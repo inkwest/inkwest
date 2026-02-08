@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "inkwest-kubectl": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "${workspaceFolder}/backend",
+      "env": {
+        "KUBECONFIG": "${KUBECONFIG}",
+        "KUBECTL_CONTEXT": "${KUBECTL_CONTEXT}",
+        "MCP_DEBUG": "false"
+      }
+    }
+  }
+}

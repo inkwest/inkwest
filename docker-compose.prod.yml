@@ -1,0 +1,99 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: inkwest
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      target: production
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/inkwest
+      - APP_ENV=production
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set for production}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # AI Provider
+      - AI_PROVIDER=${AI_PROVIDER:-anthropic}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-}
+      - AWS_REGION=${AWS_REGION:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GOOGLE_MODEL=${GOOGLE_MODEL:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-}
+      - OPENROUTER_APP_NAME=${OPENROUTER_APP_NAME:-}
+      - OPENROUTER_SITE_URL=${OPENROUTER_SITE_URL:-}
+      - CLAUDE_CLI_PATH=${CLAUDE_CLI_PATH:-}
+      - CLAUDE_CLI_TIMEOUT=${CLAUDE_CLI_TIMEOUT:-}
+      # OIDC
+      - OIDC_ENABLED=${OIDC_ENABLED:-false}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
+      - OIDC_SCOPES=${OIDC_SCOPES:-openid profile email}
+      - OIDC_ROLES_CLAIM=${OIDC_ROLES_CLAIM:-roles}
+      - OIDC_ADMIN_ROLE=${OIDC_ADMIN_ROLE:-admin}
+      # Budget
+      - BUDGET_ENABLED=${BUDGET_ENABLED:-false}
+      - DEFAULT_DAILY_TOKEN_LIMIT=${DEFAULT_DAILY_TOKEN_LIMIT:-100000}
+      - DEFAULT_MONTHLY_TOKEN_LIMIT=${DEFAULT_MONTHLY_TOKEN_LIMIT:-2000000}
+      - GLOBAL_DAILY_TOKEN_LIMIT=${GLOBAL_DAILY_TOKEN_LIMIT:-1000000}
+      - GLOBAL_MONTHLY_TOKEN_LIMIT=${GLOBAL_MONTHLY_TOKEN_LIMIT:-20000000}
+      # Kubectl
+      - KUBECTL_TIMEOUT=${KUBECTL_TIMEOUT:-30}
+    volumes:
+      - ${KUBECONFIG_DIR}:/etc/inkwest/kubeconfigs:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      target: production
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:

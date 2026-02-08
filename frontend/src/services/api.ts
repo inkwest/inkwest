@@ -1,0 +1,120 @@
+import { Cluster, Message, SearchResponse, Session, SessionWithMessages } from '@/types/api';
+
+export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+function getAuthHeaders(): HeadersInit {
+  const token = localStorage.getItem('session_token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export async function fetchAPI<T>(
+  endpoint: string,
+  options?: RequestInit
+): Promise<T> {
+  const response = await fetch(`${API_URL}${endpoint}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders(),
+      ...options?.headers,
+    },
+  });
+
+  if (!response.ok) {
+    let detail = `API error: ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+    } catch {
+      // response body not JSON
+    }
+    throw new Error(detail);
+  }
+
+  if (response.status === 204) return undefined as unknown as T;
+
+  return response.json();
+}
+
+// Clusters
+interface PaginatedClusters {
+  items: Cluster[];
+  total: number;
+}
+
+export async function getClusters(): Promise<Cluster[]> {
+  const response = await fetchAPI<PaginatedClusters>('/api/clusters');
+  return response.items;
+}
+
+export async function createCluster(data: {
+  name: string;
+  display_name: string;
+  kubeconfig_path: string;
+}): Promise<Cluster> {
+  return fetchAPI('/api/clusters', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+// Sessions
+interface PaginatedSessions {
+  items: Session[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export async function getSessions(): Promise<Session[]> {
+  const response = await fetchAPI<PaginatedSessions>('/api/sessions');
+  return response.items;
+}
+
+export async function createSession(data: {
+  cluster_id: string;
+}): Promise<Session> {
+  return fetchAPI('/api/sessions', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getSession(id: string): Promise<SessionWithMessages> {
+  return fetchAPI(`/api/sessions/${id}`);
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  await fetchAPI(`/api/sessions/${id}`, { method: 'DELETE' });
+}
+
+export async function updateSession(id: string, data: { title?: string }): Promise<Session> {
+  return fetchAPI(`/api/sessions/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+// Messages
+export async function retryMessage(sessionId: string, messageId: string): Promise<Message> {
+  return fetchAPI(`/api/sessions/${sessionId}/messages/${messageId}/retry`, {
+    method: 'POST',
+  });
+}
+
+export async function getFailedMessages(sessionId: string): Promise<Message[]> {
+  return fetchAPI(`/api/sessions/${sessionId}/failed-messages`);
+}
+
+// WebSocket ticket
+export async function fetchWsTicket(): Promise<string> {
+  const { ticket } = await fetchAPI<{ ticket: string }>('/api/auth/ws-ticket', {
+    method: 'POST',
+  });
+  return ticket;
+}
+
+// Search
+export async function searchGlobal(query: string): Promise<SearchResponse> {
+  return fetchAPI(`/api/search?q=${encodeURIComponent(query)}`);
+}

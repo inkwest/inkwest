@@ -1,0 +1,72 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Scrap files and tests
+deploy
+tasks
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+.claude.json
+.claude.json.backup.*
+
+# Kube / local state
+.kube/
+.local/
+.bash_history
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+logs/
+
+# Kubeconfigs (sensitive!)
+kubeconfigs/
+*.kubeconfig
+
+# Database
+*.db
+*.sqlite
+
+# Temp files
+tmp/
+temp/
+.tmp/
+
+# Coverage reports
+frontend/coverage/
+backend/htmlcov/

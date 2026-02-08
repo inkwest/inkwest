@@ -1,0 +1,136 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: inkwest-db
+    environment:
+      POSTGRES_USER: inkwest
+      POSTGRES_PASSWORD: inkwest
+      POSTGRES_DB: inkwest
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inkwest"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Python Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: inkwest-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://inkwest:inkwest@db:5432/inkwest
+      # AI Provider: anthropic, bedrock, azure, openrouter, google, or claude-cli
+      - AI_PROVIDER=${AI_PROVIDER:-claude-cli}
+      # Anthropic
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
+      # AWS Bedrock
+      - AWS_REGION=${AWS_REGION:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-}
+      # Azure OpenAI
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}
+      # OpenAI
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      # Google Gemini
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GOOGLE_MODEL=${GOOGLE_MODEL:-gemini-2.5-flash}
+      # OpenRouter
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-}
+      - OPENROUTER_APP_NAME=${OPENROUTER_APP_NAME:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-}
+      - OPENROUTER_SITE_URL=${OPENROUTER_SITE_URL:-}
+      # Claude CLI
+      - CLAUDE_CLI_PATH=${CLAUDE_CLI_PATH:-claude}
+      - CLAUDE_CLI_TIMEOUT=${CLAUDE_CLI_TIMEOUT:-120}
+      # App settings
+      - APP_ENV=${APP_ENV:-development}
+      - SECRET_KEY=${SECRET_KEY:-change-this-to-a-random-secret-in-production}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - KUBECTL_TIMEOUT=${KUBECTL_TIMEOUT:-30}
+      # OIDC Authentication
+      - OIDC_ENABLED=${OIDC_ENABLED:-false}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
+      - OIDC_SCOPES=${OIDC_SCOPES:-openid profile email}
+      - OIDC_ROLES_CLAIM=${OIDC_ROLES_CLAIM:-roles}
+      - OIDC_ADMIN_ROLE=${OIDC_ADMIN_ROLE:-admin}
+      # Budget Management
+      - BUDGET_ENABLED=${BUDGET_ENABLED:-false}
+      - DEFAULT_DAILY_TOKEN_LIMIT=${DEFAULT_DAILY_TOKEN_LIMIT:-100000}
+      - DEFAULT_MONTHLY_TOKEN_LIMIT=${DEFAULT_MONTHLY_TOKEN_LIMIT:-2000000}
+      - GLOBAL_DAILY_TOKEN_LIMIT=${GLOBAL_DAILY_TOKEN_LIMIT:-1000000}
+      - GLOBAL_MONTHLY_TOKEN_LIMIT=${GLOBAL_MONTHLY_TOKEN_LIMIT:-20000000}
+      # Interactive Flow
+      - DEFAULT_CONFIRMATION_MODE=${DEFAULT_CONFIRMATION_MODE:-expensive}
+      - DEFAULT_COST_THRESHOLD_CENTS=${DEFAULT_COST_THRESHOLD_CENTS:-10}
+      - DEFAULT_ITERATION_INTERVAL=${DEFAULT_ITERATION_INTERVAL:-5}
+      # Web Search
+      - WEB_SEARCH_ENABLED=${WEB_SEARCH_ENABLED:-false}
+      - WEB_SEARCH_PROVIDER=${WEB_SEARCH_PROVIDER:-brave}
+      - WEB_SEARCH_API_KEY=${WEB_SEARCH_API_KEY:-}
+      - WEB_SEARCH_MAX_RESULTS=${WEB_SEARCH_MAX_RESULTS:-5}
+      - WEB_SEARCH_TRUSTED_DOMAINS=${WEB_SEARCH_TRUSTED_DOMAINS:-}
+      - WEB_SEARCH_BLOCKED_DOMAINS=${WEB_SEARCH_BLOCKED_DOMAINS:-}
+    volumes:
+      - ./backend:/app
+      - ./app_home/.claude:/home/app/.claude
+      - ./app_home/.claude.json:/home/app/.claude.json
+      - ${KUBECONFIG_DIR:-./kubeconfigs}:/etc/inkwest/kubeconfigs:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: inkwest-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_WS_URL=ws://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    command: npm run dev -- --host
+
+volumes:
+  postgres_data:

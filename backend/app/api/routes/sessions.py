@@ -1,0 +1,436 @@
+"""
+Session management routes.
+"""
+
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.api.dependencies import CurrentUser, check_cluster_access, get_db
+from app.api.routes.chat import close_session_connections
+from app.models.cluster import Cluster
+from app.models.message import Message
+from app.models.schemas import (
+    ClusterSummary,
+    MessageResponse,
+    SearchMessageHit,
+    SearchResponse,
+    SearchSessionHit,
+    SessionCreate,
+    SessionList,
+    SessionResponse,
+    SessionUpdate,
+    SessionWithMessages,
+)
+from app.models.session import Session
+from app.services.pubsub import notify
+
+router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+async def check_session_access(session: Session, user: CurrentUser) -> None:
+    """Raise 403 if user doesn't own this session (non-admin)."""
+    if not user.is_admin() and session.user_id and str(session.user_id) != str(user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this session",
+        )
+
+
+@router.get("", response_model=SessionList)
+async def list_sessions(
+    current_user: CurrentUser,
+    cluster_id: UUID | None = None,
+    search: str | None = None,
+    include_archived: bool = False,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> SessionList:
+    query = select(Session).options(selectinload(Session.cluster))
+    query = query.where(Session.user_id == str(current_user.id))
+
+    if cluster_id:
+        query = query.where(Session.cluster_id == cluster_id)
+    if not include_archived:
+        query = query.where(Session.is_archived == False)  # noqa: E712
+    if search:
+        search_filter = f"%{search}%"
+        query = query.where(
+            or_(
+                Session.title.ilike(search_filter),
+                Session.summary.ilike(search_filter),
+            )
+        )
+
+    count_query = select(func.count()).select_from(query.subquery())
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = query.order_by(Session.updated_at.desc())
+    query = query.offset((page - 1) * page_size).limit(page_size)
+
+    result = await db.execute(query)
+    sessions = result.scalars().all()
+
+    return SessionList(
+        items=[SessionResponse.model_validate(s) for s in sessions],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+async def create_session(
+    session_data: SessionCreate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> SessionResponse:
+    cluster_result = await db.execute(
+        select(Cluster).where(
+            Cluster.id == session_data.cluster_id,
+            Cluster.is_active == True,  # noqa: E712
+        )
+    )
+    cluster = cluster_result.scalar_one_or_none()
+
+    if not cluster:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Active cluster with ID '{session_data.cluster_id}' not found",
+        )
+
+    await check_cluster_access(current_user, str(cluster.id), db)
+
+    session = Session(**session_data.model_dump(), user_id=str(current_user.id))
+    db.add(session)
+    await db.flush()
+    await db.refresh(session)
+    await db.commit()
+
+    await notify({"type": "session_created", "session_id": str(session.id)})
+
+    return SessionResponse.model_validate(session)
+
+
+@router.get("/{session_id}", response_model=SessionWithMessages)
+async def get_session(
+    session_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> SessionWithMessages:
+    result = await db.execute(
+        select(Session)
+        .where(Session.id == session_id)
+        .options(
+            selectinload(Session.messages),
+            selectinload(Session.cluster),
+        )
+    )
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+
+    await check_session_access(session, current_user)
+    return SessionWithMessages.model_validate(session)
+
+
+@router.patch("/{session_id}", response_model=SessionResponse)
+async def update_session(
+    session_id: UUID,
+    session_data: SessionUpdate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> SessionResponse:
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+
+    await check_session_access(session, current_user)
+
+    update_data = session_data.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(session, field, value)
+
+    await db.flush()
+    await db.refresh(session)
+    await db.commit()
+
+    await notify({"type": "session_updated", "session_id": str(session.id)})
+
+    return SessionResponse.model_validate(session)
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+
+    await check_session_access(session, current_user)
+    session.is_archived = True
+    await db.flush()
+    await db.commit()
+
+    await close_session_connections(str(session.id))
+    await notify({"type": "session_deleted", "session_id": str(session.id)})
+
+
+@router.get("/{session_id}/stats")
+async def get_session_stats(
+    session_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+
+    await check_session_access(session, current_user)
+
+    return {
+        "session_id": str(session.id),
+        "total_input_tokens": session.total_input_tokens,
+        "total_output_tokens": session.total_output_tokens,
+        "total_tokens": session.total_input_tokens + session.total_output_tokens,
+        "total_tool_calls": session.total_tool_calls,
+        "total_iterations": session.total_iterations,
+    }
+
+
+@router.get("/{session_id}/failed-messages", response_model=list[MessageResponse])
+async def get_failed_messages(
+    session_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[MessageResponse]:
+    session_result = await db.execute(select(Session).where(Session.id == session_id))
+    session = session_result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+
+    await check_session_access(session, current_user)
+
+    result = await db.execute(
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.status == "error",
+            Message.is_retryable == True,  # noqa: E712
+        )
+        .order_by(Message.created_at.desc())
+    )
+    messages = result.scalars().all()
+
+    return [MessageResponse.model_validate(m) for m in messages]
+
+
+@router.post("/{session_id}/messages/{message_id}/retry", response_model=MessageResponse)
+async def retry_message(
+    session_id: UUID,
+    message_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> MessageResponse:
+    session_result = await db.execute(select(Session).where(Session.id == session_id))
+    session = session_result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+
+    await check_session_access(session, current_user)
+
+    result = await db.execute(
+        select(Message).where(
+            Message.id == message_id,
+            Message.session_id == session_id,
+        )
+    )
+    message = result.scalar_one_or_none()
+
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Message with ID '{message_id}' not found in session",
+        )
+
+    if not message.is_retryable:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This message cannot be retried",
+        )
+
+    message.status = "pending"
+    message.error_message = None
+    message.retry_count += 1
+    await db.flush()
+    await db.refresh(message)
+
+    return MessageResponse.model_validate(message)
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+search_router = APIRouter(prefix="/search", tags=["search"])
+
+MAX_SESSION_RESULTS = 20
+MAX_MESSAGE_HITS_PER_SESSION = 3
+SNIPPET_LENGTH = 150
+
+
+def _make_snippet(text: str, query: str) -> str:
+    lower = text.lower()
+    idx = lower.find(query.lower())
+    if idx == -1:
+        return text[:SNIPPET_LENGTH]
+    start = max(0, idx - SNIPPET_LENGTH // 3)
+    end = start + SNIPPET_LENGTH
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(text):
+        snippet = snippet + "…"
+    return snippet
+
+
+@search_router.get("", response_model=SearchResponse)
+async def search_global(
+    current_user: CurrentUser,
+    q: str = Query(..., min_length=2),
+    db: AsyncSession = Depends(get_db),
+) -> SearchResponse:
+    pattern = f"%{q}%"
+
+    # Sessions matching by title/summary
+    session_query = (
+        select(Session)
+        .options(selectinload(Session.cluster))
+        .where(
+            Session.is_archived == False,  # noqa: E712
+            Session.user_id == str(current_user.id),
+        )
+    )
+
+    title_match_query = session_query.where(
+        or_(Session.title.ilike(pattern), Session.summary.ilike(pattern))
+    )
+    title_result = await db.execute(
+        title_match_query.order_by(Session.updated_at.desc()).limit(MAX_SESSION_RESULTS)
+    )
+    title_sessions = {s.id: s for s in title_result.scalars().all()}
+
+    # Messages matching by content (cast JSONB to text)
+    msg_query = (
+        select(Message)
+        .join(Session, Message.session_id == Session.id)
+        .where(
+            Session.is_archived == False,  # noqa: E712
+            cast(Message.content, String).ilike(pattern),
+        )
+    )
+    msg_query = msg_query.where(Session.user_id == str(current_user.id))
+
+    msg_query = msg_query.order_by(Message.created_at.desc()).limit(500)
+    msg_result = await db.execute(msg_query)
+    messages = msg_result.scalars().all()
+
+    # Group messages by session, cap per session
+    msg_by_session: dict[UUID, list[Message]] = {}
+    for m in messages:
+        lst = msg_by_session.setdefault(m.session_id, [])
+        if len(lst) < MAX_MESSAGE_HITS_PER_SESSION:
+            lst.append(m)
+
+    # Fetch sessions for message-only matches we don't already have
+    missing_ids = set(msg_by_session.keys()) - set(title_sessions.keys())
+    if missing_ids:
+        extra_query = (
+            select(Session)
+            .options(selectinload(Session.cluster))
+            .where(Session.id.in_(missing_ids))
+        )
+        extra_result = await db.execute(extra_query)
+        for s in extra_result.scalars().all():
+            title_sessions[s.id] = s
+
+    # Build results
+    all_session_ids = list(title_sessions.keys()) + [
+        sid for sid in msg_by_session if sid not in title_sessions
+    ]
+    # Deduplicate while preserving order
+    seen: set[UUID] = set()
+    unique_ids: list[UUID] = []
+    for sid in all_session_ids:
+        if sid not in seen:
+            seen.add(sid)
+            unique_ids.append(sid)
+
+    results: list[SearchSessionHit] = []
+    for sid in unique_ids[:MAX_SESSION_RESULTS]:
+        session = title_sessions.get(sid)
+        if not session:
+            continue
+        matched_msgs = [
+            SearchMessageHit(
+                id=m.id,
+                role=m.role,
+                snippet=_make_snippet(
+                    m.content if isinstance(m.content, str) else str(m.content), q
+                ),
+                created_at=m.created_at,
+            )
+            for m in msg_by_session.get(sid, [])
+        ]
+        is_title_match = (session.title and q.lower() in session.title.lower()) or (
+            session.summary and q.lower() in session.summary.lower()
+        )
+        cluster_summary = (
+            ClusterSummary.model_validate(session.cluster) if session.cluster else None
+        )
+        results.append(
+            SearchSessionHit(
+                id=session.id,
+                title=session.title,
+                cluster=cluster_summary,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                matched_messages=matched_msgs,
+                title_match=bool(is_title_match),
+            )
+        )
+
+    return SearchResponse(query=q, results=results, total=len(results))

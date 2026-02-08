@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@keyframes flash-btn {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.animate-flash-btn {
+  animation: flash-btn 0.4s ease-in-out 10;
+}
+
+@keyframes border-wipe {
+  0%   { background-position: 0 0, 250% 0; }
+  50%  { background-position: 0 0, -50% 0; }
+  100% { background-position: 0 0, -50% 0; }
+}
+
+.shimmer-border {
+  border-color: transparent !important;
+  background:
+    linear-gradient(rgb(55 65 81), rgb(55 65 81)) padding-box,
+    linear-gradient(
+      110deg,
+      rgb(75 85 99) 35%,
+      rgba(255 255 255 / 0.85) 49%,
+      #fff 50%,
+      rgba(255 255 255 / 0.85) 51%,
+      rgb(75 85 99) 65%
+    ) border-box;
+  background-size: 100% 100%, 250% 100%;
+  animation: border-wipe 2s ease-in-out 2;
+}
