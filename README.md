@@ -41,9 +41,9 @@ It also solves the permissions problem. Instead of giving developers broad clust
 │  - Sessions     │     │    - Session Management         │     │  - Bedrock      │
 └─────────────────┘     │    - Budget Tracking            │     │  - OpenAI       │
         │               └─────────────────────────────────┘     │  - Google       │
-        │                           │           │               │  - OpenRouter   │
-        │    WebSocket              │           │               └─────────────────┘
-        └───────────────────────────┘           │
+        │                           │          │                │  - OpenRouter   │
+        │    WebSocket              │          │                └─────────────────┘
+        └───────────────────────────┘          │
                                                ▼
                                         ┌─────────────┐
                                         │   kubectl   │
