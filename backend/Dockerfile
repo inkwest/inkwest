@@ -2,7 +2,7 @@ FROM python:3.11-slim AS base
 
 ARG BUILD_TIMESTAMP="1970-01-01T00:00:00+00:00"
 ARG COMMIT_HASH="00000000-dirty"
-ARG PROJECT_URL="https://github.com/kubepanion/kubepanion"
+ARG PROJECT_URL="https://github.com/inkwest/inkwest"
 ARG VERSION="v0.0.0"
 
 LABEL org.opencontainers.image.source=${PROJECT_URL}
