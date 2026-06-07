@@ -2,6 +2,7 @@
 Application configuration using pydantic-settings.
 """
 
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -126,6 +127,9 @@ class Settings(BaseSettings):
     aws_sso_oidc_client_secret: str | None = None  # optional (confidential client)
     aws_sso_oidc_issuer: str | None = None  # e.g. https://oidc.<region>.amazonaws.com
     aws_cli_path: str = "aws"
+    # Defense in depth: regex matched (case-insensitive) against "<account_name>.<role_name>"
+    # to restrict which roles are offered/mintable. Empty/unset → no filter (all roles).
+    aws_sso_role_filter: str | None = None
 
     # GitLab OAuth (public PKCE client -> no secret). Read-only scopes only.
     gitlab_enabled: bool = False
@@ -207,6 +211,14 @@ def validate_settings() -> None:
                 "CORALOGIX_SECRET_ID and CORALOGIX_API_ENDPOINT are required "
                 "when CORALOGIX_ENABLED is true"
             )
+
+    # Fail fast on a malformed role filter (any env): a bad regex would otherwise
+    # only surface at SSO enumeration time, mid-request.
+    if settings.aws_sso_role_filter:
+        try:
+            re.compile(settings.aws_sso_role_filter)
+        except re.error as e:
+            raise ValueError(f"AWS_SSO_ROLE_FILTER is not a valid regex: {e}") from e
 
     # claude-cli provider requires no additional configuration
     # (claude CLI uses its own authentication)

@@ -20,6 +20,7 @@ import asyncio
 import logging
 import re
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Any, ClassVar
 
 from app.core.config import get_settings
@@ -41,6 +42,40 @@ def _profile_name(account_name: str, role_name: str) -> str:
     """Build a safe AWS profile name from an account + role (e.g. acme-prod-ReadOnly)."""
     raw = f"{account_name}-{role_name}"
     return re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:120]
+
+
+@lru_cache(maxsize=8)
+def _compiled_role_filter(pattern: str) -> re.Pattern[str]:
+    """Compile (and cache) the role filter. Validity is enforced at startup."""
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _filter_by_role(
+    accounts: list[dict[str, Any]],
+    roles: list[dict[str, Any]],
+    role_filter: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep only roles whose ``<account_name>.<role_name>`` matches the regex.
+
+    Defense in depth, applied at SSO enumeration so a filtered role never reaches
+    ``available_roles`` (and is therefore neither selectable nor mintable — the
+    ``select_account_roles`` guard rejects anything not offered). Empty/unset
+    filter is a pass-through; accounts left with no matching role are dropped so
+    they don't surface in the modal. Case-insensitive, unanchored (the operator
+    controls anchors, e.g. ``read-?only$``).
+    """
+    if not role_filter:
+        return accounts, roles
+    pat = _compiled_role_filter(role_filter)
+    name_by_id = {a["account_id"]: a.get("account_name", a["account_id"]) for a in accounts}
+    kept_roles = [
+        r
+        for r in roles
+        if pat.search(f"{name_by_id.get(r['account_id'], r['account_id'])}.{r['role_name']}")
+    ]
+    kept_ids = {r["account_id"] for r in kept_roles}
+    kept_accounts = [a for a in accounts if a["account_id"] in kept_ids]
+    return kept_accounts, kept_roles
 
 
 class AwsConnector(Connector):
@@ -94,6 +129,7 @@ class AwsConnector(Connector):
         accounts, roles = await asyncio.to_thread(
             _list_accounts_and_roles, access_token, s.aws_sso_region
         )
+        accounts, roles = _filter_by_role(accounts, roles, s.aws_sso_role_filter)
         return MintedCredential(
             connector="aws",
             scope=_SSO_SCOPE,

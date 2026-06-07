@@ -80,6 +80,10 @@ AWS_SSO_OIDC_CLIENT_ID=<clientId from register-client>
 # AWS_SSO_OIDC_CLIENT_SECRET=...   # only for a confidential client
 # AWS_SSO_OIDC_ISSUER=...          # default: https://oidc.{AWS_SSO_REGION}.amazonaws.com
 # AWS_CLI_PATH=aws                 # default
+# AWS_SSO_ROLE_FILTER=read-?only$  # optional: case-insensitive regex matched on
+#                                  # "<account_name>.<role_name>"; only matching roles
+#                                  # are offered/mintable. Unset = all roles. Invalid
+#                                  # regex = startup failure.
 ```
 
 ### d. Flow
