@@ -197,8 +197,12 @@ def parallel_tools_response() -> tuple[MagicMock, MagicMock]:
 
 @pytest.fixture
 def mock_kubectl_success():
-    """Patch execute_kubectl to return success."""
-    with patch("app.services.orchestrator.execute_kubectl") as mock:
+    """Patch execute_kubectl to return success.
+
+    Orchestrators route tool calls through app.tools.dispatch.execute_tool, which
+    dispatches kubectl tools to execute_kubectl — so we patch it there.
+    """
+    with patch("app.tools.dispatch.execute_kubectl") as mock:
         mock.return_value = ("NAME  READY  STATUS\npod1  1/1    Running", False)
         yield mock
 
@@ -206,7 +210,7 @@ def mock_kubectl_success():
 @pytest.fixture
 def mock_kubectl_error():
     """Patch execute_kubectl to return error."""
-    with patch("app.services.orchestrator.execute_kubectl") as mock:
+    with patch("app.tools.dispatch.execute_kubectl") as mock:
         mock.return_value = ("Error: pods not found", True)
         yield mock
 

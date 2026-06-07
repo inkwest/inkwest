@@ -342,7 +342,7 @@ class TestOrchestrateAzureChatLoop:
                             new_callable=AsyncMock,
                         ):
                             with patch(
-                                "app.services.orchestrator_azure.execute_kubectl",
+                                "app.tools.dispatch.execute_kubectl",
                                 new_callable=AsyncMock,
                             ) as mock_kubectl:
                                 mock_kubectl.return_value = ("pod1\npod2", False)
@@ -398,7 +398,7 @@ class TestOrchestrateAzureChatLoop:
                             new_callable=AsyncMock,
                         ):
                             with patch(
-                                "app.services.orchestrator_azure.execute_kubectl",
+                                "app.tools.dispatch.execute_kubectl",
                                 new_callable=AsyncMock,
                             ) as mock_kubectl:
                                 mock_kubectl.side_effect = Exception("Connection refused")

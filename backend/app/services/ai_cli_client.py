@@ -9,6 +9,7 @@ enabling local development without API costs.
 import asyncio
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -33,6 +34,8 @@ async def execute_claude_cli(
     cli_path: str = "claude",
     timeout: int = 120,
     resume_session_id: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    cwd: str | None = None,
 ) -> AsyncIterator[str]:
     """
     Execute Claude CLI and stream output.
@@ -46,6 +49,12 @@ async def execute_claude_cli(
         cli_path: Path to the claude binary
         timeout: Timeout in seconds for the CLI command
         resume_session_id: Claude CLI session ID for --resume (from previous init event)
+        extra_env: Per-session connector credentials to expose to the agent's shell
+            (e.g. AWS_*, GITLAB_TOKEN). Merged over the parent env for THIS subprocess
+            only — never set process-globally, so conversations stay isolated.
+        cwd: Working directory for the CLI process. Use a per-session scratch dir so
+            the agent doesn't see the backend source (`/app`) and so Claude Code keeps
+            its per-project transcripts isolated between conversations.
 
     Yields:
         Lines of JSON output from the CLI
@@ -81,11 +90,16 @@ async def execute_claude_cli(
     # Default is 64KB which can be exceeded by file reads, kubectl outputs, etc.
     buffer_limit = 100 * 1024 * 1024  # 100MB
 
+    # Inject per-session connector creds into THIS subprocess's env only.
+    proc_env = {**os.environ, **extra_env} if extra_env else None
+
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         limit=buffer_limit,
+        env=proc_env,
+        cwd=cwd,
     )
 
     try:
@@ -255,9 +269,13 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
             )
 
         elif event_type == "result":
+            # The `result` field duplicates the final assistant text already streamed
+            # via `assistant` events. Only emit it as a fallback when nothing was sent
+            # yet — otherwise the whole answer is rendered twice.
             result_text = parsed.get("result", "")
-            if result_text:
+            if result_text and not has_sent_text:
                 yield ChatEvent(type="text_delta", content=result_text)
+                has_sent_text = True
             # Result event carries final usage from CLI
             usage = parsed.get("usage", {})
             if usage.get("input_tokens"):

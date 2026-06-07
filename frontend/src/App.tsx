@@ -5,6 +5,7 @@ import { ChatPage } from '@/pages/ChatPage';
 import { NewSessionPage } from '@/pages/NewSessionPage';
 import { QuickStartPage } from '@/pages/QuickStartPage';
 import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
+import { ConnectorCallbackPage } from '@/pages/ConnectorCallbackPage';
 import {
   AdminLayout,
   DashboardPage,
@@ -84,6 +85,9 @@ function App() {
       <Routes>
         {/* OIDC callback — outside auth guard */}
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
+
+        {/* Connector OAuth callback — outside auth guard (hit by the IdP redirect) */}
+        <Route path="/connectors/callback" element={<ConnectorCallbackPage />} />
 
         {/* Main Chat Routes */}
         <Route path="/" element={<AuthGuard><Layout /></AuthGuard>}>

@@ -560,3 +560,24 @@ class TestResourceValidation:
         assert validate_tool_input("kubectl_get", {"resource": "pods"}) is None
         assert validate_tool_input("kubectl_get", {"resource": "applications"}) is None
         assert validate_tool_input("kubectl_get", {"resource": "certificates"}) is None
+
+
+class TestKubectlWithoutCluster:
+    """kubectl tools degrade gracefully when no kubeconfig is set."""
+
+    @pytest.mark.asyncio
+    async def test_kubectl_returns_clean_error_without_kubeconfig(self):
+        import uuid
+
+        from app.tools.dispatch import execute_tool
+        from app.tools.exec_context import ToolExecContext
+
+        ctx = ToolExecContext(user_id=None, session_id=uuid.uuid4(), kubeconfig_path=None)
+
+        with patch("app.tools.dispatch.execute_kubectl") as mock_kubectl:
+            output, is_error = await execute_tool("kubectl_get", {"resource": "pods"}, ctx)
+
+        assert is_error is True
+        assert "No Kubernetes cluster is configured" in output
+        # The kubectl executor must not be invoked at all.
+        mock_kubectl.assert_not_called()

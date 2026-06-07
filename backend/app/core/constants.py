@@ -67,3 +67,13 @@ MAX_K8S_LABEL_LENGTH = 63
 # =============================================================================
 
 OIDC_STATE_TTL_SECONDS = 600
+
+# =============================================================================
+# External Access Connectors
+# =============================================================================
+
+# TTL for a pending connector OAuth handshake (state + PKCE verifier)
+CONNECTOR_STATE_TTL_SECONDS = 600
+
+# Default timeout for connector tool execution (seconds)
+CONNECTOR_TOOL_TIMEOUT = 30

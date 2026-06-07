@@ -27,36 +27,42 @@ export function NewSessionPage() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const startSession = useCallback(async (cluster: string, q: string, signal: AbortSignal) => {
+  const startSession = useCallback(async (cluster: string | undefined, q: string, signal: AbortSignal) => {
     setError(null);
     setLoading(true);
 
     try {
-      const clusters = await api.getClusters();
-      if (signal.aborted) return;
+      // Cluster is optional: with no cluster requested, start without a Kube context.
+      let clusterId: string | undefined;
+      if (cluster) {
+        const clusters = await api.getClusters();
+        if (signal.aborted) return;
 
-      const lc = cluster.toLowerCase();
-      const match = clusters.find(
-        (c: Cluster) =>
-          c.name.toLowerCase() === lc ||
-          c.display_name.toLowerCase() === lc ||
-          c.id === cluster,
-      );
+        const lc = cluster.toLowerCase();
+        const match = clusters.find(
+          (c: Cluster) =>
+            c.name.toLowerCase() === lc ||
+            c.display_name.toLowerCase() === lc ||
+            c.id === cluster,
+        );
 
-      if (!match) {
-        setError(`Cluster "${cluster}" not found`);
-        setLoading(false);
-        return;
-      }
+        if (!match) {
+          setError(`Cluster "${cluster}" not found`);
+          setLoading(false);
+          return;
+        }
 
-      if (!match.is_active) {
-        setError(`Cluster "${match.display_name}" is not active`);
-        setLoading(false);
-        return;
+        if (!match.is_active) {
+          setError(`Cluster "${match.display_name}" is not active`);
+          setLoading(false);
+          return;
+        }
+
+        clusterId = match.id;
       }
 
       setPendingPrompt(q);
-      const session = await createSession(match.id);
+      const session = await createSession(clusterId);
       if (!signal.aborted) {
         window.history.replaceState(null, '', window.location.pathname);
         navigate(`/session/${session.id}`, { replace: true });
@@ -71,7 +77,7 @@ export function NewSessionPage() {
 
   useEffect(() => {
     const { cluster, q } = parseHash();
-    if (!cluster || !q) return;
+    if (!q) return;
 
     const controller = new AbortController();
     startSession(cluster, q, controller.signal);

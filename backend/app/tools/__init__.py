@@ -7,11 +7,16 @@ command building, and execution capabilities.
 """
 
 from .definitions import (
+    CONNECTOR_TOOLS,
     KUBECTL_TOOLS,
     get_all_tool_names,
     get_tool_by_name,
+    get_tool_definitions,
     validate_tool_schema,
 )
+from .dispatch import execute_tool
+from .dispatch import execute_tools_parallel as execute_tools_parallel_ctx
+from .exec_context import ToolExecContext
 from .executor import (
     DEFAULT_TIMEOUT,
     MAX_OUTPUT_CHARS,
@@ -30,9 +35,15 @@ from .validation import (
 __all__ = [
     # Definitions
     "KUBECTL_TOOLS",
+    "CONNECTOR_TOOLS",
     "get_tool_by_name",
     "get_all_tool_names",
+    "get_tool_definitions",
     "validate_tool_schema",
+    # Dispatch (connector-aware)
+    "execute_tool",
+    "execute_tools_parallel_ctx",
+    "ToolExecContext",
     # Validation
     "ALLOWED_TOP_RESOURCES",
     "validate_tool_input",

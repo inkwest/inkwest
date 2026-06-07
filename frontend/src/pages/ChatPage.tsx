@@ -59,6 +59,7 @@ export function ChatPage() {
       onSendMessage={handleSend}
       onStopStreaming={stopStreaming}
       initialPrompt={initialPrompt}
+      sessionId={sessionId}
     />
   );
 }

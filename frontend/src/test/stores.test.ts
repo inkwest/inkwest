@@ -226,6 +226,34 @@ describe('chatStore todos', () => {
     useChatStore.getState().clearTodos()
     expect(useChatStore.getState().currentTodos).toEqual([])
   })
+
+  // Claude Code 2.x emits TaskCreate/TaskUpdate instead of TodoWrite.
+  it('should append a task on TaskCreate with a sequential id', () => {
+    const { setActiveToolCall } = useChatStore.getState()
+    setActiveToolCall({
+      name: 'TaskCreate',
+      input: { subject: 'Check nodes', description: '…', activeForm: 'Checking nodes' },
+    })
+    setActiveToolCall({ name: 'TaskCreate', input: { subject: 'Check pods' } })
+
+    expect(useChatStore.getState().currentTodos).toEqual([
+      { id: '1', content: 'Check nodes', activeForm: 'Checking nodes', status: 'pending' },
+      { id: '2', content: 'Check pods', activeForm: undefined, status: 'pending' },
+    ])
+  })
+
+  it('should update a task status by taskId on TaskUpdate', () => {
+    const { setActiveToolCall } = useChatStore.getState()
+    setActiveToolCall({ name: 'TaskCreate', input: { subject: 'A' } })
+    setActiveToolCall({ name: 'TaskCreate', input: { subject: 'B' } })
+    setActiveToolCall({ name: 'TaskUpdate', input: { taskId: '2', status: 'in_progress' } })
+    setActiveToolCall({ name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } })
+
+    expect(useChatStore.getState().currentTodos).toEqual([
+      { id: '1', content: 'A', activeForm: undefined, status: 'completed' },
+      { id: '2', content: 'B', activeForm: undefined, status: 'in_progress' },
+    ])
+  })
 })
 
 describe('settingsStore', () => {

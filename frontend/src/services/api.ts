@@ -72,7 +72,7 @@ export async function getSessions(): Promise<Session[]> {
 }
 
 export async function createSession(data: {
-  cluster_id: string;
+  cluster_id?: string;
 }): Promise<Session> {
   return fetchAPI('/api/sessions', {
     method: 'POST',
@@ -117,4 +117,64 @@ export async function fetchWsTicket(): Promise<string> {
 // Search
 export async function searchGlobal(query: string): Promise<SearchResponse> {
   return fetchAPI(`/api/search?q=${encodeURIComponent(query)}`);
+}
+
+// External access connectors
+import { ConnectorName, ConnectorStatus } from '@/types/connectors';
+
+export async function getConnectorStatus(sessionId: string): Promise<ConnectorStatus[]> {
+  return fetchAPI(`/api/connectors/${sessionId}/status`);
+}
+
+export async function initiateConnector(
+  sessionId: string,
+  connector: ConnectorName
+): Promise<{ redirect_url: string }> {
+  return fetchAPI(`/api/connectors/${sessionId}/${connector}/initiate`, { method: 'POST' });
+}
+
+export async function activateCoralogix(sessionId: string): Promise<ConnectorStatus> {
+  return fetchAPI(`/api/connectors/${sessionId}/coralogix/activate`, { method: 'POST' });
+}
+
+export async function getAwsOptions(
+  sessionId: string
+): Promise<{ accounts: { account_id: string; account_name: string }[]; roles: { account_id: string; role_name: string }[] }> {
+  return fetchAPI(`/api/connectors/${sessionId}/aws/options`);
+}
+
+export async function selectAwsRoles(
+  sessionId: string,
+  selections: { account_id: string; role_name: string }[]
+): Promise<ConnectorStatus> {
+  return fetchAPI(`/api/connectors/${sessionId}/aws/select`, {
+    method: 'POST',
+    body: JSON.stringify({ selections }),
+  });
+}
+
+export async function revokeConnector(
+  sessionId: string,
+  connector: ConnectorName
+): Promise<ConnectorStatus> {
+  return fetchAPI(`/api/connectors/${sessionId}/${connector}/revoke`, { method: 'POST' });
+}
+
+// AWS device authorization flow (no redirect — loopback-only public client)
+export interface AwsDeviceStart {
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  interval: number;
+  expires_in: number;
+}
+
+export async function startAwsDevice(sessionId: string): Promise<AwsDeviceStart> {
+  return fetchAPI(`/api/connectors/${sessionId}/aws/device/start`, { method: 'POST' });
+}
+
+export async function pollAwsDevice(
+  sessionId: string
+): Promise<{ status: string; detail?: string | null }> {
+  return fetchAPI(`/api/connectors/${sessionId}/aws/device/poll`, { method: 'POST' });
 }

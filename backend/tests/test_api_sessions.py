@@ -120,6 +120,46 @@ async def test_create_session_success(
 
 
 @pytest.mark.asyncio
+async def test_create_session_without_cluster(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+) -> None:
+    """a session can be created with no cluster configured."""
+    mock_db.flush = AsyncMock()
+
+    def fake_refresh(obj: MagicMock) -> None:
+        obj.id = mock_session_obj.id
+        obj.cluster_id = None
+        obj.user_id = mock_session_obj.user_id
+        obj.title = None
+        obj.summary = None
+        obj.is_archived = False
+        obj.total_input_tokens = 0
+        obj.total_output_tokens = 0
+        obj.total_tool_calls = 0
+        obj.total_iterations = 0
+        obj.created_at = datetime.now(UTC)
+        obj.updated_at = datetime.now(UTC)
+        obj.cluster = None
+
+    mock_db.refresh = AsyncMock(side_effect=fake_refresh)
+
+    # No cluster lookup nor access check should run when cluster_id is absent.
+    with (
+        patch(
+            "app.api.routes.sessions.check_cluster_access",
+            side_effect=AssertionError("cluster access must not be checked"),
+        ),
+        patch("app.api.routes.sessions.notify", return_value=None),
+    ):
+        resp = await authenticated_client.post("/api/sessions", json={})
+    assert resp.status_code == 201
+    assert resp.json()["cluster_id"] is None
+    mock_db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_get_session_not_found(authenticated_client: AsyncClient, mock_db: AsyncMock) -> None:
     result_mock = MagicMock()
     result_mock.scalar_one_or_none.return_value = None

@@ -38,10 +38,13 @@ class Session(Base, TimestampMixin):
         primary_key=True,
         default=uuid.uuid4,
     )
-    cluster_id: Mapped[uuid.UUID] = mapped_column(
+    # Optional: a session may start without any Kubernetes access. Kube access
+    # can also arrive later via AWS (EKS kubeconfigs), so a null cluster does
+    # not mean kubectl is permanently unavailable for the session.
+    cluster_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("clusters.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -113,7 +116,7 @@ class Session(Base, TimestampMixin):
     )
 
     # Relationships
-    cluster: Mapped["Cluster"] = relationship(
+    cluster: Mapped["Cluster | None"] = relationship(
         "Cluster",
         back_populates="sessions",
         lazy="selectin",

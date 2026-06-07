@@ -17,9 +17,9 @@ export interface ClusterSummary {
 // Session types
 export interface Session {
   id: string;
-  cluster_id: string;
+  cluster_id?: string | null;
   title?: string;
-  cluster?: ClusterSummary;
+  cluster?: ClusterSummary | null;
   total_input_tokens?: number;
   total_output_tokens?: number;
   created_at: string;
@@ -28,7 +28,7 @@ export interface Session {
 
 export interface SessionWithMessages extends Session {
   messages: Message[];
-  cluster: Cluster;
+  cluster: Cluster | null;
 }
 
 // Message types
