@@ -36,7 +36,10 @@ def test_minted_credential_repr_hides_secret():
         connector="aws",
         scope="read",
         expires_at=None,
-        secret={"secret_access_key": "SUPERSECRET", "session_token": "TOKEN"},
+        secret={
+            "secret_access_key": "SUPERSECRET",  # pragma: allowlist secret
+            "session_token": "TOKEN",
+        },
     )
     assert "SUPERSECRET" not in repr(cred)
     assert "SUPERSECRET" not in str(cred)
@@ -209,7 +212,7 @@ async def test_execute_aws_writes_profiles_to_ramfile_not_argv():
                     "account_name": "acme",
                     "role_name": "ReadOnly",
                     "access_key_id": "AKIA_TEST",
-                    "secret_access_key": "SECRETKEYVALUE",
+                    "secret_access_key": "SECRETKEYVALUE",  # pragma: allowlist secret
                     "session_token": "SESSIONTOKEN",
                     "region": "eu-west-1",
                 }

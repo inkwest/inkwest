@@ -199,9 +199,7 @@ def validate_settings() -> None:
                 "are required when AWS_SSO_ENABLED is true"
             )
         if settings.gitlab_enabled and not settings.gitlab_oauth_client_id:
-            raise ValueError(
-                "GITLAB_OAUTH_CLIENT_ID is required when GITLAB_ENABLED is true"
-            )
+            raise ValueError("GITLAB_OAUTH_CLIENT_ID is required when GITLAB_ENABLED is true")
         if settings.coralogix_enabled and not (
             settings.coralogix_secret_id and settings.coralogix_api_endpoint
         ):

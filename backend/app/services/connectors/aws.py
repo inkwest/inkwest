@@ -88,9 +88,7 @@ class AwsConnector(Connector):
             s.aws_sso_region,
         )
 
-    async def provisional_from_token(
-        self, access_token: str, expires_in: int
-    ) -> MintedCredential:
+    async def provisional_from_token(self, access_token: str, expires_in: int) -> MintedCredential:
         """Build the provisional (``needs_selection``) credential from the SSO token."""
         s = get_settings()
         accounts, roles = await asyncio.to_thread(
