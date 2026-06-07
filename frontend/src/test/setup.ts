@@ -54,3 +54,36 @@ Object.defineProperty(window, 'matchMedia', {
 
 // Mock scrollIntoView
 Element.prototype.scrollIntoView = () => {}
+
+// Mock localStorage / sessionStorage with a full in-memory Storage API. jsdom's
+// implementation here lacks the setItem/getItem methods zustand's `persist`
+// middleware calls, which otherwise throws "storage.setItem is not a function".
+class MemoryStorage {
+  private store = new Map<string, string>()
+  get length() {
+    return this.store.size
+  }
+  clear() {
+    this.store.clear()
+  }
+  getItem(key: string) {
+    return this.store.has(key) ? (this.store.get(key) as string) : null
+  }
+  key(index: number) {
+    return Array.from(this.store.keys())[index] ?? null
+  }
+  removeItem(key: string) {
+    this.store.delete(key)
+  }
+  setItem(key: string, value: string) {
+    this.store.set(key, String(value))
+  }
+}
+
+for (const name of ['localStorage', 'sessionStorage'] as const) {
+  Object.defineProperty(globalThis, name, {
+    value: new MemoryStorage(),
+    writable: true,
+    configurable: true,
+  })
+}
