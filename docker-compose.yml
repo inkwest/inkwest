@@ -102,6 +102,7 @@ services:
       - AWS_SSO_REGION=${AWS_SSO_REGION:-}
       - AWS_SSO_OIDC_CLIENT_ID=${AWS_SSO_OIDC_CLIENT_ID:-}
       - AWS_SSO_OIDC_CLIENT_SECRET=${AWS_SSO_OIDC_CLIENT_SECRET:-}
+      - AWS_SSO_ROLE_FILTER=${AWS_SSO_ROLE_FILTER:-}
       # GitLab OAuth (public PKCE client)
       - GITLAB_ENABLED=${GITLAB_ENABLED:-false}
       - GITLAB_BASE_URL=${GITLAB_BASE_URL:-https://gitlab.com}
