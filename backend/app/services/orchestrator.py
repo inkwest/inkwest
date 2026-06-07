@@ -32,6 +32,7 @@ from app.services.ai_client import get_ai_client, get_model_name
 from app.services.budget_service import record_usage
 from app.services.events import (
     ChatEvent,
+    connector_required_event,
     done_event,
     error_event,
     text_event,
@@ -47,8 +48,10 @@ from app.services.messages import (
     update_session_stats,
 )
 from app.services.prompts import get_system_prompt
-from app.tools.definitions import KUBECTL_TOOLS
-from app.tools.executor import execute_kubectl
+from app.tools.connector_exec import connector_for_tool, is_needs_auth
+from app.tools.definitions import get_tool_definitions
+from app.tools.dispatch import execute_tool
+from app.tools.exec_context import ToolExecContext
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +103,8 @@ async def call_claude_with_retry(
 async def orchestrate_chat(
     db: AsyncSession,
     session_id: str | uuid.UUID,
-    cluster_name: str,
-    kubeconfig_path: str,
+    cluster_name: str | None,
+    kubeconfig_path: str | None,
     context_name: str | None,
     user_message: str,
     namespaces: list[str] | None = None,
@@ -178,7 +181,7 @@ async def orchestrate_chat(
     cached_system = [
         {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
     ]
-    cached_tools = [*KUBECTL_TOOLS]
+    cached_tools = list(get_tool_definitions())
     cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
 
     # Session stats tracking
@@ -372,11 +375,17 @@ async def orchestrate_chat(
                 # Notify frontend that tool is starting
                 yield tool_start_event(tool_name, tool_input, tool_id)
 
-                # Execute the kubectl command
+                # Execute the tool (kubectl or a connector tool). Connector tools
+                # fetch the user's temporary credential from the RAM store by
+                # (user_id, session_id) — never via the model or tool input.
+                tool_ctx = ToolExecContext(
+                    user_id=user_id,
+                    session_id=session_id,
+                    kubeconfig_path=kubeconfig_path,
+                    context_name=context_name,
+                )
                 try:
-                    output, is_error = await execute_kubectl(
-                        tool_name, tool_input, kubeconfig_path, context_name
-                    )
+                    output, is_error = await execute_tool(tool_name, tool_input, tool_ctx)
                 except Exception as e:
                     logger.exception(f"Exception executing tool {tool_name}")
                     output = f"Error executing tool: {str(e)}"
@@ -384,6 +393,11 @@ async def orchestrate_chat(
 
                 # Notify frontend of result
                 yield tool_result_event(tool_name, output, tool_id, is_error)
+
+                # Surface a first-class re-auth affordance when a connector is missing
+                connector = connector_for_tool(tool_name)
+                if connector and is_needs_auth(output, is_error):
+                    yield connector_required_event(connector, session_id_str)
 
                 # Format for Claude API
                 tool_results.append(
@@ -425,8 +439,8 @@ async def orchestrate_chat(
 async def orchestrate_chat_streaming(
     db: AsyncSession,
     session_id: str | uuid.UUID,
-    cluster_name: str,
-    kubeconfig_path: str,
+    cluster_name: str | None,
+    kubeconfig_path: str | None,
     context_name: str | None,
     user_message: str,
     namespaces: list[str] | None = None,
@@ -499,7 +513,7 @@ async def orchestrate_chat_streaming(
     cached_system = [
         {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
     ]
-    cached_tools = [*KUBECTL_TOOLS]
+    cached_tools = list(get_tool_definitions())
     cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
 
     total_input_tokens = 0
@@ -693,15 +707,23 @@ async def orchestrate_chat_streaming(
 
                 yield tool_start_event(tool_name, tool_input, tool_id)
 
+                tool_ctx = ToolExecContext(
+                    user_id=user_id,
+                    session_id=session_id,
+                    kubeconfig_path=kubeconfig_path,
+                    context_name=context_name,
+                )
                 try:
-                    output, is_error = await execute_kubectl(
-                        tool_name, tool_input, kubeconfig_path, context_name
-                    )
+                    output, is_error = await execute_tool(tool_name, tool_input, tool_ctx)
                 except Exception as e:
                     output = f"Error: {str(e)}"
                     is_error = True
 
                 yield tool_result_event(tool_name, output, tool_id, is_error)
+
+                connector = connector_for_tool(str(tool_name))
+                if connector and is_needs_auth(output, is_error):
+                    yield connector_required_event(connector, session_id_str)
 
                 tool_results.append(
                     {

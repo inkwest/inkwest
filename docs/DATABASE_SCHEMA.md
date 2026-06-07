@@ -102,7 +102,7 @@ Chat sessions, each bound to a specific cluster and user.
 CREATE TABLE inkwest.sessions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID REFERENCES inkwest.users(id) ON DELETE SET NULL,
-    cluster_id UUID NOT NULL REFERENCES inkwest.clusters(id) ON DELETE CASCADE,
+    cluster_id UUID REFERENCES inkwest.clusters(id) ON DELETE CASCADE,  -- nullable: session may have no Kube context
     title VARCHAR(255),
     summary TEXT,
     is_archived BOOLEAN NOT NULL DEFAULT false,

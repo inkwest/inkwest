@@ -2,7 +2,7 @@ FROM python:3.11-slim AS base
 
 ARG BUILD_TIMESTAMP="1970-01-01T00:00:00+00:00"
 ARG COMMIT_HASH="00000000-dirty"
-ARG PROJECT_URL="https://github.com/inkwest/inkwest"
+ARG PROJECT_URL="https://github.com/kubepanion/kubepanion"
 ARG VERSION="v0.0.0"
 
 LABEL org.opencontainers.image.source=${PROJECT_URL}
@@ -13,7 +13,7 @@ LABEL org.opencontainers.image.revision=${COMMIT_HASH}
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates git && \
+    apt-get install -y --no-install-recommends curl ca-certificates git unzip && \
     rm -rf /var/lib/apt/lists/* && \
     useradd -ms /bin/bash -d /home/app app
 
@@ -23,6 +23,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
     && chmod +x kubectl \
     && mv kubectl /usr/local/bin/
+
+# Install AWS CLI v2 (used by the AWS external-access connector's aws_call tool).
+# $(uname -m) -> x86_64 on amd64, aarch64 on arm64; AWS's bundle names match exactly,
+# so the same line builds correctly on both architectures.
+RUN curl -s "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscli.zip \
+    && unzip -q /tmp/awscli.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/awscli.zip
 
 # Install Claude CLI as app user so it lands in /home/app/.local/bin
 # Note: Claude CLI runs with --dangerously-skip-permissions for non-interactive use.

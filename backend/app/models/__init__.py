@@ -2,6 +2,8 @@
 from app.models.base import Base
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
 from app.models.cluster import Cluster
+from app.models.connector_audit import ConnectorAuditLog
+from app.models.connector_pending_state import ConnectorPendingState
 from app.models.message import Message
 from app.models.oidc_pending_state import OidcPendingState
 from app.models.role_mapping import RoleKubeconfigMapping
@@ -21,4 +23,6 @@ __all__ = [
     "BudgetPeriod",
     "UsageRecord",
     "OidcPendingState",
+    "ConnectorPendingState",
+    "ConnectorAuditLog",
 ]

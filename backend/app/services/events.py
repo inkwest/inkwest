@@ -29,6 +29,8 @@ EventType = Literal[
     # Web search events
     "search_proposal",  # Proposed web search awaiting approval
     "search_results",  # Web search results for user review
+    # Connector events
+    "connector_required",  # A tool needs a connector that is not connected/expired
 ]
 
 
@@ -345,6 +347,19 @@ def search_results_event(
             "result_count": len(results),
             "requires_approval": requires_approval,
         },
+    )
+
+
+def connector_required_event(connector: str, session_id: str) -> ChatEvent:
+    """Signal that a tool needs a connector the session has not granted (or it expired).
+
+    Lets the UI render a first-class "Give access" button instead of relying on the
+    model to ask in prose.
+    """
+    return ChatEvent(
+        type="connector_required",
+        content=f"Access to {connector} is required for this action.",
+        metadata={"connector": connector, "session_id": session_id},
     )
 
 

@@ -39,7 +39,8 @@ from app.services.messages import (
     update_session_stats,
 )
 from app.services.prompts import get_system_prompt
-from app.tools import KUBECTL_TOOLS, execute_tools_parallel
+from app.tools import ToolExecContext, get_tool_definitions
+from app.tools import execute_tools_parallel_ctx as execute_tools_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ def get_google_client() -> genai.Client:
 def _build_gemini_tools() -> Sequence[types.Tool]:
     """Convert KUBECTL_TOOLS to Gemini function declarations."""
     declarations = []
-    for tool in KUBECTL_TOOLS:
+    for tool in get_tool_definitions():
         schema = tool["input_schema"].copy()
         # Gemini doesn't accept top-level 'required' alongside 'properties' in the same way;
         # pass it through as-is since google-genai SDK handles conversion
@@ -135,8 +136,8 @@ def _convert_messages_to_gemini(messages: list[dict[str, Any]]) -> list[types.Co
 async def orchestrate_chat_google(
     db: AsyncSession,
     session_id: str | uuid.UUID,
-    cluster_name: str,
-    kubeconfig_path: str,
+    cluster_name: str | None,
+    kubeconfig_path: str | None,
     context_name: str | None,
     user_message: str,
     namespaces: list[str] | None = None,
@@ -302,7 +303,15 @@ async def orchestrate_chat_google(
 
             # Execute tool calls
             parsed_calls = [{"name": tc["name"], "input": tc["input"]} for tc in tool_calls_data]
-            results = await execute_tools_parallel(parsed_calls, kubeconfig_path)
+            results = await execute_tools_parallel(
+                parsed_calls,
+                ToolExecContext(
+                    user_id=user_id,
+                    session_id=session_id,
+                    kubeconfig_path=kubeconfig_path,
+                    context_name=context_name,
+                ),
+            )
 
             # Yield tool events and build tool result blocks
             tool_result_blocks: list[dict[str, Any]] = []

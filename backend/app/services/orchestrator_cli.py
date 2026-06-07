@@ -8,6 +8,7 @@ just parse and stream the output.
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator
 
@@ -28,6 +29,7 @@ from app.services.messages import (
     set_cli_session_id,
     update_session_stats,
 )
+from app.tools.connector_exec import build_connector_env, connector_prompt_hint
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +37,8 @@ logger = logging.getLogger(__name__)
 async def orchestrate_chat_cli(
     db: AsyncSession,
     session_id: str | uuid.UUID,
-    cluster_name: str,
-    kubeconfig_path: str,
+    cluster_name: str | None,
+    kubeconfig_path: str | None,
     context_name: str | None,
     user_message: str,
     namespaces: list[str] | None = None,
@@ -102,8 +104,9 @@ async def orchestrate_chat_cli(
     if context_name:
         context_info = f"\nKubectl context: {context_name}"
 
-    prompt = f"""You are a Kubernetes debugging assistant for cluster: {cluster_name}
-
+    if kubeconfig_path:
+        cluster_header = f"You are a Kubernetes debugging assistant for cluster: {cluster_name}"
+        kube_section = f"""
 CRITICAL KUBECONFIG REQUIREMENT:
 - Kubeconfig files are stored in /etc/inkwest/kubeconfigs/
 - The kubeconfig for this cluster is: {kubeconfig_path}
@@ -115,10 +118,43 @@ Correct usage example:
   kubectl --kubeconfig={kubeconfig_path} get pods
   kubectl --kubeconfig={kubeconfig_path} get services -n <namespace>
   kubectl --kubeconfig={kubeconfig_path} describe pod <pod-name>
+"""
+    else:
+        cluster_header = "You are a Kubernetes debugging assistant."
+        kube_section = """
+NO KUBERNETES CLUSTER IS CONFIGURED for this session: kubectl is unavailable
+until a cluster or AWS/EKS access is set up. Rely on any external access listed
+below (e.g. AWS, GitLab, Coralogix) and ask the user to configure cluster access
+if Kubernetes inspection is required.
+"""
 
+    prompt = f"""{cluster_header}
+{kube_section}
 User question: {user_message}
 
-Investigate using kubectl and provide actionable insights."""
+Investigate using the available tools and provide actionable insights.
+
+IMPORTANT: You are NOT running on the target system. Investigate via the tools
+and any external access listed below."""
+
+    # Expose this session's connected connector credentials as standard env vars
+    # (AWS_*, GITLAB_TOKEN, …) so the agent can use `aws`/`curl` naturally.
+    # Read-only is enforced by the IAM/SSO role the user selected, not here.
+    connector_env, injected = await build_connector_env(user_id, uuid.UUID(str(session_id)))
+    if injected:
+        logger.info(
+            "Injecting connector credentials into CLI session",
+            extra={"session_id": session_id_str, "connectors": injected},
+        )
+        # Tell the agent which connectors it can use (the shell equivalent of the
+        # tool descriptions the API providers receive).
+        prompt += connector_prompt_hint(injected)
+
+    # Run the agent in a per-session scratch dir so it neither sees the backend
+    # source (/app) nor shares Claude Code's per-project transcripts with other
+    # conversations — the working dir is the isolation key on both counts.
+    work_dir = f"/tmp/inkwest-sessions/{session_id_str}"
+    os.makedirs(work_dir, exist_ok=True)
 
     try:
         # Execute CLI and stream response
@@ -129,6 +165,8 @@ Investigate using kubectl and provide actionable insights."""
             cli_path=settings.claude_cli_path,
             timeout=settings.claude_cli_timeout,
             resume_session_id=cli_session_id,
+            extra_env=connector_env or None,
+            cwd=work_dir,
         )
 
         collected_text: list[str] = []

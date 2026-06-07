@@ -87,12 +87,13 @@ Use markdown formatting for readability.
 """
 
 
-def get_system_prompt(cluster_name: str, namespaces: list[str] | None = None) -> str:
+def get_system_prompt(cluster_name: str | None, namespaces: list[str] | None = None) -> str:
     """
     Generate system prompt with cluster context.
 
     Args:
-        cluster_name: Name of the Kubernetes cluster
+        cluster_name: Name of the Kubernetes cluster, or None when the session
+            has no Kube context configured
         namespaces: List of available namespaces (optional)
 
     Returns:
@@ -100,8 +101,15 @@ def get_system_prompt(cluster_name: str, namespaces: list[str] | None = None) ->
     """
     from app.core.config import get_settings
 
+    if cluster_name is None:
+        cluster_label = (
+            "none configured — no Kubernetes access in this session. "
+            "kubectl tools will return an error until a cluster or AWS/EKS access is set up."
+        )
+    else:
+        cluster_label = cluster_name
     ns_str = ", ".join(namespaces) if namespaces else "all (user will specify)"
-    prompt = SYSTEM_PROMPT.format(cluster_name=cluster_name, namespaces=ns_str)
+    prompt = SYSTEM_PROMPT.format(cluster_name=cluster_label, namespaces=ns_str)
 
     extra = get_settings().system_prompt_extra
     if extra:

@@ -21,14 +21,16 @@ export function NewSessionDialog({ open, onClose }: Props) {
     }
   }, [open, fetchClusters]);
 
+  const clusterList = Array.isArray(clusters) ? clusters : [];
+  const noClusters = !isLoading && !error && clusterList.length === 0;
+
   const handleCreate = async () => {
-    if (!selectedCluster) return;
-    const session = await createSession(selectedCluster);
+    // With no cluster configured, start a session without a Kube context.
+    if (!noClusters && !selectedCluster) return;
+    const session = await createSession(selectedCluster || undefined);
     onClose();
     navigate(`/session/${session.id}`);
   };
-
-  const clusterList = Array.isArray(clusters) ? clusters : [];
 
   return (
     <Modal isOpen={open} onClose={onClose} title="Start New Session" size="sm">
@@ -41,7 +43,10 @@ export function NewSessionDialog({ open, onClose }: Props) {
         ) : error ? (
           <div className="text-red-400 text-sm">Failed to load clusters</div>
         ) : clusterList.length === 0 ? (
-          <div className="text-gray-500 text-sm">No clusters configured</div>
+          <div className="text-gray-500 text-sm">
+            No cluster configured — the session will start without a Kubernetes
+            context. You can still use other tools (e.g. AWS, GitLab).
+          </div>
         ) : (
           <select
             autoFocus
@@ -68,7 +73,7 @@ export function NewSessionDialog({ open, onClose }: Props) {
         </button>
         <button
           onClick={handleCreate}
-          disabled={!selectedCluster}
+          disabled={!noClusters && !selectedCluster}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white disabled:opacity-50"
         >
           Start

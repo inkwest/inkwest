@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: inkwest
       POSTGRES_DB: inkwest
     ports:
-      - "5432:5432"
+      - "${DB_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
@@ -91,6 +91,26 @@ services:
       - WEB_SEARCH_MAX_RESULTS=${WEB_SEARCH_MAX_RESULTS:-5}
       - WEB_SEARCH_TRUSTED_DOMAINS=${WEB_SEARCH_TRUSTED_DOMAINS:-}
       - WEB_SEARCH_BLOCKED_DOMAINS=${WEB_SEARCH_BLOCKED_DOMAINS:-}
+      # External Access Connectors (AWS / GitLab / Coralogix)
+      - CONNECTORS_ENABLED=${CONNECTORS_ENABLED:-false}
+      - CONNECTOR_AUDIT_ENABLED=${CONNECTOR_AUDIT_ENABLED:-true}
+      # Local dev: callback hits the backend directly (no Vite /api proxy).
+      - CONNECTOR_REDIRECT_BASE=${CONNECTOR_REDIRECT_BASE:-http://localhost:8000/api/connectors/callback}
+      # AWS IAM Identity Center
+      - AWS_SSO_ENABLED=${AWS_SSO_ENABLED:-false}
+      - AWS_SSO_START_URL=${AWS_SSO_START_URL:-}
+      - AWS_SSO_REGION=${AWS_SSO_REGION:-}
+      - AWS_SSO_OIDC_CLIENT_ID=${AWS_SSO_OIDC_CLIENT_ID:-}
+      - AWS_SSO_OIDC_CLIENT_SECRET=${AWS_SSO_OIDC_CLIENT_SECRET:-}
+      # GitLab OAuth (public PKCE client)
+      - GITLAB_ENABLED=${GITLAB_ENABLED:-false}
+      - GITLAB_BASE_URL=${GITLAB_BASE_URL:-https://gitlab.com}
+      - GITLAB_OAUTH_CLIENT_ID=${GITLAB_OAUTH_CLIENT_ID:-}
+      # Coralogix (read-only key from AWS Secrets Manager)
+      - CORALOGIX_ENABLED=${CORALOGIX_ENABLED:-false}
+      - CORALOGIX_SECRET_ID=${CORALOGIX_SECRET_ID:-}
+      - CORALOGIX_SECRET_REGION=${CORALOGIX_SECRET_REGION:-}
+      - CORALOGIX_API_ENDPOINT=${CORALOGIX_API_ENDPOINT:-}
     volumes:
       - ./backend:/app
       - ./app_home/.claude:/home/app/.claude

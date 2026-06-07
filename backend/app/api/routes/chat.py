@@ -41,7 +41,7 @@ _connections_lock = asyncio.Lock()
 class ClusterContext:
     display_name: str
     kubeconfig_path: str
-    context_name: str | None
+    context_name: str | None = None
 
 
 async def connect(session_id: str, websocket: WebSocket) -> None:
@@ -147,6 +147,10 @@ async def validate_session(
             if str(session.user_id) != str(user.id):
                 return None, None, "Access denied"
 
+        # A session may have no cluster: start without a Kube context.
+        if session.cluster_id is None:
+            return session, None, None
+
         cluster = await db.get(Cluster, session.cluster_id)
         if not cluster:
             return None, None, "Cluster not found"
@@ -211,12 +215,13 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             await websocket.close(code=4004)
             return
 
-        assert cluster is not None
-        cluster_ctx = ClusterContext(
-            display_name=cluster.display_name,
-            kubeconfig_path=cluster.kubeconfig_path,
-            context_name=cluster.context_name,
-        )
+        # cluster may be None: session runs without a Kube context.
+        if cluster is not None:
+            cluster_ctx = ClusterContext(
+                display_name=cluster.display_name,
+                kubeconfig_path=cluster.kubeconfig_path,
+                context_name=cluster.context_name,
+            )
 
     await connect(session_id, websocket)
 
@@ -224,7 +229,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
         "Session validated",
         extra={
             "session_id": session_id,
-            "cluster_name": cluster_ctx.display_name,
+            "cluster_name": cluster_ctx.display_name if cluster_ctx else None,
         },
     )
 
@@ -276,9 +281,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                     async for event in orchestrate(
                         db=db,
                         session_id=session_id,
-                        cluster_name=cluster_ctx.display_name,
-                        kubeconfig_path=cluster_ctx.kubeconfig_path,
-                        context_name=cluster_ctx.context_name,
+                        cluster_name=cluster_ctx.display_name if cluster_ctx else None,
+                        kubeconfig_path=cluster_ctx.kubeconfig_path if cluster_ctx else None,
+                        context_name=cluster_ctx.context_name if cluster_ctx else None,
                         user_message=content,
                         user_id=user_id,
                         cancel_event=cancel_event,

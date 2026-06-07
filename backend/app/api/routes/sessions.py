@@ -90,21 +90,24 @@ async def create_session(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> SessionResponse:
-    cluster_result = await db.execute(
-        select(Cluster).where(
-            Cluster.id == session_data.cluster_id,
-            Cluster.is_active == True,  # noqa: E712
+    # A cluster is optional: with no cluster configured the session starts
+    # without a Kube context. Validate access only when one is requested.
+    if session_data.cluster_id is not None:
+        cluster_result = await db.execute(
+            select(Cluster).where(
+                Cluster.id == session_data.cluster_id,
+                Cluster.is_active == True,  # noqa: E712
+            )
         )
-    )
-    cluster = cluster_result.scalar_one_or_none()
+        cluster = cluster_result.scalar_one_or_none()
 
-    if not cluster:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Active cluster with ID '{session_data.cluster_id}' not found",
-        )
+        if not cluster:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Active cluster with ID '{session_data.cluster_id}' not found",
+            )
 
-    await check_cluster_access(current_user, str(cluster.id), db)
+        await check_cluster_access(current_user, str(cluster.id), db)
 
     session = Session(**session_data.model_dump(), user_id=str(current_user.id))
     db.add(session)
@@ -193,6 +196,12 @@ async def delete_session(
     session.is_archived = True
     await db.flush()
     await db.commit()
+
+    # Drop any brokered external-access credentials held for this session.
+    if session.user_id is not None:
+        from app.services.connectors.store import get_credential_store
+
+        await get_credential_store().revoke_session(session.user_id, session.id)
 
     await close_session_connections(str(session.id))
     await notify({"type": "session_deleted", "session_id": str(session.id)})

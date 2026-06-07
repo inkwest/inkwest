@@ -43,7 +43,8 @@ from app.services.orchestrator_openrouter import (
     _convert_tools_to_openai_format,
 )
 from app.services.prompts import get_system_prompt
-from app.tools import execute_tools_parallel
+from app.tools import ToolExecContext
+from app.tools import execute_tools_parallel_ctx as execute_tools_parallel
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,8 @@ async def close_cached_openai_client() -> None:
 async def orchestrate_chat_openai(
     db: AsyncSession,
     session_id: str | uuid.UUID,
-    cluster_name: str,
-    kubeconfig_path: str,
+    cluster_name: str | None,
+    kubeconfig_path: str | None,
     context_name: str | None,
     user_message: str,
     namespaces: list[str] | None = None,
@@ -327,7 +328,15 @@ async def orchestrate_chat_openai(
                 yield tool_start_event(tc_data["name"], tc_data["input"], tc_data["id"])
 
             parsed_calls = [{"name": tc["name"], "input": tc["input"]} for tc in tool_calls_data]
-            results = await execute_tools_parallel(parsed_calls, kubeconfig_path)
+            results = await execute_tools_parallel(
+                parsed_calls,
+                ToolExecContext(
+                    user_id=user_id,
+                    session_id=session_id,
+                    kubeconfig_path=kubeconfig_path,
+                    context_name=context_name,
+                ),
+            )
 
             tool_result_blocks: list[dict[str, Any]] = []
             for tc_data, result in zip(tool_calls_data, results):

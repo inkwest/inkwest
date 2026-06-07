@@ -146,11 +146,27 @@ Optional documentation lookup (Brave Search or SerpAPI). Sources classified by t
 
 ### Session Management
 
-Sessions are bound to a user + cluster. Track:
+Sessions are bound to a user and **optionally** a cluster. Track:
 - Message history with content blocks (text, tool_use, tool_result)
 - Token usage counters (input, output, tool calls, iterations)
 - Retry support for failed messages
 - Archive (soft delete)
+
+#### Sessions without a configured cluster
+
+A session can start with **no cluster** (`cluster_id` is nullable). This is the
+default when no cluster is configured — Kube access in our model comes from AWS
+(EKS kubeconfigs minted per session), so a session must not require a
+pre-configured cluster to open.
+
+- **New-session flow** skips cluster selection when none exist and creates the
+  session without a `cluster_id`; the cluster picker only appears when ≥ 1
+  cluster is configured.
+- **WebSocket chat + orchestrators** run without a kubeconfig. `kubectl_*` tools
+  stay advertised to the model (cluster access can arrive mid-session via AWS),
+  but invoking one without a kubeconfig returns a clean error instead of
+  failing the turn. The system prompt notes that no cluster is configured.
+- Connector tools (AWS, GitLab, Coralogix) are unaffected and fully usable.
 
 ### Quick-Start Links
 

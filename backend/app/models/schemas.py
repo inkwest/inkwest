@@ -104,7 +104,7 @@ class MessageResponse(MessageBase):
 class SessionBase(BaseModel):
     """Base session schema with common fields."""
 
-    cluster_id: UUID
+    cluster_id: UUID | None = None
     title: str | None = Field(None, max_length=255)
 
 

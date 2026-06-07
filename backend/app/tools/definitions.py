@@ -245,6 +245,126 @@ KUBECTL_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+# =============================================================================
+# External Access Connector tools
+#
+# These tools carry ONLY query parameters — never a credential, token, account or
+# key. The backend injects the temporary scoped credential from the RAM store at
+# execution time. If the connector is not connected, the tool returns a re-auth
+# message so the model can ask the user to click "Give access".
+# =============================================================================
+
+CONNECTOR_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "aws_call",
+        "description": (
+            "Run an AWS CLI call using the temporary credentials the user granted."
+            " The user may grant several accounts/roles at once — each is an AWS"
+            " profile. Omit 'profile' to use the default (first) profile, or pass a"
+            " profile name to target a specific account. Permissions are capped by"
+            " the selected read-only role. Use to inspect infrastructure (EKS, EC2,"
+            " CloudWatch, etc.)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "AWS service, e.g. 'eks', 'ec2', 'cloudwatch', 'logs'.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": (
+                        "Read-only operation in kebab-case, e.g. 'describe-cluster',"
+                        " 'list-clusters', 'describe-instances'."
+                    ),
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Additional CLI arguments, e.g. ['--name', 'my-cluster']."
+                        " Provide flags and values as separate items."
+                    ),
+                },
+                "profile": {
+                    "type": "string",
+                    "description": (
+                        "Optional AWS profile (one of the granted account/role"
+                        " profiles). Defaults to the first granted profile."
+                    ),
+                },
+            },
+            "required": ["service", "operation"],
+        },
+    },
+    {
+        "name": "gitlab_api",
+        "description": (
+            "Make a READ-ONLY (GET) call to the GitLab REST API v4 using the user's"
+            " granted read_api/read_repository token. Use to analyze the code of the"
+            " hosted apps. Provide the path after '/api/v4'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "API path after /api/v4, e.g."
+                        " '/projects/123/repository/files/main.py?ref=main'."
+                    ),
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Optional query parameters as key/value pairs.",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "coralogix_query",
+        "description": (
+            "Query Coralogix (logs, metrics and traces) using the granted read-only"
+            " key. Supports DataPrime or Lucene query syntax."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "DataPrime or Lucene query string."},
+                "syntax": {
+                    "type": "string",
+                    "enum": ["lucene", "dataprime"],
+                    "description": "Query syntax. Defaults to 'lucene'.",
+                },
+                "time_range": {
+                    "type": "string",
+                    "description": "Relative range, e.g. '1h', '30m', '24h'. Defaults to '1h'.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+CONNECTOR_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in CONNECTOR_TOOLS)
+KUBECTL_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in KUBECTL_TOOLS)
+
+
+def get_tool_definitions() -> list[dict[str, Any]]:
+    """Return the tool definitions advertised to the model.
+
+    Connector tools are included only when connectors are enabled, keeping the
+    prompt (and its cache) stable for deployments that don't use them.
+    """
+    from app.core.config import get_settings
+
+    if get_settings().connectors_enabled:
+        return [*KUBECTL_TOOLS, *CONNECTOR_TOOLS]
+    return list(KUBECTL_TOOLS)
+
+
 def get_tool_by_name(name: str) -> dict[str, Any] | None:
     """
     Get a tool definition by its name.

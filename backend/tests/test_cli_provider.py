@@ -243,6 +243,24 @@ class TestParseCliResponse:
         assert events[1].type == "done"
 
     @pytest.mark.asyncio
+    async def test_result_does_not_duplicate_assistant_text(self):
+        """The `result` field repeats the assistant text — it must not be emitted twice."""
+
+        async def mock_stream():
+            yield (
+                '{"type": "assistant", "message": {"content":'
+                ' [{"type": "text", "text": "The answer is 42."}]}}'
+            )
+            yield '{"type": "result", "result": "The answer is 42.", "subtype": "success"}'
+
+        events = [e async for e in parse_cli_response(mock_stream())]
+
+        text_events = [e for e in events if e.type == "text_delta"]
+        assert len(text_events) == 1
+        assert text_events[0].content == "The answer is 42."
+        assert any(e.type == "done" for e in events)
+
+    @pytest.mark.asyncio
     async def test_parse_full_assistant_message(self):
         """Test parsing full assistant message with multiple content blocks."""
 

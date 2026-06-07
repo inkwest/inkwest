@@ -6,6 +6,42 @@ export interface TodoItem {
   content: string;
   status: 'pending' | 'in_progress' | 'completed' | 'interrupted';
   activeForm?: string;
+  // Claude Code 2.x assigns each task a sequential id (TaskCreate); TaskUpdate
+  // references it. Absent for legacy TodoWrite (which carries the whole list).
+  id?: string;
+}
+
+// Apply a task-tracking tool call to the running todo list. Supports both
+// Claude Code ≤1.x (TodoWrite: one call carries the whole list) and 2.x
+// (TaskCreate/TaskUpdate: incremental). The CLI assigns task ids sequentially
+// in creation order and monotonically across a session's turns, so a task's
+// position (length+1 at creation) reproduces the id TaskUpdate will reference —
+// no need to read the create result, keeping this purely frontend.
+export function applyTaskTool(
+  todos: TodoItem[],
+  name: string | undefined,
+  input: Record<string, unknown> | undefined
+): TodoItem[] {
+  if (name === 'TodoWrite' && Array.isArray(input?.todos)) {
+    return input.todos as TodoItem[];
+  }
+  if (name === 'TaskCreate' && typeof input?.subject === 'string') {
+    return [
+      ...todos,
+      {
+        id: String(todos.length + 1),
+        content: input.subject as string,
+        activeForm: input.activeForm as string | undefined,
+        status: 'pending',
+      },
+    ];
+  }
+  if (name === 'TaskUpdate' && input?.taskId != null) {
+    const taskId = String(input.taskId);
+    const status = input.status as TodoItem['status'];
+    return todos.map((t) => (t.id === taskId ? { ...t, status } : t));
+  }
+  return todos;
 }
 
 // Content block types for streaming
@@ -103,16 +139,11 @@ export const useChatStore = create<ChatState>((set) => ({
           isLoading: true,
         });
 
-        // Extract todos from TodoWrite tool calls
-        let newTodos = state.currentTodos;
-        if (tool.name === 'TodoWrite' && tool.input?.todos) {
-          const todos = tool.input.todos as TodoItem[];
-          if (Array.isArray(todos)) {
-            newTodos = todos;
-          }
-        }
-
-        return { activeToolCall: tool, streamingBlocks: updatedBlocks, currentTodos: newTodos };
+        return {
+          activeToolCall: tool,
+          streamingBlocks: updatedBlocks,
+          currentTodos: applyTaskTool(state.currentTodos, tool.name, tool.input),
+        };
       }
       return { activeToolCall: tool };
     }),
@@ -171,20 +202,33 @@ export const useChatStore = create<ChatState>((set) => ({
 }));
 
 /**
- * Extract the last TodoWrite todos from a list of loaded messages.
- * Used to restore the floating task list when returning to a session.
+ * Reconstruct the floating task list from a loaded session's messages.
+ * Legacy Claude Code (TodoWrite) carries the whole list in the last call, so we
+ * return that; Claude Code 2.x emits incremental TaskCreate/TaskUpdate, so we
+ * replay them in order. A session uses a single CLI version, so it's either-or.
  */
 export function extractTodosFromMessages(messages: Message[]): TodoItem[] {
+  // Legacy TodoWrite: newest call holds the full, current list.
   for (let i = messages.length - 1; i >= 0; i--) {
     const content = messages[i].content;
     if (!Array.isArray(content)) continue;
     for (let j = content.length - 1; j >= 0; j--) {
       const block = content[j];
-      if (block.type === 'tool_use' && block.name === 'TodoWrite' && block.input?.todos) {
-        const todos = block.input.todos as TodoItem[];
-        if (Array.isArray(todos)) return todos;
+      if (block.type === 'tool_use' && block.name === 'TodoWrite' && Array.isArray(block.input?.todos)) {
+        return block.input.todos as TodoItem[];
       }
     }
   }
-  return [];
+  // Claude Code 2.x: replay TaskCreate/TaskUpdate chronologically.
+  let todos: TodoItem[] = [];
+  for (const message of messages) {
+    const content = message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (block.type === 'tool_use') {
+        todos = applyTaskTool(todos, block.name, block.input);
+      }
+    }
+  }
+  return todos;
 }

@@ -3,6 +3,8 @@ import { useChatStore } from '@/store/chat';
 import { useSessionsStore } from '@/store/sessions';
 import { ChatWebSocket } from '@/services/websocket';
 import { ChatEvent } from '@/types/events';
+import { useConnectorsStore } from '@/store/connectors';
+import { ConnectorName } from '@/types/connectors';
 
 export function useWebSocket(sessionId: string) {
   const wsRef = useRef<ChatWebSocket | null>(null);
@@ -128,6 +130,17 @@ export function useWebSocket(sessionId: string) {
         setIsStreaming(false);
         setActiveToolCall(null);
         break;
+
+      case 'connector_required': {
+        // A tool needs a connector that isn't granted/expired — surface a
+        // re-auth affordance in the connector panel and refresh its status.
+        const connector = event.metadata?.connector as ConnectorName | undefined;
+        if (connector) {
+          useConnectorsStore.getState().setReauthRequired(connector);
+          useConnectorsStore.getState().fetchStatus(sessionId);
+        }
+        break;
+      }
 
       case 'pong':
         // Keepalive response, no action needed

@@ -6,14 +6,16 @@ import { ChatInput } from './ChatInput';
 import { StreamingMessage } from './StreamingMessage';
 import { ErrorBanner } from './ErrorBanner';
 import { FloatingTodoPanel } from './FloatingTodoPanel';
+import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
 
 interface Props {
   onSendMessage: (content: string) => void;
   onStopStreaming?: () => void;
   initialPrompt?: string | null;
+  sessionId?: string;
 }
 
-export function ChatView({ onSendMessage, onStopStreaming, initialPrompt }: Props) {
+export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, sessionId }: Props) {
   const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks, currentTodos } = useChatStore();
   const compact = useSettingsStore((s) => s.compactToolCards);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -51,6 +53,7 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt }: Prop
   return (
     <div className="flex-1 flex flex-col h-full relative min-h-0 overflow-hidden">
       <ErrorBanner />
+      {sessionId && <ConnectorPanel sessionId={sessionId} />}
       <div
         ref={containerRef}
         onScroll={handleScroll}
