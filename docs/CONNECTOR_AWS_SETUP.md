@@ -58,6 +58,9 @@ AWS_SSO_REGION=eu-west-1                              # région de l'Identity Ce
 AWS_SSO_START_URL=https://d-xxxxxxxxxx.awsapps.com/start
 AWS_SSO_OIDC_CLIENT_ID=<clientId de l'étape 1>
 AWS_SSO_OIDC_CLIENT_SECRET=<clientSecret de l'étape 1>   # nom exact : ..._OIDC_CLIENT_SECRET
+
+# Optionnel — filtre regex des rôles proposés (défense en profondeur, cf. §5)
+# AWS_SSO_ROLE_FILTER=read-?only$
 ```
 
 Appliquer (recrée le backend pour relire l'`.env`) :
@@ -123,6 +126,16 @@ Fichiers : `backend/app/services/connectors/aws.py` (device grant + multi-select
   log/prompt/navigateur ; argv ne contient jamais le secret (seulement le chemin
   du fichier tmpfs).
 - **Plafonné par le SSO** de l'utilisateur : pas d'escalade.
+- **Filtre de rôles (`AWS_SSO_ROLE_FILTER`)** : second verrou côté backend. Regex
+  **insensible à la casse**, matchée (`search`, donc non ancrée — l'opérateur place
+  ses propres `^`/`$`) sur **`<nom_du_compte>.<nom_du_rôle>`**
+  (ex. `acme-integration.AWSReadonlyAccess`). Seuls les rôles qui **matchent**
+  apparaissent dans la modale et sont mintables ; un compte sans rôle correspondant
+  **disparaît**. Vide / non défini → **aucun filtre** (tous les rôles).
+  Appliqué à l'énumération SSO (`provisional_from_token` → `available_roles`) ; la
+  sélection (`select_account_roles`) ne mint que ce qui a été proposé, donc un rôle
+  filtré est de facto non sélectionnable. Regex invalide → **échec au démarrage**.
+  Exemple read-only : `AWS_SSO_ROLE_FILTER=read-?only$`.
 - **Cloisonnement par session** : un fichier `~/.aws` tmpfs par session.
 - **Révocation** : bouton Revoke → creds purgés du store + fichiers tmpfs supprimés
   (les STS expirent de toute façon à ~1 h).
@@ -137,6 +150,7 @@ Fichiers : `backend/app/services/connectors/aws.py` (device grant + multi-select
 | `register-client` : « unknown options » | CLI trop vieux → utilise **CloudShell** (CLI récent) |
 | `register-client` : « Could not connect to endpoint » | faute de frappe région (ex. `eu-west1` au lieu de `eu-west-1`) |
 | Reste « en attente d'approbation » | tu n'as pas encore validé le code dans la popup AWS |
-| Liste comptes/rôles vide | aucun permission set assigné à ton utilisateur sur les comptes |
+| Liste comptes/rôles vide | aucun permission set assigné à ton utilisateur sur les comptes — **ou** `AWS_SSO_ROLE_FILTER` trop strict (ne matche aucun `compte.rôle`) |
+| Backend refuse de démarrer (`AWS_SSO_ROLE_FILTER is not a valid regex`) | regex `AWS_SSO_ROLE_FILTER` malformée → corriger ou retirer la variable |
 | `aws` échoue « no credentials » dans le chat | accès AWS non accordé / expiré → re-cliquer « Give access » |
 | `clientSecret` expiré (~90 j) | ré-enregistrer un client + mettre à jour le `.env` |

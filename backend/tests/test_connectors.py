@@ -251,3 +251,58 @@ def test_connector_status_has_no_secret_field():
     from app.api.routes.connectors import ConnectorStatusResponse
 
     assert "secret" not in ConnectorStatusResponse.model_fields
+
+
+# --------------------------------------------------------------------------- #
+# AWS role filter: regex on "<account_name>.<role_name>"
+# --------------------------------------------------------------------------- #
+_ACCOUNTS = [
+    {"account_id": "111", "account_name": "acme-integration"},
+    {"account_id": "222", "account_name": "acme-prod"},
+]
+_ROLES = [
+    {"account_id": "111", "role_name": "AWSReadonlyAccess"},
+    {"account_id": "111", "role_name": "AWSAdministratorAccess"},
+    {"account_id": "222", "role_name": "AWSAdministratorAccess"},
+]
+
+
+def test_filter_by_role_none_is_passthrough():
+    from app.services.connectors.aws import _filter_by_role
+
+    accounts, roles = _filter_by_role(_ACCOUNTS, _ROLES, None)
+    assert accounts == _ACCOUNTS and roles == _ROLES
+    # Empty string behaves like unset.
+    assert _filter_by_role(_ACCOUNTS, _ROLES, "") == (_ACCOUNTS, _ROLES)
+
+
+def test_filter_by_role_keeps_only_matches_case_insensitive():
+    from app.services.connectors.aws import _filter_by_role
+
+    accounts, roles = _filter_by_role(_ACCOUNTS, _ROLES, "readonly")
+    # Only the read-only role survives...
+    assert roles == [{"account_id": "111", "role_name": "AWSReadonlyAccess"}]
+    # ...and the account with no surviving role is dropped.
+    assert accounts == [{"account_id": "111", "account_name": "acme-integration"}]
+
+
+def test_filter_by_role_matches_on_account_dot_role():
+    from app.services.connectors.aws import _filter_by_role
+
+    # Anchored to the "<account>." prefix: only integration roles, any role name.
+    _, roles = _filter_by_role(_ACCOUNTS, _ROLES, r"^acme-integration\.")
+    assert {r["role_name"] for r in roles} == {"AWSReadonlyAccess", "AWSAdministratorAccess"}
+    assert {r["account_id"] for r in roles} == {"111"}
+
+
+def test_validate_settings_rejects_invalid_role_filter():
+    from app.core.config import validate_settings
+
+    with patch("app.core.config.get_settings") as mock_get:
+        mock_get.return_value = MagicMock(
+            ai_provider="claude-cli",
+            app_env="development",
+            aws_sso_role_filter="([",  # unbalanced → re.error
+        )
+        with pytest.raises(ValueError, match="AWS_SSO_ROLE_FILTER is not a valid regex"):
+            validate_settings()
