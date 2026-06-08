@@ -91,7 +91,10 @@ AWS_SSO_OIDC_CLIENT_ID=<clientId from register-client>
 2. Callback → Inkwest exchanges the code for an SSO token, then lists the
    accounts/roles the user's SSO allows (`ListAccounts` / `ListAccountRoles`).
 3. User picks account + role → `GetRoleCredentials` mints ~1h STS creds (held in RAM).
-4. The AI can call `aws_call` — **read-only only** (`describe-*` / `get-*` / `list-*`;
+4. Selecting roles also kicks off a per-session EKS kubeconfig refresh (clusters are
+   discovered and one tmpfs kubeconfig is generated per cluster) — see
+   [`EKS_REFRESH.md`](./EKS_REFRESH.md).
+5. The AI can call `aws_call` — **read-only only** (`describe-*` / `get-*` / `list-*`;
    secret-returning ops and `secretsmanager`/`kms`/`sts` are denied).
 
 ---

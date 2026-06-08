@@ -200,8 +200,11 @@ async def delete_session(
     # Drop any brokered external-access credentials held for this session.
     if session.user_id is not None:
         from app.services.connectors.store import get_credential_store
+        from app.tools.connector_exec import cleanup_aws_files
 
         await get_credential_store().revoke_session(session.user_id, session.id)
+        # Remove the session tmpfs (~/.aws projection + generated EKS kubeconfigs).
+        cleanup_aws_files(session.id)
 
     await close_session_connections(str(session.id))
     await notify({"type": "session_deleted", "session_id": str(session.id)})

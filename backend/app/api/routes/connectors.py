@@ -34,6 +34,7 @@ from app.services.connectors.base import (
 )
 from app.services.connectors.registry import all_connectors, get_connector
 from app.services.connectors.store import get_credential_store
+from app.services.eks_refresh import schedule_session_eks_refresh
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -441,6 +442,9 @@ async def aws_select(
     except ConnectorError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     await get_credential_store().put(current_user.id, sid, cred)
+    # Discover EKS clusters for the freshly minted profiles and generate one
+    # (tmpfs) kubeconfig each — async, must not block the select response.
+    schedule_session_eks_refresh(sid, cred)
     await _audit(
         db, user_id=current_user.id, session_id=sid, connector="aws", action="select", cred=cred
     )
