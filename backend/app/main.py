@@ -9,7 +9,17 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import admin, auth, chat, clusters, connectors, health, sessions, sync
+from app.api.routes import (
+    admin,
+    auth,
+    chat,
+    clusters,
+    connectors,
+    health,
+    prompt_templates,
+    sessions,
+    sync,
+)
 from app.core.config import get_settings
 from app.core.database import close_db, init_db
 from app.core.logging import AccessLogMiddleware, access_log_config, get_logger, setup_logging
@@ -108,6 +118,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 # Include routers
 app.include_router(health.router)
 app.include_router(clusters.router, prefix="/api")
+app.include_router(prompt_templates.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(sessions.search_router, prefix="/api")
 app.include_router(auth.router, prefix="/api")

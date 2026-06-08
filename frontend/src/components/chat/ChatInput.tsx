@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, KeyboardEvent } from 'react';
 import { Send, Square } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { cn, TEXT_SIZE } from '@/lib/utils';
+import { PromptTemplatePalette } from './PromptTemplatePalette';
 
 interface Props {
   onSend: (message: string) => void;
@@ -43,9 +44,16 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     }
   };
 
+  const handleSelectTemplate = (content: string) => {
+    // Replace input with the template, leaving it editable before send.
+    setMessage(content);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
   return (
     <div className="border-t border-gray-700 p-4">
       <div className="flex items-stretch gap-2">
+        <PromptTemplatePalette onSelect={handleSelectTemplate} disabled={disabled} />
         <textarea
           ref={textareaRef}
           value={message}
@@ -64,6 +72,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         {isStreaming ? (
           <button
             onClick={onStop}
+            aria-label="Stop"
             className="flex items-center justify-center px-3 rounded-lg border border-transparent bg-red-600 hover:bg-red-700"
           >
             <Square className="h-4 w-4" />
@@ -71,6 +80,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         ) : (
           <button
             onClick={handleSend}
+            aria-label="Send message"
             disabled={disabled || !message.trim()}
             className={cn(
               'flex items-center justify-center px-3 rounded-lg border border-transparent bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed',

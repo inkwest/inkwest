@@ -13,13 +13,13 @@ describe('ChatInput', () => {
   it('renders textarea and send button', () => {
     render(<ChatInput onSend={onSend} />);
     expect(screen.getByPlaceholderText(/kubernetes/i)).toBeInTheDocument();
-    expect(screen.getByRole('button')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /send message/i })).toBeInTheDocument();
   });
 
   it('disables inputs when disabled prop is true', () => {
     render(<ChatInput onSend={onSend} disabled />);
     expect(screen.getByPlaceholderText(/kubernetes/i)).toBeDisabled();
-    expect(screen.getByRole('button')).toBeDisabled();
+    expect(screen.getByRole('button', { name: /send message/i })).toBeDisabled();
   });
 
   it('calls onSend when send button is clicked', async () => {
@@ -28,7 +28,7 @@ describe('ChatInput', () => {
 
     const textarea = screen.getByPlaceholderText(/kubernetes/i);
     await user.type(textarea, 'list pods');
-    await user.click(screen.getByRole('button'));
+    await user.click(screen.getByRole('button', { name: /send message/i }));
 
     expect(onSend).toHaveBeenCalledWith('list pods');
   });
@@ -57,7 +57,7 @@ describe('ChatInput', () => {
     const user = userEvent.setup();
     render(<ChatInput onSend={onSend} />);
 
-    await user.click(screen.getByRole('button'));
+    await user.click(screen.getByRole('button', { name: /send message/i }));
     expect(onSend).not.toHaveBeenCalled();
   });
 
@@ -79,6 +79,6 @@ describe('ChatInput', () => {
 
   it('send button is disabled when textarea is empty', () => {
     render(<ChatInput onSend={onSend} />);
-    expect(screen.getByRole('button')).toBeDisabled();
+    expect(screen.getByRole('button', { name: /send message/i })).toBeDisabled();
   });
 });

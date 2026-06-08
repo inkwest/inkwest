@@ -14,6 +14,16 @@ export interface ClusterSummary {
   display_name: string;
 }
 
+// Prompt template types
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  content: string;
+  description?: string;
+  is_active: boolean;
+  created_at: string;
+}
+
 // Session types
 export interface Session {
   id: string;

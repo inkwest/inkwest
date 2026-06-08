@@ -6,6 +6,7 @@ from app.models.connector_audit import ConnectorAuditLog
 from app.models.connector_pending_state import ConnectorPendingState
 from app.models.message import Message
 from app.models.oidc_pending_state import OidcPendingState
+from app.models.prompt_template import PromptTemplate
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import ConfirmationMode, Session
 from app.models.user import User
@@ -23,6 +24,7 @@ __all__ = [
     "BudgetPeriod",
     "UsageRecord",
     "OidcPendingState",
+    "PromptTemplate",
     "ConnectorPendingState",
     "ConnectorAuditLog",
 ]

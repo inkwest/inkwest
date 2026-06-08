@@ -3,6 +3,7 @@ import { clsx } from 'clsx';
 import {
   LayoutDashboard,
   Server,
+  FileText,
   DollarSign,
   Users,
   Shield,
@@ -15,6 +16,7 @@ import { ShellLayout } from '@/components/layout/ShellLayout';
 const navItems = [
   { to: '/admin', icon: LayoutDashboard, label: 'Dashboard', end: true },
   { to: '/admin/clusters', icon: Server, label: 'Clusters' },
+  { to: '/admin/prompt-templates', icon: FileText, label: 'Prompt Templates' },
   { to: '/admin/budgets', icon: DollarSign, label: 'Budgets' },
   { to: '/admin/users', icon: Users, label: 'Users' },
   { to: '/admin/roles', icon: Shield, label: 'Role Mappings' },

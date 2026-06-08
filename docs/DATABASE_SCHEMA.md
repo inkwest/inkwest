@@ -94,6 +94,25 @@ CREATE TABLE inkwest.clusters (
 );
 ```
 
+### prompt_templates
+
+Reusable, user-editable prompt templates surfaced as a palette in the chat.
+Global (no per-user ownership); `content` is plain text and may contain literal
+fill-in blanks (e.g. `__________`) edited in the input before sending — there is
+no server-side templating or placeholder substitution.
+
+```sql
+CREATE TABLE inkwest.prompt_templates (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL UNIQUE,
+    content TEXT NOT NULL,
+    description TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
 ### sessions
 
 Chat sessions, each bound to a specific cluster and user.

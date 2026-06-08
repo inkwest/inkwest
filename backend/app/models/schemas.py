@@ -58,6 +58,52 @@ class ClusterList(BaseModel):
 
 
 # =============================================================================
+# Prompt Template Schemas
+# =============================================================================
+
+
+class PromptTemplateBase(BaseModel):
+    """Base prompt template schema with common fields."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+    description: str | None = None
+
+
+class PromptTemplateCreate(PromptTemplateBase):
+    """Schema for creating a new prompt template."""
+
+    pass
+
+
+class PromptTemplateUpdate(BaseModel):
+    """Schema for updating a prompt template."""
+
+    name: str | None = Field(None, min_length=1, max_length=255)
+    content: str | None = Field(None, min_length=1)
+    description: str | None = None
+    is_active: bool | None = None
+
+
+class PromptTemplateResponse(PromptTemplateBase):
+    """Schema for prompt template response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class PromptTemplateList(BaseModel):
+    """Schema for list of prompt templates."""
+
+    items: list[PromptTemplateResponse]
+    total: int
+
+
+# =============================================================================
 # Message Schemas
 # =============================================================================
 
