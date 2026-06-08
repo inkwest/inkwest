@@ -49,13 +49,16 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
             ref={ref}
             className={clsx(
               'relative w-full bg-gray-800 text-white rounded-lg shadow-xl',
+              // flex column + capped height so tall content scrolls inside the
+              // body instead of overflowing the viewport.
+              'flex flex-col max-h-[90vh] overflow-hidden',
               sizes[size],
               className
             )}
             {...props}
           >
             {title && (
-              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700 shrink-0">
                 <h3 className="text-lg font-semibold text-white">{title}</h3>
                 <button
                   onClick={onClose}
@@ -66,7 +69,7 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
               </div>
             )}
 
-            <div className="px-6 py-4">{children}</div>
+            <div className="px-6 py-4 flex-1 min-h-0 overflow-y-auto">{children}</div>
           </div>
         </div>
       </div>,

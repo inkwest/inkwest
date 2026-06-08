@@ -26,6 +26,7 @@ from app.models.schemas import (
     SessionWithMessages,
 )
 from app.models.session import Session
+from app.models.system_prompt import SystemPrompt
 from app.services.pubsub import notify
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -108,6 +109,34 @@ async def create_session(
             )
 
         await check_cluster_access(current_user, str(cluster.id), db)
+
+    # System prompt selection is admin-only. Non-admins always get the default
+    # (resolved at run time from null columns), so reject any explicit choice.
+    sp_id = session_data.system_prompt_id
+    sp_custom = session_data.system_prompt_custom
+    if sp_id is not None or sp_custom is not None:
+        if not current_user.is_admin():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins may choose a system prompt; non-admins use the default",
+            )
+        if sp_id is not None and sp_custom is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide either system_prompt_id or system_prompt_custom, not both",
+            )
+        if sp_id is not None:
+            sp_result = await db.execute(
+                select(SystemPrompt).where(
+                    SystemPrompt.id == sp_id,
+                    SystemPrompt.is_active == True,  # noqa: E712
+                )
+            )
+            if sp_result.scalar_one_or_none() is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Active system prompt '{sp_id}' not found",
+                )
 
     session = Session(**session_data.model_dump(), user_id=str(current_user.id))
     db.add(session)

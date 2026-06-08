@@ -14,7 +14,10 @@ interface SessionsState {
 
   fetchSessions: () => Promise<void>;
   fetchSession: (id: string) => Promise<void>;
-  createSession: (clusterId?: string) => Promise<Session>;
+  createSession: (
+    clusterId?: string,
+    opts?: { systemPromptId?: string; systemPromptCustom?: string }
+  ) => Promise<Session>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   setCurrentSession: (session: SessionWithMessages | null) => void;
@@ -63,8 +66,12 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
   },
 
-  createSession: async (clusterId?: string) => {
-    const session = await api.createSession(clusterId ? { cluster_id: clusterId } : {});
+  createSession: async (clusterId?: string, opts?: { systemPromptId?: string; systemPromptCustom?: string }) => {
+    const session = await api.createSession({
+      ...(clusterId ? { cluster_id: clusterId } : {}),
+      ...(opts?.systemPromptId ? { system_prompt_id: opts.systemPromptId } : {}),
+      ...(opts?.systemPromptCustom ? { system_prompt_custom: opts.systemPromptCustom } : {}),
+    });
     set((state) => ({ sessions: [session, ...state.sessions] }));
     return session;
   },

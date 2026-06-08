@@ -75,6 +75,10 @@ def mock_db() -> AsyncMock:
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     db.close = AsyncMock()
+    # Default to "nothing found" so helpers like resolve_session_system_prompt
+    # fall back cleanly; tests that need a row override these explicitly.
+    db.get = AsyncMock(return_value=None)
+    db.scalar = AsyncMock(return_value=None)
     return db
 
 
@@ -314,6 +318,24 @@ def mock_prompt_template() -> MagicMock:
     return template
 
 
+_SYSTEM_PROMPT_ID = uuid.UUID("00000000-0000-4000-8000-000000000040")
+
+
+@pytest.fixture
+def mock_system_prompt() -> MagicMock:
+    """Mock SystemPrompt with all SystemPromptResponse fields (non-default)."""
+    prompt = MagicMock()
+    prompt.id = _SYSTEM_PROMPT_ID
+    prompt.name = "test-system-prompt"
+    prompt.content = "You are a test assistant for {cluster_name}."
+    prompt.description = "A test system prompt"
+    prompt.is_active = True
+    prompt.is_default = False
+    prompt.created_at = datetime.now(UTC)
+    prompt.updated_at = datetime.now(UTC)
+    return prompt
+
+
 @pytest.fixture
 def mock_session_obj(mock_cluster: MagicMock) -> MagicMock:
     """Mock Session with all fields."""
@@ -321,6 +343,8 @@ def mock_session_obj(mock_cluster: MagicMock) -> MagicMock:
     session.id = _SESSION_ID
     session.cluster_id = _CLUSTER_ID
     session.user_id = str(_USER_ID)
+    session.system_prompt_id = None
+    session.system_prompt_custom = None
     session.title = "Test Session"
     session.summary = "A test summary"
     session.is_archived = False

@@ -84,6 +84,8 @@ export async function getSessions(): Promise<Session[]> {
 
 export async function createSession(data: {
   cluster_id?: string;
+  system_prompt_id?: string;
+  system_prompt_custom?: string;
 }): Promise<Session> {
   return fetchAPI('/api/sessions', {
     method: 'POST',

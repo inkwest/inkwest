@@ -36,6 +36,7 @@ async def execute_claude_cli(
     resume_session_id: str | None = None,
     extra_env: dict[str, str] | None = None,
     cwd: str | None = None,
+    system_prompt: str | None = None,
 ) -> AsyncIterator[str]:
     """
     Execute Claude CLI and stream output.
@@ -55,6 +56,9 @@ async def execute_claude_cli(
         cwd: Working directory for the CLI process. Use a per-session scratch dir so
             the agent doesn't see the backend source (`/app`) and so Claude Code keeps
             its per-project transcripts isolated between conversations.
+        system_prompt: The Inkwest/custom system prompt for the session, appended to
+            Claude Code's built-in prompt via --append-system-prompt (so the managed
+            persona is honored without dropping Claude Code's tool-use framing).
 
     Yields:
         Lines of JSON output from the CLI
@@ -75,6 +79,10 @@ async def execute_claude_cli(
         "stream-json",
         "--verbose",
     ]
+
+    # Layer the session's managed system prompt over Claude Code's default.
+    if system_prompt:
+        cmd += ["--append-system-prompt", system_prompt]
 
     # Add --resume if we have a CLI session ID from a previous interaction
     if resume_session_id:

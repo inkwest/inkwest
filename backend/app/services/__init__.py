@@ -39,9 +39,11 @@ from app.services.orchestrator import (
     orchestrate_chat_streaming,
 )
 from app.services.prompts import (
+    ensure_default_system_prompt,
     get_summary_prompt,
     get_system_prompt,
     get_title_prompt,
+    resolve_session_system_prompt,
 )
 
 __all__ = [
@@ -55,6 +57,8 @@ __all__ = [
     "get_system_prompt",
     "get_summary_prompt",
     "get_title_prompt",
+    "ensure_default_system_prompt",
+    "resolve_session_system_prompt",
     # Events
     "ChatEvent",
     "text_event",

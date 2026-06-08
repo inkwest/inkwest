@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useClustersStore } from '@/store/clusters';
 import { useSessionsStore } from '@/store/sessions';
+import { useAuthStore, useSystemPromptStore } from '@/store/admin';
 import { Modal } from '@/components/ui/Modal';
 
 interface Props {
@@ -9,25 +10,53 @@ interface Props {
   onClose: () => void;
 }
 
+const CUSTOM = '__custom__';
+
 export function NewSessionDialog({ open, onClose }: Props) {
   const navigate = useNavigate();
   const { clusters, fetchClusters, isLoading, error } = useClustersStore();
   const { createSession } = useSessionsStore();
+  const { user } = useAuthStore();
+  const { prompts, fetchPrompts } = useSystemPromptStore();
+  const isAdmin = !!user?.is_admin;
+
   const [selectedCluster, setSelectedCluster] = useState('');
+  // '' = default prompt, CUSTOM = free-text, otherwise a system prompt id.
+  const [selectedPrompt, setSelectedPrompt] = useState('');
+  const [customPrompt, setCustomPrompt] = useState('');
 
   useEffect(() => {
     if (open) {
       fetchClusters();
+      if (isAdmin) fetchPrompts(true); // active only
     }
-  }, [open, fetchClusters]);
+  }, [open, isAdmin, fetchClusters, fetchPrompts]);
+
+  // Preselect the default prompt once the list loads (don't clobber a manual
+  // pick). The default is always present — it can't be deactivated.
+  useEffect(() => {
+    if (!isAdmin) return;
+    const def = prompts.find((p) => p.is_default);
+    if (def) setSelectedPrompt((cur) => (cur === '' ? def.id : cur));
+  }, [isAdmin, prompts]);
 
   const clusterList = Array.isArray(clusters) ? clusters : [];
   const noClusters = !isLoading && !error && clusterList.length === 0;
+  const customInvalid = selectedPrompt === CUSTOM && !customPrompt.trim();
 
   const handleCreate = async () => {
     // With no cluster configured, start a session without a Kube context.
     if (!noClusters && !selectedCluster) return;
-    const session = await createSession(selectedCluster || undefined);
+    if (customInvalid) return;
+
+    const opts =
+      isAdmin && selectedPrompt === CUSTOM
+        ? { systemPromptCustom: customPrompt.trim() }
+        : isAdmin && selectedPrompt
+          ? { systemPromptId: selectedPrompt }
+          : undefined;
+
+    const session = await createSession(selectedCluster || undefined, opts);
     onClose();
     navigate(`/session/${session.id}`);
   };
@@ -64,6 +93,37 @@ export function NewSessionDialog({ open, onClose }: Props) {
         )}
       </div>
 
+      {/* System prompt selection is admin-only; non-admins always get the default. */}
+      {isAdmin && (
+        <div className="mb-4">
+          <label className="block text-sm text-gray-400 mb-2">
+            System Prompt
+          </label>
+          <select
+            value={selectedPrompt}
+            onChange={(e) => setSelectedPrompt(e.target.value)}
+            className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+          >
+            {prompts.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+                {p.is_default ? ' (default)' : ''}
+              </option>
+            ))}
+            <option value={CUSTOM}>Custom…</option>
+          </select>
+          {selectedPrompt === CUSTOM && (
+            <textarea
+              value={customPrompt}
+              onChange={(e) => setCustomPrompt(e.target.value)}
+              rows={6}
+              placeholder="Enter a custom system prompt for this session…"
+              className="mt-2 w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm"
+            />
+          )}
+        </div>
+      )}
+
       <div className="flex gap-2 justify-end">
         <button
           onClick={onClose}
@@ -73,7 +133,7 @@ export function NewSessionDialog({ open, onClose }: Props) {
         </button>
         <button
           onClick={handleCreate}
-          disabled={!noClusters && !selectedCluster}
+          disabled={(!noClusters && !selectedCluster) || customInvalid}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white disabled:opacity-50"
         >
           Start

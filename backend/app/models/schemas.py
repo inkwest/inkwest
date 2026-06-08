@@ -104,6 +104,54 @@ class PromptTemplateList(BaseModel):
 
 
 # =============================================================================
+# System Prompt Schemas
+# =============================================================================
+
+
+class SystemPromptBase(BaseModel):
+    """Base system prompt schema with common fields."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+    description: str | None = None
+
+
+class SystemPromptCreate(SystemPromptBase):
+    """Schema for creating a new system prompt."""
+
+    is_default: bool = False
+
+
+class SystemPromptUpdate(BaseModel):
+    """Schema for updating a system prompt."""
+
+    name: str | None = Field(None, min_length=1, max_length=255)
+    content: str | None = Field(None, min_length=1)
+    description: str | None = None
+    is_active: bool | None = None
+    is_default: bool | None = None
+
+
+class SystemPromptResponse(SystemPromptBase):
+    """Schema for system prompt response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    is_active: bool
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class SystemPromptList(BaseModel):
+    """Schema for list of system prompts."""
+
+    items: list[SystemPromptResponse]
+    total: int
+
+
+# =============================================================================
 # Message Schemas
 # =============================================================================
 
@@ -155,9 +203,14 @@ class SessionBase(BaseModel):
 
 
 class SessionCreate(SessionBase):
-    """Schema for creating a new session."""
+    """Schema for creating a new session.
 
-    pass
+    ``system_prompt_id`` / ``system_prompt_custom`` are admin-only; non-admins
+    must omit both and get the global default (enforced in the route).
+    """
+
+    system_prompt_id: UUID | None = None
+    system_prompt_custom: str | None = Field(None, min_length=1)
 
 
 class SessionUpdate(BaseModel):
@@ -188,6 +241,8 @@ class SessionResponse(SessionBase):
     summary: str | None = None
     is_archived: bool
     cluster: ClusterSummary | None = None
+    system_prompt_id: UUID | None = None
+    system_prompt_custom: str | None = None
     # Usage statistics
     total_input_tokens: int = 0
     total_output_tokens: int = 0
