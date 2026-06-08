@@ -94,8 +94,15 @@ async def orchestrate_chat_cli(
     if cli_session_id:
         logger.info(f"Found existing CLI session: {cli_session_id}")
 
+    # Expose this session's connected connector credentials as standard env vars
+    # (AWS_*, GITLAB_TOKEN, KUBECONFIG, …) so the agent can use `aws`/`kubectl`/`curl`
+    # naturally. Computed before the prompt so the kube section can reflect whether
+    # per-session EKS contexts were wired. Read-only is enforced by the IAM/SSO role
+    # the user selected, not here.
+    connector_env, injected = await build_connector_env(user_id, uuid.UUID(str(session_id)))
+    has_eks = "eks" in injected
+
     # Build prompt with context
-    # CLI will have access to kubectl via MCP, but we provide context
     namespace_context = ""
     if namespaces:
         namespace_context = f"\nAvailable namespaces: {', '.join(namespaces)}"
@@ -119,6 +126,17 @@ Correct usage example:
   kubectl --kubeconfig={kubeconfig_path} get services -n <namespace>
   kubectl --kubeconfig={kubeconfig_path} describe pod <pod-name>
 """
+    elif has_eks:
+        # No statically-selected cluster, but the AWS role select discovered EKS
+        # clusters and KUBECONFIG points at the generated contexts (details in the
+        # external-access section below). Don't claim kubectl is unavailable.
+        cluster_header = "You are a Kubernetes debugging assistant."
+        kube_section = """
+KUBERNETES ACCESS IS AVAILABLE: kubectl is preconfigured with one context per
+reachable EKS cluster (see the external access section below for how to use it).
+Do NOT reconfigure kubectl or run `aws eks update-kubeconfig` — the contexts are
+already set up.
+"""
     else:
         cluster_header = "You are a Kubernetes debugging assistant."
         kube_section = """
@@ -137,10 +155,6 @@ Investigate using the available tools and provide actionable insights.
 IMPORTANT: You are NOT running on the target system. Investigate via the tools
 and any external access listed below."""
 
-    # Expose this session's connected connector credentials as standard env vars
-    # (AWS_*, GITLAB_TOKEN, …) so the agent can use `aws`/`curl` naturally.
-    # Read-only is enforced by the IAM/SSO role the user selected, not here.
-    connector_env, injected = await build_connector_env(user_id, uuid.UUID(str(session_id)))
     if injected:
         logger.info(
             "Injecting connector credentials into CLI session",

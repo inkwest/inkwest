@@ -242,6 +242,84 @@ async def test_execute_aws_writes_profiles_to_ramfile_not_argv():
 
 
 # --------------------------------------------------------------------------- #
+# EKS refresh wiring: generated kubeconfigs reach the agent via
+# KUBECONFIG, and the agent is told the contexts are already configured.
+# --------------------------------------------------------------------------- #
+def _aws_cred_with_profile() -> MintedCredential:
+    return MintedCredential(
+        connector="aws",
+        scope="read",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        secret={
+            "region": "eu-west-1",
+            "profiles": [
+                {
+                    "name": "acme-ReadOnly",
+                    "account_id": "111111111111",
+                    "account_name": "acme",
+                    "role_name": "ReadOnly",
+                    "access_key_id": "AKIA_TEST",
+                    "secret_access_key": "SECRETKEYVALUE",  # pragma: allowlist secret
+                    "session_token": "SESSIONTOKEN",  # pragma: allowlist secret
+                    "region": "eu-west-1",
+                }
+            ],
+        },
+    )
+
+
+async def test_build_connector_env_wires_generated_kubeconfigs():
+    import os
+
+    from app.services.connectors.store import get_credential_store
+    from app.tools.connector_exec import (
+        build_connector_env,
+        cleanup_aws_files,
+        connector_prompt_hint,
+        session_kube_dir,
+    )
+
+    uid, sid = uuid.uuid4(), uuid.uuid4()
+    await get_credential_store().put(uid, sid, _aws_cred_with_profile())
+    # Simulate the EKS refresh having produced two cluster kubeconfigs.
+    kube = session_kube_dir(sid)
+    os.makedirs(kube, mode=0o700, exist_ok=True)
+    for fname in ("eks--acme--prod", "eks--acme--stg"):
+        open(os.path.join(kube, fname), "w").close()
+
+    try:
+        env, injected = await build_connector_env(uid, sid)
+        # KUBECONFIG carries every generated file, sorted, colon-joined.
+        assert env["KUBECONFIG"] == ":".join(
+            [os.path.join(kube, "eks--acme--prod"), os.path.join(kube, "eks--acme--stg")]
+        )
+        assert "aws" in injected and "eks" in injected
+        # The agent is told kubectl is ready and must NOT reconfigure it.
+        hint = connector_prompt_hint(injected)
+        assert "kubectl config get-contexts" in hint
+        assert "update-kubeconfig" in hint  # in the "do NOT run" guidance
+    finally:
+        cleanup_aws_files(sid)
+        await get_credential_store().revoke_session(uid, sid)
+
+
+async def test_build_connector_env_no_kubeconfigs_leaves_kubeconfig_unset():
+    """Refresh not run / no reachable clusters → KUBECONFIG stays unset, no eks hint."""
+    from app.services.connectors.store import get_credential_store
+    from app.tools.connector_exec import build_connector_env, cleanup_aws_files
+
+    uid, sid = uuid.uuid4(), uuid.uuid4()
+    await get_credential_store().put(uid, sid, _aws_cred_with_profile())
+    try:
+        env, injected = await build_connector_env(uid, sid)
+        assert "KUBECONFIG" not in env
+        assert "aws" in injected and "eks" not in injected
+    finally:
+        cleanup_aws_files(sid)
+        await get_credential_store().revoke_session(uid, sid)
+
+
+# --------------------------------------------------------------------------- #
 # Public status projection carries no secret field
 # --------------------------------------------------------------------------- #
 def test_connector_status_has_no_secret_field():
