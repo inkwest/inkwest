@@ -1,0 +1,7 @@
+# Keep host artifacts out of the build context: a stray (often root-owned)
+# node_modules pollutes the `npm install` layer cache and can break .bin links.
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+coverage/
