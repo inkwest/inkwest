@@ -29,7 +29,7 @@ The container runs as UID 1000 (`app`). Create the directory and file with match
 ```bash
 mkdir -p app_home/.claude
 echo '{}' > app_home/.claude.json
-chown -R 1000:1000 app_home/
+sudo chown -R 1000:1000 app_home/
 ```
 
 ### 2. Start the stack
@@ -75,7 +75,7 @@ The backend will invoke `claude` with `--dangerously-skip-permissions` for non-i
 
 | Symptom | Fix |
 |---|---|
-| `Permission denied` on `.claude.json` | `chown -R 1000:1000 app_home/` on the host |
+| `Permission denied` on `.claude.json` | `sudo chown -R 1000:1000 app_home/` on the host |
 | `claude: command not found` | Rebuild the image: `docker compose build backend` |
 | OAuth token expired | Re-enter the container and run `claude` again |
 | Empty responses | Check `docker compose logs backend` for CLI stderr output |
