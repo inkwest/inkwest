@@ -64,7 +64,7 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, sessio
         <div ref={bottomRef} />
       </div>
       <FloatingTodoPanel />
-      <ChatInput onSend={onSendMessage} onStop={onStopStreaming} disabled={!isConnected} isStreaming={isStreaming} initialPrompt={initialPrompt} />
+      <ChatInput onSend={onSendMessage} onStop={onStopStreaming} disabled={!isConnected} isStreaming={isStreaming} initialPrompt={initialPrompt} sessionId={sessionId} />
     </div>
   );
 }

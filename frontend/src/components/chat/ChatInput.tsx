@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, KeyboardEvent } from 'react';
 import { Send, Square } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
+import { useDraftsStore } from '@/store/drafts';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 import { PromptTemplatePalette } from './PromptTemplatePalette';
 
@@ -10,30 +11,48 @@ interface Props {
   disabled?: boolean;
   isStreaming?: boolean;
   initialPrompt?: string | null;
+  sessionId?: string;
 }
 
-export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt }: Props) {
+export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, sessionId }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
-  const [message, setMessage] = useState('');
+  const setDraft = useDraftsStore((s) => s.setDraft);
+  const clearDraft = useDraftsStore((s) => s.clearDraft);
+  // Seed once from the persisted per-session draft so switching sessions (which
+  // unmounts this component behind the "Loading session..." guard) and coming
+  // back restores what the user had typed.
+  const [message, setMessage] = useState(() =>
+    sessionId ? useDraftsStore.getState().drafts[sessionId] ?? '' : ''
+  );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const initialPromptApplied = useRef(false);
   const [shimmer, setShimmer] = useState(false);
 
+  // Mirror edits into the persisted draft store keyed by session.
+  const updateMessage = (value: string) => {
+    setMessage(value);
+    if (sessionId) setDraft(sessionId, value);
+  };
+
   useEffect(() => {
     if (!initialPrompt || initialPromptApplied.current) return;
     initialPromptApplied.current = true;
+    // A restored draft takes precedence over a one-shot initial prompt.
+    if (sessionId && useDraftsStore.getState().drafts[sessionId]) return;
     setMessage(initialPrompt);
+    if (sessionId) setDraft(sessionId, initialPrompt);
     setShimmer(true);
     setTimeout(() => textareaRef.current?.focus(), 100);
     const timer = setTimeout(() => setShimmer(false), 4000);
     return () => clearTimeout(timer);
-  }, [initialPrompt]);
+  }, [initialPrompt, sessionId, setDraft]);
 
   const handleSend = () => {
     setShimmer(false);
     if (message.trim() && !disabled) {
       onSend(message.trim());
       setMessage('');
+      if (sessionId) clearDraft(sessionId);
     }
   };
 
@@ -46,7 +65,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
 
   const handleSelectTemplate = (content: string) => {
     // Replace input with the template, leaving it editable before send.
-    setMessage(content);
+    updateMessage(content);
     setTimeout(() => textareaRef.current?.focus(), 0);
   };
 
@@ -57,7 +76,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         <textarea
           ref={textareaRef}
           value={message}
-          onChange={(e) => setMessage(e.target.value)}
+          onChange={(e) => updateMessage(e.target.value)}
           onKeyDown={handleKeyDown}
           autoFocus
           placeholder="Describe your Kubernetes issue..."
