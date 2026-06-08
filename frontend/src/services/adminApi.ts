@@ -245,3 +245,67 @@ export async function updateCluster(id: string, data: UpdateClusterRequest): Pro
 export async function deleteCluster(id: string): Promise<void> {
   await fetchAPI(`/api/clusters/${id}`, { method: 'DELETE' });
 }
+
+// ============================================================================
+// Prompt Template API
+// ============================================================================
+
+export interface AdminPromptTemplate {
+  id: string;
+  name: string;
+  content: string;
+  description?: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePromptTemplateRequest {
+  name: string;
+  content: string;
+  description?: string;
+}
+
+export interface UpdatePromptTemplateRequest {
+  name?: string;
+  content?: string;
+  description?: string;
+  is_active?: boolean;
+}
+
+interface PromptTemplateListResponse {
+  items: AdminPromptTemplate[];
+  total: number;
+}
+
+export async function getPromptTemplates(
+  activeOnly: boolean = false
+): Promise<AdminPromptTemplate[]> {
+  const response = await fetchAPI<PromptTemplateListResponse>(
+    `/api/prompt-templates?active_only=${activeOnly}`
+  );
+  return response.items;
+}
+
+export async function createPromptTemplate(
+  data: CreatePromptTemplateRequest
+): Promise<AdminPromptTemplate> {
+  return fetchAPI('/api/prompt-templates', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updatePromptTemplate(
+  id: string,
+  data: UpdatePromptTemplateRequest
+): Promise<AdminPromptTemplate> {
+  return fetchAPI(`/api/prompt-templates/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deletePromptTemplate(id: string): Promise<void> {
+  await fetchAPI(`/api/prompt-templates/${id}`, { method: 'DELETE' });
+}

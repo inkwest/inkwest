@@ -247,6 +247,7 @@ _USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _ADMIN_ID = uuid.UUID("00000000-0000-4000-8000-000000000002")
 _CLUSTER_ID = uuid.UUID("00000000-0000-4000-8000-000000000010")
 _SESSION_ID = uuid.UUID("00000000-0000-4000-8000-000000000020")
+_PROMPT_TEMPLATE_ID = uuid.UUID("00000000-0000-4000-8000-000000000030")
 
 
 def _make_user(
@@ -297,6 +298,20 @@ def mock_cluster() -> MagicMock:
     cluster.created_at = datetime.now(UTC)
     cluster.updated_at = datetime.now(UTC)
     return cluster
+
+
+@pytest.fixture
+def mock_prompt_template() -> MagicMock:
+    """Mock PromptTemplate with all PromptTemplateResponse fields."""
+    template = MagicMock()
+    template.id = _PROMPT_TEMPLATE_ID
+    template.name = "test-template"
+    template.content = "Investigate pod __________ in namespace __________."
+    template.description = "A test template"
+    template.is_active = True
+    template.created_at = datetime.now(UTC)
+    template.updated_at = datetime.now(UTC)
+    return template
 
 
 @pytest.fixture

@@ -390,3 +390,75 @@ export const useClusterStore = create<ClusterState>((set) => ({
 
   clearError: () => set({ error: null }),
 }));
+
+// ============================================================================
+// Prompt Template Store (admin CRUD)
+// ============================================================================
+
+interface PromptTemplateState {
+  templates: adminApi.AdminPromptTemplate[];
+  isLoading: boolean;
+  error: string | null;
+
+  fetchTemplates: (activeOnly?: boolean) => Promise<void>;
+  createTemplate: (
+    data: adminApi.CreatePromptTemplateRequest
+  ) => Promise<adminApi.AdminPromptTemplate>;
+  updateTemplate: (
+    id: string,
+    data: adminApi.UpdatePromptTemplateRequest
+  ) => Promise<adminApi.AdminPromptTemplate>;
+  deleteTemplate: (id: string) => Promise<void>;
+  clearError: () => void;
+}
+
+export const usePromptTemplateStore = create<PromptTemplateState>((set) => ({
+  templates: [],
+  isLoading: false,
+  error: null,
+
+  fetchTemplates: async (activeOnly = false) => {
+    set({ isLoading: true, error: null });
+    try {
+      const templates = await adminApi.getPromptTemplates(activeOnly);
+      set({ templates: Array.isArray(templates) ? templates : [], isLoading: false });
+    } catch (error) {
+      set({ error: (error as Error).message, isLoading: false });
+    }
+  },
+
+  createTemplate: async (data: adminApi.CreatePromptTemplateRequest) => {
+    set({ error: null });
+    try {
+      const template = await adminApi.createPromptTemplate(data);
+      set((state) => ({ templates: [...state.templates, template] }));
+      return template;
+    } catch (error) {
+      set({ error: (error as Error).message });
+      throw error;
+    }
+  },
+
+  updateTemplate: async (id: string, data: adminApi.UpdatePromptTemplateRequest) => {
+    set({ error: null });
+    try {
+      const template = await adminApi.updatePromptTemplate(id, data);
+      set((state) => ({
+        templates: state.templates.map((t) => (t.id === id ? template : t)),
+      }));
+      return template;
+    } catch (error) {
+      set({ error: (error as Error).message });
+      throw error;
+    }
+  },
+
+  deleteTemplate: async (id: string) => {
+    await adminApi.deletePromptTemplate(id);
+    set((state) => ({
+      templates: state.templates.filter((t) => t.id !== id),
+    }));
+  },
+
+  clearError: () => set({ error: null }),
+}));

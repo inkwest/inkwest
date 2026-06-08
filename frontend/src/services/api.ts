@@ -1,4 +1,4 @@
-import { Cluster, Message, SearchResponse, Session, SessionWithMessages } from '@/types/api';
+import { Cluster, Message, PromptTemplate, SearchResponse, Session, SessionWithMessages } from '@/types/api';
 
 export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -44,6 +44,17 @@ interface PaginatedClusters {
 
 export async function getClusters(): Promise<Cluster[]> {
   const response = await fetchAPI<PaginatedClusters>('/api/clusters');
+  return response.items;
+}
+
+// Prompt templates (read-only; consumed by the chat palette)
+interface PaginatedPromptTemplates {
+  items: PromptTemplate[];
+  total: number;
+}
+
+export async function getPromptTemplates(): Promise<PromptTemplate[]> {
+  const response = await fetchAPI<PaginatedPromptTemplates>('/api/prompt-templates');
   return response.items;
 }
 
