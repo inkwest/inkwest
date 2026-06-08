@@ -75,6 +75,15 @@ def _aws_session_dir(session_id: UUID) -> str:
     return os.path.join(_aws_base(), str(session_id), ".aws")
 
 
+def session_kube_dir(session_id: UUID) -> str:
+    """Tmpfs dir holding the session's generated EKS kubeconfigs (one file/cluster).
+
+    A sibling of the ~/.aws projection under the same session root, so the existing
+    ``cleanup_aws_files`` teardown removes it too (revoke / session end).
+    """
+    return os.path.join(_aws_base(), str(session_id), "kube")
+
+
 def _creds_block(name: str, p: dict[str, Any]) -> str:
     return (
         f"[{name}]\n"
