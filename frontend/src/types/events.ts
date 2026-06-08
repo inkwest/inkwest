@@ -7,6 +7,7 @@ export interface ChatEvent {
     | 'done'
     | 'error'
     | 'pong'
+    | 'stream_resumed'
     | 'connector_required';
   content?: string;
   tool_name?: string;

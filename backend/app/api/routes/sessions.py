@@ -235,6 +235,11 @@ async def delete_session(
         # Remove the session tmpfs (~/.aws projection + generated EKS kubeconfigs).
         cleanup_aws_files(session.id)
 
+    # Cancel any detached turn first — orchestration outlives the socket now, so
+    # closing connections alone would leave it running against a deleted session.
+    from app.services.turn_runner import turn_runner
+
+    await turn_runner.cancel(str(session.id))
     await close_session_connections(str(session.id))
     await notify({"type": "session_deleted", "session_id": str(session.id)})
 

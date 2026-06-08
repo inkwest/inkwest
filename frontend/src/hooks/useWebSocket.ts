@@ -34,6 +34,13 @@ export function useWebSocket(sessionId: string) {
         setIsConnected(false);
         break;
 
+      case 'stream_resumed':
+        // Reconnected to a turn still running on the server (we navigated back).
+        // Clear any stale streaming state, then the replayed buffer rebuilds it.
+        clearStreamingBlocks();
+        setIsStreaming(true);
+        break;
+
       case 'text_delta':
         setIsStreaming(true);
         appendStreamingText(event.content || '');
