@@ -18,6 +18,30 @@ services:
       timeout: 5s
       retries: 5
 
+  # One-shot init: ensure the Claude CLI mount targets exist with the right
+  # TYPE and ownership before the backend's bind-mounts resolve. Docker
+  # auto-creates a missing *file* bind-source as a root-owned *directory*,
+  # which breaks ./app_home/.claude.json (the CLI expects a file -> EISDIR).
+  # An entrypoint can't fix this: mounts resolve before any container code runs.
+  # Seeding from the parent-dir mount here removes the manual pre-create step.
+  claude-init:
+    image: busybox:1.37
+    container_name: inkwest-claude-init
+    user: root
+    volumes:
+      - ./app_home:/seed
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /seed/.claude
+        # Repair a previously auto-created bogus directory at the file path.
+        # A dir here can only be Docker's empty placeholder, never real config.
+        [ -d /seed/.claude.json ] && rm -rf /seed/.claude.json
+        [ -f /seed/.claude.json ] || echo '{}' > /seed/.claude.json
+        chown -R 1000:1000 /seed
+    restart: "no"
+
   # Python Backend
   backend:
     build:
@@ -120,6 +144,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      claude-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
