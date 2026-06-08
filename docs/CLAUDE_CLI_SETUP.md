@@ -22,15 +22,11 @@ These persist the Claude CLI authentication across container restarts. The CLI b
 
 ## Initial setup
 
-### 1. Pre-create the mount targets
+### 1. Mount targets (automatic)
 
-The container runs as UID 1000 (`app`). Create the directory and file with matching ownership **before** starting the container, otherwise Docker will create them as root and the `app` user won't be able to write to them.
+The backend bind-mounts `app_home/.claude` (a **directory**) and `app_home/.claude.json` (a **file**) into the `app` user's home. The one-shot `claude-init` service creates both with the correct type and ownership (UID 1000) on every `docker compose up`, so there is **nothing to set up by hand**.
 
-```bash
-mkdir -p app_home/.claude
-echo '{}' > app_home/.claude.json
-sudo chown -R 1000:1000 app_home/
-```
+> Why a dedicated step: Docker auto-creates a missing bind source as a **root-owned directory** — harmless for `.claude`, but for `.claude.json` it puts a *directory* where the CLI expects a *file* (`EISDIR`). `claude-init` seeds and repairs them before the backend's mounts resolve, so this can't happen.
 
 ### 2. Start the stack
 
@@ -75,7 +71,8 @@ The backend will invoke `claude` with `--dangerously-skip-permissions` for non-i
 
 | Symptom | Fix |
 |---|---|
-| `Permission denied` on `.claude.json` | `sudo chown -R 1000:1000 app_home/` on the host |
+| `.claude.json` is a directory / CLI `EISDIR` reading config | Re-run `docker compose up -d` — `claude-init` removes the stray dir and recreates the file (add `--force-recreate backend` if the backend was already running). |
+| `Permission denied` on `.claude.json` | Re-run `docker compose up -d` — `claude-init` re-applies UID 1000 ownership. |
 | `claude: command not found` | Rebuild the image: `docker compose build backend` |
 | OAuth token expired | Re-enter the container and run `claude` again |
 | Empty responses | Check `docker compose logs backend` for CLI stderr output |
