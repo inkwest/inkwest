@@ -9,6 +9,7 @@ from app.models.oidc_pending_state import OidcPendingState
 from app.models.prompt_template import PromptTemplate
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import ConfirmationMode, Session
+from app.models.system_prompt import SystemPrompt
 from app.models.user import User
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "UsageRecord",
     "OidcPendingState",
     "PromptTemplate",
+    "SystemPrompt",
     "ConnectorPendingState",
     "ConnectorAuditLog",
 ]

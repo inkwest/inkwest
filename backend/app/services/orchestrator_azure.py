@@ -46,7 +46,7 @@ from app.services.messages import (
     truncate_messages,
     update_session_stats,
 )
-from app.services.prompts import get_system_prompt
+from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.tools.connector_exec import connector_for_tool, is_needs_auth
 from app.tools.definitions import get_tool_definitions
 from app.tools.dispatch import execute_tool
@@ -272,7 +272,8 @@ async def orchestrate_chat_azure(
             logger.warning(f"Failed to set session title: {e}")
 
     # Get system prompt and convert tools
-    system_prompt = get_system_prompt(cluster_name, namespaces)
+    base_prompt = await resolve_session_system_prompt(db, session_id)
+    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
     openai_tools = convert_tools_to_openai_format(get_tool_definitions())
 
     iteration = 0

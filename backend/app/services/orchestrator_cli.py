@@ -29,6 +29,7 @@ from app.services.messages import (
     set_cli_session_id,
     update_session_stats,
 )
+from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.tools.connector_exec import build_connector_env, connector_prompt_hint
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,6 @@ async def orchestrate_chat_cli(
         context_info = f"\nKubectl context: {context_name}"
 
     if kubeconfig_path:
-        cluster_header = f"You are a Kubernetes debugging assistant for cluster: {cluster_name}"
         kube_section = f"""
 CRITICAL KUBECONFIG REQUIREMENT:
 - Kubeconfig files are stored in /etc/inkwest/kubeconfigs/
@@ -130,7 +130,6 @@ Correct usage example:
         # No statically-selected cluster, but the AWS role select discovered EKS
         # clusters and KUBECONFIG points at the generated contexts (details in the
         # external-access section below). Don't claim kubectl is unavailable.
-        cluster_header = "You are a Kubernetes debugging assistant."
         kube_section = """
 KUBERNETES ACCESS IS AVAILABLE: kubectl is preconfigured with one context per
 reachable EKS cluster (see the external access section below for how to use it).
@@ -138,7 +137,6 @@ Do NOT reconfigure kubectl or run `aws eks update-kubeconfig` — the contexts a
 already set up.
 """
     else:
-        cluster_header = "You are a Kubernetes debugging assistant."
         kube_section = """
 NO KUBERNETES CLUSTER IS CONFIGURED for this session: kubectl is unavailable
 until a cluster or AWS/EKS access is set up. Rely on any external access listed
@@ -146,8 +144,13 @@ below (e.g. AWS, GitLab, Coralogix) and ask the user to configure cluster access
 if Kubernetes inspection is required.
 """
 
-    prompt = f"""{cluster_header}
-{kube_section}
+    # Persona/behavior comes from the managed system prompt (DB default or admin
+    # custom), layered onto Claude Code via --append-system-prompt. The user turn
+    # carries only the runtime operational context + the question.
+    base_prompt = await resolve_session_system_prompt(db, session_id)
+    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
+
+    prompt = f"""{kube_section}
 User question: {user_message}
 
 Investigate using the available tools and provide actionable insights.
@@ -181,6 +184,7 @@ and any external access listed below."""
             resume_session_id=cli_session_id,
             extra_env=connector_env or None,
             cwd=work_dir,
+            system_prompt=system_prompt,
         )
 
         collected_text: list[str] = []

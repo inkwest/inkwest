@@ -47,7 +47,7 @@ from app.services.messages import (
     truncate_messages,
     update_session_stats,
 )
-from app.services.prompts import get_system_prompt
+from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.tools.connector_exec import connector_for_tool, is_needs_auth
 from app.tools.definitions import get_tool_definitions
 from app.tools.dispatch import execute_tool
@@ -174,7 +174,8 @@ async def orchestrate_chat(
             logger.warning(f"Failed to set session title: {e}")
             # Non-critical, continue
 
-    system_prompt = get_system_prompt(cluster_name, namespaces)
+    base_prompt = await resolve_session_system_prompt(db, session_id)
+    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
     model = get_model_name()
 
     # Prompt caching: cache system prompt and tool definitions across iterations
@@ -507,7 +508,8 @@ async def orchestrate_chat_streaming(
         except Exception as e:
             logger.warning(f"Failed to set session title: {e}")
 
-    system_prompt = get_system_prompt(cluster_name, namespaces)
+    base_prompt = await resolve_session_system_prompt(db, session_id)
+    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
     model = get_model_name()
 
     cached_system = [

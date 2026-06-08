@@ -309,3 +309,70 @@ export async function updatePromptTemplate(
 export async function deletePromptTemplate(id: string): Promise<void> {
   await fetchAPI(`/api/prompt-templates/${id}`, { method: 'DELETE' });
 }
+
+// ============================================================================
+// System Prompt API
+// ============================================================================
+
+export interface AdminSystemPrompt {
+  id: string;
+  name: string;
+  content: string;
+  description?: string;
+  is_active: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSystemPromptRequest {
+  name: string;
+  content: string;
+  description?: string;
+  is_default?: boolean;
+}
+
+export interface UpdateSystemPromptRequest {
+  name?: string;
+  content?: string;
+  description?: string;
+  is_active?: boolean;
+  is_default?: boolean;
+}
+
+interface SystemPromptListResponse {
+  items: AdminSystemPrompt[];
+  total: number;
+}
+
+export async function getSystemPrompts(
+  activeOnly: boolean = false
+): Promise<AdminSystemPrompt[]> {
+  const response = await fetchAPI<SystemPromptListResponse>(
+    `/api/system-prompts?active_only=${activeOnly}`
+  );
+  return response.items;
+}
+
+export async function createSystemPrompt(
+  data: CreateSystemPromptRequest
+): Promise<AdminSystemPrompt> {
+  return fetchAPI('/api/system-prompts', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateSystemPrompt(
+  id: string,
+  data: UpdateSystemPromptRequest
+): Promise<AdminSystemPrompt> {
+  return fetchAPI(`/api/system-prompts/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteSystemPrompt(id: string): Promise<void> {
+  await fetchAPI(`/api/system-prompts/${id}`, { method: 'DELETE' });
+}

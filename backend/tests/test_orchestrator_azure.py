@@ -216,7 +216,12 @@ class TestOrchestrateAzureChatLoop:
     @pytest.fixture
     def mock_db(self):
         """Create a mock database session."""
-        return AsyncMock()
+        db = AsyncMock()
+        # "nothing found" so resolve_session_system_prompt falls back to the
+        # hardcoded default instead of returning an AsyncMock.
+        db.get = AsyncMock(return_value=None)
+        db.scalar = AsyncMock(return_value=None)
+        return db
 
     @pytest.fixture
     def mock_azure_client(self):

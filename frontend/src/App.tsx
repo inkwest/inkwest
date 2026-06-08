@@ -11,6 +11,7 @@ import {
   DashboardPage,
   ClustersPage,
   PromptTemplatesPage,
+  SystemPromptsPage,
   BudgetsPage,
   UsersPage,
   RoleMappingsPage,
@@ -102,6 +103,7 @@ function App() {
           <Route index element={<DashboardPage />} />
           <Route path="clusters" element={<ClustersPage />} />
           <Route path="prompt-templates" element={<PromptTemplatesPage />} />
+          <Route path="system-prompts" element={<SystemPromptsPage />} />
           <Route path="budgets" element={<BudgetsPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="roles" element={<RoleMappingsPage />} />

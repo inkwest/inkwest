@@ -53,6 +53,19 @@ class Session(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
+    # System prompt chosen at session creation. Both null → resolve the global
+    # default. Custom free-text (admin only) takes precedence over the FK so an
+    # admin can override without touching the managed library.
+    system_prompt_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("system_prompts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    system_prompt_custom: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
     title: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,

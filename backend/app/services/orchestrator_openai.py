@@ -42,7 +42,7 @@ from app.services.orchestrator_openrouter import (
     _convert_messages_to_openai_format,
     _convert_tools_to_openai_format,
 )
-from app.services.prompts import get_system_prompt
+from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.tools import ToolExecContext
 from app.tools import execute_tools_parallel_ctx as execute_tools_parallel
 
@@ -134,7 +134,8 @@ async def orchestrate_chat_openai(
         yield error_event(f"Failed to load conversation history: {e}")
         return
 
-    system_prompt = get_system_prompt(cluster_name, namespaces)
+    base_prompt = await resolve_session_system_prompt(db, session_id)
+    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
     tools = _convert_tools_to_openai_format()
     converted_messages = _convert_messages_to_openai_format(messages)
 

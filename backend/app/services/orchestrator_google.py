@@ -38,7 +38,7 @@ from app.services.messages import (
     truncate_messages,
     update_session_stats,
 )
-from app.services.prompts import get_system_prompt
+from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.tools import ToolExecContext, get_tool_definitions
 from app.tools import execute_tools_parallel_ctx as execute_tools_parallel
 
@@ -184,7 +184,8 @@ async def orchestrate_chat_google(
         yield error_event(f"Failed to load conversation history: {e}")
         return
 
-    system_prompt = get_system_prompt(cluster_name, namespaces)
+    base_prompt = await resolve_session_system_prompt(db, session_id)
+    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
     gemini_tools = _build_gemini_tools()
     model = settings.google_model
 

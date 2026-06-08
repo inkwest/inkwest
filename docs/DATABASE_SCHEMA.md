@@ -113,15 +113,45 @@ CREATE TABLE inkwest.prompt_templates (
 );
 ```
 
+### system_prompts
+
+Named SYSTEM prompts managed by admins — the prompt loaded before any
+user interaction. Global (no per-user ownership); exactly one row is the default
+applied to non-admins. `content` may contain `{cluster_name}` / `{namespaces}`
+blanks filled in at run time. The default is seeded at startup from
+`app/services/prompts.py::SYSTEM_PROMPT`.
+
+```sql
+CREATE TABLE inkwest.system_prompts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL UNIQUE,
+    content TEXT NOT NULL,
+    description TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    is_default BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- At most one default at any time.
+CREATE UNIQUE INDEX idx_system_prompts_single_default
+    ON inkwest.system_prompts(is_default) WHERE is_default = true;
+```
+
 ### sessions
 
-Chat sessions, each bound to a specific cluster and user.
+Chat sessions, each bound to a specific cluster and user. A session also records
+the system prompt chosen at creation: `system_prompt_id` (admin
+selection) and `system_prompt_custom` (admin free-text). Both null → the global
+default is resolved at run time.
 
 ```sql
 CREATE TABLE inkwest.sessions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID REFERENCES inkwest.users(id) ON DELETE SET NULL,
     cluster_id UUID REFERENCES inkwest.clusters(id) ON DELETE CASCADE,  -- nullable: session may have no Kube context
+    system_prompt_id UUID REFERENCES inkwest.system_prompts(id) ON DELETE SET NULL,  -- admin-selected prompt
+    system_prompt_custom TEXT,  -- admin free-text prompt for this session
     title VARCHAR(255),
     summary TEXT,
     is_archived BOOLEAN NOT NULL DEFAULT false,

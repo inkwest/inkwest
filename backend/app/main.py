@@ -19,13 +19,15 @@ from app.api.routes import (
     prompt_templates,
     sessions,
     sync,
+    system_prompts,
 )
 from app.core.config import get_settings
-from app.core.database import close_db, init_db
+from app.core.database import async_session_maker, close_db, init_db
 from app.core.logging import AccessLogMiddleware, access_log_config, get_logger, setup_logging
 from app.core.telemetry import shutdown_telemetry
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
+from app.services.prompts import ensure_default_system_prompt
 from app.services.pubsub import start_listener, stop_listener
 
 # Set up structured logging
@@ -43,6 +45,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("starting_api", version="0.1.0")
     await init_db()
     logger.info("database_initialized")
+    # Seed the hardcoded system prompt as the DB default on first startup.
+    async with async_session_maker() as db:
+        await ensure_default_system_prompt(db)
+    logger.info("default_system_prompt_ensured")
     await start_listener()
     logger.info("pubsub_listener_started")
     if settings.oidc_enabled:
@@ -119,6 +125,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 app.include_router(health.router)
 app.include_router(clusters.router, prefix="/api")
 app.include_router(prompt_templates.router, prefix="/api")
+app.include_router(system_prompts.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(sessions.search_router, prefix="/api")
 app.include_router(auth.router, prefix="/api")

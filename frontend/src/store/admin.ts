@@ -462,3 +462,75 @@ export const usePromptTemplateStore = create<PromptTemplateState>((set) => ({
 
   clearError: () => set({ error: null }),
 }));
+
+// ============================================================================
+// System Prompt store
+// ============================================================================
+
+interface SystemPromptState {
+  prompts: adminApi.AdminSystemPrompt[];
+  isLoading: boolean;
+  error: string | null;
+
+  fetchPrompts: (activeOnly?: boolean) => Promise<void>;
+  createPrompt: (
+    data: adminApi.CreateSystemPromptRequest
+  ) => Promise<adminApi.AdminSystemPrompt>;
+  updatePrompt: (
+    id: string,
+    data: adminApi.UpdateSystemPromptRequest
+  ) => Promise<adminApi.AdminSystemPrompt>;
+  deletePrompt: (id: string) => Promise<void>;
+  clearError: () => void;
+}
+
+// Promoting one default demotes the previous one server-side, so refetch keeps
+// the single-default invariant visible in the list.
+export const useSystemPromptStore = create<SystemPromptState>((set, get) => ({
+  prompts: [],
+  isLoading: false,
+  error: null,
+
+  fetchPrompts: async (activeOnly = false) => {
+    set({ isLoading: true, error: null });
+    try {
+      const prompts = await adminApi.getSystemPrompts(activeOnly);
+      set({ prompts: Array.isArray(prompts) ? prompts : [], isLoading: false });
+    } catch (error) {
+      set({ error: (error as Error).message, isLoading: false });
+    }
+  },
+
+  createPrompt: async (data: adminApi.CreateSystemPromptRequest) => {
+    set({ error: null });
+    try {
+      const prompt = await adminApi.createSystemPrompt(data);
+      await get().fetchPrompts();
+      return prompt;
+    } catch (error) {
+      set({ error: (error as Error).message });
+      throw error;
+    }
+  },
+
+  updatePrompt: async (id: string, data: adminApi.UpdateSystemPromptRequest) => {
+    set({ error: null });
+    try {
+      const prompt = await adminApi.updateSystemPrompt(id, data);
+      await get().fetchPrompts();
+      return prompt;
+    } catch (error) {
+      set({ error: (error as Error).message });
+      throw error;
+    }
+  },
+
+  deletePrompt: async (id: string) => {
+    await adminApi.deleteSystemPrompt(id);
+    set((state) => ({
+      prompts: state.prompts.filter((p) => p.id !== id),
+    }));
+  },
+
+  clearError: () => set({ error: null }),
+}));
