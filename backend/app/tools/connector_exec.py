@@ -84,6 +84,20 @@ def session_kube_dir(session_id: UUID) -> str:
     return os.path.join(_aws_base(), str(session_id), "kube")
 
 
+def session_kubeconfigs(session_id: UUID) -> list[str]:
+    """Absolute paths of the session's generated EKS kubeconfigs (one per cluster).
+
+    Empty when the EKS refresh produced none (no reachable clusters) or has not run
+    yet — the caller then leaves ``KUBECONFIG`` unset. Sorted for a deterministic
+    merge order (kubectl takes the current-context from the first file).
+    """
+    kube_dir = session_kube_dir(session_id)
+    try:
+        return sorted(os.path.join(kube_dir, f) for f in os.listdir(kube_dir))
+    except FileNotFoundError:
+        return []
+
+
 def _creds_block(name: str, p: dict[str, Any]) -> str:
     return (
         f"[{name}]\n"
@@ -168,6 +182,15 @@ async def build_connector_env(
     if aws is not None and aws.secret.get("profiles"):
         env.update(write_aws_profiles(session_id, aws))
         injected.append("aws")
+        # Wire the per-session EKS kubeconfigs (generated on role select) into
+        # KUBECONFIG so the agent's `kubectl` finds them. Without this the refresh
+        # writes files nothing reads: kubectl falls back to localhost:8080 and the
+        # agent wrongly reports "no cluster configured". May be empty on the first
+        # turn if discovery hasn't finished — then we just leave KUBECONFIG unset.
+        kubeconfigs = session_kubeconfigs(session_id)
+        if kubeconfigs:
+            env["KUBECONFIG"] = ":".join(kubeconfigs)
+            injected.append("eks")
 
     gitlab = await store.get(user_id, session_id, "gitlab")
     if gitlab is not None and gitlab.secret.get("access_token"):
@@ -194,6 +217,13 @@ _CONNECTOR_HINTS: dict[str, str] = {
         "granted account/role). List them with `aws configure list-profiles`, then "
         "use `aws --profile <name> ...` (or bare `aws ...` for the default profile), "
         "e.g. `aws --profile <name> eks list-clusters`, `aws --profile <name> s3 ls`."
+    ),
+    "eks": (
+        "- Kubernetes (EKS): `kubectl` is already configured (KUBECONFIG is set) with "
+        "one context per reachable EKS cluster. List them with "
+        "`kubectl config get-contexts`, then target one with "
+        "`kubectl --context <name> get pods -A`. Do NOT run `aws eks update-kubeconfig` "
+        "or otherwise reconfigure kubectl — the contexts are already there."
     ),
     "gitlab": (
         "- GitLab: a read-only token is in $GITLAB_TOKEN for $GITLAB_BASE_URL. Read "
