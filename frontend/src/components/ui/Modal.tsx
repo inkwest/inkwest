@@ -8,10 +8,15 @@ export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
   onClose: () => void;
   title?: string;
   size?: 'sm' | 'md' | 'lg' | 'xl';
+  /**
+   * Vertical alignment. 'top' keeps the modal anchored to a fixed top offset
+   * so content-height changes (e.g. live filtering) don't make it jump.
+   */
+  align?: 'center' | 'top';
 }
 
 export const Modal = forwardRef<HTMLDivElement, ModalProps>(
-  ({ className, isOpen, onClose, title, size = 'md', children, ...props }, ref) => {
+  ({ className, isOpen, onClose, title, size = 'md', align = 'center', children, ...props }, ref) => {
     useEffect(() => {
       const handleEscape = (e: KeyboardEvent) => {
         if (e.key === 'Escape') onClose();
@@ -37,9 +42,16 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
       xl: 'max-w-4xl',
     };
 
+    const alignments = {
+      center: 'items-center',
+      // Fixed top offset: the modal's top edge stays put when its content
+      // grows/shrinks (e.g. while filtering a list), instead of re-centering.
+      top: 'items-start pt-16',
+    };
+
     return createPortal(
       <div className="fixed inset-0 z-50 overflow-y-auto">
-        <div className="flex min-h-full items-center justify-center p-4">
+        <div className={clsx('flex min-h-full justify-center p-4', alignments[align])}>
           <div
             className="fixed inset-0 bg-black/70 transition-opacity"
             onClick={onClose}

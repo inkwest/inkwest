@@ -124,8 +124,9 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     }
   };
 
+  // align="top": keeps the modal anchored while the filtered list resizes.
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Sélection des comptes & rôles AWS" size="lg">
+    <Modal isOpen={isOpen} onClose={onClose} title="Sélection des comptes & rôles AWS" size="lg" align="top">
       <div className="flex flex-col" style={{ maxHeight: '80vh' }}>
         {/* Search + global check-all */}
         <div className="flex items-center gap-2 mb-3">
