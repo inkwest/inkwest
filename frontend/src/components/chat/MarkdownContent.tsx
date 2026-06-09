@@ -75,6 +75,8 @@ export function MarkdownContent({ content }: Props) {
   return (
     <div className={cn(
       '[&>p]:mb-2 [&>p:last-child]:mb-0 [&>ul]:mb-2 [&>ol]:mb-2 [&>pre]:mb-2 [&>ul]:list-disc [&>ul]:pl-4 [&>ol]:list-decimal [&>ol]:pl-4',
+      // GFM task lists carry their own checkboxes; drop the inherited disc/indent
+      '[&_.contains-task-list]:list-none [&_.contains-task-list]:pl-0',
       TEXT_SIZE.body(compact), compact && 'leading-relaxed'
     )}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
