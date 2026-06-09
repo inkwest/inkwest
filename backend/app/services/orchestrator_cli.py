@@ -187,8 +187,12 @@ and any external access listed below."""
             system_prompt=system_prompt,
         )
 
-        collected_text: list[str] = []
-        collected_tools: list[dict] = []
+        # Single ordered content list built in stream arrival order, so the
+        # persisted block order matches the causal order shown during live
+        # streaming (steps then report, interleaving preserved). Building two
+        # separate text/tool lists merged text-first would reorder the history
+        # on reload.
+        content: list[dict] = []
         received_done = False
         new_cli_session_id: str | None = None
         total_input_tokens = 0
@@ -205,10 +209,15 @@ and any external access listed below."""
                 logger.info(f"Captured new CLI session ID: {new_cli_session_id}")
 
             elif event.type == "text_delta" and event.content:
-                collected_text.append(event.content)
+                # Coalesce consecutive deltas into the trailing text block; start
+                # a new block if the last one is a tool event, to keep ordering.
+                if content and content[-1]["type"] == "text":
+                    content[-1]["text"] += event.content
+                else:
+                    content.append({"type": "text", "text": event.content})
                 yield event
             elif event.type == "tool_start":
-                collected_tools.append(
+                content.append(
                     {
                         "type": "tool_use",
                         "id": event.tool_use_id,
@@ -218,7 +227,7 @@ and any external access listed below."""
                 )
                 yield event
             elif event.type == "tool_result":
-                collected_tools.append(
+                content.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": event.tool_use_id,
@@ -244,19 +253,9 @@ and any external access listed below."""
                 logger.warning(f"Failed to store CLI session ID: {e}")
 
         # Save assistant message if we have content
-        if collected_text or collected_tools:
-            content: list[dict] = []
-
-            if collected_text:
-                content.append({"type": "text", "text": "".join(collected_text)})
-
-            for tool_event in collected_tools:
-                content.append(tool_event)
-
+        if content:
             try:
-                await save_message(
-                    db, session_id, "assistant", content if content else "".join(collected_text)
-                )
+                await save_message(db, session_id, "assistant", content)
             except Exception as e:
                 logger.error(f"Failed to save assistant message: {e}")
                 # Continue anyway - response was already streamed
@@ -269,7 +268,7 @@ and any external access listed below."""
                     session_id,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
-                    tool_calls=len([t for t in collected_tools if t.get("type") == "tool_use"]),
+                    tool_calls=len([b for b in content if b.get("type") == "tool_use"]),
                     iterations=1,
                 )
                 await record_usage(

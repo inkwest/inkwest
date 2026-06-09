@@ -168,6 +168,20 @@ messages = [
 3. **Content can be string or array** - Simple messages can be strings, but tool-related messages use arrays
 4. **Order matters** - Messages must alternate user/assistant (tool_result counts as user)
 
+### Persisted block order == stream order
+
+The block order saved in an assistant message's `content` array **must match the
+causal order of the live stream** (steps then report, with text interleaved
+between tool calls preserved). JSONB keeps array order, and the frontend renders
+`content` by index — so the only way reload can differ from live is if the
+backend reorders blocks at save time.
+
+Build the saved `content` as a **single list appended in stream arrival order**:
+coalesce consecutive text deltas into the trailing text block, push each
+`tool_use` / `tool_result` as it arrives. Do **not** accumulate text and tools in
+two separate lists and concatenate text-first — that flattens interleaving and
+shows the report above the steps on reload.
+
 ## Parallel Tool Execution
 
 Claude can request multiple tools in a single response:
