@@ -155,6 +155,20 @@ async def _remove_pair(names: _Names) -> None:
     await _docker("network", "rm", names.int_net, names.ext_net, check=False)
 
 
+async def _check_toolbox_image(image: str) -> None:
+    """Fail fast with an actionable message when the toolbox image is absent.
+
+    Without this, ``docker run`` tries to pull from the private ECR — which dind has
+    no credentials for — and the turn dies on a cryptic auth error.
+    """
+    rc, _, _ = await _docker("image", "inspect", image, check=False)
+    if rc != 0:
+        raise RuntimeError(
+            f"toolbox image {image!r} not found in the sandbox Docker daemon — "
+            "run `make sandbox-pull` to pull it into dind"
+        )
+
+
 async def provision(session_id: str) -> Sandbox:
     """Create the conversation's container pair + networks. Rolls back on failure.
 
@@ -163,6 +177,7 @@ async def provision(session_id: str) -> Sandbox:
     soft teardown).
     """
     settings = get_settings()
+    await _check_toolbox_image(settings.sandbox_toolbox_image)
     sandbox_home = settings.sandbox_home.rstrip("/")
     names = _names(session_id)
     root = session_dir(session_id)
