@@ -116,4 +116,11 @@ describe('ChatInput', () => {
     render(<ChatInput onSend={onSend} sessionId="s1" />);
     expect((screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement).value).toBe('');
   });
+
+  it('does not send on Enter while a response is streaming', async () => {
+    const user = userEvent.setup();
+    render(<ChatInput onSend={onSend} isStreaming />);
+    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'second message{enter}');
+    expect(onSend).not.toHaveBeenCalled();
+  });
 });
