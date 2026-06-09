@@ -331,6 +331,13 @@ async def get_failed_messages(
 
     await check_session_access(session, current_user)
 
+    # KNOWN LIMITATION: a reconciled (interrupted) user message stays
+    # error+retryable even if the user later continued the conversation past it,
+    # so this can return a stale, no-longer-trailing message. Harmless while the
+    # retry UX is unwired; when it is wired, scope this to the session's *latest*
+    # message (or clear the flag once a later reply is persisted). The producer
+    # is reconcile_interrupted_turns(); both should move to an explicit per-turn
+    # terminal status together.
     result = await db.execute(
         select(Message)
         .where(
