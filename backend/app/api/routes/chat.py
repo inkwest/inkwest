@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import dataclass
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -28,6 +29,7 @@ from app.models.cluster import Cluster
 from app.models.session import Session
 from app.models.user import User
 from app.services.ai_client import get_orchestrator
+from app.services.turn_runner import TURN_END, turn_runner
 
 logger = logging.getLogger(__name__)
 
@@ -233,91 +235,87 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
         },
     )
 
-    # DB session is now released — main loop acquires per-message
-    # Dual-task pattern: receive loop + process loop so stop messages arrive during streaming
-    queue: asyncio.Queue[dict] = asyncio.Queue()
-    cancel_event: asyncio.Event | None = None
+    # Orchestration runs detached from this socket via the turn_runner, so a turn
+    # survives the client navigating away (and still persists its result). This
+    # socket only (a) starts/stops turns and (b) streams a turn's events. A single
+    # pump task forwards the active turn's buffered + live events to this client;
+    # it's recreated whenever we (re)attach to a turn.
+    base_kwargs = {
+        "session_id": session_id,
+        "cluster_name": cluster_ctx.display_name if cluster_ctx else None,
+        "kubeconfig_path": cluster_ctx.kubeconfig_path if cluster_ctx else None,
+        "context_name": cluster_ctx.context_name if cluster_ctx else None,
+        "user_id": user_id,
+    }
+    stream_task: asyncio.Task[None] | None = None
+
+    async def pump(snapshot: list[dict], queue: asyncio.Queue) -> None:
+        """Forward an active turn's events (replayed buffer, then live) to this socket."""
+        try:
+            for payload in snapshot:
+                await websocket.send_json(payload)
+            while True:
+                payload = await queue.get()
+                if payload is TURN_END:
+                    break
+                await websocket.send_json(payload)
+        finally:
+            await turn_runner.unsubscribe(session_id, queue)
+
+    async def attach(send_resumed: bool) -> None:
+        """Subscribe this socket to the session's active turn, if any."""
+        nonlocal stream_task
+        sub = await turn_runner.subscribe(session_id)
+        if sub is None:
+            return
+        snapshot, queue = sub
+        # On reconnect (client navigated back mid-turn) tell the UI to show the
+        # streaming state before we replay the in-progress events.
+        if send_resumed:
+            await websocket.send_json({"type": "stream_resumed"})
+        stream_task = asyncio.create_task(pump(snapshot, queue))
 
     async def receive_loop() -> None:
-        nonlocal cancel_event
+        nonlocal stream_task
         while True:
             data = await websocket.receive_json()
             msg_type = data.get("type")
 
             if msg_type == "stop":
-                if cancel_event:
-                    cancel_event.set()
-                    logger.info("Stop requested", extra={"session_id": session_id})
+                await turn_runner.cancel(session_id)
+                logger.info("Stop requested", extra={"session_id": session_id})
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
-            else:
-                await queue.put(data)
-
-    async def process_loop() -> None:
-        nonlocal cancel_event
-        while True:
-            data = await queue.get()
-            message_type = data.get("type")
-
-            if message_type == "message":
+            elif msg_type == "message":
                 content = data.get("content", "").strip()
-
                 if not content:
                     await websocket.send_json({"type": "error", "content": "Empty message content"})
                     continue
 
                 logger.info(
                     "Received message",
-                    extra={
-                        "session_id": session_id,
-                        "message_length": len(content),
-                    },
+                    extra={"session_id": session_id, "message_length": len(content)},
                 )
 
-                cancel_event = asyncio.Event()
-                orchestrate = get_orchestrator()
-
-                async with async_session_maker() as db:
-                    async for event in orchestrate(
-                        db=db,
-                        session_id=session_id,
-                        cluster_name=cluster_ctx.display_name if cluster_ctx else None,
-                        kubeconfig_path=cluster_ctx.kubeconfig_path if cluster_ctx else None,
-                        context_name=cluster_ctx.context_name if cluster_ctx else None,
-                        user_message=content,
-                        user_id=user_id,
-                        cancel_event=cancel_event,
-                    ):
-                        await websocket.send_json(event.to_dict())
-
-                cancel_event = None
-
+                started = await turn_runner.start(
+                    session_id, get_orchestrator(), {**base_kwargs, "user_message": content}
+                )
+                if not started:
+                    await websocket.send_json(
+                        {"type": "error", "content": "A response is already in progress."}
+                    )
+                    continue
+                await attach(send_resumed=False)
             else:
                 await websocket.send_json(
-                    {"type": "error", "content": f"Unknown message type: {message_type}"}
+                    {"type": "error", "content": f"Unknown message type: {msg_type}"}
                 )
 
     try:
-        receive_task = asyncio.create_task(receive_loop())
-        process_task = asyncio.create_task(process_loop())
-
-        done, pending = await asyncio.wait(
-            {receive_task, process_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        if cancel_event:
-            cancel_event.set()
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        for task in done:
-            if task.exception() and not isinstance(task.exception(), WebSocketDisconnect):
-                raise task.exception()  # type: ignore[misc]
+        # If a turn is already running for this session, the client is reconnecting
+        # (e.g. navigated back) — attach so it sees the in-progress work live.
+        await attach(send_resumed=True)
+        await receive_loop()
 
     except WebSocketDisconnect:
         logger.info(
@@ -352,4 +350,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             pass
 
     finally:
+        # Tear down only this socket's pump — NOT the turn, which keeps running
+        # detached and will persist its result even with no client attached.
+        if stream_task is not None:
+            if not stream_task.done():
+                stream_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await stream_task
         await disconnect(session_id, websocket)

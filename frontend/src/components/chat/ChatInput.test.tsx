@@ -2,12 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatInput } from './ChatInput';
+import { useDraftsStore } from '@/store/drafts';
 
 describe('ChatInput', () => {
   const onSend = vi.fn();
 
   beforeEach(() => {
     onSend.mockClear();
+    useDraftsStore.setState({ drafts: {} });
   });
 
   it('renders textarea and send button', () => {
@@ -80,5 +82,38 @@ describe('ChatInput', () => {
   it('send button is disabled when textarea is empty', () => {
     render(<ChatInput onSend={onSend} />);
     expect(screen.getByRole('button', { name: /send message/i })).toBeDisabled();
+  });
+
+  it('restores a per-session draft after unmount/remount', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<ChatInput onSend={onSend} sessionId="s1" />);
+    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'investigate crashloop');
+    unmount();
+
+    render(<ChatInput onSend={onSend} sessionId="s1" />);
+    expect((screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement).value).toBe(
+      'investigate crashloop'
+    );
+  });
+
+  it('does not leak a draft into a different session', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<ChatInput onSend={onSend} sessionId="s1" />);
+    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'only for s1');
+    unmount();
+
+    render(<ChatInput onSend={onSend} sessionId="s2" />);
+    expect((screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('clears the saved draft after sending', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<ChatInput onSend={onSend} sessionId="s1" />);
+    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'send me{enter}');
+    expect(onSend).toHaveBeenCalledWith('send me');
+    unmount();
+
+    render(<ChatInput onSend={onSend} sessionId="s1" />);
+    expect((screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement).value).toBe('');
   });
 });

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { SearchResponse, Session, SessionWithMessages } from '@/types/api';
 import * as api from '@/services/api';
+import { useDraftsStore } from '@/store/drafts';
 
 interface SessionsState {
   sessions: Session[];
@@ -80,6 +81,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 
   deleteSession: async (id: string) => {
     await api.deleteSession(id);
+    // Drop any orphaned draft so it can't resurface on a reused id / clutter storage.
+    useDraftsStore.getState().clearDraft(id);
     set((state) => ({
       sessions: state.sessions.filter((s) => s.id !== id),
       currentSession: state.currentSession?.id === id ? null : state.currentSession,
