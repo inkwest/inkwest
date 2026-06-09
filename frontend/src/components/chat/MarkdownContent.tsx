@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { CodeBlock } from './CodeBlock';
 import { useSettingsStore } from '@/store/settings';
 import { cn, TEXT_SIZE } from '@/lib/utils';
@@ -46,6 +47,29 @@ export function MarkdownContent({ content }: Props) {
     pre({ children }) {
       return <>{children}</>;
     },
+    // GFM tables: wrap for horizontal overflow + dark-theme borders
+    table({ children }) {
+      return (
+        <div className="my-2 overflow-x-auto">
+          <table className="w-full border-collapse text-left">{children}</table>
+        </div>
+      );
+    },
+    // Forward `style` so GFM column alignment (:---:, ---:) is honored
+    th({ children, style }) {
+      return (
+        <th style={style} className="border border-gray-700 bg-gray-800 px-2 py-1 font-semibold">
+          {children}
+        </th>
+      );
+    },
+    td({ children, style }) {
+      return (
+        <td style={style} className="border border-gray-700 px-2 py-1 align-top">
+          {children}
+        </td>
+      );
+    },
   };
 
   return (
@@ -53,7 +77,7 @@ export function MarkdownContent({ content }: Props) {
       '[&>p]:mb-2 [&>p:last-child]:mb-0 [&>ul]:mb-2 [&>ol]:mb-2 [&>pre]:mb-2 [&>ul]:list-disc [&>ul]:pl-4 [&>ol]:list-decimal [&>ol]:pl-4',
       TEXT_SIZE.body(compact), compact && 'leading-relaxed'
     )}>
-      <ReactMarkdown components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {content}
       </ReactMarkdown>
     </div>
