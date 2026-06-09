@@ -224,7 +224,9 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
     fake_logger = MagicMock()
     monkeypatch.setattr(app_main, "logger", fake_logger)
     monkeypatch.setattr(
-        app_main, "settings", SimpleNamespace(oidc_enabled=False, connectors_enabled=False)
+        app_main,
+        "settings",
+        SimpleNamespace(oidc_enabled=False, connectors_enabled=False, sandbox_enabled=False),
     )
     monkeypatch.setattr(app_main, "init_db", AsyncMock())
     monkeypatch.setattr(app_main, "async_session_maker", lambda: _DummySession())

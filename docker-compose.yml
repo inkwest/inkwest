@@ -138,15 +138,31 @@ services:
       - CORALOGIX_SECRET_ID=${CORALOGIX_SECRET_ID:-}
       - CORALOGIX_SECRET_REGION=${CORALOGIX_SECRET_REGION:-}
       - CORALOGIX_API_ENDPOINT=${CORALOGIX_API_ENDPOINT:-}
+      # Per-conversation Docker sandbox — talk to the dind daemon over TLS (via the
+      # `docker` alias, the only name its cert is valid for). These in-container paths are
+      # coupled to the mounts below; enable + image/home come from .env (SANDBOX_ENABLED,
+      # SANDBOX_TOOLBOX_IMAGE, SANDBOX_HOME).
+      - DOCKER_HOST=tcp://docker:2376
+      - DOCKER_TLS_VERIFY=1
+      - DOCKER_CERT_PATH=/certs/client
+      - SANDBOX_TOOLBOX_ENV_FILE=/app/toolbox.env  # --env-file read by the docker client here
+      - SANDBOX_SQUID_CONF=/etc/inkwest/squid.conf  # -v source resolved by dind (mounted there)
+      - SANDBOX_SESSIONS_ROOT=/sandbox/sessions  # the shared named volume
     volumes:
       - ./backend:/app
       - ./app_home/.claude:/home/app/.claude
       - ./app_home/.claude.json:/home/app/.claude.json
       - ${KUBECONFIG_DIR:-./kubeconfigs}:/etc/inkwest/kubeconfigs:ro
+      - sandbox-dind-certs:/certs:ro  # read dind's client certs
+      - sandbox-sessions:/sandbox/sessions  # same volume as dind -> truly shared
     depends_on:
       db:
         condition: service_healthy
       claude-init:
+        condition: service_completed_successfully
+      dind:
+        condition: service_healthy
+      sandbox-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -181,5 +197,54 @@ services:
       start_period: 10s
     command: npm run dev -- --host
 
+  # ---------------------------------------------------------------------------
+  # Per-conversation sandbox (DinD) — used by the claude-cli provider when
+  # SANDBOX_ENABLED=true. A privileged docker:dind daemon runs the per-conversation
+  # toolbox+squid pairs in isolation from the host daemon; the backend drives it over
+  # TLS. Dev-only: `privileged` is not for production (k8s gets a different backend).
+  # ---------------------------------------------------------------------------
+
+  # Makes the shared session volume writable by the non-root backend (uid 1000) so it
+  # can create the per-conversation dirs that dind mounts into the nested containers.
+  sandbox-init:
+    image: busybox
+    command: ["sh", "-c", "chmod 777 /sandbox/sessions"]
+    volumes:
+      - sandbox-sessions:/sandbox/sessions
+
+  dind:
+    image: docker:27-dind
+    privileged: true  # required to run a nested daemon
+    environment:
+      - DOCKER_TLS_CERTDIR=/certs  # TLS on tcp://dind:2376; client certs in /certs/client
+    dns:  # the dind CONTAINER's own resolver, for image pulls
+      - 1.1.1.1
+      - 8.8.8.8
+    command: ["--dns", "1.1.1.1"]  # daemon-wide DNS default for the nested containers
+    # The dind server cert is valid for `docker`/`localhost`/the container id — NOT `dind`;
+    # expose it under `docker` so the backend's TLS hostname verification passes.
+    networks:
+      default:
+        aliases:
+          - docker
+    depends_on:
+      sandbox-init:
+        condition: service_completed_successfully
+    volumes:
+      - sandbox-dind-certs:/certs  # shared TLS certs (with backend)
+      - sandbox-dind-data:/var/lib/docker  # persist dind's image store across restarts
+      - sandbox-sessions:/sandbox/sessions  # per-conv dirs (shared with backend; nested -v sources)
+      # Bind the DIRECTORY (not the single squid.conf file): a single-file bind pins an
+      # inode and goes stale if the file is edited, breaking the nested proxy mount.
+      - ./sandbox:/etc/inkwest:ro  # /etc/inkwest/squid.conf -> nested -v source
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
 volumes:
   postgres_data:
+  sandbox-dind-certs:
+  sandbox-dind-data:
+  sandbox-sessions:

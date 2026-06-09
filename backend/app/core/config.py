@@ -143,6 +143,43 @@ class Settings(BaseSettings):
     coralogix_secret_region: str | None = None
     coralogix_api_endpoint: str | None = None  # logs+metrics+traces query endpoint
 
+    # ==========================================================================
+    # Per-conversation Docker sandbox (claude-cli provider only)
+    # Each conversation IS its own claude-toolbox container, paired with a sibling
+    # squid proxy on an internal-only network; the toolbox's only egress path is the
+    # proxy's domain allowlist. The backend drives the host Docker daemon via the
+    # `docker` CLI (Docker-out-of-Docker). See app.services.sandbox.
+    # ==========================================================================
+    sandbox_enabled: bool = False
+    sandbox_docker_path: str = "docker"
+    sandbox_toolbox_image: str = ""  # claude-toolbox image (claude + kubectl + aws)
+    # The sandbox container's HOME. Claude Code state (durable, for --resume) and the creds
+    # tmpfs are anchored here, and CLAUDE_CONFIG_DIR is set to <home>/.claude so it works
+    # regardless of the image's own HOME env. Set this to your image's home directory.
+    sandbox_home: str = "/home/sandbox"
+    sandbox_squid_image: str = ""  # squid proxy image
+    # Optional host path bind-mounted read-only as the squid config (empty = baked
+    # into the image). The conf's access_log MUST target the mounted logs dir
+    # (/var/log/squid/access.log), and its allowlist must cover .eks.amazonaws.com +
+    # the chosen Claude backend endpoint.
+    sandbox_squid_conf: str = ""
+    # Optional resolver for the proxy container (`docker run --dns`). The stock squid
+    # image often can't resolve public names via the host's stub resolver — set this
+    # (e.g. 1.1.1.1, as in the POC) when egress fails with DNS errors. Empty = default.
+    sandbox_proxy_dns: str = ""
+    # Host path to the toolbox .env — provider-agnostic model-backend creds for the
+    # in-toolbox `claude` (Anthropic API / Bedrock / Vertex / gateway). Mounted into
+    # the backend; passed to the conversation container via `docker run --env-file`.
+    sandbox_toolbox_env_file: str = ""
+    # Host root for per-conversation dirs (logs/, home/, workdir/). Bind-mounted into
+    # the backend at the same path so it can create the dirs the daemon then binds.
+    sandbox_sessions_root: str = "/var/lib/inkwest/sessions"
+    sandbox_idle_ttl: int = 1800  # reap a conversation idle longer than this (s)
+    sandbox_provision_timeout: int = 60  # wait for proxy healthy + toolbox up (s)
+    sandbox_cpu_limit: str = "1.0"  # docker run --cpus, per container
+    sandbox_memory_limit: str = "1g"  # docker run --memory, per container
+    sandbox_pids_limit: int = 512  # docker run --pids-limit, per container
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

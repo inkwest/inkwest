@@ -473,3 +473,18 @@ async def set_cli_session_id(
     )
     await db.commit()
     logger.debug(f"Stored CLI session ID {cli_session_id} for session {session_id}")
+
+
+async def clear_cli_session_id(db: AsyncSession, session_id: str | uuid.UUID) -> None:
+    """Forget a stale Claude CLI session ID so the next turn starts a fresh session.
+
+    Used when ``--resume <id>`` fails because the transcript no longer exists in the
+    toolbox (e.g. the sandbox was rebuilt) — the conversation recovers instead of
+    erroring on every subsequent turn.
+    """
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+
+    await db.execute(update(Session).where(Session.id == session_id).values(cli_session_id=None))
+    await db.commit()
+    logger.info(f"Cleared stale CLI session ID for session {session_id}")
