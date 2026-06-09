@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Cloud, Gitlab, Activity, ExternalLink } from 'lucide-react';
+import { Cloud, Gitlab, Activity, ExternalLink, Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
@@ -66,6 +66,7 @@ export function ConnectorPanel({ sessionId }: Props) {
     awsAutoSelect,
   } = useConnectorsStore();
   const [busy, setBusy] = useState<ConnectorName | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
   const [renewing, setRenewing] = useState(false);
   const [awsModalOpen, setAwsModalOpen] = useState(false);
 
@@ -138,6 +139,7 @@ export function ConnectorPanel({ sessionId }: Props) {
       return;
     }
     setBusy(connector);
+    setStartError(null);
     try {
       if (connector === 'coralogix') {
         await activateCoralogix(sessionId);
@@ -146,6 +148,9 @@ export function ConnectorPanel({ sessionId }: Props) {
       } else {
         await initiate(sessionId, connector); // OAuth redirect (GitLab)
       }
+    } catch (e) {
+      const detail = e instanceof Error && e.message ? `: ${e.message}` : '';
+      setStartError(`Failed to start ${LABELS[connector]} authorization${detail}`);
     } finally {
       setBusy(null);
     }
@@ -189,7 +194,14 @@ export function ConnectorPanel({ sessionId }: Props) {
                   disabled={busy === c}
                   className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
                 >
-                  {busy === c ? '…' : `Give access`}
+                  {busy === c ? (
+                    <span role="status" className="flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Waiting for {LABELS[c]}…
+                    </span>
+                  ) : (
+                    `Give access`
+                  )}
                 </button>
               )}
             </div>
@@ -205,6 +217,7 @@ export function ConnectorPanel({ sessionId }: Props) {
             {renewing ? 'Renewing…' : 'Renew access'}
           </button>
         )}
+        {startError && <span className="text-xs text-red-400">{startError}</span>}
       </div>
 
       {/* AWS device authorization — our own centered modal (the AWS page itself
