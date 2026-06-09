@@ -160,6 +160,60 @@ async def test_create_session_without_cluster(
 
 
 @pytest.mark.asyncio
+async def test_reorder_sessions_assigns_positions_by_request_order(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_user: MagicMock,
+) -> None:
+    s1, s2, s3 = MagicMock(), MagicMock(), MagicMock()
+    s1.id, s2.id, s3.id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    for s in (s1, s2, s3):
+        s.user_id = str(mock_user.id)
+
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [s1, s2, s3]
+    mock_db.execute = AsyncMock(return_value=result)
+    mock_db.commit = AsyncMock()
+
+    # Request a new top-to-bottom order: s3, s1, s2.
+    resp = await authenticated_client.post(
+        "/api/sessions/reorder",
+        json={"session_ids": [str(s3.id), str(s1.id), str(s2.id)]},
+    )
+
+    assert resp.status_code == 204
+    assert (s3.position, s1.position, s2.position) == (0, 1, 2)
+    mock_db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reorder_sessions_ignores_unowned_ids(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_user: MagicMock,
+) -> None:
+    owned = MagicMock()
+    owned.id = uuid.uuid4()
+    owned.user_id = str(mock_user.id)
+
+    # The query only returns the caller's own sessions; a foreign id is filtered out.
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [owned]
+    mock_db.execute = AsyncMock(return_value=result)
+    mock_db.commit = AsyncMock()
+
+    foreign_id = uuid.uuid4()
+    resp = await authenticated_client.post(
+        "/api/sessions/reorder",
+        json={"session_ids": [str(foreign_id), str(owned.id)]},
+    )
+
+    assert resp.status_code == 204
+    # Owned session takes position 0 (the foreign id at index 0 is skipped).
+    assert owned.position == 0
+
+
+@pytest.mark.asyncio
 async def test_get_session_not_found(authenticated_client: AsyncClient, mock_db: AsyncMock) -> None:
     result_mock = MagicMock()
     result_mock.scalar_one_or_none.return_value = None

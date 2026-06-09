@@ -221,6 +221,12 @@ class SessionUpdate(BaseModel):
     is_archived: bool | None = None
 
 
+class SessionReorder(BaseModel):
+    """Top-to-bottom ordered session ids defining the sidebar arrangement."""
+
+    session_ids: list[UUID]
+
+
 class ClusterSummary(BaseModel):
     """Minimal cluster info for embedding in session responses."""
 

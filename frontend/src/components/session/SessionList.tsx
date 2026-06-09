@@ -5,7 +5,7 @@ import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { SessionItem } from './SessionItem';
 import { SearchSessionHit } from '@/types/api';
-import { formatRelativeTime } from '@/lib/utils';
+import { formatRelativeTime, cn } from '@/lib/utils';
 
 const DEBOUNCE_MS = 300;
 
@@ -66,9 +66,11 @@ export function SessionList() {
   const {
     sessions, fetchSessions, isLoading, error,
     searchResults, isSearching, searchGlobal, clearSearch,
+    moveSession, persistSessionOrder,
   } = useSessionsStore();
   const setSidebarOpen = useSettingsStore((s) => s.setSidebarOpen);
   const [searchQuery, setSearchQuery] = useState('');
+  const [draggingId, setDraggingId] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
@@ -93,6 +95,24 @@ export function SessionList() {
     setSearchQuery('');
     clearSearch();
   }, [clearSearch]);
+
+  const handleDragStart = (e: React.DragEvent, id: string) => {
+    setDraggingId(id);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', id);
+  };
+
+  const handleDragOver = (e: React.DragEvent, overId: string) => {
+    if (!draggingId || draggingId === overId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    moveSession(draggingId, overId); // live, optimistic reorder
+  };
+
+  const handleDragEnd = () => {
+    if (draggingId) persistSessionOrder(); // save the final arrangement once
+    setDraggingId(null);
+  };
 
   useEffect(() => {
     return () => clearTimeout(debounceRef.current);
@@ -151,7 +171,21 @@ export function SessionList() {
               <div className="text-gray-500 text-sm px-2">No sessions yet</div>
             ) : (
               sessions.map((session) => (
-                <SessionItem key={session.id} session={session} />
+                <div
+                  key={session.id}
+                  onDragOver={(e) => handleDragOver(e, session.id)}
+                  onDrop={(e) => e.preventDefault()}
+                  className={cn(draggingId === session.id && 'opacity-40')}
+                >
+                  <SessionItem
+                    session={session}
+                    dragHandleProps={{
+                      draggable: true,
+                      onDragStart: (e) => handleDragStart(e, session.id),
+                      onDragEnd: handleDragEnd,
+                    }}
+                  />
+                </div>
               ))
             )}
           </>

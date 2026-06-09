@@ -79,6 +79,14 @@ class Session(Base, TimestampMixin):
         default=False,
         nullable=False,
     )
+    # Sidebar ordering: an explicit slot (ascending = top) changed only by an
+    # explicit reorder, never by activity. New sessions get the smallest value
+    # (see create_session) so they land on top.
+    position: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
 
     # Token usage statistics (aggregated)
     total_input_tokens: Mapped[int] = mapped_column(
