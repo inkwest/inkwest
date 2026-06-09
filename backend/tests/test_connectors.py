@@ -373,6 +373,20 @@ def test_filter_by_role_matches_on_account_dot_role():
     assert {r["account_id"] for r in roles} == {"111"}
 
 
+def test_filter_by_role_matches_aws_read_only_profile():
+    """read-?only(-?access)?$ keeps both AWSReadOnlyAccess and aws-read-only."""
+    from app.services.connectors.aws import _filter_by_role
+
+    accounts = [{"account_id": "333", "account_name": "acme-prod"}]
+    roles = [
+        {"account_id": "333", "role_name": "aws-read-only"},
+        {"account_id": "333", "role_name": "AWSReadOnlyAccess"},
+        {"account_id": "333", "role_name": "AWSAdministratorAccess"},
+    ]
+    _, kept = _filter_by_role(accounts, roles, r"read-?only(-?access)?$")
+    assert {r["role_name"] for r in kept} == {"aws-read-only", "AWSReadOnlyAccess"}
+
+
 def test_validate_settings_rejects_invalid_role_filter():
     from app.core.config import validate_settings
 
