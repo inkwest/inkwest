@@ -115,12 +115,19 @@ export function BudgetsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Budgets</h1>
-          <p className="text-gray-400 mt-1">Manage token and cost limits</p>
+          <p className="text-gray-400 mt-1">Track token and cost usage</p>
         </div>
         <Button onClick={() => handleOpenModal()}>
           <Plus className="w-4 h-4 mr-2" />
           Add Budget
         </Button>
+      </div>
+
+      {/* Budget is informational only, never enforced — see docs/BUDGET.md */}
+      <div className="bg-blue-900/30 border border-blue-700 text-blue-300 px-4 py-3 rounded text-sm">
+        Budgets are <strong>informational only</strong>. They track usage for
+        reporting and visibility — no limit blocks, throttles, or interrupts a
+        conversation.
       </div>
 
       {error && (
