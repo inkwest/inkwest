@@ -49,7 +49,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
 
   const handleSend = () => {
     setShimmer(false);
-    if (message.trim() && !disabled) {
+    // Don't send while a response is streaming — the button is a Stop button then,
+    // but Enter would otherwise still fire and the backend rejects a second turn
+    // ("A response is already in progress").
+    if (message.trim() && !disabled && !isStreaming) {
       onSend(message.trim());
       setMessage('');
       if (sessionId) clearDraft(sessionId);
