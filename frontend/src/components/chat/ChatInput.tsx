@@ -82,7 +82,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           onChange={(e) => updateMessage(e.target.value)}
           onKeyDown={handleKeyDown}
           autoFocus
-          placeholder="Describe your Kubernetes issue..."
+          placeholder="Describe what you want to investigate or analyse…"
           disabled={disabled}
           className={cn(
             'flex-1 bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 disabled:opacity-50',

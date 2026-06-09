@@ -25,7 +25,10 @@ import { TEXT_SIZE } from '@/lib/utils';
 function LoginPrompt() {
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white gap-6">
-      <h1 className="text-2xl font-bold">Inkwest</h1>
+      <div className="flex flex-col items-center gap-1">
+        <h1 className="text-2xl font-bold">Inkwest</h1>
+        <p className="text-sm text-gray-400">Secure infrastructure &amp; code assistant</p>
+      </div>
       <p className="text-gray-400">Sign in to continue</p>
       <a
         href={getLoginUrl()}
