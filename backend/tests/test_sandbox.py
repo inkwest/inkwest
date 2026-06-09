@@ -143,6 +143,28 @@ async def test_teardown_serializes_on_session_lock(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_provision_fails_fast_when_toolbox_image_missing(tmp_path):
+    settings = _settings(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ("image", "inspect"):
+            return (1, "", "No such image: toolbox:latest")
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+    ):
+        with pytest.raises(RuntimeError, match="make sandbox-pull"):
+            await sandbox.provision("sid")
+
+    # Failed before creating anything — no containers or networks to roll back.
+    assert not [a for a in calls if a[0] in ("run", "network")]
+
+
+@pytest.mark.asyncio
 async def test_provision_rolls_back_on_failure(tmp_path):
     settings = _settings(tmp_path)
     calls: list[tuple[str, ...]] = []

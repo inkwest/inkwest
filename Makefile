@@ -1,4 +1,4 @@
-.PHONY: dev up down logs reset-db migrate seed test lint site-dev site-build
+.PHONY: dev up down logs reset-db migrate seed test lint site-dev site-build sandbox-pull
 
 # Development
 dev:
@@ -12,6 +12,10 @@ down:
 
 logs:
 	docker compose logs -f
+
+# Sandbox: ECR-login + pull the toolbox image directly inside dind (incremental layers)
+sandbox-pull:
+	./scripts/sandbox-pull.sh
 
 # Database
 reset-db:
