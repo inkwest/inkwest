@@ -37,6 +37,8 @@ async def execute_claude_cli(
     extra_env: dict[str, str] | None = None,
     cwd: str | None = None,
     system_prompt: str | None = None,
+    container: str | None = None,
+    docker_path: str = "docker",
 ) -> AsyncIterator[str]:
     """
     Execute Claude CLI and stream output.
@@ -59,6 +61,10 @@ async def execute_claude_cli(
         system_prompt: The Inkwest/custom system prompt for the session, appended to
             Claude Code's built-in prompt via --append-system-prompt (so the managed
             persona is honored without dropping Claude Code's tool-use framing).
+        container: When set, run `claude` INSIDE this per-conversation toolbox
+            container via `docker exec` (the sandboxed path) instead of as a local
+            subprocess. The streaming/timeout/parse behavior is identical either way.
+        docker_path: Path to the `docker` CLI used for the `docker exec` wrapper.
 
     Yields:
         Lines of JSON output from the CLI
@@ -67,10 +73,10 @@ async def execute_claude_cli(
         TimeoutError: If the CLI times out
         RuntimeError: If the CLI returns a non-zero exit code
     """
-    # Build command - use -p for print mode with streaming JSON output
-    # Note: --verbose is required for stream-json with -p
-    # --dangerously-skip-permissions bypasses workspace trust prompt for non-interactive usage
-    cmd = [
+    # Build the inner `claude` argv — identical whether run locally or in a container.
+    # Note: --verbose is required for stream-json with -p; --dangerously-skip-permissions
+    # bypasses the workspace trust prompt for non-interactive usage.
+    inner = [
         cli_path,
         "--dangerously-skip-permissions",
         "-p",
@@ -82,24 +88,39 @@ async def execute_claude_cli(
 
     # Layer the session's managed system prompt over Claude Code's default.
     if system_prompt:
-        cmd += ["--append-system-prompt", system_prompt]
+        inner += ["--append-system-prompt", system_prompt]
 
     # Add --resume if we have a CLI session ID from a previous interaction
     if resume_session_id:
-        cmd.insert(2, "--resume")
-        cmd.insert(3, resume_session_id)
+        inner.insert(2, "--resume")
+        inner.insert(3, resume_session_id)
         logger.info(f"Resuming Claude CLI session {resume_session_id}")
 
+    # Inject per-session connector creds into THIS subprocess's env only — never set
+    # process-globally, so conversations stay isolated.
+    proc_env = {**os.environ, **extra_env} if extra_env else None
+
+    if container:
+        # Run `claude` inside the per-conversation toolbox container. Each cred is
+        # passed as a value-less `-e KEY`: docker reads the value from this client's
+        # own env (proc_env), so secrets never appear in argv — same guarantee as the
+        # local path. `-w` sets the dir inside the container (don't chdir the client).
+        env_flags = [flag for key in (extra_env or {}) for flag in ("-e", key)]
+        workdir_flags = ["-w", cwd] if cwd else []
+        # No `-i`: `claude -p` reads the prompt from argv, not stdin; attaching stdin is
+        # unnecessary surface. stdout is still streamed back to us as the inner process runs.
+        cmd = [docker_path, "exec", *env_flags, *workdir_flags, container, *inner]
+        run_cwd: str | None = None
+    else:
+        cmd = inner
+        run_cwd = cwd
+
     logger.info(f"Executing Claude CLI for Inkwest session {session_id}")
-    logger.info(f"CLI command: {' '.join(cmd)}")
     logger.debug(f"CLI command: {' '.join(cmd)}")
 
     # Use a much larger buffer limit to handle large tool outputs
     # Default is 64KB which can be exceeded by file reads, kubectl outputs, etc.
     buffer_limit = 100 * 1024 * 1024  # 100MB
-
-    # Inject per-session connector creds into THIS subprocess's env only.
-    proc_env = {**os.environ, **extra_env} if extra_env else None
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -107,7 +128,7 @@ async def execute_claude_cli(
         stderr=asyncio.subprocess.PIPE,
         limit=buffer_limit,
         env=proc_env,
-        cwd=cwd,
+        cwd=run_cwd,
     )
 
     try:

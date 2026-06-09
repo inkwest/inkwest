@@ -5,6 +5,7 @@ Tests the CLI client, output parsing, and orchestrator.
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -480,6 +481,152 @@ class TestExecuteClaudeCli:
         assert "--resume" not in captured_cmd
 
 
+class TestExecuteClaudeCliSandbox:
+    """The container path wraps `claude` in `docker exec` without leaking secrets."""
+
+    @pytest.mark.asyncio
+    async def test_container_wraps_in_docker_exec_keeping_secrets_out_of_argv(self):
+        mock_process = MagicMock()
+        mock_process.stdout = AsyncMock()
+        mock_process.stderr = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.stdout.readline = AsyncMock(return_value=b"")
+        mock_process.wait = AsyncMock(return_value=0)
+
+        captured: dict = {}
+
+        async def capture(*args, **kwargs):
+            captured["argv"] = args
+            captured["env"] = kwargs.get("env")
+            captured["cwd"] = kwargs.get("cwd")
+            return mock_process
+
+        secret = "super-secret-token"  # pragma: allowlist secret
+        with patch("asyncio.create_subprocess_exec", side_effect=capture):
+            async for _ in execute_claude_cli(
+                "sess",
+                "hello",
+                extra_env={"AWS_BEARER_TOKEN_BEDROCK": secret},
+                cwd="/workdir",
+                container="inkwest_conv_x",
+                docker_path="docker",
+            ):
+                pass
+
+        argv = captured["argv"]
+        assert argv[:2] == ("docker", "exec")
+        assert "-i" not in argv  # claude -p reads argv, not stdin
+        assert "inkwest_conv_x" in argv
+        # Work dir is set inside the container via -w; the docker client isn't chdir'd.
+        assert "-w" in argv and argv[argv.index("-w") + 1] == "/workdir"
+        assert captured["cwd"] is None
+        # Cred passed as a value-less `-e KEY`; the VALUE never appears in argv...
+        assert "-e" in argv
+        assert "AWS_BEARER_TOKEN_BEDROCK" in argv
+        assert secret not in argv
+        # ...but it IS in the subprocess env so docker can resolve it.
+        assert captured["env"]["AWS_BEARER_TOKEN_BEDROCK"] == secret
+        # The inner `claude` invocation is preserved verbatim.
+        assert "claude" in argv
+        assert "--output-format" in argv and "stream-json" in argv
+        assert "--dangerously-skip-permissions" in argv
+
+    @pytest.mark.asyncio
+    async def test_no_container_runs_claude_directly(self):
+        mock_process = MagicMock()
+        mock_process.stdout = AsyncMock()
+        mock_process.stderr = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.stdout.readline = AsyncMock(return_value=b"")
+        mock_process.wait = AsyncMock(return_value=0)
+
+        captured: dict = {}
+
+        async def capture(*args, **kwargs):
+            captured["argv"] = args
+            captured["cwd"] = kwargs.get("cwd")
+            return mock_process
+
+        with patch("asyncio.create_subprocess_exec", side_effect=capture):
+            async for _ in execute_claude_cli("sess", "hello", cwd="/tmp/x"):
+                pass
+
+        argv = captured["argv"]
+        assert argv[0] == "claude"  # local path: no docker wrapper
+        assert "docker" not in argv
+        assert captured["cwd"] == "/tmp/x"  # client chdir'd locally
+
+
+class TestOrchestrateChatCliResume:
+    """A stale --resume id self-heals: clear it and retry once from a fresh session."""
+
+    @pytest.mark.asyncio
+    async def test_stale_resume_id_clears_and_retries_fresh(self):
+        from app.services import orchestrator_cli
+
+        sid = "11111111-1111-1111-1111-111111111111"
+        resume_calls: list = []
+
+        def fake_execute(*args, **kwargs):
+            resume_calls.append(kwargs.get("resume_session_id"))
+
+            async def gen_fail():
+                raise RuntimeError(
+                    "Claude CLI failed: No conversation found with session ID: stale-id"
+                )
+                yield ""  # unreachable — makes this an async generator
+
+            async def gen_ok():
+                yield '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}'
+                yield '{"type":"result","subtype":"success","result":"hi"}'
+
+            return gen_fail() if kwargs.get("resume_session_id") == "stale-id" else gen_ok()
+
+        settings = SimpleNamespace(
+            claude_cli_path="claude",
+            claude_cli_timeout=120,
+            sandbox_enabled=False,
+            sandbox_docker_path="docker",
+        )
+        clear_mock = AsyncMock()
+        with (
+            patch.object(orchestrator_cli, "get_settings", return_value=settings),
+            patch.object(orchestrator_cli, "execute_claude_cli", side_effect=fake_execute),
+            patch.object(
+                orchestrator_cli, "get_cli_session_id", AsyncMock(return_value="stale-id")
+            ),
+            patch.object(orchestrator_cli, "set_cli_session_id", AsyncMock()),
+            patch.object(orchestrator_cli, "clear_cli_session_id", clear_mock),
+            patch.object(orchestrator_cli, "save_message", AsyncMock()),
+            patch.object(orchestrator_cli, "ensure_session_title", AsyncMock(return_value=None)),
+            patch.object(orchestrator_cli, "update_session_stats", AsyncMock()),
+            patch.object(orchestrator_cli, "record_usage", AsyncMock()),
+            patch.object(orchestrator_cli, "build_connector_env", AsyncMock(return_value=({}, []))),
+            patch.object(
+                orchestrator_cli, "resolve_session_system_prompt", AsyncMock(return_value="")
+            ),
+            patch.object(orchestrator_cli, "get_system_prompt", lambda *a, **k: ""),
+        ):
+            events = [
+                event
+                async for event in orchestrator_cli.orchestrate_chat_cli(
+                    db=AsyncMock(),
+                    session_id=sid,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="hello",
+                    user_id=None,
+                    cancel_event=None,
+                )
+            ]
+
+        assert resume_calls == ["stale-id", None]  # retried fresh after the stale failure
+        clear_mock.assert_awaited_once()  # the dangling id was cleared
+        assert any(e.type == "text_delta" and "hi" in (e.content or "") for e in events)
+        assert any(e.type == "done" for e in events)
+
+
 class TestGetOrchestrator:
     """Tests for get_orchestrator factory function."""
 
@@ -551,6 +698,16 @@ class TestOrchestratorContentOrder:
         from app.services import orchestrator_cli
 
         with (
+            patch.object(
+                orchestrator_cli,
+                "get_settings",
+                return_value=SimpleNamespace(
+                    sandbox_enabled=False,
+                    claude_cli_path="claude",
+                    claude_cli_timeout=120,
+                    sandbox_docker_path="docker",
+                ),
+            ),
             patch.object(orchestrator_cli, "parse_cli_response", fake_parse),
             patch.object(orchestrator_cli, "execute_claude_cli", return_value=MagicMock()),
             patch.object(orchestrator_cli, "save_message", new=AsyncMock()) as mock_save,

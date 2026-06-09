@@ -32,6 +32,15 @@ RUN curl -s "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /
     && /tmp/aws/install \
     && rm -rf /tmp/aws /tmp/awscli.zip
 
+# Install the Docker CLI client only (no daemon). app.services.sandbox shells out to it
+# to run the per-conversation sandbox containers; it targets the dind sidecar over
+# TCP+TLS (DOCKER_HOST), so only the `docker` client is needed here — no engine.
+ARG DOCKER_CLI_VERSION=27.3.1
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /tmp \
+    && mv /tmp/docker/docker /usr/local/bin/docker \
+    && rm -rf /tmp/docker /tmp/docker.tgz
+
 # Install Claude CLI as app user so it lands in /home/app/.local/bin
 # Note: Claude CLI runs with --dangerously-skip-permissions for non-interactive use.
 # This is safe in container context as the container provides isolation.

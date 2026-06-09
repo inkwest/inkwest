@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import CurrentUser, check_cluster_access, get_db
 from app.api.routes.chat import close_session_connections
+from app.core.config import get_settings
 from app.models.cluster import Cluster
 from app.models.message import Message
 from app.models.schemas import (
@@ -284,6 +285,15 @@ async def delete_session(
     from app.services.turn_runner import turn_runner
 
     await turn_runner.cancel(str(session.id))
+
+    # Tear down the conversation's sandbox pair + its durable dir (hard teardown:
+    # the conversation is gone, so nothing needs to resume).
+    settings = get_settings()
+    if settings.sandbox_enabled:
+        from app.services import sandbox
+
+        await sandbox.teardown(str(session.id))
+
     await close_session_connections(str(session.id))
     await notify({"type": "session_deleted", "session_id": str(session.id)})
 

@@ -23,6 +23,7 @@ from app.services.events import (
     error_event,
 )
 from app.services.messages import (
+    clear_cli_session_id,
     ensure_session_title,
     get_cli_session_id,
     save_message,
@@ -167,83 +168,128 @@ and any external access listed below."""
         # tool descriptions the API providers receive).
         prompt += connector_prompt_hint(injected)
 
-    # Run the agent in a per-session scratch dir so it neither sees the backend
-    # source (/app) nor shares Claude Code's per-project transcripts with other
-    # conversations — the working dir is the isolation key on both counts.
-    work_dir = f"/tmp/inkwest-sessions/{session_id_str}"
-    os.makedirs(work_dir, exist_ok=True)
-
     try:
-        # Execute CLI and stream response
-        # Pass resume_session_id if we have one from a previous interaction
-        output_stream = execute_claude_cli(
-            session_id=session_id_str,
-            prompt=prompt,
-            cli_path=settings.claude_cli_path,
-            timeout=settings.claude_cli_timeout,
-            resume_session_id=cli_session_id,
-            extra_env=connector_env or None,
-            cwd=work_dir,
-            system_prompt=system_prompt,
-        )
+        # Where the agent works. In sandbox mode `claude` runs inside this
+        # conversation's own container: ensure() provisions the toolbox+proxy pair on
+        # the first turn (reused after), the work dir is /workdir (durable scratch), and
+        # Claude Code state persists on the durable CLAUDE_CONFIG_DIR mount for --resume.
+        # Otherwise fall back to a local per-session scratch dir so the agent neither sees
+        # the backend source (/app) nor shares Claude Code transcripts across conversations.
+        container: str | None = None
+        if settings.sandbox_enabled:
+            from app.services import sandbox
 
-        # Single ordered content list built in stream arrival order, so the
-        # persisted block order matches the causal order shown during live
-        # streaming (steps then report, interleaving preserved). Building two
-        # separate text/tool lists merged text-first would reorder the history
-        # on reload.
+            container = await sandbox.ensure(session_id_str)
+            work_dir = "/workdir"
+        else:
+            work_dir = f"/tmp/inkwest-sessions/{session_id_str}"
+            os.makedirs(work_dir, exist_ok=True)
+
+        # Execute the CLI and stream the response. A stored --resume target can be stale
+        # (the sandbox was rebuilt, so the transcript is gone): `claude --resume` then
+        # fails before emitting anything. Detect that, clear the id, and retry once from a
+        # fresh session so the conversation self-heals instead of erroring on every turn.
+        # The assistant message is a single ordered `content` list built in stream arrival
+        # order, so the persisted block order matches what was shown live.
         content: list[dict] = []
         received_done = False
         new_cli_session_id: str | None = None
         total_input_tokens = 0
         total_output_tokens = 0
+        resume_id = cli_session_id
 
-        async for event in parse_cli_response(output_stream):
-            if cancel_event and cancel_event.is_set():
-                logger.info("CLI chat cancelled by user")
-                yield done_event(stopped=True)
-                return
-
-            if event.type == "session_info" and event.metadata.get("cli_session_id"):
-                new_cli_session_id = event.metadata["cli_session_id"]
-                logger.info(f"Captured new CLI session ID: {new_cli_session_id}")
-
-            elif event.type == "text_delta" and event.content:
-                # Coalesce consecutive deltas into the trailing text block; start
-                # a new block if the last one is a tool event, to keep ordering.
-                if content and content[-1]["type"] == "text":
-                    content[-1]["text"] += event.content
-                else:
-                    content.append({"type": "text", "text": event.content})
-                yield event
-            elif event.type == "tool_start":
-                content.append(
-                    {
-                        "type": "tool_use",
-                        "id": event.tool_use_id,
-                        "name": event.tool_name,
-                        "input": event.tool_input,
-                    }
+        for attempt in (1, 2):
+            content = []
+            received_done = False
+            new_cli_session_id = None
+            total_input_tokens = 0
+            total_output_tokens = 0
+            emitted = False
+            try:
+                output_stream = execute_claude_cli(
+                    session_id=session_id_str,
+                    prompt=prompt,
+                    cli_path=settings.claude_cli_path,
+                    timeout=settings.claude_cli_timeout,
+                    resume_session_id=resume_id,
+                    extra_env=connector_env or None,
+                    cwd=work_dir,
+                    system_prompt=system_prompt,
+                    container=container,
+                    docker_path=settings.sandbox_docker_path,
                 )
-                yield event
-            elif event.type == "tool_result":
-                content.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": event.tool_use_id,
-                        "content": event.content,
-                        "is_error": event.is_error,
-                    }
+
+                async for event in parse_cli_response(output_stream):
+                    if cancel_event and cancel_event.is_set():
+                        logger.info("CLI chat cancelled by user")
+                        yield done_event(stopped=True)
+                        return
+
+                    if event.type == "session_info" and event.metadata.get("cli_session_id"):
+                        # init/metadata only — NOT client-visible output, so it must not
+                        # set `emitted` (a --resume run can emit init before claude finds
+                        # the transcript missing and fails; the retry must still fire).
+                        new_cli_session_id = event.metadata["cli_session_id"]
+                        logger.info(f"Captured new CLI session ID: {new_cli_session_id}")
+                        continue
+
+                    # Any client-visible event means the turn produced output → don't retry.
+                    emitted = True
+                    if event.type == "text_delta" and event.content:
+                        # Coalesce consecutive deltas into the trailing text block; start a
+                        # new block if the last is a tool event, to keep order.
+                        if content and content[-1]["type"] == "text":
+                            content[-1]["text"] += event.content
+                        else:
+                            content.append({"type": "text", "text": event.content})
+                        yield event
+                    elif event.type == "tool_start":
+                        content.append(
+                            {
+                                "type": "tool_use",
+                                "id": event.tool_use_id,
+                                "name": event.tool_name,
+                                "input": event.tool_input,
+                            }
+                        )
+                        yield event
+                    elif event.type == "tool_result":
+                        content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": event.tool_use_id,
+                                "content": event.content,
+                                "is_error": event.is_error,
+                            }
+                        )
+                        yield event
+                    elif event.type == "done":
+                        received_done = True
+                        if event.metadata:
+                            total_input_tokens = event.metadata.get("input_tokens", 0)
+                            total_output_tokens = event.metadata.get("output_tokens", 0)
+                        yield event
+                    else:
+                        yield event
+                break  # turn completed
+            except RuntimeError as e:
+                # Stale --resume target (sandbox rebuilt -> transcript gone): the CLI fails
+                # before any client-visible output. Detect it via the message OR the resume
+                # id echoed in the error (resilient to CLI wording changes), then clear it
+                # and retry once from a fresh session.
+                err = str(e)
+                is_stale_resume = resume_id is not None and (
+                    "No conversation found" in err or resume_id in err
                 )
-                yield event
-            elif event.type == "done":
-                received_done = True
-                if event.metadata:
-                    total_input_tokens = event.metadata.get("input_tokens", 0)
-                    total_output_tokens = event.metadata.get("output_tokens", 0)
-                yield event
-            else:
-                yield event
+                if attempt == 1 and not emitted and is_stale_resume:
+                    logger.warning(f"Stale CLI session {resume_id}; clearing and retrying fresh")
+                    try:
+                        await clear_cli_session_id(db, session_id)
+                    except Exception as ce:
+                        logger.warning(f"Failed to clear stale CLI session ID: {ce}")
+                    resume_id = None
+                    continue
+                raise
 
         # Store CLI session ID for future --resume calls
         if new_cli_session_id and new_cli_session_id != cli_session_id:

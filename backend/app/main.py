@@ -15,6 +15,7 @@ from app.api.routes import (
     chat,
     clusters,
     connectors,
+    egress,
     health,
     prompt_templates,
     sessions,
@@ -30,6 +31,7 @@ from app.services.connector_cleanup import start_connector_cleanup, stop_connect
 from app.services.messages import reconcile_interrupted_turns
 from app.services.prompts import ensure_default_system_prompt
 from app.services.pubsub import start_listener, stop_listener
+from app.services.sandbox import reap_orphans, start_sandbox_reaper, stop_sandbox_reaper
 
 # Set up structured logging
 setup_logging()
@@ -65,6 +67,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await start_state_cleanup()
     if settings.connectors_enabled:
         await start_connector_cleanup()
+    if settings.sandbox_enabled:
+        # Clear container/network orphans left by a prior (crashed) backend, then run
+        # the idle reaper. Durable per-conversation dirs are kept so turns can resume.
+        await reap_orphans()
+        start_sandbox_reaper()
     yield
     # Shutdown
     logger.info("shutting_down_api")
@@ -72,6 +79,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await stop_state_cleanup()
     if settings.connectors_enabled:
         await stop_connector_cleanup()
+    if settings.sandbox_enabled:
+        await stop_sandbox_reaper()
     await stop_listener()
     from app.services.orchestrator_openai import close_cached_openai_client
 
@@ -143,6 +152,7 @@ app.include_router(admin.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(chat.router)  # WebSocket routes (no prefix needed)
 app.include_router(sync.router)  # Session sync WebSocket
+app.include_router(egress.router)  # Per-conversation squid egress log WebSocket
 
 
 @app.get("/")
