@@ -21,6 +21,7 @@ from app.models.schemas import (
     SearchSessionHit,
     SessionCreate,
     SessionList,
+    SessionReorder,
     SessionResponse,
     SessionUpdate,
     SessionWithMessages,
@@ -71,7 +72,9 @@ async def list_sessions(
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
-    query = query.order_by(Session.updated_at.desc())
+    # Stable, user-defined order (ASC = top); created_at/id break ties so the
+    # arrangement never reshuffles on activity. Reordering is explicit (see below).
+    query = query.order_by(Session.position.asc(), Session.created_at.desc(), Session.id)
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
@@ -138,7 +141,14 @@ async def create_session(
                     detail=f"Active system prompt '{sp_id}' not found",
                 )
 
-    session = Session(**session_data.model_dump(), user_id=str(current_user.id))
+    # New sessions go to the top of the manually-ordered list: one slot above the
+    # current minimum. position is never touched by activity, so the list stays put.
+    min_pos = await db.scalar(
+        select(func.min(Session.position)).where(Session.user_id == str(current_user.id))
+    )
+    next_pos = (min_pos - 1) if min_pos is not None else 0
+
+    session = Session(**session_data.model_dump(), user_id=str(current_user.id), position=next_pos)
     db.add(session)
     await db.flush()
     await db.refresh(session)
@@ -147,6 +157,40 @@ async def create_session(
     await notify({"type": "session_created", "session_id": str(session.id)})
 
     return SessionResponse.model_validate(session)
+
+
+@router.post("/reorder", status_code=status.HTTP_204_NO_CONTENT)
+async def reorder_sessions(
+    payload: SessionReorder,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Set the sidebar order from a full top-to-bottom list of session ids.
+
+    Only the caller's own sessions are repositioned (foreign/unknown ids are
+    ignored); position is assigned 0..n by request order, so 0 is the top.
+    """
+    ids = [str(i) for i in payload.session_ids]
+    if not ids:
+        return None
+
+    result = await db.execute(
+        select(Session).where(
+            Session.id.in_(ids),
+            Session.user_id == str(current_user.id),
+        )
+    )
+    owned = {str(s.id): s for s in result.scalars().all()}
+
+    pos = 0
+    for sid in ids:
+        session = owned.get(sid)
+        if session is not None:
+            session.position = pos
+            pos += 1
+
+    await db.commit()
+    return None
 
 
 @router.get("/{session_id}", response_model=SessionWithMessages)

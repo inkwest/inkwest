@@ -108,6 +108,14 @@ export async function updateSession(id: string, data: { title?: string }): Promi
   });
 }
 
+// Persist the sidebar arrangement: full top-to-bottom list of session ids.
+export async function reorderSessions(sessionIds: string[]): Promise<void> {
+  await fetchAPI('/api/sessions/reorder', {
+    method: 'POST',
+    body: JSON.stringify({ session_ids: sessionIds }),
+  });
+}
+
 // Messages
 export async function retryMessage(sessionId: string, messageId: string): Promise<Message> {
   return fetchAPI(`/api/sessions/${sessionId}/messages/${messageId}/retry`, {

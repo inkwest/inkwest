@@ -1,17 +1,26 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { Trash2, Pencil, Check, X } from 'lucide-react';
+import { Trash2, Pencil, Check, X, GripVertical } from 'lucide-react';
 import { Session } from '@/types/api';
 import { formatRelativeTime, formatTokenCount, cn } from '@/lib/utils';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { ConfirmDialog } from '@/components/ui';
 
-interface Props {
-  session: Session;
+interface DragHandleProps {
+  draggable: boolean;
+  onDragStart: (e: React.DragEvent) => void;
+  onDragEnd: (e: React.DragEvent) => void;
 }
 
-export function SessionItem({ session }: Props) {
+interface Props {
+  session: Session;
+  // Wired by SessionList to make only the grip a drag source (so the row stays
+  // clickable). Absent in contexts that don't support reordering.
+  dragHandleProps?: DragHandleProps;
+}
+
+export function SessionItem({ session, dragHandleProps }: Props) {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const isActive = sessionId === session.id;
@@ -145,6 +154,22 @@ export function SessionItem({ session }: Props) {
 
           {isHovered && (
             <div className="flex items-center gap-1 shrink-0">
+              {dragHandleProps && (
+                <span
+                  {...dragHandleProps}
+                  // The grip lives inside the row's <Link>; suppress navigation on
+                  // a plain click so only drag does anything.
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
+                  className="p-1 text-gray-500 hover:text-gray-300 rounded hover:bg-gray-600 cursor-grab active:cursor-grabbing transition-colors"
+                  title="Drag to reorder"
+                  aria-label="Drag to reorder"
+                >
+                  <GripVertical className="w-3.5 h-3.5" />
+                </span>
+              )}
               <button
                 onClick={handleStartRename}
                 className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-600 transition-colors"

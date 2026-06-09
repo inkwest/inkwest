@@ -21,6 +21,8 @@ interface SessionsState {
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   setCurrentSession: (session: SessionWithMessages | null) => void;
+  moveSession: (fromId: string, toId: string) => void;
+  persistSessionOrder: () => Promise<void>;
   setPendingPrompt: (prompt: string | null) => void;
   consumePendingPrompt: () => string | null;
   updateSessionTokens: (id: string, inputTokens: number, outputTokens: number) => void;
@@ -95,6 +97,30 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   },
 
   setCurrentSession: (session) => set({ currentSession: session }),
+
+  // Live, optimistic reorder during a drag (no network). moveSession places the
+  // dragged session into the target's slot; persistSessionOrder saves the result.
+  moveSession: (fromId, toId) =>
+    set((state) => {
+      const from = state.sessions.findIndex((s) => s.id === fromId);
+      const to = state.sessions.findIndex((s) => s.id === toId);
+      if (from === -1 || to === -1 || from === to) return state;
+      const next = state.sessions.slice();
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return { sessions: next };
+    }),
+
+  persistSessionOrder: async () => {
+    const ids = get().sessions.map((s) => s.id);
+    try {
+      await api.reorderSessions(ids);
+    } catch {
+      // Couldn't save the order — re-sync from the server rather than leave the
+      // UI showing an arrangement the backend doesn't have.
+      get().fetchSessions();
+    }
+  },
 
   setPendingPrompt: (prompt) => set({ pendingPrompt: prompt }),
 
