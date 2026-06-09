@@ -4,8 +4,9 @@ import { NewSessionButton } from '@/components/session/NewSessionButton';
 export function Sidebar() {
   return (
     <div className="w-full bg-gray-800 border-r border-gray-700 flex flex-col h-full">
-      <div className="h-14 px-4 border-b border-gray-700 flex items-center">
-        <h1 className="text-xl font-bold">Inkwest</h1>
+      <div className="h-14 px-4 border-b border-gray-700 flex flex-col justify-center">
+        <h1 className="text-xl font-bold leading-tight">Inkwest</h1>
+        <p className="text-xs text-gray-400 truncate">Secure infrastructure &amp; code assistant</p>
       </div>
       <div className="p-2">
         <NewSessionButton />
