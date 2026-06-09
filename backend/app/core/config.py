@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     # f"{frontend_url}/api/connectors/callback" when unset.
     connector_redirect_base: str | None = None
 
-    # AWS IAM Identity Center (SSO). Auth code + PKCE -> SSO token -> STS creds.
+    # AWS IAM Identity Center (SSO). Device Authorization Grant -> SSO token -> STS creds.
     aws_sso_enabled: bool = False
     aws_sso_start_url: str | None = None  # https://<org>.awsapps.com/start
     aws_sso_region: str | None = None  # region hosting Identity Center
