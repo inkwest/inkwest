@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { useConnectorsStore } from '@/store/connectors';
 import { ConnectorName, ConnectorState } from '@/types/connectors';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
+import { ConnectorPermissions } from './ConnectorPermissions';
 
 const LABELS: Record<ConnectorName, string> = {
   aws: 'AWS',
@@ -162,13 +163,19 @@ export function ConnectorPanel({ sessionId }: Props) {
           return (
             <div
               key={c}
-              className={`flex items-center gap-2 rounded-md px-2 py-1 ${
+              className={`group relative flex items-center gap-2 rounded-md px-2 py-1 ${
                 highlight ? 'ring-1 ring-yellow-600' : ''
               }`}
             >
               <Icon className="h-4 w-4 text-gray-400" />
               <span className="text-sm text-gray-200">{LABELS[c]}</span>
               <StateBadge state={status.state} expiresAt={status.expires_at} />
+
+              {/* Hover popup: what this connector currently grants (secret-free). */}
+              <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-60 rounded-md border border-gray-700 bg-gray-800 p-2 text-xs shadow-lg group-hover:block">
+                <div className="mb-1 font-medium text-gray-300">Permissions</div>
+                <ConnectorPermissions status={status} />
+              </div>
               {connected ? (
                 <button
                   onClick={() => revoke(sessionId, c)}
