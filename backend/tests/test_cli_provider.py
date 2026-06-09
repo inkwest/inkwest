@@ -6,6 +6,7 @@ Tests the CLI client, output parsing, and orchestrator.
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -14,6 +15,7 @@ from app.services.ai_cli_client import (
     parse_cli_response,
     parse_cli_stream_line,
 )
+from app.services.events import ChatEvent
 
 
 class TestParseCliStreamLine:
@@ -519,3 +521,78 @@ class TestGetOrchestrator:
             from app.services.orchestrator import orchestrate_chat
 
             assert orchestrator == orchestrate_chat
+
+
+class TestOrchestratorContentOrder:
+    """Persisted assistant content must keep the live stream order."""
+
+    async def test_persisted_block_order_matches_stream(self):
+        """Interleaved text/tool events persist in arrival order, deltas coalesced."""
+        # Stream: text -> tool_use -> tool_result -> text (split across two deltas).
+        # Regression guard: the old code merged all text first, all tools after.
+        streamed = [
+            ChatEvent(type="text_delta", content="Let me check. "),
+            ChatEvent(
+                type="tool_start",
+                tool_name="kubectl",
+                tool_input={"command": "get pods"},
+                tool_use_id="t1",
+            ),
+            ChatEvent(type="tool_result", content="pod/nginx", tool_use_id="t1"),
+            ChatEvent(type="text_delta", content="All "),
+            ChatEvent(type="text_delta", content="good."),
+            ChatEvent(type="done", metadata={"input_tokens": 10, "output_tokens": 5}),
+        ]
+
+        async def fake_parse(_stream):
+            for event in streamed:
+                yield event
+
+        from app.services import orchestrator_cli
+
+        with (
+            patch.object(orchestrator_cli, "parse_cli_response", fake_parse),
+            patch.object(orchestrator_cli, "execute_claude_cli", return_value=MagicMock()),
+            patch.object(orchestrator_cli, "save_message", new=AsyncMock()) as mock_save,
+            patch.object(
+                orchestrator_cli, "resolve_session_system_prompt", new=AsyncMock(return_value="")
+            ),
+            patch.object(orchestrator_cli, "get_system_prompt", return_value="sys"),
+            patch.object(orchestrator_cli, "get_cli_session_id", new=AsyncMock(return_value=None)),
+            patch.object(orchestrator_cli, "set_cli_session_id", new=AsyncMock()),
+            patch.object(
+                orchestrator_cli, "ensure_session_title", new=AsyncMock(return_value=None)
+            ),
+            patch.object(
+                orchestrator_cli, "build_connector_env", new=AsyncMock(return_value=({}, set()))
+            ),
+            patch.object(orchestrator_cli, "update_session_stats", new=AsyncMock()),
+            patch.object(orchestrator_cli, "record_usage", new=AsyncMock()),
+            patch.object(orchestrator_cli.os, "makedirs"),
+        ):
+            db = AsyncMock()
+            async for _ in orchestrator_cli.orchestrate_chat_cli(
+                db=db,
+                session_id=uuid4(),
+                cluster_name="prod",
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="list pods",
+            ):
+                pass
+
+        # The assistant message is the save_message call with role == "assistant".
+        assistant_content = next(
+            call.args[3] for call in mock_save.call_args_list if call.args[2] == "assistant"
+        )
+
+        assert [block["type"] for block in assistant_content] == [
+            "text",
+            "tool_use",
+            "tool_result",
+            "text",
+        ]
+        # Tool block sits between the two text blocks (interleaving preserved),
+        # not pushed to the end after a single merged text block.
+        assert assistant_content[0]["text"] == "Let me check. "
+        assert assistant_content[3]["text"] == "All good."  # consecutive deltas coalesced
