@@ -163,6 +163,11 @@ class Settings(BaseSettings):
     # (/var/log/squid/access.log), and its allowlist must cover .eks.amazonaws.com +
     # the chosen Claude backend endpoint.
     sandbox_squid_conf: str = ""
+    # Optional host path bind-mounted read-only as the squid error_directory
+    # (/etc/squid/errors): the LLM-parseable error templates in sandbox/errors.
+    # The checked-in squid.conf sets error_directory, so set this whenever
+    # sandbox_squid_conf points at it. Empty = squid's stock pages.
+    sandbox_squid_errors: str = ""
     # Optional resolver for the proxy container (`docker run --dns`). The stock squid
     # image often can't resolve public names via the host's stub resolver — set this
     # (e.g. 1.1.1.1, as in the POC) when egress fails with DNS errors. Empty = default.
