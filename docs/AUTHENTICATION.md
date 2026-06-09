@@ -2,6 +2,17 @@
 
 ## Modes
 
+Inkwest ships with **two intentional auth modes**, selected by the single
+`OIDC_ENABLED` flag. The default (SSO off) is a self-contained single-user mode;
+flip the flag to switch to multi-user authenticated access.
+
+| | `OIDC_ENABLED=false` (default) | `OIDC_ENABLED=true` |
+|---|---|---|
+| Who can access | Anyone reaching the app — no login | Only users authenticated via the IdP |
+| Identity | Auto-created `dev@localhost`, `admin` role | Real user from the OIDC ID token |
+| Roles / admin | Always admin | Driven by `OIDC_ROLES_CLAIM` / `OIDC_ADMIN_ROLE` |
+| Intended for | Local dev, single-operator / mono-user deploys | Shared / multi-user / production deploys |
+
 ### Single-User (default)
 
 `OIDC_ENABLED=false` -- auto-creates a `dev@localhost` user with `admin` role. All routes are accessible without login.
@@ -12,20 +23,45 @@ async def get_or_create_dev_user(db) -> User:
     # Creates User(email="dev@localhost", roles=["admin"], oidc_subject="dev-local")
 ```
 
-### OIDC
+**This automatic admin is by design, not a misconfiguration.** With SSO off there
+is no identity provider to authenticate against, so the app runs as a single
+trusted operator with full rights — the expected model for local development and
+single-user deployments. The same default applies across HTTP and WebSocket: all
+skip token validation — `get_current_user` and the chat WS
+(`validate_websocket_auth`) return the dev user, while the sync WS
+(`_authenticate_sync_ws`) simply authorizes the connection.
 
-`OIDC_ENABLED=true` -- standard OAuth2/OIDC authorization code flow.
+> **Security:** single-user mode performs **no authentication**. Only run it on a
+> trusted host / network (localhost, a private deployment you alone reach). To
+> expose Inkwest to multiple users or the public, enable SSO (below).
+
+### OIDC (enabling SSO)
+
+`OIDC_ENABLED=true` -- standard OAuth2/OIDC authorization code flow. This is the
+switch from single-user to multi-user authenticated access.
 
 ```
-OIDC_ENABLED=true
-OIDC_ISSUER_URL=https://accounts.google.com
-OIDC_CLIENT_ID=...
-OIDC_CLIENT_SECRET=...
-OIDC_REDIRECT_URI=http://localhost:8000/api/auth/callback
-OIDC_SCOPES=openid profile email
-OIDC_ROLES_CLAIM=roles        # claim path in ID token
-OIDC_ADMIN_ROLE=admin          # role name that grants admin
+OIDC_ENABLED=true                                              # required: turns SSO on
+OIDC_ISSUER_URL=https://accounts.google.com                    # required
+OIDC_CLIENT_ID=...                                             # required
+OIDC_CLIENT_SECRET=...                                         # required
+OIDC_REDIRECT_URI=http://localhost:8000/api/auth/callback      # required: must match IdP config
+OIDC_SCOPES=openid profile email                               # optional (default shown)
+OIDC_ROLES_CLAIM=roles        # optional: claim path in ID token (default: roles)
+OIDC_ADMIN_ROLE=admin          # optional: role name that grants admin (default: admin)
 ```
+
+Register the `OIDC_REDIRECT_URI` as an allowed callback in your IdP. Once these
+are set and the app is restarted, the single-user dev admin is no longer issued —
+every request must carry a valid session JWT obtained through the flow below.
+
+> **Set all four `required` vars together.** `get_current_user` switches to
+> token-required mode on the `OIDC_ENABLED` flag **alone**, but `/api/auth/login`
+> and `/api/auth/callback` only work once `OIDC_ISSUER_URL` and `OIDC_CLIENT_ID`
+> are also present (`OIDCClient.is_enabled`). A partial config (flag on, issuer or
+> client id missing) **locks everyone out**: every request 401s while `/login`
+> returns `400 OIDC authentication is not enabled` — there is no startup
+> validation to catch this.
 
 **Flow:** `/api/auth/login` -> OIDC provider -> `/api/auth/callback` -> returns JWT session token.
 
