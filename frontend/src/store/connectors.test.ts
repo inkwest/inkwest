@@ -54,3 +54,188 @@ describe('connectorsStore', () => {
     expect(s.reauthRequired).toBeNull();
   });
 });
+
+describe('connectorsStore renewal', () => {
+  beforeEach(() => {
+    useConnectorsStore.getState().reset();
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('fetchRenewable populates the renewable set', async () => {
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'aws', live: false, state: 'not_connected', aws_selection: { profiles: [] } },
+    ]);
+    await useConnectorsStore.getState().fetchRenewable('sess-1');
+    expect(useConnectorsStore.getState().renewable.map((g) => g.connector)).toEqual(['aws']);
+  });
+
+  it('renewAll skips connectors that are already connected', async () => {
+    // AWS connected, GitLab not — renewing must NOT re-run the AWS device flow.
+    useConnectorsStore.setState({ statuses: { aws: { connector: 'aws', state: 'connected' } } });
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'aws', live: true, state: 'connected' },
+      { connector: 'gitlab', live: false, state: 'not_connected' },
+    ]);
+    const startAws = vi.spyOn(api, 'startAwsDevice');
+    vi.spyOn(api, 'gitlabRenew').mockResolvedValue({ connector: 'gitlab', state: 'connected' });
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([]);
+
+    await useConnectorsStore.getState().renewAll('sess-1');
+    expect(startAws).not.toHaveBeenCalled();
+    expect(useConnectorsStore.getState().awsAutoSelect).toBe(false);
+  });
+
+  it('renewAll re-activates Coralogix silently', async () => {
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'coralogix', live: false, state: 'not_connected' },
+    ]);
+    const activate = vi
+      .spyOn(api, 'activateCoralogix')
+      .mockResolvedValue({ connector: 'coralogix', state: 'connected' });
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([]);
+
+    await useConnectorsStore.getState().renewAll('sess-1');
+    expect(activate).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('renewAll refreshes GitLab silently when possible', async () => {
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'gitlab', live: true, state: 'expired' },
+    ]);
+    const renew = vi
+      .spyOn(api, 'gitlabRenew')
+      .mockResolvedValue({ connector: 'gitlab', state: 'connected' });
+    // fetchStatus (the final reconcile) is the source of truth for the badge.
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([
+      { connector: 'gitlab', state: 'connected' },
+    ]);
+
+    await useConnectorsStore.getState().renewAll('sess-1');
+    expect(renew).toHaveBeenCalledWith('sess-1');
+    expect(useConnectorsStore.getState().statuses.gitlab.state).toBe('connected');
+  });
+
+  it('renewAll redirects to GitLab OAuth when it cannot refresh silently (no AWS pending)', async () => {
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'gitlab', live: false, state: 'not_connected' },
+    ]);
+    vi.spyOn(api, 'gitlabRenew').mockRejectedValue(new Error('409'));
+    const initiate = vi
+      .spyOn(api, 'initiateConnector')
+      .mockResolvedValue({ redirect_url: 'https://gitlab.example/oauth/authorize' });
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([]);
+
+    await useConnectorsStore.getState().renewAll('sess-1');
+    expect(initiate).toHaveBeenCalledWith('sess-1', 'gitlab');
+  });
+
+  it('renewAll defers the GitLab OAuth redirect until AWS finishes', async () => {
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'gitlab', live: false, state: 'not_connected' },
+      { connector: 'aws', live: false, state: 'not_connected' },
+    ]);
+    vi.spyOn(api, 'gitlabRenew').mockRejectedValue(new Error('409'));
+    const initiate = vi.spyOn(api, 'initiateConnector');
+    vi.spyOn(api, 'startAwsDevice').mockResolvedValue({
+      user_code: 'X',
+      verification_uri: 'u',
+      verification_uri_complete: 'uc',
+      interval: 5,
+      expires_in: 600,
+    });
+
+    await useConnectorsStore.getState().renewAll('sess-1');
+    const s = useConnectorsStore.getState();
+    expect(s.awsAutoSelect).toBe(true);
+    expect(s.gitlabReauthPending).toBe(true); // queued, not fired yet
+    expect(initiate).not.toHaveBeenCalled();
+  });
+
+  it('pollAwsDevice fires the deferred GitLab redirect once AWS renews', async () => {
+    useConnectorsStore.setState({
+      awsAutoSelect: true,
+      gitlabReauthPending: true,
+      awsDevice: { userCode: 'X', verificationUri: 'u', status: 'pending' },
+    });
+    vi.spyOn(api, 'pollAwsDevice').mockResolvedValue({ status: 'needs_selection' });
+    vi.spyOn(api, 'awsRenewSelect').mockResolvedValue({ connector: 'aws', state: 'connected' });
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([
+      { connector: 'aws', state: 'connected' },
+    ]);
+    const initiate = vi
+      .spyOn(api, 'initiateConnector')
+      .mockResolvedValue({ redirect_url: 'https://gitlab.example/oauth/authorize' });
+
+    await useConnectorsStore.getState().pollAwsDevice('sess-1');
+    expect(initiate).toHaveBeenCalledWith('sess-1', 'gitlab');
+    expect(useConnectorsStore.getState().gitlabReauthPending).toBe(false);
+  });
+
+  it('renewAll starts AWS device auth and arms auto-select', async () => {
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'aws', live: false, state: 'not_connected' },
+    ]);
+    vi.spyOn(api, 'startAwsDevice').mockResolvedValue({
+      user_code: 'ABCD-1234',
+      verification_uri: 'https://device.aws',
+      verification_uri_complete: 'https://device.aws?code=ABCD-1234',
+      interval: 5,
+      expires_in: 600,
+    });
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([]);
+
+    await useConnectorsStore.getState().renewAll('sess-1');
+    expect(useConnectorsStore.getState().awsAutoSelect).toBe(true);
+    expect(useConnectorsStore.getState().awsDevice?.status).toBe('pending');
+  });
+
+  it('pollAwsDevice auto-applies the saved selection on needs_selection', async () => {
+    useConnectorsStore.setState({
+      awsAutoSelect: true,
+      awsDevice: { userCode: 'X', verificationUri: 'u', status: 'pending' },
+    });
+    vi.spyOn(api, 'pollAwsDevice').mockResolvedValue({ status: 'needs_selection' });
+    const renewSelect = vi
+      .spyOn(api, 'awsRenewSelect')
+      .mockResolvedValue({ connector: 'aws', state: 'connected' });
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([
+      { connector: 'aws', state: 'connected' },
+    ]);
+
+    const status = await useConnectorsStore.getState().pollAwsDevice('sess-1');
+    expect(status).toBe('needs_selection');
+    expect(renewSelect).toHaveBeenCalledWith('sess-1');
+    const s = useConnectorsStore.getState();
+    expect(s.awsModalRequested).toBe(false); // did NOT open the manual picker
+    expect(s.awsAutoSelect).toBe(false);
+    expect(s.statuses.aws.state).toBe('connected');
+  });
+
+  it('pollAwsDevice falls back to the manual picker when the saved selection is invalid', async () => {
+    useConnectorsStore.setState({
+      awsAutoSelect: true,
+      awsDevice: { userCode: 'X', verificationUri: 'u', status: 'pending' },
+    });
+    vi.spyOn(api, 'pollAwsDevice').mockResolvedValue({ status: 'needs_selection' });
+    vi.spyOn(api, 'awsRenewSelect').mockRejectedValue(new Error('400'));
+
+    await useConnectorsStore.getState().pollAwsDevice('sess-1');
+    const s = useConnectorsStore.getState();
+    expect(s.awsModalRequested).toBe(true); // fell back to manual picker
+    expect(s.awsAutoSelect).toBe(false);
+  });
+
+  it('reset clears renewal state', () => {
+    useConnectorsStore.setState({
+      renewable: [{ connector: 'aws', live: false, state: 'not_connected' }],
+      awsAutoSelect: true,
+    });
+    useConnectorsStore.getState().reset();
+    expect(useConnectorsStore.getState().renewable).toEqual([]);
+    expect(useConnectorsStore.getState().awsAutoSelect).toBe(false);
+  });
+});

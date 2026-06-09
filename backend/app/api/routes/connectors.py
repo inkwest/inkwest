@@ -32,6 +32,7 @@ from app.services.connectors.base import (
     MintedCredential,
     generate_pkce,
 )
+from app.services.connectors.grants import aws_selections_from_grant, derive_prior_grants
 from app.services.connectors.registry import all_connectors, get_connector
 from app.services.connectors.store import get_credential_store
 from app.services.eks_refresh import schedule_session_eks_refresh
@@ -106,6 +107,15 @@ class AwsDevicePollResponse(BaseModel):
     detail: str | None = None
 
 
+class PriorGrantResponse(BaseModel):
+    """A connector this session previously granted and can renew (secret-free)."""
+
+    connector: str
+    live: bool  # a usable (non-expired) credential is currently held
+    state: str  # public_status state of the held credential (or "not_connected")
+    aws_selection: dict[str, Any] | None = None  # AWS account/role profiles to re-apply
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -163,6 +173,31 @@ def _get_enabled_connector(name: str) -> Any:
     if connector is None:
         raise HTTPException(status_code=404, detail=f"Connector '{name}' is not available")
     return connector
+
+
+async def _apply_aws_selection(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    sid: uuid.UUID,
+    conn: Any,
+    provisional: MintedCredential,
+    selections: list[dict[str, str]],
+) -> ConnectorStatusResponse:
+    """Mint STS creds for the given account/role pairs, persist, refresh EKS, audit.
+
+    Shared tail of ``aws_select`` (manual pick) and ``aws_renew_select`` (saved pick).
+    """
+    try:
+        cred = await conn.select_account_roles(provisional, selections=selections)
+    except ConnectorError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    await get_credential_store().put(user_id, sid, cred)
+    # Discover EKS clusters for the freshly minted profiles and generate one
+    # (tmpfs) kubeconfig each — async, must not block the response.
+    schedule_session_eks_refresh(sid, cred)
+    await _audit(db, user_id=user_id, session_id=sid, connector="aws", action="select", cred=cred)
+    return ConnectorStatusResponse.from_status(conn.public_status(cred))
 
 
 # --------------------------------------------------------------------------- #
@@ -435,20 +470,14 @@ async def aws_select(
     provisional = await get_credential_store().get(current_user.id, sid, "aws")
     if provisional is None:
         raise HTTPException(status_code=409, detail="No pending AWS authentication; re-initiate")
-    try:
-        cred = await conn.select_account_roles(
-            provisional, selections=[s.model_dump() for s in body.selections]
-        )
-    except ConnectorError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    await get_credential_store().put(current_user.id, sid, cred)
-    # Discover EKS clusters for the freshly minted profiles and generate one
-    # (tmpfs) kubeconfig each — async, must not block the select response.
-    schedule_session_eks_refresh(sid, cred)
-    await _audit(
-        db, user_id=current_user.id, session_id=sid, connector="aws", action="select", cred=cred
+    return await _apply_aws_selection(
+        db,
+        user_id=current_user.id,
+        sid=sid,
+        conn=conn,
+        provisional=provisional,
+        selections=[s.model_dump() for s in body.selections],
     )
-    return ConnectorStatusResponse.from_status(conn.public_status(cred))
 
 
 @router.post("/{session_id}/{connector}/revoke", response_model=ConnectorStatusResponse)
@@ -477,3 +506,104 @@ async def revoke(
             db, user_id=current_user.id, session_id=sid, connector=connector, action="revoke"
         )
     return ConnectorStatusResponse.from_status(conn.public_status(None))
+
+
+# --------------------------------------------------------------------------- #
+# Renew previously-granted connectors (re-grant the same set; never add new)
+# --------------------------------------------------------------------------- #
+@router.get("/{session_id}/renewable", response_model=list[PriorGrantResponse])
+async def renewable(
+    session_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[PriorGrantResponse]:
+    """The connectors this session previously granted (from the audit log).
+
+    Drives a single "Renew access" action: only connectors still enabled and
+    previously granted are returned; AWS carries its prior account/role selection.
+    """
+    _require_enabled()
+    sid = await _verify_session_owner(db, session_id, current_user)
+    store = get_credential_store()
+    out: list[PriorGrantResponse] = []
+    for grant in await derive_prior_grants(db, sid):
+        conn = get_connector(grant.connector)
+        if conn is None:
+            continue  # connector disabled since the grant — not renewable
+        cred = await store.get(current_user.id, sid, conn.type)
+        out.append(
+            PriorGrantResponse(
+                connector=grant.connector,
+                live=cred is not None,
+                state=conn.public_status(cred).state,
+                aws_selection=grant.selection if grant.connector == "aws" else None,
+            )
+        )
+    return out
+
+
+@router.post("/{session_id}/gitlab/renew", response_model=ConnectorStatusResponse)
+async def gitlab_renew(
+    session_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> ConnectorStatusResponse:
+    """Silently renew GitLab from the held refresh token.
+
+    409 when no live cred with a refresh token is held (token evicted on expiry):
+    the frontend then falls back to the normal OAuth re-initiate.
+    """
+    _require_enabled()
+    sid = await _verify_session_owner(db, session_id, current_user)
+    conn = _get_enabled_connector("gitlab")
+    cred = await get_credential_store().get(current_user.id, sid, "gitlab")
+    if cred is None or not cred.secret.get("refresh_token"):
+        raise HTTPException(
+            status_code=409, detail="GitLab cannot be renewed silently; re-initiate"
+        )
+    try:
+        renewed = await conn.refresh(cred)
+    except ConnectorError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    await get_credential_store().put(current_user.id, sid, renewed)
+    await _audit(
+        db,
+        user_id=current_user.id,
+        session_id=sid,
+        connector="gitlab",
+        action="grant",
+        cred=renewed,
+    )
+    return ConnectorStatusResponse.from_status(conn.public_status(renewed))
+
+
+@router.post("/{session_id}/aws/renew-select", response_model=ConnectorStatusResponse)
+async def aws_renew_select(
+    session_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> ConnectorStatusResponse:
+    """After a fresh device auth, re-apply the session's previously-saved AWS selection.
+
+    Lets renewal skip the manual account/role picker. 409 if there's no provisional
+    cred (re-auth first) or no saved selection; 400 if a saved pair is no longer
+    authorized (the frontend then falls back to the manual picker).
+    """
+    _require_enabled()
+    sid = await _verify_session_owner(db, session_id, current_user)
+    conn = _get_enabled_connector("aws")
+    provisional = await get_credential_store().get(current_user.id, sid, "aws")
+    if provisional is None or provisional.selection is not None:
+        raise HTTPException(status_code=409, detail="No pending AWS authentication; re-initiate")
+    aws_grant = next((g for g in await derive_prior_grants(db, sid) if g.connector == "aws"), None)
+    selections = aws_selections_from_grant(aws_grant) if aws_grant else []
+    if not selections:
+        raise HTTPException(status_code=409, detail="No saved AWS selection; choose manually")
+    return await _apply_aws_selection(
+        db,
+        user_id=current_user.id,
+        sid=sid,
+        conn=conn,
+        provisional=provisional,
+        selections=selections,
+    )

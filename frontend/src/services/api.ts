@@ -141,10 +141,25 @@ export async function searchGlobal(query: string): Promise<SearchResponse> {
 }
 
 // External access connectors
-import { ConnectorName, ConnectorStatus } from '@/types/connectors';
+import { ConnectorName, ConnectorStatus, PriorGrant } from '@/types/connectors';
 
 export async function getConnectorStatus(sessionId: string): Promise<ConnectorStatus[]> {
   return fetchAPI(`/api/connectors/${sessionId}/status`);
+}
+
+// Connectors this session previously granted — drives the "Renew access" action.
+export async function getRenewable(sessionId: string): Promise<PriorGrant[]> {
+  return fetchAPI(`/api/connectors/${sessionId}/renewable`);
+}
+
+// Silent GitLab renewal from the held refresh token (409 → caller re-initiates OAuth).
+export async function gitlabRenew(sessionId: string): Promise<ConnectorStatus> {
+  return fetchAPI(`/api/connectors/${sessionId}/gitlab/renew`, { method: 'POST' });
+}
+
+// After a fresh AWS device auth, re-apply the session's previously-saved selection.
+export async function awsRenewSelect(sessionId: string): Promise<ConnectorStatus> {
+  return fetchAPI(`/api/connectors/${sessionId}/aws/renew-select`, { method: 'POST' });
 }
 
 export async function initiateConnector(

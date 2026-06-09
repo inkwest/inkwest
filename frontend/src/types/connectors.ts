@@ -20,6 +20,27 @@ export interface AwsRole {
   role_name: string;
 }
 
+// One AWS account/role profile a session previously selected (no secrets).
+export interface AwsSelectionProfile {
+  name: string;
+  account_id: string;
+  account_name: string;
+  role_name: string;
+}
+
+export interface AwsSelection {
+  profiles: AwsSelectionProfile[];
+}
+
+// A connector the session previously granted, returned by GET /renewable to drive
+// the single "Renew access" action.
+export interface PriorGrant {
+  connector: ConnectorName;
+  live: boolean; // a usable (non-expired) credential is currently held
+  state: ConnectorState;
+  aws_selection?: AwsSelection | null;
+}
+
 // Never carries a secret — only the lifecycle state and safe metadata.
 export interface ConnectorStatus {
   connector: ConnectorName;
