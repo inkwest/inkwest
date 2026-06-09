@@ -172,6 +172,48 @@ class TestValidation:
         assert error is not None
         assert "Invalid duration" in error
 
+    def test_validate_valid_field_selector(self):
+        """Well-formed field selector should pass."""
+        error = validate_tool_input(
+            "kubectl_events", {"field_selector": "involvedObject.name=my-pod"}
+        )
+        assert error is None
+
+    def test_validate_invalid_field_selector(self):
+        """A field selector that doesn't match the pattern is rejected."""
+        error = validate_tool_input("kubectl_events", {"field_selector": "bad selector!"})
+        assert error is not None
+        assert "field selector" in error
+
+    def test_validate_valid_api_version(self):
+        """Recognized API version should pass."""
+        error = validate_tool_input("kubectl_explain", {"api_version": "apps/v1"})
+        assert error is None
+
+    def test_validate_invalid_api_version(self):
+        """Malformed API version should fail."""
+        error = validate_tool_input("kubectl_explain", {"api_version": "not a version"})
+        assert error is not None
+        assert "API version" in error
+
+    def test_validate_invalid_output_format(self):
+        """Output format outside the allow-list is rejected."""
+        error = validate_tool_input("kubectl_get", {"resource": "pods", "output": "exec"})
+        assert error is not None
+        assert "output format" in error
+
+    def test_validate_invalid_sort_by(self):
+        """sort_by outside {cpu, memory} is rejected."""
+        error = validate_tool_input("kubectl_top", {"resource": "pods", "sort_by": "disk"})
+        assert error is not None
+        assert "sort_by" in error
+
+    def test_validate_invalid_event_type(self):
+        """Event type outside {Normal, Warning} is rejected."""
+        error = validate_tool_input("kubectl_events", {"types": "Critical"})
+        assert error is not None
+        assert "event type" in error
+
 
 class TestLabelSelectorValidation:
     """Tests for label selector validation."""
@@ -199,6 +241,16 @@ class TestLabelSelectorValidation:
     def test_validate_empty_key(self):
         """Empty label key should fail."""
         error = validate_label_selector("=value")
+        assert error is not None
+
+    def test_validate_bare_key_without_operator(self):
+        """A token with no =/!= operator is rejected (not a valid existence check)."""
+        error = validate_label_selector("justakey")
+        assert error is not None
+
+    def test_validate_invalid_label_value(self):
+        """A value with illegal characters is rejected."""
+        error = validate_label_selector("app=ba d!value")
         assert error is not None
 
     def test_validate_empty_selector(self):
