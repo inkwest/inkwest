@@ -235,6 +235,8 @@ async def provision(session_id: str) -> Sandbox:
         ]
         if settings.sandbox_squid_conf:
             proxy_run += ["-v", f"{settings.sandbox_squid_conf}:/etc/squid/squid.conf:ro"]
+        if settings.sandbox_squid_errors:
+            proxy_run += ["-v", f"{settings.sandbox_squid_errors}:/etc/squid/errors:ro"]
         if settings.sandbox_proxy_dns:
             proxy_run += ["--dns", settings.sandbox_proxy_dns]
         proxy_run += [settings.sandbox_squid_image]

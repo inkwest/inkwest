@@ -21,6 +21,7 @@ def _settings(tmp_path):
         sandbox_home="/home/sandbox",
         sandbox_squid_image="squid:latest",
         sandbox_squid_conf="",
+        sandbox_squid_errors="",
         sandbox_proxy_dns="",
         sandbox_env_file="",
         sandbox_sessions_root=str(tmp_path),

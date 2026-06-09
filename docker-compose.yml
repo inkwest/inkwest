@@ -147,6 +147,7 @@ services:
       - DOCKER_CERT_PATH=/certs/client
       - SANDBOX_ENV_FILE=/app/sandbox.env  # --env-file read by the docker client here
       - SANDBOX_SQUID_CONF=/etc/inkwest/squid.conf  # -v source resolved by dind (mounted there)
+      - SANDBOX_SQUID_ERRORS=/etc/inkwest/errors  # custom error pages, sibling of the conf
       - SANDBOX_SESSIONS_ROOT=/sandbox/sessions  # the shared named volume
     volumes:
       - ./backend:/app
