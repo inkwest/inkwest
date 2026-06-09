@@ -50,7 +50,7 @@ export function PromptTemplatePalette({ onSelect, disabled }: Props) {
         disabled={disabled}
         title="Insert a prompt template"
         aria-label="Insert a prompt template"
-        className="flex h-full items-center justify-center px-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex items-center justify-center px-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <LibraryBig className="h-4 w-4" />
       </button>
