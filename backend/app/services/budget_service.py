@@ -167,6 +167,13 @@ async def check_budget(
     """
     Check if a request is within budget limits.
 
+    NOTE: Budget is informational only and is NOT enforced. The
+    returned `is_allowed` is consumed solely by `get_user_usage_summary` for
+    admin reporting — no orchestrator nor `turn_runner.start` calls this before
+    invoking the model, so a conversation is never blocked or interrupted by a
+    limit. This is a deliberate product choice (visibility, not quota). See
+    docs/BUDGET.md before wiring this into the request path.
+
     Args:
         db: Database session
         user_id: User ID
@@ -367,6 +374,8 @@ async def get_user_usage_summary(
         Dict with usage details
     """
     usage = await get_usage_for_period(db, user_id, period)
+    # check_budget is used here purely for reporting (usage_percent, warnings).
+    # is_allowed is surfaced for visibility, not acted upon — see docs/BUDGET.md.
     budget_status = await check_budget(db, user_id)
 
     return {
