@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import * as api from '@/services/api';
-import { ConnectorName, ConnectorStatus } from '@/types/connectors';
+import { ConnectorName, ConnectorStatus, PriorGrant } from '@/types/connectors';
 
 // AWS device-authorization prompt shown while the user approves in their browser.
 export interface AwsDeviceState {
@@ -22,8 +22,18 @@ interface ConnectorsState {
   // Set true once device auth is approved → the panel opens the selection modal.
   // Avoids auto-opening on every session load from a stale status.
   awsModalRequested: boolean;
+  // Connectors this session previously granted (for the "Renew access" action).
+  renewable: PriorGrant[];
+  // True during a renew: the AWS device poll should auto-apply the saved selection
+  // (skip the manual picker) instead of opening the account/role modal.
+  awsAutoSelect: boolean;
+  // True when a GitLab OAuth redirect is queued behind an in-progress AWS device
+  // approval; fired once AWS completes (deferred so it doesn't abandon AWS).
+  gitlabReauthPending: boolean;
 
   fetchStatus: (sessionId: string) => Promise<void>;
+  fetchRenewable: (sessionId: string) => Promise<void>;
+  renewAll: (sessionId: string) => Promise<void>;
   initiate: (sessionId: string, connector: ConnectorName) => Promise<void>;
   startAwsDevice: (sessionId: string) => Promise<void>;
   pollAwsDevice: (sessionId: string) => Promise<string>;
@@ -86,6 +96,9 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
   reauthRequired: null,
   awsDevice: null,
   awsModalRequested: false,
+  renewable: [],
+  awsAutoSelect: false,
+  gitlabReauthPending: false,
 
   fetchStatus: async (sessionId) => {
     set({ isLoading: true, error: null });
@@ -95,6 +108,71 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
     } catch (e) {
       set({ error: (e as Error).message, isLoading: false });
     }
+  },
+
+  // Load the connectors this session previously granted (best-effort).
+  fetchRenewable: async (sessionId) => {
+    try {
+      set({ renewable: await api.getRenewable(sessionId) });
+    } catch {
+      set({ renewable: [] });
+    }
+  },
+
+  // Re-grant exactly the previously-granted set (never adds new). Coralogix
+  // re-activates silently; GitLab refreshes silently when its token is still held,
+  // otherwise it must re-authorize via an OAuth redirect; AWS re-runs device
+  // approval and the poll auto-applies the saved selection.
+  //
+  // GitLab's redirect navigates away, so it can't run alongside an AWS device
+  // approval. When both need it, AWS goes first (stays on the page) and the GitLab
+  // redirect is deferred until AWS completes (see pollAwsDevice) — by then AWS is
+  // connected and persisted, so navigating away is safe. When AWS isn't renewing,
+  // GitLab redirects right away.
+  renewAll: async (sessionId) => {
+    await get().fetchRenewable(sessionId);
+    // Only renew connectors that aren't already connected (mirrors the button gate),
+    // so renewing one doesn't needlessly re-auth a healthy one — e.g. re-popping the
+    // AWS device approval just to renew GitLab.
+    const { statuses, renewable } = get();
+    const granted = new Set(
+      renewable
+        .filter((g) => statuses[g.connector]?.state !== 'connected')
+        .map((g) => g.connector)
+    );
+    const willRenewAws = granted.has('aws');
+
+    if (granted.has('coralogix')) {
+      try {
+        await get().activateCoralogix(sessionId);
+      } catch {
+        /* reflected by the subsequent status refresh */
+      }
+    }
+
+    let gitlabNeedsOAuth = false;
+    if (granted.has('gitlab')) {
+      try {
+        const status = await api.gitlabRenew(sessionId);
+        set((s) => ({ statuses: { ...s.statuses, gitlab: status } }));
+      } catch {
+        gitlabNeedsOAuth = true; // token gone → silent refresh impossible
+      }
+    }
+
+    if (willRenewAws) {
+      // Defer any GitLab redirect until AWS device approval finishes.
+      set({ awsAutoSelect: true, gitlabReauthPending: gitlabNeedsOAuth });
+      await get().startAwsDevice(sessionId);
+      return;
+    }
+
+    if (gitlabNeedsOAuth) {
+      await get().initiate(sessionId, 'gitlab'); // OAuth redirect — navigates away
+      return;
+    }
+
+    await get().fetchStatus(sessionId);
   },
 
   // OAuth redirect connectors (GitLab). On return the callback page refreshes status.
@@ -132,8 +210,35 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
       set((s) => (s.awsDevice ? { awsDevice: { ...s.awsDevice, status: 'error', detail } } : {}));
       return status;
     }
-    // needs_selection (or connected) → refresh status, close popup, open the modal.
     closeAwsPopup();
+    // Renewal: re-apply the previously-saved account/role selection automatically
+    // instead of opening the manual picker. Falls back to the picker if the saved
+    // selection is no longer valid (backend 400).
+    if (status === 'needs_selection' && get().awsAutoSelect) {
+      try {
+        const aws = await api.awsRenewSelect(sessionId);
+        set((s) => ({ statuses: { ...s.statuses, aws }, awsDevice: null, awsAutoSelect: false }));
+        await get().fetchStatus(sessionId);
+        // AWS is now connected & persisted, so it's safe to navigate away to renew
+        // GitLab (a redirect we deferred until the AWS device approval completed).
+        if (get().gitlabReauthPending) {
+          set({ gitlabReauthPending: false });
+          await get().initiate(sessionId, 'gitlab');
+        }
+      } catch {
+        // Saved selection invalid → manual picker. Surface a deferred GitLab renewal
+        // as a re-auth prompt the user handles after the manual AWS pick.
+        set((s) => ({
+          awsDevice: null,
+          awsAutoSelect: false,
+          awsModalRequested: true,
+          reauthRequired: s.gitlabReauthPending ? 'gitlab' : s.reauthRequired,
+          gitlabReauthPending: false,
+        }));
+      }
+      return status;
+    }
+    // needs_selection (or connected) → refresh status, close popup, open the modal.
     await get().fetchStatus(sessionId);
     set({ awsDevice: null, awsModalRequested: status === 'needs_selection' });
     return status;
@@ -141,7 +246,14 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
 
   clearAwsDevice: () => {
     closeAwsPopup();
-    set({ awsDevice: null });
+    // If a GitLab redirect was queued behind AWS and the user cancels AWS, surface
+    // GitLab for a manual reconnect instead of silently dropping it.
+    set((s) => ({
+      awsDevice: null,
+      awsAutoSelect: false,
+      reauthRequired: s.gitlabReauthPending ? 'gitlab' : s.reauthRequired,
+      gitlabReauthPending: false,
+    }));
   },
 
   clearAwsModalRequest: () => set({ awsModalRequested: false }),
@@ -173,5 +285,8 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
       reauthRequired: null,
       awsDevice: null,
       awsModalRequested: false,
+      renewable: [],
+      awsAutoSelect: false,
+      gitlabReauthPending: false,
     }),
 }));

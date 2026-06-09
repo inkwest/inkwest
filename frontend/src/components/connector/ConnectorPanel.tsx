@@ -59,13 +59,40 @@ export function ConnectorPanel({ sessionId }: Props) {
     activateCoralogix,
     revoke,
     reauthRequired,
+    renewable,
+    fetchRenewable,
+    renewAll,
+    awsAutoSelect,
   } = useConnectorsStore();
   const [busy, setBusy] = useState<ConnectorName | null>(null);
+  const [renewing, setRenewing] = useState(false);
   const [awsModalOpen, setAwsModalOpen] = useState(false);
 
   useEffect(() => {
-    if (sessionId) fetchStatus(sessionId);
-  }, [sessionId, fetchStatus]);
+    if (sessionId) {
+      fetchStatus(sessionId);
+      fetchRenewable(sessionId);
+    }
+  }, [sessionId, fetchStatus, fetchRenewable]);
+
+  const handleRenew = async () => {
+    setRenewing(true);
+    try {
+      await renewAll(sessionId);
+    } finally {
+      setRenewing(false);
+    }
+  };
+
+  // Offer renewal only for previously-granted connectors that aren't currently connected.
+  const canRenew = renewable.some((g) => statuses[g.connector]?.state !== 'connected');
+
+  // While renewing AWS, the device modal shows which accounts/roles will be
+  // re-applied (the saved selection) so the user confirms what's being renewed.
+  const awsRenewProfiles =
+    awsDevice && awsAutoSelect
+      ? (renewable.find((g) => g.connector === 'aws')?.aws_selection?.profiles ?? [])
+      : [];
 
   // Open the AWS selection modal only right after device auth completes (explicit
   // flag) — NOT on every session load from a possibly-stale status.
@@ -161,6 +188,16 @@ export function ConnectorPanel({ sessionId }: Props) {
             </div>
           );
         })}
+        {canRenew && (
+          <button
+            onClick={handleRenew}
+            disabled={renewing}
+            className="ml-1 text-xs px-2 py-1 rounded-md border border-blue-700 text-blue-300 hover:bg-blue-900/30 disabled:opacity-50"
+            title="Re-grant the connectors this session previously had (reuses your AWS account/role selection)"
+          >
+            {renewing ? 'Renewing…' : 'Renew access'}
+          </button>
+        )}
       </div>
 
       {/* AWS device authorization — our own centered modal (the AWS page itself
@@ -185,6 +222,18 @@ export function ConnectorPanel({ sessionId }: Props) {
         ) : (
           awsDevice && (
             <div className="space-y-4 text-sm text-gray-300">
+              {awsRenewProfiles.length > 0 && (
+                <div className="rounded-md border border-gray-700 bg-gray-800/60 p-2">
+                  <div className="text-xs text-gray-400 mb-1">Accès renouvelé&nbsp;:</div>
+                  <ul className="space-y-0.5">
+                    {awsRenewProfiles.map((p) => (
+                      <li key={p.name} className="text-xs text-gray-200">
+                        {p.account_name} <span className="text-gray-500">·</span> {p.role_name}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <p>
                 1. Ouvre la page de vérification AWS, 2. vérifie que le code affiché
                 correspond, puis approuve.
@@ -199,11 +248,14 @@ export function ConnectorPanel({ sessionId }: Props) {
                 <ExternalLink className="h-4 w-4 mr-2" />
                 Ouvrir la page AWS
               </Button>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-500">En attente d'approbation…</span>
+              <div className="flex items-start justify-between gap-2">
+                <div className="text-xs text-gray-500">
+                  En attente d'approbation…
+                  <div>Cette fenêtre se fermera automatiquement une fois l'accès accordé.</div>
+                </div>
                 <button
                   onClick={clearAwsDevice}
-                  className="text-xs text-gray-400 underline hover:text-gray-200"
+                  className="shrink-0 text-xs text-gray-400 underline hover:text-gray-200"
                 >
                   Annuler
                 </button>

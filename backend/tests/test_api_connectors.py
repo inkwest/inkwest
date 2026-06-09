@@ -1,0 +1,218 @@
+"""Tests for the connector renewal routes (/renewable, /gitlab/renew, /aws/renew-select)."""
+
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from httpx import AsyncClient
+
+from app.services.connectors.base import ConnectorError, ConnectorStatus, MintedCredential
+from app.services.connectors.grants import PriorGrant
+
+_SETTINGS = MagicMock(connectors_enabled=True, connector_audit_enabled=False)
+_AWS_SEL = {"profiles": [{"account_id": "111", "role_name": "ReadOnly", "name": "acme-ReadOnly"}]}
+
+
+def _session_lookup(mock_db: AsyncMock, mock_session_obj: MagicMock, owner_id) -> None:
+    """Wire the single _verify_session_owner SELECT(Session) to return an owned session."""
+    mock_session_obj.user_id = owner_id
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+
+
+async def test_renewable_lists_prior_grants(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    grants = [PriorGrant("aws", _AWS_SEL), PriorGrant("gitlab", None)]
+    store = MagicMock(get=AsyncMock(return_value=None))
+
+    def fake_conn(name: str) -> MagicMock:
+        c = MagicMock(type=name)
+        c.public_status.return_value = ConnectorStatus(connector=name, state="not_connected")
+        return c
+
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.derive_prior_grants", AsyncMock(return_value=grants)),
+        patch("app.api.routes.connectors.get_connector", side_effect=fake_conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+    ):
+        resp = await authenticated_client.get(f"/api/connectors/{mock_session_obj.id}/renewable")
+
+    assert resp.status_code == 200
+    by = {d["connector"]: d for d in resp.json()}
+    assert set(by) == {"aws", "gitlab"}
+    assert by["aws"]["aws_selection"] == _AWS_SEL
+    assert by["gitlab"]["aws_selection"] is None
+    assert by["aws"]["live"] is False
+
+
+async def test_renewable_skips_disabled_connector(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch(
+            "app.api.routes.connectors.derive_prior_grants",
+            AsyncMock(return_value=[PriorGrant("gitlab", None)]),
+        ),
+        patch("app.api.routes.connectors.get_connector", return_value=None),  # disabled since grant
+        patch("app.api.routes.connectors.get_credential_store", return_value=MagicMock()),
+    ):
+        resp = await authenticated_client.get(f"/api/connectors/{mock_session_obj.id}/renewable")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_gitlab_renew_success(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    held = MintedCredential(
+        "gitlab", "read", datetime.now(UTC) + timedelta(hours=1), secret={"refresh_token": "r"}
+    )
+    renewed = MintedCredential(
+        "gitlab", "read", datetime.now(UTC) + timedelta(hours=2), secret={"refresh_token": "r2"}
+    )
+    store = MagicMock(get=AsyncMock(return_value=held), put=AsyncMock())
+    conn = MagicMock(type="gitlab", refresh=AsyncMock(return_value=renewed))
+    conn.public_status.return_value = ConnectorStatus(connector="gitlab", state="connected")
+
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/gitlab/renew"
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "connected"
+    conn.refresh.assert_awaited_once_with(held)
+    store.put.assert_awaited_once()
+
+
+async def test_gitlab_renew_409_without_refresh_token(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=None))  # nothing held (evicted)
+    conn = MagicMock(type="gitlab")
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/gitlab/renew"
+        )
+    assert resp.status_code == 409
+
+
+def _aws_provisional() -> MintedCredential:
+    return MintedCredential(
+        "aws",
+        "read",
+        datetime.now(UTC) + timedelta(minutes=10),
+        secret={"sso_access_token": "t"},
+        selection=None,  # provisional → needs_selection
+    )
+
+
+async def test_aws_renew_select_applies_saved_selection(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    connected = MintedCredential(
+        "aws", "read", datetime.now(UTC) + timedelta(hours=1), selection=_AWS_SEL
+    )
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(type="aws", select_account_roles=AsyncMock(return_value=connected))
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.derive_prior_grants",
+            AsyncMock(return_value=[PriorGrant("aws", _AWS_SEL)]),
+        ),
+        patch("app.api.routes.connectors.schedule_session_eks_refresh") as eks,
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/renew-select"
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "connected"
+    _, kwargs = conn.select_account_roles.call_args
+    assert kwargs["selections"] == [{"account_id": "111", "role_name": "ReadOnly"}]
+    eks.assert_called_once()
+
+
+async def test_aws_renew_select_409_no_provisional(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=None))
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=MagicMock(type="aws")),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/renew-select"
+        )
+    assert resp.status_code == 409
+
+
+async def test_aws_renew_select_409_no_saved_selection(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()))
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=MagicMock(type="aws")),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.api.routes.connectors.derive_prior_grants", AsyncMock(return_value=[])),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/renew-select"
+        )
+    assert resp.status_code == 409
+
+
+async def test_aws_renew_select_400_when_selection_no_longer_valid(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws",
+        select_account_roles=AsyncMock(side_effect=ConnectorError("Account/role not authorized")),
+    )
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.derive_prior_grants",
+            AsyncMock(return_value=[PriorGrant("aws", _AWS_SEL)]),
+        ),
+        patch("app.api.routes.connectors.schedule_session_eks_refresh"),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/renew-select"
+        )
+    assert resp.status_code == 400
+
+
+def test_prior_grant_response_has_no_secret_field() -> None:
+    from app.api.routes.connectors import PriorGrantResponse
+
+    assert "secret" not in PriorGrantResponse.model_fields
