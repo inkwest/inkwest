@@ -22,7 +22,7 @@ def _settings(tmp_path):
         sandbox_squid_image="squid:latest",
         sandbox_squid_conf="",
         sandbox_proxy_dns="",
-        sandbox_toolbox_env_file="",
+        sandbox_env_file="",
         sandbox_sessions_root=str(tmp_path),
         sandbox_idle_ttl=1800,
         sandbox_provision_timeout=5,

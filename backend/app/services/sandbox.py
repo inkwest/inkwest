@@ -267,8 +267,8 @@ async def provision(session_id: str) -> Sandbox:
             "--pids-limit",
             str(settings.sandbox_pids_limit),
         ]
-        if settings.sandbox_toolbox_env_file:
-            conv_run += ["--env-file", settings.sandbox_toolbox_env_file]
+        if settings.sandbox_env_file:
+            conv_run += ["--env-file", settings.sandbox_env_file]
         conv_run += [settings.sandbox_toolbox_image, "sleep", "infinity"]
         await _docker(*conv_run, timeout=settings.sandbox_provision_timeout)
     except Exception:

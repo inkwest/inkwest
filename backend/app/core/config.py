@@ -167,10 +167,10 @@ class Settings(BaseSettings):
     # image often can't resolve public names via the host's stub resolver — set this
     # (e.g. 1.1.1.1, as in the POC) when egress fails with DNS errors. Empty = default.
     sandbox_proxy_dns: str = ""
-    # Host path to the toolbox .env — provider-agnostic model-backend creds for the
+    # Host path to the sandbox .env — provider-agnostic model-backend creds for the
     # in-toolbox `claude` (Anthropic API / Bedrock / Vertex / gateway). Mounted into
     # the backend; passed to the conversation container via `docker run --env-file`.
-    sandbox_toolbox_env_file: str = ""
+    sandbox_env_file: str = ""
     # Host root for per-conversation dirs (logs/, home/, workdir/). Bind-mounted into
     # the backend at the same path so it can create the dirs the daemon then binds.
     sandbox_sessions_root: str = "/var/lib/inkwest/sessions"
