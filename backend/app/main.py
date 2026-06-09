@@ -27,6 +27,7 @@ from app.core.logging import AccessLogMiddleware, access_log_config, get_logger,
 from app.core.telemetry import shutdown_telemetry
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
+from app.services.messages import reconcile_interrupted_turns
 from app.services.prompts import ensure_default_system_prompt
 from app.services.pubsub import start_listener, stop_listener
 
@@ -48,7 +49,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Seed the hardcoded system prompt as the DB default on first startup.
     async with async_session_maker() as db:
         await ensure_default_system_prompt(db)
-    logger.info("default_system_prompt_ensured")
+        logger.info("default_system_prompt_ensured")
+        # Recover turns killed mid-flight by the previous shutdown (restart,
+        # rolling deploy, crash): no turn is in flight yet, so any session ending
+        # on an unanswered user message is an interrupted turn — mark it retryable.
+        try:
+            reconciled = await reconcile_interrupted_turns(db)
+            if reconciled:
+                logger.info("reconciled_interrupted_turns", count=reconciled)
+        except Exception:
+            logger.exception("reconcile_interrupted_turns_failed")
     await start_listener()
     logger.info("pubsub_listener_started")
     if settings.oidc_enabled:

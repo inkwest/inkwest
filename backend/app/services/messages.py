@@ -7,10 +7,12 @@ and managing session metadata like titles.
 
 import logging
 import uuid
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.message import Message
 from app.models.session import Session
@@ -159,6 +161,96 @@ async def save_message(
 
     logger.debug(f"Saved {role} message {message.id} to session {session_id}")
     return message
+
+
+# Shown on turns that never produced a reply — killed mid-flight by a server
+# restart, rolling deploy, pod eviction, OOM or crash. Cause-agnostic on
+# purpose: the same dangling state can also follow a turn that errored without
+# persisting anything. Surfaced through the existing retry flow.
+INTERRUPTED_TURN_ERROR = (
+    "The previous response didn't finish (the turn was interrupted). Retry to regenerate it."
+)
+
+
+async def reconcile_interrupted_turns(db: AsyncSession) -> int:
+    """Mark turns left dangling by a process restart as retryable errors.
+
+    A turn persists the user message at the start but the assistant reply only
+    at the end. If the process dies in between — rolling deploy, pod eviction,
+    OOM, crash — the detached turn task is killed without persisting a reply, so
+    the session is left ending on an unanswered ``user`` message (the user
+    "comes back to a question with no answer"; see ``turn_runner``). The
+    in-memory ``turn_runner`` only survives a WS disconnect, not the process
+    dying, so a restart-time sweep is the backstop.
+
+    Marks each such ``user`` message ``error`` + retryable so it surfaces in
+    ``/failed-messages`` and the UI offers a retry instead of silently showing
+    nothing. Idempotent — skips messages already ``error`` and leaves
+    ``retry_count`` untouched (so a re-interrupted retry is re-flagged without
+    losing its attempt count).
+
+    Scope / limitations (detection is structural — it flags any session whose
+    newest row is a ``user`` message with ``status != 'error'`` — so it cannot
+    tell *interrupted* apart from *completed-with-no-persisted-reply*):
+
+    * False positives (currently benign — retry is dormant): the CLI orchestrator
+      only persists an assistant row when the turn produced text or tool calls
+      (see ``orchestrator_cli``), so a turn that completes *empty* leaves a
+      trailing ``user`` row and is wrongly flagged; likewise a turn that errors
+      in-process (``turn_runner`` except path) persists nothing, so a later
+      unrelated restart re-flags it.
+    * False negatives: the streaming API orchestrators persist intermediate
+      ``assistant``/``tool_result`` rows, so one of their turns interrupted
+      mid-tool ends on an ``assistant`` (unanswered ``tool_use``) or
+      ``tool_result`` row and is NOT detected.
+    * The robust fix for both is an explicit per-turn terminal status rather than
+      structural inference.
+    * Assumes no turn is in flight anywhere when it runs. True on a single
+      replica: uvicorn serves no requests until startup completes, so this runs
+      before any turn can start. With multiple replicas — including the
+      transient two-pod overlap of a default RollingUpdate — a starting replica
+      could flag a turn still running on another replica, mislabelling a live
+      turn as failed. Deploy single-replica with strategy ``Recreate`` (or
+      RollingUpdate ``maxSurge: 0``).
+
+    Returns the number of turns reconciled.
+    """
+    # An interrupted turn is a "user" message with nothing newer in its session.
+    # Expressed as an anti-join (NOT EXISTS of a later message). The OR tie-break
+    # can't serve as an index range bound, so Postgres runs this as a hash
+    # anti-join over a full scan of `messages` rather than an indexed probe (per
+    # EXPLAIN) — fine for a one-shot startup sweep, not for a hot path. Portable
+    # across Postgres and SQLite. The id tie-break only matters if created_at
+    # collides (it shouldn't: each message is committed in its own transaction,
+    # so func.now() differs) — kept for correctness, not performance.
+    later = aliased(Message)
+    has_newer = (
+        select(later.id)
+        .where(
+            later.session_id == Message.session_id,
+            or_(
+                later.created_at > Message.created_at,
+                and_(later.created_at == Message.created_at, later.id > Message.id),
+            ),
+        )
+        .exists()
+    )
+
+    result = await db.execute(
+        update(Message)
+        .where(
+            Message.role == "user",
+            Message.status != "error",
+            ~has_newer,
+        )
+        .values(status="error", is_retryable=True, error_message=INTERRUPTED_TURN_ERROR)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+
+    # execute() is typed Result, but a DML statement yields a CursorResult.
+    # The caller (lifespan) logs the count as a structured event.
+    return cast("CursorResult[Any]", result).rowcount or 0
 
 
 async def update_session_title(db: AsyncSession, session_id: str | uuid.UUID, title: str) -> None:
