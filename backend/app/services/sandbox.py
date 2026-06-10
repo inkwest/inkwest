@@ -155,6 +155,20 @@ async def _remove_pair(names: _Names) -> None:
     await _docker("network", "rm", names.int_net, names.ext_net, check=False)
 
 
+async def _check_toolbox_image(image: str) -> None:
+    """Fail fast with an actionable message when the toolbox image is absent.
+
+    Without this, ``docker run`` tries to pull from the private ECR — which dind has
+    no credentials for — and the turn dies on a cryptic auth error.
+    """
+    rc, _, _ = await _docker("image", "inspect", image, check=False)
+    if rc != 0:
+        raise RuntimeError(
+            f"toolbox image {image!r} not found in the sandbox Docker daemon — "
+            "run `make sandbox-pull` to pull it into dind"
+        )
+
+
 async def provision(session_id: str) -> Sandbox:
     """Create the conversation's container pair + networks. Rolls back on failure.
 
@@ -163,9 +177,35 @@ async def provision(session_id: str) -> Sandbox:
     soft teardown).
     """
     settings = get_settings()
+    await _check_toolbox_image(settings.sandbox_toolbox_image)
     sandbox_home = settings.sandbox_home.rstrip("/")
     names = _names(session_id)
     root = session_dir(session_id)
+
+    # Per-session AWS/kube creds projection. When a shared RAM-backed creds volume is
+    # configured, bind-mount THIS session's `<id>/{.aws,kube}` (written by the connector
+    # layer on account/role select) read-only into the container, so the agent's `aws`
+    # finds the granted profiles. The dirs are pre-created here (backend-owned) so the
+    # daemon binds an existing source even before the user grants. Without the volume we
+    # fall back to empty tmpfs (creds simply aren't propagated — API-provider only).
+    creds_root = settings.sandbox_creds_root
+    if creds_root:
+        aws_src = os.path.join(creds_root, session_id, ".aws")
+        kube_src = os.path.join(creds_root, session_id, "kube")
+        # 0755 so the toolbox (a different uid) can traverse to the creds it's granted;
+        # the per-session read-only mount is the isolation boundary. The 0600/0644 files
+        # are written by the connector layer (write_aws_profiles).
+        for path in (aws_src, kube_src):
+            os.makedirs(path, mode=0o755, exist_ok=True)
+            os.chmod(path, 0o755)  # exist_ok skips mode on an existing dir — force it
+        creds_mounts = [
+            "-v",
+            f"{aws_src}:{sandbox_home}/.aws:ro",
+            "-v",
+            f"{kube_src}:{sandbox_home}/.kube:ro",
+        ]
+    else:
+        creds_mounts = ["--tmpfs", f"{sandbox_home}/.aws", "--tmpfs", f"{sandbox_home}/.kube"]
     logs_dir = os.path.join(root, "logs", "squid")
     claude_dir = os.path.join(
         root, "claude"
@@ -220,6 +260,8 @@ async def provision(session_id: str) -> Sandbox:
         ]
         if settings.sandbox_squid_conf:
             proxy_run += ["-v", f"{settings.sandbox_squid_conf}:/etc/squid/squid.conf:ro"]
+        if settings.sandbox_squid_errors:
+            proxy_run += ["-v", f"{settings.sandbox_squid_errors}:/etc/squid/errors:ro"]
         if settings.sandbox_proxy_dns:
             proxy_run += ["--dns", settings.sandbox_proxy_dns]
         proxy_run += [settings.sandbox_squid_image]
@@ -255,11 +297,9 @@ async def provision(session_id: str) -> Sandbox:
             f"{claude_dir}:{sandbox_home}/.claude",
             "-v",
             f"{work_dir}:/workdir",
-            # RAM-only creds location (per-session connector projection is future work).
-            "--tmpfs",
-            f"{sandbox_home}/.aws",
-            "--tmpfs",
-            f"{sandbox_home}/.kube",
+            # RAM-only creds: the session's ~/.aws/~/.kube, bind-mounted from the shared
+            # tmpfs creds volume (or an empty tmpfs when no such volume is configured).
+            *creds_mounts,
             "--cpus",
             settings.sandbox_cpu_limit,
             "--memory",

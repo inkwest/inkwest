@@ -9,6 +9,9 @@ export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const { currentSession, fetchSession, isLoadingSession, consumePendingPrompt } = useSessionsStore();
   const { setMessages, setTodos, resetChat } = useChatStore();
+  // A prompt handed off from the start screen. It seeds the composer (so it stays
+  // visible/recoverable if the WS never connects) and is auto-submitted once
+  // connected — see ChatInput's autoSubmit.
   const [initialPrompt, setInitialPrompt] = useState<string | null>(null);
 
   useEffect(() => {
@@ -59,6 +62,7 @@ export function ChatPage() {
       onSendMessage={handleSend}
       onStopStreaming={stopStreaming}
       initialPrompt={initialPrompt}
+      autoSubmit
       sessionId={sessionId}
     />
   );

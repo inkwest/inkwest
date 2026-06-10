@@ -14,13 +14,13 @@ describe('ChatInput', () => {
 
   it('renders textarea and send button', () => {
     render(<ChatInput onSend={onSend} />);
-    expect(screen.getByPlaceholderText(/kubernetes/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/investigate or analyse/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /send message/i })).toBeInTheDocument();
   });
 
   it('disables inputs when disabled prop is true', () => {
     render(<ChatInput onSend={onSend} disabled />);
-    expect(screen.getByPlaceholderText(/kubernetes/i)).toBeDisabled();
+    expect(screen.getByPlaceholderText(/investigate or analyse/i)).toBeDisabled();
     expect(screen.getByRole('button', { name: /send message/i })).toBeDisabled();
   });
 
@@ -28,7 +28,7 @@ describe('ChatInput', () => {
     const user = userEvent.setup();
     render(<ChatInput onSend={onSend} />);
 
-    const textarea = screen.getByPlaceholderText(/kubernetes/i);
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i);
     await user.type(textarea, 'list pods');
     await user.click(screen.getByRole('button', { name: /send message/i }));
 
@@ -39,7 +39,7 @@ describe('ChatInput', () => {
     const user = userEvent.setup();
     render(<ChatInput onSend={onSend} />);
 
-    const textarea = screen.getByPlaceholderText(/kubernetes/i);
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i);
     await user.type(textarea, 'get nodes{enter}');
 
     expect(onSend).toHaveBeenCalledWith('get nodes');
@@ -49,7 +49,7 @@ describe('ChatInput', () => {
     const user = userEvent.setup();
     render(<ChatInput onSend={onSend} />);
 
-    const textarea = screen.getByPlaceholderText(/kubernetes/i);
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i);
     await user.type(textarea, 'line1{shift>}{enter}{/shift}line2');
 
     expect(onSend).not.toHaveBeenCalled();
@@ -67,7 +67,7 @@ describe('ChatInput', () => {
     const user = userEvent.setup();
     render(<ChatInput onSend={onSend} />);
 
-    const textarea = screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement;
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
     await user.type(textarea, 'message{enter}');
 
     expect(textarea.value).toBe('');
@@ -75,7 +75,7 @@ describe('ChatInput', () => {
 
   it('populates initial prompt', () => {
     render(<ChatInput onSend={onSend} initialPrompt="check pods" />);
-    const textarea = screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement;
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
     expect(textarea.value).toBe('check pods');
   });
 
@@ -87,11 +87,11 @@ describe('ChatInput', () => {
   it('restores a per-session draft after unmount/remount', async () => {
     const user = userEvent.setup();
     const { unmount } = render(<ChatInput onSend={onSend} sessionId="s1" />);
-    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'investigate crashloop');
+    await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'investigate crashloop');
     unmount();
 
     render(<ChatInput onSend={onSend} sessionId="s1" />);
-    expect((screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement).value).toBe(
+    expect((screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement).value).toBe(
       'investigate crashloop'
     );
   });
@@ -99,28 +99,28 @@ describe('ChatInput', () => {
   it('does not leak a draft into a different session', async () => {
     const user = userEvent.setup();
     const { unmount } = render(<ChatInput onSend={onSend} sessionId="s1" />);
-    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'only for s1');
+    await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'only for s1');
     unmount();
 
     render(<ChatInput onSend={onSend} sessionId="s2" />);
-    expect((screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement).value).toBe('');
+    expect((screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement).value).toBe('');
   });
 
   it('clears the saved draft after sending', async () => {
     const user = userEvent.setup();
     const { unmount } = render(<ChatInput onSend={onSend} sessionId="s1" />);
-    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'send me{enter}');
+    await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'send me{enter}');
     expect(onSend).toHaveBeenCalledWith('send me');
     unmount();
 
     render(<ChatInput onSend={onSend} sessionId="s1" />);
-    expect((screen.getByPlaceholderText(/kubernetes/i) as HTMLTextAreaElement).value).toBe('');
+    expect((screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement).value).toBe('');
   });
 
   it('does not send on Enter while a response is streaming', async () => {
     const user = userEvent.setup();
     render(<ChatInput onSend={onSend} isStreaming />);
-    await user.type(screen.getByPlaceholderText(/kubernetes/i), 'second message{enter}');
+    await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'second message{enter}');
     expect(onSend).not.toHaveBeenCalled();
   });
 });

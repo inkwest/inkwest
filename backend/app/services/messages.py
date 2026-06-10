@@ -149,7 +149,9 @@ async def save_message(
         content=normalized_content,
         tool_calls=tool_calls,
         tool_call_id=tool_call_id,
-        token_count=token_count or output_tokens,
+        # Fall back to output_tokens only when token_count is unset; an explicit 0
+        # must be preserved (a falsy `or` would silently swap it for output_tokens).
+        token_count=token_count if token_count is not None else output_tokens,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         thinking_content=thinking_content,

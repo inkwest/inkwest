@@ -11,10 +11,16 @@ interface Props {
   disabled?: boolean;
   isStreaming?: boolean;
   initialPrompt?: string | null;
+  // Submit initialPrompt automatically once the composer is enabled (WS connected).
+  // The text stays in the textarea until then, so it's recoverable if connect fails.
+  autoSubmit?: boolean;
   sessionId?: string;
+  // Centered "start a conversation" variant: taller textarea, no top divider.
+  large?: boolean;
+  placeholder?: string;
 }
 
-export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, sessionId }: Props) {
+export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, autoSubmit, sessionId, large, placeholder }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
   const setDraft = useDraftsStore((s) => s.setDraft);
   const clearDraft = useDraftsStore((s) => s.clearDraft);
@@ -59,6 +65,20 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     }
   };
 
+  // Auto-submit the handed-off prompt once the WS is connected. Only fires for the
+  // untouched seed: if the user has started editing it, we defer to them. If connect
+  // never happens, the text simply stays in the composer (recoverable).
+  const autoSubmittedRef = useRef(false);
+  useEffect(() => {
+    if (!autoSubmit || autoSubmittedRef.current) return;
+    if (disabled || isStreaming) return;
+    if (!initialPrompt || message.trim() !== initialPrompt.trim()) return;
+    autoSubmittedRef.current = true;
+    handleSend();
+    // handleSend reads current message/disabled; this is a guarded one-shot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSubmit, disabled, isStreaming, message, initialPrompt]);
+
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -72,46 +92,64 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     setTimeout(() => textareaRef.current?.focus(), 0);
   };
 
+  // Square corner button sizing for the large "start a conversation" composer.
+  const square = large ? 'h-12 w-12 px-0 shrink-0' : 'px-3';
+  const iconSize = large ? 'h-5 w-5' : 'h-4 w-4';
+
   return (
-    <div className="border-t border-gray-700 p-4">
+    <div className={large ? '' : 'border-t border-gray-700 p-4'}>
+      {/* Large variant anchors the skill library to the NW corner and submit to the
+          SE corner via top-/bottom-aligned side columns, with a tall textarea between. */}
       <div className="flex items-stretch gap-2">
-        <PromptTemplatePalette onSelect={handleSelectTemplate} disabled={disabled} />
+        <div className={large ? 'flex flex-col justify-start' : 'contents'}>
+          <PromptTemplatePalette
+            onSelect={handleSelectTemplate}
+            disabled={disabled}
+            className={large ? square : undefined}
+          />
+        </div>
         <textarea
           ref={textareaRef}
           value={message}
           onChange={(e) => updateMessage(e.target.value)}
           onKeyDown={handleKeyDown}
           autoFocus
-          placeholder="Describe your Kubernetes issue..."
+          placeholder={placeholder ?? 'Describe what you want to investigate or analyse…'}
           disabled={disabled}
           className={cn(
             'flex-1 bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 disabled:opacity-50',
             shimmer && message.trim() && 'shimmer-border',
-            TEXT_SIZE.body(compact),
+            large ? 'text-base' : TEXT_SIZE.body(compact),
           )}
-          rows={1}
+          rows={large ? 6 : 1}
         />
-        {isStreaming ? (
-          <button
-            onClick={onStop}
-            aria-label="Stop"
-            className="flex items-center justify-center px-3 rounded-lg border border-transparent bg-red-600 hover:bg-red-700"
-          >
-            <Square className="h-4 w-4" />
-          </button>
-        ) : (
-          <button
-            onClick={handleSend}
-            aria-label="Send message"
-            disabled={disabled || !message.trim()}
-            className={cn(
-              'flex items-center justify-center px-3 rounded-lg border border-transparent bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed',
-              shimmer && message.trim() && 'animate-flash-btn',
-            )}
-          >
-            <Send className="h-4 w-4" />
-          </button>
-        )}
+        <div className={large ? 'flex flex-col justify-end' : 'contents'}>
+          {isStreaming ? (
+            <button
+              onClick={onStop}
+              aria-label="Stop"
+              className={cn(
+                'flex items-center justify-center rounded-lg border border-transparent bg-red-600 hover:bg-red-700',
+                square,
+              )}
+            >
+              <Square className={iconSize} />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              aria-label="Send message"
+              disabled={disabled || !message.trim()}
+              className={cn(
+                'flex items-center justify-center rounded-lg border border-transparent bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed',
+                square,
+                shimmer && message.trim() && 'animate-flash-btn',
+              )}
+            >
+              <Send className={iconSize} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

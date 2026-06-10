@@ -45,7 +45,10 @@ export function Header() {
         >
           <Menu className="h-5 w-5 text-gray-400" />
         </button>
-        <span className="text-sm font-semibold md:hidden">Inkwest</span>
+        <div className="flex flex-col min-w-0 md:hidden">
+          <span className="text-sm font-semibold leading-tight">Inkwest</span>
+          <span className="text-[10px] text-gray-500 truncate">Secure infrastructure &amp; code assistant</span>
+        </div>
         {currentSession && (
           <div className="flex flex-col min-w-0">
             {currentSession.title && (

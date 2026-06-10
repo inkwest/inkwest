@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     # f"{frontend_url}/api/connectors/callback" when unset.
     connector_redirect_base: str | None = None
 
-    # AWS IAM Identity Center (SSO). Auth code + PKCE -> SSO token -> STS creds.
+    # AWS IAM Identity Center (SSO). Device Authorization Grant -> SSO token -> STS creds.
     aws_sso_enabled: bool = False
     aws_sso_start_url: str | None = None  # https://<org>.awsapps.com/start
     aws_sso_region: str | None = None  # region hosting Identity Center
@@ -163,6 +163,11 @@ class Settings(BaseSettings):
     # (/var/log/squid/access.log), and its allowlist must cover .eks.amazonaws.com +
     # the chosen Claude backend endpoint.
     sandbox_squid_conf: str = ""
+    # Optional host path bind-mounted read-only as the squid error_directory
+    # (/etc/squid/errors): the LLM-parseable error templates in sandbox/errors.
+    # The checked-in squid.conf sets error_directory, so set this whenever
+    # sandbox_squid_conf points at it. Empty = squid's stock pages.
+    sandbox_squid_errors: str = ""
     # Optional resolver for the proxy container (`docker run --dns`). The stock squid
     # image often can't resolve public names via the host's stub resolver — set this
     # (e.g. 1.1.1.1, as in the POC) when egress fails with DNS errors. Empty = default.
@@ -174,6 +179,12 @@ class Settings(BaseSettings):
     # Host root for per-conversation dirs (logs/, home/, workdir/). Bind-mounted into
     # the backend at the same path so it can create the dirs the daemon then binds.
     sandbox_sessions_root: str = "/var/lib/inkwest/sessions"
+    # Root for per-session AWS/kube credentials, on a RAM-backed (tmpfs) volume shared
+    # between the backend and the dind daemon so the daemon can bind-mount each session's
+    # `<id>/.aws` into its conversation container — without the secrets ever touching
+    # disk. When set, it becomes the AWS creds base (see connector_exec._aws_base); empty
+    # falls back to the backend-local /dev/shm projection (no sandbox propagation).
+    sandbox_creds_root: str = ""
     sandbox_idle_ttl: int = 1800  # reap a conversation idle longer than this (s)
     sandbox_provision_timeout: int = 60  # wait for proxy healthy + toolbox up (s)
     sandbox_cpu_limit: str = "1.0"  # docker run --cpus, per container

@@ -147,7 +147,9 @@ services:
       - DOCKER_CERT_PATH=/certs/client
       - SANDBOX_ENV_FILE=/app/sandbox.env  # --env-file read by the docker client here
       - SANDBOX_SQUID_CONF=/etc/inkwest/squid.conf  # -v source resolved by dind (mounted there)
+      - SANDBOX_SQUID_ERRORS=/etc/inkwest/errors  # custom error pages, sibling of the conf
       - SANDBOX_SESSIONS_ROOT=/sandbox/sessions  # the shared named volume
+      - SANDBOX_CREDS_ROOT=/sandbox/creds  # RAM (tmpfs) creds volume, shared with dind
     volumes:
       - ./backend:/app
       - ./app_home/.claude:/home/app/.claude
@@ -155,6 +157,7 @@ services:
       - ${KUBECONFIG_DIR:-./kubeconfigs}:/etc/inkwest/kubeconfigs:ro
       - sandbox-dind-certs:/certs:ro  # read dind's client certs
       - sandbox-sessions:/sandbox/sessions  # same volume as dind -> truly shared
+      - sandbox-creds:/sandbox/creds  # RAM creds, shared with dind (nested -v sources)
     depends_on:
       db:
         condition: service_healthy
@@ -208,9 +211,10 @@ services:
   # can create the per-conversation dirs that dind mounts into the nested containers.
   sandbox-init:
     image: busybox
-    command: ["sh", "-c", "chmod 777 /sandbox/sessions"]
+    command: ["sh", "-c", "chmod 777 /sandbox/sessions /sandbox/creds"]
     volumes:
       - sandbox-sessions:/sandbox/sessions
+      - sandbox-creds:/sandbox/creds
 
   dind:
     image: docker:27-dind
@@ -234,6 +238,7 @@ services:
       - sandbox-dind-certs:/certs  # shared TLS certs (with backend)
       - sandbox-dind-data:/var/lib/docker  # persist dind's image store across restarts
       - sandbox-sessions:/sandbox/sessions  # per-conv dirs (shared with backend; nested -v sources)
+      - sandbox-creds:/sandbox/creds  # per-session RAM creds (shared with backend; nested -v sources)
       # Bind the DIRECTORY (not the single squid.conf file): a single-file bind pins an
       # inode and goes stale if the file is edited, breaking the nested proxy mount.
       - ./sandbox:/etc/inkwest:ro  # /etc/inkwest/squid.conf -> nested -v source
@@ -248,3 +253,11 @@ volumes:
   sandbox-dind-certs:
   sandbox-dind-data:
   sandbox-sessions:
+  # RAM-backed (tmpfs) volume for per-session AWS/kube creds — secrets never touch
+  # disk. Shared by the backend (writes) and dind (bind-mounts each session's subdir
+  # into its conversation container). Cleared on host/daemon restart, like the creds.
+  sandbox-creds:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs

@@ -3,15 +3,18 @@ import { LibraryBig } from 'lucide-react';
 import { Button, Modal } from '@/components/ui';
 import { usePromptTemplatesStore } from '@/store/promptTemplates';
 import { PromptTemplate } from '@/types/api';
+import { cn } from '@/lib/utils';
 
 interface Props {
   // Called with the chosen template's content. The caller decides what to do
   // with it (here: replace the chat input, leaving it editable before send).
   onSelect: (content: string) => void;
   disabled?: boolean;
+  // Override the trigger button styling (e.g. a square corner button).
+  className?: string;
 }
 
-export function PromptTemplatePalette({ onSelect, disabled }: Props) {
+export function PromptTemplatePalette({ onSelect, disabled, className }: Props) {
   const { templates, isLoading, error, fetchTemplates } = usePromptTemplatesStore();
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -50,7 +53,10 @@ export function PromptTemplatePalette({ onSelect, disabled }: Props) {
         disabled={disabled}
         title="Insert a prompt template"
         aria-label="Insert a prompt template"
-        className="flex h-full items-center justify-center px-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+        className={cn(
+          'flex items-center justify-center px-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed',
+          className,
+        )}
       >
         <LibraryBig className="h-4 w-4" />
       </button>
