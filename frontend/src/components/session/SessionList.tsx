@@ -103,9 +103,14 @@ export function SessionList() {
   };
 
   const handleDragOver = (e: React.DragEvent, overId: string) => {
-    if (!draggingId || draggingId === overId) return;
+    if (!draggingId) return;
+    // Always accept while dragging — once the live reorder puts the dragged row
+    // under the cursor, draggingId === overId is the steady state, and Firefox
+    // treats an unaccepted release as an unhandled drop (default handling, no
+    // clean drop) instead of completing the move.
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
+    if (draggingId === overId) return;
     moveSession(draggingId, overId); // live, optimistic reorder
   };
 
@@ -113,6 +118,15 @@ export function SessionList() {
     if (draggingId) persistSessionOrder(); // save the final arrangement once
     setDraggingId(null);
   };
+
+  // A remote sync can delete the dragged session mid-drag; its dragend then
+  // never fires (removed drag sources don't get one), which would leave the
+  // list stuck accepting dragovers for a dead id.
+  useEffect(() => {
+    if (draggingId && !sessions?.some((s) => s.id === draggingId)) {
+      setDraggingId(null);
+    }
+  }, [sessions, draggingId]);
 
   useEffect(() => {
     return () => clearTimeout(debounceRef.current);

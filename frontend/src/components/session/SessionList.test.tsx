@@ -1,12 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { SessionList } from './SessionList';
 import { useSessionsStore } from '@/store/sessions';
 
+// Spread dragHandleProps onto the stub so the drag tests can fire dragstart/
+// dragend on it; dragover/drop land on SessionList's wrapper div via bubbling.
 vi.mock('./SessionItem', () => ({
-  SessionItem: ({ session }: { session: { title?: string; id: string } }) => (
-    <div data-testid={`session-${session.id}`}>{session.title || 'Untitled'}</div>
+  SessionItem: ({
+    session,
+    dragHandleProps,
+  }: {
+    session: { title?: string; id: string };
+    dragHandleProps?: object;
+  }) => (
+    <div data-testid={`session-${session.id}`} {...dragHandleProps}>
+      {session.title || 'Untitled'}
+    </div>
   ),
 }));
 
@@ -81,5 +91,96 @@ describe('SessionList', () => {
     useSessionsStore.setState({ isLoading: false, sessions: [] });
     renderWithRouter();
     expect(screen.getByPlaceholderText(/search all sessions/i)).toBeInTheDocument();
+  });
+
+  describe('drag reorder', () => {
+    const session = (id: string) => ({
+      id,
+      cluster_id: 'c1',
+      title: id,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    const moveSession = vi.fn();
+    const persistSessionOrder = vi.fn();
+    // jsdom has no DataTransfer; fireEvent assigns this stub onto the event.
+    const dataTransfer = () => ({ effectAllowed: '', dropEffect: '', setData: vi.fn() });
+
+    beforeEach(() => {
+      moveSession.mockClear();
+      persistSessionOrder.mockClear();
+      useSessionsStore.setState({
+        sessions: [session('s1'), session('s2'), session('s3')],
+        moveSession,
+        persistSessionOrder,
+      });
+    });
+
+    const startDrag = (id: string) => {
+      const dt = dataTransfer();
+      fireEvent.dragStart(screen.getByTestId(`session-${id}`), { dataTransfer: dt });
+      return dt;
+    };
+
+    it('dragstart marks the drag as a move and sets the session id as payload', () => {
+      renderWithRouter();
+      const dt = startDrag('s1');
+      expect(dt.effectAllowed).toBe('move');
+      expect(dt.setData).toHaveBeenCalledWith('text/plain', 's1');
+    });
+
+    it('dragover another row accepts the drop and live-moves the session', () => {
+      renderWithRouter();
+      startDrag('s1');
+      // fireEvent returns false when preventDefault was called (drop accepted)
+      const accepted = !fireEvent.dragOver(screen.getByTestId('session-s3'), {
+        dataTransfer: dataTransfer(),
+      });
+      expect(accepted).toBe(true);
+      expect(moveSession).toHaveBeenCalledWith('s1', 's3');
+    });
+
+    it('dragover the dragged row itself stays accepted but does not move', () => {
+      renderWithRouter();
+      startDrag('s2');
+      // Steady state after a live move — Firefox needs the target to keep
+      // accepting or it falls back to default unhandled-drop handling.
+      const accepted = !fireEvent.dragOver(screen.getByTestId('session-s2'), {
+        dataTransfer: dataTransfer(),
+      });
+      expect(accepted).toBe(true);
+      expect(moveSession).not.toHaveBeenCalled();
+    });
+
+    it('dragover without an in-app drag (foreign drag) is not accepted', () => {
+      renderWithRouter();
+      const accepted = !fireEvent.dragOver(screen.getByTestId('session-s2'), {
+        dataTransfer: dataTransfer(),
+      });
+      expect(accepted).toBe(false);
+      expect(moveSession).not.toHaveBeenCalled();
+    });
+
+    it('dragend persists the order exactly once', () => {
+      renderWithRouter();
+      startDrag('s1');
+      fireEvent.dragOver(screen.getByTestId('session-s3'), { dataTransfer: dataTransfer() });
+      fireEvent.dragEnd(screen.getByTestId('session-s1'), { dataTransfer: dataTransfer() });
+      expect(persistSessionOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('forgets the drag when the dragged session disappears mid-drag', () => {
+      renderWithRouter();
+      startDrag('s1');
+      // Remote delete arriving via the realtime sync — s1's dragend never fires.
+      act(() => {
+        useSessionsStore.setState({ sessions: [session('s2'), session('s3')] });
+      });
+      const accepted = !fireEvent.dragOver(screen.getByTestId('session-s2'), {
+        dataTransfer: dataTransfer(),
+      });
+      expect(accepted).toBe(false);
+      expect(moveSession).not.toHaveBeenCalled();
+    });
   });
 });
