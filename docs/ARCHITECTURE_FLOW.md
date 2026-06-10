@@ -115,7 +115,7 @@ backend. Voir `app/services/sandbox.py`.
   couvre déjà tous les connecteurs + backends de modèle ; un grant n'ouvre **pas** de
   domaine (pas de reload). `access.log` est monté côté backend → audit egress durable
   + onglet UI.
-- Le backend pilote un daemon **dind** dédié (DooD over TLS) ; provisioning paresseux
+- Le backend pilote un daemon **dind** dédié ; provisioning paresseux
   au 1er message, reaper d'inactivité (TTL), balayage des orphelins au démarrage.
 
 ```mermaid
