@@ -102,7 +102,7 @@ describe('McpPanel', () => {
     expect(btn.className).not.toContain('green');
   });
 
-  it('lists servers with checkboxes in the modal and persists a toggle', async () => {
+  it('persists selected servers only when OK is clicked and then closes the modal', async () => {
     mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab'] });
     mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
     mockSetSession.mockResolvedValue({ enabled: ['coralogix', 'gitlab'] });
@@ -119,9 +119,20 @@ describe('McpPanel', () => {
     expect(gitlab).not.toBeChecked();
 
     fireEvent.click(gitlab);
+    expect(mockSetSession).not.toHaveBeenCalled();
+
+    await waitFor(() =>
+      expect(screen.getByText('2/2 selected')).toBeInTheDocument()
+    );
+
+    expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
 
     await waitFor(() =>
       expect(mockSetSession).toHaveBeenCalledWith('s1', ['coralogix', 'gitlab'])
     );
+    expect(screen.queryByText('Choose which MCP servers this conversation can use.')).not.toBeInTheDocument();
   });
 });

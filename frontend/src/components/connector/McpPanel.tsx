@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Plug } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
+import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
 
@@ -48,8 +49,9 @@ export function McpPanel({
 }: Props) {
   const [catalog, setCatalog] = useState<string[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
+  const [draftEnabled, setDraftEnabled] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState(autoOpen);
-  const [saving, setSaving] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
 
@@ -63,13 +65,16 @@ export function McpPanel({
 
         if (!sessionId) {
           setEnabled(new Set());
+          setDraftEnabled(new Set());
           setExpiresAt(null);
           return;
         }
 
         const sel = await getSessionMcp(sessionId);
         if (!cancelled) {
-          setEnabled(new Set(sel.enabled));
+          const next = new Set(sel.enabled);
+          setEnabled(next);
+          setDraftEnabled(next);
           setExpiresAt(sel.expires_at ?? null);
         }
       } catch {
@@ -82,25 +87,34 @@ export function McpPanel({
     };
   }, [sessionId]);
 
-  const toggle = async (key: string) => {
+  const toggleDraft = (key: string) => {
     if (saving) return;
-    const next = new Set(enabled);
+    const next = new Set(draftEnabled);
     next.has(key) ? next.delete(key) : next.add(key);
+    setDraftEnabled(next);
+  };
 
-    // Optimistic: reflect the toggle immediately, revert on failure.
-    const previous = enabled;
-    setEnabled(next);
-    setSaving(key);
+  const handleClose = () => {
+    setDraftEnabled(new Set(enabled));
+    setError(null);
+    setOpen(false);
+  };
+
+  const applySelection = async () => {
+    if (saving || !sessionId) return;
+    setSaving(true);
     setError(null);
     try {
-      const res = await setSessionMcp(sessionId, [...next]);
-      setEnabled(new Set(res.enabled));
+      const res = await setSessionMcp(sessionId, [...draftEnabled]);
+      const next = new Set(res.enabled);
+      setEnabled(next);
+      setDraftEnabled(next);
       setExpiresAt(res.expires_at ?? null);
+      setOpen(false);
     } catch {
-      setEnabled(previous);
       setError('Failed to update MCP selection');
     } finally {
-      setSaving(null);
+      setSaving(false);
     }
   };
 
@@ -119,7 +133,11 @@ export function McpPanel({
   const handleOpen = async () => {
     if (!hasCatalog) return;
     if (onBeforeOpen) await onBeforeOpen();
-    if (!deferOpen) setOpen(true);
+    if (!deferOpen) {
+      setDraftEnabled(new Set(enabled));
+      setError(null);
+      setOpen(true);
+    }
   };
 
   return (
@@ -175,13 +193,13 @@ export function McpPanel({
         </button>
       )}
 
-      <Modal isOpen={open && hasCatalog} onClose={() => setOpen(false)} title="MCP servers" size="sm">
+      <Modal isOpen={open && hasCatalog} onClose={handleClose} title="MCP servers" size="sm">
         <p className="text-sm text-gray-400 mb-3">
           Choose which MCP servers this conversation can use.
         </p>
         <div className="space-y-1">
           {catalog.map((key) => {
-            const on = enabled.has(key);
+            const on = draftEnabled.has(key);
             return (
               <label
                 key={key}
@@ -190,8 +208,8 @@ export function McpPanel({
                 <input
                   type="checkbox"
                   checked={on}
-                  disabled={saving !== null}
-                  onChange={() => toggle(key)}
+                  disabled={saving}
+                  onChange={() => toggleDraft(key)}
                   className="h-4 w-4 accent-green-600 disabled:opacity-50"
                 />
                 <span className="text-sm text-gray-200">{key}</span>
@@ -204,6 +222,14 @@ export function McpPanel({
         ) : (
           <p className="text-xs text-gray-500 mt-3">Changes apply to the next message.</p>
         )}
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-700 pt-3">
+          <span className="text-xs text-gray-500">
+            {catalog.filter((key) => draftEnabled.has(key)).length}/{catalog.length} selected
+          </span>
+          <Button size="sm" onClick={applySelection} disabled={!sessionId} isLoading={saving}>
+            OK
+          </Button>
+        </div>
       </Modal>
     </>
   );
