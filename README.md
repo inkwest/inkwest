@@ -228,6 +228,7 @@ Access the admin panel at `/admin` (requires admin role):
 - [Authentication](docs/AUTHENTICATION.md) - OIDC auth setup
 - [Database Schema](docs/DATABASE_SCHEMA.md) - Data models
 - [Budget](docs/BUDGET.md) - Usage tracking (informational, non-enforced)
+- [MCP Servers](docs/MCP.md) - Per-conversation MCP selection (catalog + .claude.json merge)
 - [Kubernetes RBAC](docs/KUBERNETES_RBAC_SETUP.md) - K8s access setup
 - [Implementation Plan](docs/IMPLEMENTATION_PLAN.md) - Development phases
 - [Roadmap](docs/ROADMAP.md) - Future development

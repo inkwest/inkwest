@@ -5,6 +5,7 @@ Session management routes.
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -249,6 +250,80 @@ async def update_session(
     await notify({"type": "session_updated", "session_id": str(session.id)})
 
     return SessionResponse.model_validate(session)
+
+
+class SessionMcpResponse(BaseModel):
+    """The MCP catalog keys enabled for a conversation."""
+
+    enabled: list[str]
+
+
+class SessionMcpUpdate(BaseModel):
+    """Set the MCP catalog keys enabled for a conversation."""
+
+    enabled: list[str]
+
+
+async def _load_owned_session(session_id: UUID, user: CurrentUser, db: AsyncSession) -> Session:
+    """Fetch a session and enforce ownership, or raise 404/403."""
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+    await check_session_access(session, user)
+    return session
+
+
+@router.get("/{session_id}/mcp", response_model=SessionMcpResponse)
+async def get_session_mcp(
+    session_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> SessionMcpResponse:
+    """Return the MCP servers enabled for this conversation."""
+    session = await _load_owned_session(session_id, current_user, db)
+    return SessionMcpResponse(enabled=list(session.enabled_mcp_servers or []))
+
+
+@router.put("/{session_id}/mcp", response_model=SessionMcpResponse)
+async def set_session_mcp(
+    session_id: UUID,
+    body: SessionMcpUpdate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> SessionMcpResponse:
+    """
+    Set the MCP servers enabled for this conversation.
+
+    Keys are validated against the catalog (no arbitrary server injection). The
+    selection is persisted and merged into the conversation's .claude.json; it
+    takes effect on the next message (the CLI reads its config at launch).
+    """
+    from app.services.mcp_catalog import catalog_keys
+    from app.services.mcp_config import apply_session_mcp_selection
+
+    session = await _load_owned_session(session_id, current_user, db)
+
+    # Dedupe while preserving order; reject anything not in the catalog.
+    enabled = list(dict.fromkeys(body.enabled))
+    unknown = [k for k in enabled if k not in set(catalog_keys())]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown MCP server key(s): {', '.join(unknown)}",
+        )
+
+    session.enabled_mcp_servers = enabled
+    await db.flush()
+    await db.commit()
+
+    # Reconcile the conversation's .claude.json (no-op in non-sandbox mode).
+    apply_session_mcp_selection(str(session_id), enabled)
+
+    return SessionMcpResponse(enabled=enabled)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

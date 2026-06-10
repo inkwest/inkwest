@@ -26,6 +26,7 @@ from app.services.messages import (
     clear_cli_session_id,
     ensure_session_title,
     get_cli_session_id,
+    get_enabled_mcp_servers,
     save_message,
     set_cli_session_id,
     update_session_stats,
@@ -178,9 +179,15 @@ and any external access listed below."""
         container: str | None = None
         if settings.sandbox_enabled:
             from app.services import sandbox
+            from app.services.mcp_config import apply_session_mcp_selection
 
             container = await sandbox.ensure(session_id_str)
             work_dir = "/workdir"
+            # Reconcile the conversation's enabled MCP servers into its .claude.json
+            # before the CLI starts (the CLI reads its config at launch). Done every
+            # turn so it survives a sandbox rebuild that recreates an empty claude dir.
+            enabled_mcp = await get_enabled_mcp_servers(db, session_id)
+            apply_session_mcp_selection(session_id_str, enabled_mcp)
         else:
             work_dir = f"/tmp/inkwest-sessions/{session_id_str}"
             os.makedirs(work_dir, exist_ok=True)

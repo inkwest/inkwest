@@ -7,6 +7,7 @@ import { useConnectorsStore } from '@/store/connectors';
 import { ConnectorName, ConnectorState } from '@/types/connectors';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 import { ConnectorPermissions } from './ConnectorPermissions';
+import { McpPanel } from './McpPanel';
 import { cn } from '@/lib/utils';
 
 const LABELS: Record<ConnectorName, string> = {
@@ -49,11 +50,14 @@ interface Props {
   // 'inline' (default) packs connectors on one wrapping row (in-conversation header).
   // 'stacked' puts each connector on its own full-width row (start screen).
   layout?: 'inline' | 'stacked';
+  // Open the MCP picker on mount — used by the start screen after it lazily
+  // creates the session from the MCP row (which remounts this panel).
+  autoOpenMcp?: boolean;
 }
 
 // Per-session "Give access" panel for external connectors. Each button is a
 // bounded act of consent; expired credentials prompt a re-grant.
-export function ConnectorPanel({ sessionId, autoStart, layout = 'inline' }: Props) {
+export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOpenMcp = false }: Props) {
   const stacked = layout === 'stacked';
   const {
     statuses,
@@ -243,6 +247,16 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline' }: Prop
           </button>
         )}
         {startError && <span className="text-xs text-red-400">{startError}</span>}
+        {/* MCP selector: a connector-style row in the stacked layout, a compact
+            button (after a divider) on the in-conversation bar. */}
+        {stacked ? (
+          <McpPanel sessionId={sessionId} variant="row" autoOpen={autoOpenMcp} />
+        ) : (
+          <>
+            <span className="mx-1 h-5 w-px bg-gray-700" aria-hidden />
+            <McpPanel sessionId={sessionId} variant="inline" />
+          </>
+        )}
       </div>
 
       {/* AWS device authorization — our own centered modal (the AWS page itself

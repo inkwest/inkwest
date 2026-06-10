@@ -191,6 +191,15 @@ class Settings(BaseSettings):
     sandbox_memory_limit: str = "1g"  # docker run --memory, per container
     sandbox_pids_limit: int = 512  # docker run --pids-limit, per container
 
+    # ==========================================================================
+    # MCP catalog — the set of MCP servers users may enable per conversation.
+    # JSON object {"<key>": "<base64(server-def-json)>"}; each value base64-decodes
+    # to the Claude `mcpServers[<key>]` definition (command/args/env/url…). Kept
+    # server-side: only keys are exposed to the browser, never the definitions or
+    # any secret they embed. Parsed/validated by app.services.mcp_catalog.
+    # ==========================================================================
+    mcp_catalog: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

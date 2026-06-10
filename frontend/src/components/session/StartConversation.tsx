@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Cloud, Gitlab, Activity } from 'lucide-react';
+import { Cloud, Gitlab } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore, useSystemPromptStore } from '@/store/admin';
 import { ConnectorName } from '@/types/connectors';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
+import { McpPanel } from '@/components/connector/McpPanel';
 
 const CUSTOM = '__custom__';
 
@@ -14,7 +15,6 @@ const CUSTOM = '__custom__';
 const PRESESSION_CONNECTORS: { name: ConnectorName; label: string; Icon: typeof Cloud }[] = [
   { name: 'aws', label: 'AWS', Icon: Cloud },
   { name: 'gitlab', label: 'GitLab', Icon: Gitlab },
-  { name: 'coralogix', label: 'Coralogix', Icon: Activity },
 ];
 
 // Centered "ready to start a conversation" surface shown at the session root.
@@ -35,6 +35,7 @@ export function StartConversation() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const creatingRef = useRef<Promise<string> | null>(null);
   const [autoStart, setAutoStart] = useState<ConnectorName | null>(null);
+  const [mcpAutoOpen, setMcpAutoOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -100,6 +101,21 @@ export function StartConversation() {
     }
   };
 
+  // Create the session before the MCP picker opens, so the selection persists.
+  // Creating the session swaps this branch to ConnectorPanel (remounting the MCP
+  // row), so flag autoOpen to reopen the picker on the post-session instance.
+  const handleConfigureMcp = async () => {
+    if (customInvalid) return;
+    setError(null);
+    try {
+      setMcpAutoOpen(true);
+      await ensureSession();
+    } catch (e) {
+      setMcpAutoOpen(false);
+      setError(`Could not start the session: ${(e as Error).message}`);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-3xl space-y-4">
@@ -139,11 +155,16 @@ export function StartConversation() {
           </div>
         )}
 
-        {/* External access — all three connectors, one per row. Once the session
-            exists, hand off to the real status-aware panel (same stacked layout). */}
+        {/* External access + MCP — one row each. Once the session exists, hand off
+            to the real status-aware panel (which renders the MCP row itself). */}
         {sessionId ? (
           <div className="rounded-lg border border-gray-700">
-            <ConnectorPanel sessionId={sessionId} autoStart={autoStart} layout="stacked" />
+            <ConnectorPanel
+              sessionId={sessionId}
+              autoStart={autoStart}
+              layout="stacked"
+              autoOpenMcp={mcpAutoOpen}
+            />
           </div>
         ) : (
           <div className="flex flex-col gap-1 rounded-lg border border-gray-700 bg-gray-900/60 px-4 py-2">
@@ -163,6 +184,15 @@ export function StartConversation() {
                 </button>
               </div>
             ))}
+            {/* MCP servers — same bordered box, lazily creates the session on open.
+                deferOpen: this instance unmounts when the session is created; the
+                post-session ConnectorPanel reopens the picker via autoOpenMcp. */}
+            <McpPanel
+              sessionId={sessionId ?? ''}
+              variant="row"
+              onBeforeOpen={handleConfigureMcp}
+              deferOpen
+            />
           </div>
         )}
 
