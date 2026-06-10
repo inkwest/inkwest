@@ -1,4 +1,7 @@
-.PHONY: dev up down logs reset-db migrate seed test lint site-dev site-build sandbox-pull
+.PHONY: fresh dev up down logs reset-db migrate seed test lint site-dev site-build sandbox-pull
+
+# Full rebuild cycle: tear down, rebuild images, start, migrate, pull sandbox image
+fresh: down build up migrate sandbox-pull
 
 # Development
 dev:
