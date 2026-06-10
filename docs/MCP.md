@@ -3,7 +3,8 @@
 > users enable a per-conversation set of MCP servers from a
 > server-side **catalog**. The selection is merged into the conversation's
 > `.claude.json` so the `claude-cli` agent picks the servers up. Coralogix is the
-> first catalog entry.
+> first integration onboarded — one entry per environment (`Coralogix-<env>`:
+> `coralogix-dev` / `coralogix-staging` / `coralogix-prod`).
 
 ## TL;DR
 
