@@ -115,15 +115,18 @@ async def orchestrate_chat_cli(
         context_info = f"\nKubectl context: {context_name}"
 
     if kubeconfig_path:
+        # One connector among those granted this session — kubectl access via a
+        # statically-selected kubeconfig. Framed as a usage note, consistent with
+        # the external-access section below, not as the agent's whole purpose.
         kube_section = f"""
-CRITICAL KUBECONFIG REQUIREMENT:
+Kubernetes access (one of this session's connectors):
 - Kubeconfig files are stored in /etc/inkwest/kubeconfigs/
 - The kubeconfig for this cluster is: {kubeconfig_path}
-- You MUST use --kubeconfig={kubeconfig_path} with EVERY kubectl command
-- Without this flag, kubectl will fail to connect to the cluster
+- You MUST pass --kubeconfig={kubeconfig_path} on EVERY kubectl command;
+  without it kubectl cannot reach the cluster.
 {context_info}{namespace_context}
 
-Correct usage example:
+Usage example:
   kubectl --kubeconfig={kubeconfig_path} get pods
   kubectl --kubeconfig={kubeconfig_path} get services -n <namespace>
   kubectl --kubeconfig={kubeconfig_path} describe pod <pod-name>
@@ -133,17 +136,19 @@ Correct usage example:
         # clusters and KUBECONFIG points at the generated contexts (details in the
         # external-access section below). Don't claim kubectl is unavailable.
         kube_section = """
-KUBERNETES ACCESS IS AVAILABLE: kubectl is preconfigured with one context per
+Kubernetes access (via EKS): kubectl is preconfigured with one context per
 reachable EKS cluster (see the external access section below for how to use it).
 Do NOT reconfigure kubectl or run `aws eks update-kubeconfig` — the contexts are
 already set up.
 """
     else:
+        # No Kubernetes this session — investigate with whatever other connectors
+        # are granted; the external-access section below lists them.
         kube_section = """
-NO KUBERNETES CLUSTER IS CONFIGURED for this session: kubectl is unavailable
-until a cluster or AWS/EKS access is set up. Rely on any external access listed
-below (e.g. AWS, GitLab, Coralogix) and ask the user to configure cluster access
-if Kubernetes inspection is required.
+No Kubernetes cluster is configured for this session, so kubectl is unavailable.
+Investigate using the other connectors granted below (e.g. AWS, GitLab,
+Coralogix), and ask the user to configure cluster access if Kubernetes
+inspection turns out to be required.
 """
 
     # Persona/behavior comes from the managed system prompt (DB default or admin

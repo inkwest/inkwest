@@ -92,7 +92,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # Create FastAPI application
 app = FastAPI(
     title="Inkwest API",
-    description="AI-powered Kubernetes debugging assistant",
+    description=(
+        "AI-powered investigation assistant brokering read-only access "
+        "across Kubernetes, AWS, GitLab, and Coralogix"
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )
