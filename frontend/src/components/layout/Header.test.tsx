@@ -14,9 +14,9 @@ vi.mock('@/components/chat/ConnectionStatus', () => ({
 const mockCheckAuth = vi.fn();
 const mockLogout = vi.fn();
 
-function renderHeader() {
+function renderHeader(route = '/') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[route]}>
       <Header />
     </MemoryRouter>,
   );
@@ -123,6 +123,18 @@ describe('Header', () => {
     renderHeader();
 
     await user.click(screen.getByTitle('Profile & Settings'));
+    expect(screen.queryByText('Admin Panel')).not.toBeInTheDocument();
+  });
+
+  it('shows back-to-chat link instead of admin link inside the admin panel', async () => {
+    useAuthStore.setState({
+      user: { id: 'u1', email: 'admin@localhost', display_name: 'Admin', is_admin: true, roles: ['admin'], oidc_issuer: '' },
+    });
+    const user = userEvent.setup();
+    renderHeader('/admin/system-prompts');
+
+    await user.click(screen.getByTitle('Profile & Settings'));
+    expect(screen.getByText('Back to Chat')).toBeInTheDocument();
     expect(screen.queryByText('Admin Panel')).not.toBeInTheDocument();
   });
 
