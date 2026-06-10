@@ -36,6 +36,23 @@ FIELD_SELECTOR_PATTERN = re.compile(r"^[\w.]+[=!]=?[\w.-]*$")
 # API version pattern (e.g., 'v1', 'apps/v1', 'networking.k8s.io/v1')
 API_VERSION_PATTERN = re.compile(r"^([a-z0-9.-]+/)?v[0-9]+(alpha[0-9]+|beta[0-9]+)?$")
 
+# Resource kind / field path (e.g., 'pods', 'pod.spec.containers', 'networkpolicies').
+# Must start with a lowercase letter so a flag-shaped value (leading '-') can never
+# reach the kubectl argv as a positional argument. Security: a leading '-'
+# lets a prompt-injected tool call smuggle flags (--kubeconfig=, --raw=) past the
+# read-only proxy boundary.
+RESOURCE_PATTERN = re.compile(r"^[a-z][a-z0-9.-]*$")
+
+# API group (e.g., 'apps', 'networking.k8s.io'). Empty string is the core group but the
+# builder skips empty values, so we only validate non-empty ones here.
+API_GROUP_PATTERN = re.compile(r"^[a-z][a-z0-9.-]*$")
+
+# Comma-separated verb list for api-resources (e.g., 'get,list,watch').
+VERBS_PATTERN = re.compile(r"^[a-z]+(,[a-z]+)*$")
+
+# Container name follows the same DNS-label rules as a resource name.
+CONTAINER_PATTERN = NAME_PATTERN
+
 
 def validate_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str | None:
     """
@@ -50,13 +67,17 @@ def validate_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str | Non
     """
     logger.debug(f"Validating input for {tool_name}: {tool_input}")
 
-    # Validate resource type — RBAC handles access control, we only check kubectl_top constraints
-    resource = tool_input.get("resource", "").lower()
+    # Validate resource type. RBAC handles access control, so we don't allow-list kinds, but the
+    # value lands in the kubectl argv as a positional argument and MUST be flag-shape-safe.
+    # The MCP server names this field 'resource_type' for kubectl_top, so accept both keys.
+    resource = (tool_input.get("resource") or tool_input.get("resource_type") or "").lower()
     if resource:
-        if tool_name == "kubectl_top":
-            if resource not in ALLOWED_TOP_RESOURCES:
-                logger.warning(f"Invalid resource for top command: {resource}")
-                return f"kubectl_top only supports 'pods' or 'nodes', got: {resource}"
+        if not RESOURCE_PATTERN.match(resource):
+            logger.warning(f"Invalid resource value: {resource}")
+            return f"Invalid resource: {resource}"
+        if tool_name == "kubectl_top" and resource not in ALLOWED_TOP_RESOURCES:
+            logger.warning(f"Invalid resource for top command: {resource}")
+            return f"kubectl_top only supports 'pods' or 'nodes', got: {resource}"
 
     # Validate namespace format
     namespace = tool_input.get("namespace")
@@ -105,6 +126,24 @@ def validate_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str | Non
     if api_version and not API_VERSION_PATTERN.match(api_version):
         logger.warning(f"Invalid API version: {api_version}")
         return f"Invalid API version format: {api_version}"
+
+    # Validate container name (lands in argv after '-c')
+    container = tool_input.get("container")
+    if container and not CONTAINER_PATTERN.match(container):
+        logger.warning(f"Invalid container name: {container}")
+        return f"Invalid container name: {container}"
+
+    # Validate api_group (lands in argv after '--api-group')
+    api_group = tool_input.get("api_group")
+    if api_group and not API_GROUP_PATTERN.match(api_group):
+        logger.warning(f"Invalid API group: {api_group}")
+        return f"Invalid API group: {api_group}"
+
+    # Validate verbs (lands in argv after '--verbs')
+    verbs = tool_input.get("verbs")
+    if verbs and not VERBS_PATTERN.match(verbs):
+        logger.warning(f"Invalid verbs value: {verbs}")
+        return f"Invalid verbs: {verbs}"
 
     # Validate output format
     output = tool_input.get("output")
@@ -172,51 +211,3 @@ def validate_label_selector(selector: str) -> str | None:
             return f"Invalid label value: {value}"
 
     return None
-
-
-def sanitize_input(value: str, max_length: int = 253) -> str:
-    """
-    Sanitize a string input by removing potentially dangerous characters.
-
-    Args:
-        value: Input string to sanitize
-        max_length: Maximum allowed length (default 253 for K8s names)
-
-    Returns:
-        Sanitized string
-    """
-    if not value:
-        return ""
-
-    # Truncate to max length
-    value = value[:max_length]
-
-    # Remove any shell metacharacters (extra safety)
-    dangerous_chars = [
-        ";",
-        "|",
-        "&",
-        "$",
-        "`",
-        "(",
-        ")",
-        "{",
-        "}",
-        "[",
-        "]",
-        "<",
-        ">",
-        "!",
-        "*",
-        "?",
-        "~",
-        '"',
-        "'",
-        "\\",
-        "\n",
-        "\r",
-    ]
-    for char in dangerous_chars:
-        value = value.replace(char, "")
-
-    return value

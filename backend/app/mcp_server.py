@@ -11,12 +11,26 @@ Usage:
 Or configure in ~/.claude/mcp.json or project .mcp.json
 """
 
+import importlib.util
 import json
 import logging
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
+
+# Load the validation module directly from its file rather than via `from app.tools.validation
+# import ...`. Importing the `app.tools` package runs its __init__, which eagerly pulls the
+# orchestrator/connector stack and trips a circular import when this standalone server is the
+# entry point (`python -m app.mcp_server`). validation.py is pure (stdlib only), so a direct
+# spec load gives us the shared flag-shape guard without dragging in the rest of the package.
+_validation_path = Path(__file__).parent / "tools" / "validation.py"
+_spec = importlib.util.spec_from_file_location("inkwest_mcp_validation", _validation_path)
+assert _spec and _spec.loader  # narrows Optional for mypy; spec_from_file_location can return None
+_validation = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_validation)
+validate_tool_input = _validation.validate_tool_input
 
 # Configure logging to stderr (stdout is for MCP protocol)
 logging.basicConfig(
@@ -248,6 +262,15 @@ def execute_kubectl(tool_name: str, args: dict[str, Any]) -> tuple[str, bool]:
     Returns:
         Tuple of (output string, is_error bool)
     """
+    # Security: reject flag-shaped / malformed free-string args before they reach
+    # the kubectl argv, otherwise a value like '--kubeconfig=...' or '--raw=...' smuggled as a
+    # resource pivots clusters or bypasses the read-only output allow-list. Shared with the API
+    # path so both kubectl entry points enforce the same boundary.
+    validation_error = validate_tool_input(tool_name, args)
+    if validation_error:
+        logger.warning(f"Validation failed for {tool_name}: {validation_error}")
+        return f"Validation error: {validation_error}", True
+
     kubeconfig = os.environ.get("KUBECONFIG", "")
     context = os.environ.get("KUBECTL_CONTEXT", "")
 
