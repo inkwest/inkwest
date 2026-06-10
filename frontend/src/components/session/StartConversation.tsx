@@ -35,6 +35,7 @@ export function StartConversation() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const creatingRef = useRef<Promise<string> | null>(null);
   const [autoStart, setAutoStart] = useState<ConnectorName | null>(null);
+  const [mcpAutoOpen, setMcpAutoOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -101,12 +102,16 @@ export function StartConversation() {
   };
 
   // Create the session before the MCP picker opens, so the selection persists.
+  // Creating the session swaps this branch to ConnectorPanel (remounting the MCP
+  // row), so flag autoOpen to reopen the picker on the post-session instance.
   const handleConfigureMcp = async () => {
     if (customInvalid) return;
     setError(null);
     try {
+      setMcpAutoOpen(true);
       await ensureSession();
     } catch (e) {
+      setMcpAutoOpen(false);
       setError(`Could not start the session: ${(e as Error).message}`);
     }
   };
@@ -150,11 +155,16 @@ export function StartConversation() {
           </div>
         )}
 
-        {/* External access — all three connectors, one per row. Once the session
-            exists, hand off to the real status-aware panel (same stacked layout). */}
+        {/* External access + MCP — one row each. Once the session exists, hand off
+            to the real status-aware panel (which renders the MCP row itself). */}
         {sessionId ? (
           <div className="rounded-lg border border-gray-700">
-            <ConnectorPanel sessionId={sessionId} autoStart={autoStart} layout="stacked" />
+            <ConnectorPanel
+              sessionId={sessionId}
+              autoStart={autoStart}
+              layout="stacked"
+              autoOpenMcp={mcpAutoOpen}
+            />
           </div>
         ) : (
           <div className="flex flex-col gap-1 rounded-lg border border-gray-700 bg-gray-900/60 px-4 py-2">
@@ -174,15 +184,17 @@ export function StartConversation() {
                 </button>
               </div>
             ))}
+            {/* MCP servers — same bordered box, lazily creates the session on open.
+                deferOpen: this instance unmounts when the session is created; the
+                post-session ConnectorPanel reopens the picker via autoOpenMcp. */}
+            <McpPanel
+              sessionId={sessionId ?? ''}
+              variant="row"
+              onBeforeOpen={handleConfigureMcp}
+              deferOpen
+            />
           </div>
         )}
-
-        {/* MCP servers — selectable per conversation. The session is created
-            lazily when the picker opens (same "en soumsoum" rule as Give access). */}
-        <div className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-900/60 px-4 py-2">
-          <span className="text-xs text-gray-500">MCP servers:</span>
-          <McpPanel sessionId={sessionId ?? ''} onBeforeOpen={handleConfigureMcp} />
-        </div>
 
         {error && (
           <div role="alert" className="rounded-md border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">

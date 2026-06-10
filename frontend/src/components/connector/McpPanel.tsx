@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Plug } from 'lucide-react';
+import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
 
@@ -8,19 +9,34 @@ interface Props {
   // Optional hook run before the modal opens — used on the start screen to
   // lazily create the session (so the selection has somewhere to persist).
   onBeforeOpen?: () => Promise<void> | void;
+  // 'inline' (default): compact button for the in-conversation connector bar.
+  // 'row': full-width connector-style row (start screen, stacked layout).
+  variant?: 'inline' | 'row';
+  // Open the modal as soon as this becomes true. Used to reopen after the start
+  // screen lazily creates the session (which remounts this component).
+  autoOpen?: boolean;
+  // Skip opening here on click (the caller reopens elsewhere, e.g. via autoOpen
+  // on the post-session instance). Avoids a flash on the soon-to-unmount instance.
+  deferOpen?: boolean;
 }
 
 /**
- * Per-conversation MCP selector. A compact "MCP" button (green when at least one
- * server is enabled) opens a modal listing the catalog of available MCP servers,
- * one per line with a checkbox. Toggling persists the selection and re-merges the
- * conversation's .claude.json server-side; it takes effect on the NEXT message
- * (the CLI reads its config at launch).
+ * Per-conversation MCP selector. Opens a modal listing the catalog of available
+ * MCP servers, one per line with a checkbox. Toggling persists the selection and
+ * re-merges the conversation's .claude.json server-side; it takes effect on the
+ * NEXT message (the CLI reads its config at launch). Renders either as a compact
+ * button ('inline') or as a connector-style row ('row').
  */
-export function McpPanel({ sessionId, onBeforeOpen }: Props) {
+export function McpPanel({
+  sessionId,
+  onBeforeOpen,
+  variant = 'inline',
+  autoOpen = false,
+  deferOpen = false,
+}: Props) {
   const [catalog, setCatalog] = useState<string[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(autoOpen);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,23 +89,47 @@ export function McpPanel({ sessionId, onBeforeOpen }: Props) {
 
   const handleOpen = async () => {
     if (onBeforeOpen) await onBeforeOpen();
-    setOpen(true);
+    if (!deferOpen) setOpen(true);
   };
 
   return (
     <>
-      <button
-        onClick={handleOpen}
-        title="Choose which MCP servers this conversation can use"
-        className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-sm border transition-colors ${
-          anyOn
-            ? 'border-green-600 bg-green-900/30 text-green-300'
-            : 'border-gray-700 text-gray-300 hover:bg-gray-800'
-        }`}
-      >
-        <Plug className="h-3.5 w-3.5" />
-        MCP{catalog.length ? ` ${count}/${catalog.length}` : ''}
-      </button>
+      {variant === 'row' ? (
+        // Connector-style full-width row (matches the "External access" rows).
+        <div className="flex w-full items-center justify-between rounded-md px-2 py-1">
+          <div className="flex items-center gap-2">
+            <Plug className="h-4 w-4 text-gray-400" />
+            <span className="text-sm text-gray-200">MCP servers</span>
+            {anyOn ? (
+              <Badge variant="success">
+                {count}/{catalog.length} enabled
+              </Badge>
+            ) : (
+              <Badge variant="default">none</Badge>
+            )}
+          </div>
+          <button
+            onClick={handleOpen}
+            className="text-xs text-blue-400 hover:text-blue-300"
+          >
+            Configure
+          </button>
+        </div>
+      ) : (
+        // Compact button for the in-conversation connector bar.
+        <button
+          onClick={handleOpen}
+          title="Choose which MCP servers this conversation can use"
+          className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-sm border transition-colors ${
+            anyOn
+              ? 'border-green-600 bg-green-900/30 text-green-300'
+              : 'border-gray-700 text-gray-300 hover:bg-gray-800'
+          }`}
+        >
+          <Plug className="h-3.5 w-3.5" />
+          MCP{catalog.length ? ` ${count}/${catalog.length}` : ''}
+        </button>
+      )}
 
       <Modal isOpen={open} onClose={() => setOpen(false)} title="MCP servers" size="sm">
         <p className="text-sm text-gray-400 mb-3">
