@@ -454,6 +454,19 @@ async def get_cli_session_id(db: AsyncSession, session_id: str | uuid.UUID) -> s
     return result.scalar_one_or_none()
 
 
+async def get_enabled_mcp_servers(db: AsyncSession, session_id: str | uuid.UUID) -> list[str]:
+    """
+    Get the catalog keys of MCP servers enabled for this conversation.
+
+    Returns an empty list if the session is unknown or has no selection.
+    """
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+
+    result = await db.execute(select(Session.enabled_mcp_servers).where(Session.id == session_id))
+    return result.scalar_one_or_none() or []
+
+
 async def set_cli_session_id(
     db: AsyncSession, session_id: str | uuid.UUID, cli_session_id: str
 ) -> None:

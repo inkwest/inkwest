@@ -7,6 +7,7 @@ import { useConnectorsStore } from '@/store/connectors';
 import { ConnectorName, ConnectorState } from '@/types/connectors';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 import { ConnectorPermissions } from './ConnectorPermissions';
+import { McpPanel } from './McpPanel';
 
 const LABELS: Record<ConnectorName, string> = {
   aws: 'AWS',
@@ -205,6 +206,8 @@ export function ConnectorPanel({ sessionId }: Props) {
             {renewing ? 'Renewing…' : 'Renew access'}
           </button>
         )}
+        {/* MCP selector, inline on the same bar as the connectors. */}
+        <McpPanel sessionId={sessionId} />
       </div>
 
       {/* AWS device authorization — our own centered modal (the AWS page itself

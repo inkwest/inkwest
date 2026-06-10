@@ -17,6 +17,7 @@ from app.api.routes import (
     connectors,
     egress,
     health,
+    mcp,
     prompt_templates,
     sessions,
     sync,
@@ -150,6 +151,7 @@ app.include_router(sessions.search_router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
+app.include_router(mcp.router, prefix="/api")
 app.include_router(chat.router)  # WebSocket routes (no prefix needed)
 app.include_router(sync.router)  # Session sync WebSocket
 app.include_router(egress.router)  # Per-conversation squid egress log WebSocket

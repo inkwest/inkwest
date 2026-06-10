@@ -7,7 +7,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -115,6 +115,17 @@ class Session(Base, TimestampMixin):
         String(50),
         nullable=True,
         comment="Claude CLI session ID for conversation resumption",
+    )
+
+    # Per-conversation MCP selection: catalog keys (see app.services.mcp_catalog)
+    # the user enabled for this session. Merged into the conversation's
+    # .claude.json mcpServers; persisted so the choice survives reload / --resume.
+    enabled_mcp_servers: Mapped[list[str]] = mapped_column(
+        JSONB,
+        default=list,
+        nullable=False,
+        server_default="[]",
+        comment="Catalog keys of MCP servers enabled for this conversation",
     )
 
     # Interactive flow settings
