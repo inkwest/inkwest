@@ -6,11 +6,36 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.services.prompts import (
+    _LEGACY_SEEDED_PROMPTS,
     SYSTEM_PROMPT,
     ensure_default_system_prompt,
     get_system_prompt,
     resolve_session_system_prompt,
 )
+
+
+def test_base_prompt_is_connector_agnostic() -> None:
+    # the default prompt must not frame Inkwest as Kubernetes-only and
+    # must surface the other connectors generically.
+    assert "investigation assistant" in SYSTEM_PROMPT.lower()
+    assert "specialized in debugging kubernetes" not in SYSTEM_PROMPT.lower()
+    for connector in ("Kubernetes", "AWS", "GitLab", "Coralogix"):
+        assert connector in SYSTEM_PROMPT
+    # kubectl read-only safety constraints are preserved.
+    assert "read-only" in SYSTEM_PROMPT.lower()
+    assert "kubectl" in SYSTEM_PROMPT
+    # Runtime context tokens still present for get_system_prompt() replacement.
+    assert "{cluster_name}" in SYSTEM_PROMPT
+    assert "{namespaces}" in SYSTEM_PROMPT
+
+
+def test_current_prompt_not_treated_as_legacy() -> None:
+    # Guard the migration contract: the live SYSTEM_PROMPT must never appear in the
+    # legacy set, otherwise ensure_default_system_prompt would consider an already
+    # up-to-date Default "refreshable" — and, more importantly, this catches a future
+    # edit to SYSTEM_PROMPT that forgot to append the previous body to the set
+    # (which would silently strand unmodified Defaults on the old wording).
+    assert SYSTEM_PROMPT not in _LEGACY_SEEDED_PROMPTS
 
 
 def test_get_system_prompt_fills_context_from_base() -> None:
@@ -97,9 +122,61 @@ async def test_ensure_default_seeds_when_empty() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_default_is_idempotent() -> None:
+async def test_ensure_default_no_insert_when_rows_exist() -> None:
+    # Non-empty table: never inserts a second Default row.
+    existing = MagicMock()
+    existing.content = SYSTEM_PROMPT  # already current → nothing to refresh
     db = MagicMock()
-    db.scalar = AsyncMock(return_value=1)
+    db.scalar = AsyncMock(side_effect=[1, existing])
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+
+    await ensure_default_system_prompt(db)
+
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_default_reseeds_unmodified_legacy_default() -> None:
+    # Reframe migration: an unmodified, previously-seeded Default gets its body
+    # refreshed in place to the new connector-agnostic prompt.
+    legacy = next(iter(_LEGACY_SEEDED_PROMPTS))
+    row = MagicMock()
+    row.content = legacy
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[1, row])
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+
+    await ensure_default_system_prompt(db)
+
+    assert row.content == SYSTEM_PROMPT
+    db.add.assert_not_called()
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_default_does_not_clobber_admin_edited_default() -> None:
+    # An admin-edited Default body must survive: not in the legacy set → untouched.
+    row = MagicMock()
+    row.content = "Admin-customised prompt body that must not be overwritten."
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[1, row])
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+
+    await ensure_default_system_prompt(db)
+
+    assert row.content == "Admin-customised prompt body that must not be overwritten."
+    db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_default_handles_missing_default_row() -> None:
+    # Rows exist but none named "Default" (admin renamed it): leave everything be.
+    db = MagicMock()
+    db.scalar = AsyncMock(side_effect=[2, None])
     db.add = MagicMock()
     db.commit = AsyncMock()
 

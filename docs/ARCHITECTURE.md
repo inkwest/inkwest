@@ -2,7 +2,7 @@
 
 ## Overview
 
-Inkwest is an AI-powered Kubernetes debugging portal. Users interact with an AI assistant via a chat interface that can execute read-only kubectl commands against selected clusters, search documentation, and help diagnose issues.
+Inkwest is an AI-powered investigation portal. Users interact with an AI assistant via a chat interface that brokers scoped, read-only access across connectors — Kubernetes (kubectl), AWS, GitLab, and Coralogix — to investigate and diagnose issues, search documentation, and correlate findings across systems. Kubernetes is one connector among several, not the portal's sole scope.
 
 ```
  Browser (React/TS)

@@ -1,6 +1,6 @@
 # Inkwest
 
-AI-powered Kubernetes debugging assistant — chat interface backed by Claude that executes read-only kubectl commands.
+AI-powered investigation assistant — chat interface backed by Claude that brokers scoped, read-only access across connectors (Kubernetes/kubectl, AWS, GitLab, Coralogix) to investigate and correlate issues across systems.
 
 ## Tech Stack
 
