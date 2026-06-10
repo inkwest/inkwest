@@ -179,7 +179,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
   const connectors = Object.keys(LABELS) as ConnectorName[];
   // Only render connectors the backend reports (enabled ones).
   const visible = connectors.filter((c) => statuses[c]);
-  if (visible.length === 0) return null;
+  if (visible.length === 0 && !stacked) return null;
 
   return (
     <div className={cn('px-4 py-2 bg-gray-900/60', !stacked && 'border-b border-gray-800')}>
@@ -250,7 +250,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
         {/* MCP selector: a connector-style row in the stacked layout, a compact
             button (after a divider) on the in-conversation bar. */}
         {stacked ? (
-          <McpPanel sessionId={sessionId} variant="row" autoOpen={autoOpenMcp} />
+          <McpPanel sessionId={sessionId} variant="row" autoOpen={autoOpenMcp} showWhenEmpty />
         ) : (
           <>
             <span className="mx-1 h-5 w-px bg-gray-700" aria-hidden />

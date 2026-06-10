@@ -228,18 +228,23 @@ export async function pollAwsDevice(
 }
 
 // MCP catalog + per-conversation selection
+interface SessionMcpSelection {
+  enabled: string[];
+  expires_at?: string | null;
+}
+
 export async function getMcpCatalog(): Promise<{ keys: string[] }> {
   return fetchAPI('/api/mcp/catalog');
 }
 
-export async function getSessionMcp(sessionId: string): Promise<{ enabled: string[] }> {
+export async function getSessionMcp(sessionId: string): Promise<SessionMcpSelection> {
   return fetchAPI(`/api/sessions/${sessionId}/mcp`);
 }
 
 export async function setSessionMcp(
   sessionId: string,
   enabled: string[]
-): Promise<{ enabled: string[] }> {
+): Promise<SessionMcpSelection> {
   return fetchAPI(`/api/sessions/${sessionId}/mcp`, {
     method: 'PUT',
     body: JSON.stringify({ enabled }),

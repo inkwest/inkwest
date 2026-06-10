@@ -120,6 +120,8 @@ services:
       - CORALOGIX_SECRET_ID=${CORALOGIX_SECRET_ID:-}
       - CORALOGIX_SECRET_REGION=${CORALOGIX_SECRET_REGION:-}
       - CORALOGIX_API_ENDPOINT=${CORALOGIX_API_ENDPOINT:-}
+      # MCP catalog exposed to the backend only; the API returns keys, not definitions.
+      - MCP_CATALOG=${MCP_CATALOG:-}
       # Per-conversation Docker sandbox — talk to the dind daemon over TLS (via the
       # `docker` alias, the only name its cert is valid for). These in-container paths are
       # coupled to the mounts below; enable + image/home come from .env (SANDBOX_ENABLED,
