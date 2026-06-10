@@ -101,7 +101,7 @@ app = FastAPI(
     title="Inkwest API",
     description=(
         "AI-powered investigation assistant brokering read-only access "
-        "across Kubernetes, AWS, GitLab, and Coralogix"
+        "across Kubernetes, AWS, and GitLab"
     ),
     version="0.1.0",
     lifespan=lifespan,

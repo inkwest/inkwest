@@ -22,7 +22,6 @@ from app.services.connectors.base import (
 from app.services.connectors.store import CredentialStore
 from app.tools.connector_validation import (
     validate_aws_call,
-    validate_coralogix_query,
     validate_gitlab_api,
 )
 from app.tools.exec_context import ToolExecContext
@@ -50,7 +49,7 @@ def test_minted_credential_repr_hides_secret():
 def test_minted_credential_expiry():
     past = MintedCredential("gitlab", "read", datetime.now(UTC) - timedelta(seconds=1))
     future = MintedCredential("gitlab", "read", datetime.now(UTC) + timedelta(hours=1))
-    none_exp = MintedCredential("coralogix", "read", None)
+    none_exp = MintedCredential("gitlab", "read", None)
     assert past.is_expired() is True
     assert future.is_expired() is False
     assert none_exp.is_expired() is False
@@ -173,12 +172,6 @@ def test_gitlab_validation():
     assert validate_gitlab_api({"path": "projects/1"})  # no leading slash
     assert validate_gitlab_api({"path": "https://evil.com"})  # absolute
     assert validate_gitlab_api({"path": "/a/../../etc"})  # traversal
-
-
-def test_coralogix_validation():
-    assert validate_coralogix_query({"query": "error"}) is None
-    assert validate_coralogix_query({"query": ""})
-    assert validate_coralogix_query({"query": "x", "syntax": "bogus"})
 
 
 # --------------------------------------------------------------------------- #

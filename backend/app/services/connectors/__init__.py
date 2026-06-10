@@ -2,7 +2,7 @@
 External access connectors.
 
 Inkwest acts as a credential *broker*: it mints temporary, scoped credentials for
-external services (AWS, GitLab, Coralogix) on explicit user consent, holds them in
+external services (AWS, GitLab) on explicit user consent, holds them in
 RAM for the lifetime of an investigation session, and injects them into tool
 execution. Secrets never reach the browser, the logs, or the model prompt.
 """

@@ -4,7 +4,7 @@ Connector tool executors.
 Each executor fetches the temporary scoped credential from the in-RAM store using
 the session identity in :class:`ToolExecContext`, then injects it into the outbound
 call — AWS creds via the subprocess **environment** (never argv, so they cannot
-appear in command logs), GitLab/Coralogix via an Authorization header. The model
+appear in command logs), GitLab via an Authorization header. The model
 never sees the credential; it only supplies query parameters.
 """
 
@@ -23,7 +23,6 @@ from app.services.connectors.base import ConnectorType, MintedCredential
 from app.services.connectors.store import get_credential_store
 from app.tools.connector_validation import (
     validate_aws_call,
-    validate_coralogix_query,
     validate_gitlab_api,
 )
 from app.tools.exec_context import ToolExecContext
@@ -39,12 +38,11 @@ _REAUTH_MARKER = "Give access to"
 _TOOL_TO_CONNECTOR: dict[str, ConnectorType] = {
     "aws_call": "aws",
     "gitlab_api": "gitlab",
-    "coralogix_query": "coralogix",
 }
 
 
 def _needs_auth(connector: ConnectorType) -> tuple[str, bool]:
-    label = {"aws": "AWS", "gitlab": "GitLab", "coralogix": "Coralogix"}[connector]
+    label = {"aws": "AWS", "gitlab": "GitLab"}[connector]
     return (
         f"No active {label} access for this session. Ask the user to click "
         f'"{_REAUTH_MARKER} {label}" — the credential may be missing or expired.',
@@ -243,13 +241,6 @@ async def build_connector_env(
         env["GITLAB_BASE_URL"] = get_settings().gitlab_base_url
         injected.append("gitlab")
 
-    coralogix = await store.get(user_id, session_id, "coralogix")
-    if coralogix is not None and coralogix.secret.get("api_key"):
-        env["CORALOGIX_API_KEY"] = coralogix.secret["api_key"]
-        if coralogix.secret.get("endpoint"):
-            env["CORALOGIX_ENDPOINT"] = coralogix.secret["endpoint"]
-        injected.append("coralogix")
-
     return env, injected
 
 
@@ -275,10 +266,6 @@ _CONNECTOR_HINTS: dict[str, str] = {
         "code via the API, e.g. "
         '`curl -s -H "Authorization: Bearer $GITLAB_TOKEN" '
         '"$GITLAB_BASE_URL/api/v4/projects?membership=true&per_page=20"`.'
-    ),
-    "coralogix": (
-        "- Coralogix: a read-only API key is in $CORALOGIX_API_KEY for endpoint "
-        "$CORALOGIX_ENDPOINT. Query logs/metrics/traces via curl against that endpoint."
     ),
 }
 
@@ -386,35 +373,3 @@ async def execute_gitlab(tool_input: dict[str, Any], ctx: ToolExecContext) -> tu
     if resp.status_code >= 400:
         return (f"GitLab API error {resp.status_code}:\n{resp.text}", True)
     return (truncate_output(resp.text, "gitlab_api"), False)
-
-
-async def execute_coralogix(tool_input: dict[str, Any], ctx: ToolExecContext) -> tuple[str, bool]:
-    error = validate_coralogix_query(tool_input)
-    if error:
-        return (f"Validation error: {error}", True)
-
-    cred = await _get_cred(ctx, "coralogix")
-    if cred is None:
-        return _needs_auth("coralogix")
-
-    payload = {
-        "query": str(tool_input["query"]),
-        "metadata": {
-            "syntax": tool_input.get("syntax", "lucene"),
-            "time_range": tool_input.get("time_range", "1h"),
-        },
-    }
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                cred.secret["endpoint"],
-                json=payload,
-                headers={"Authorization": f"Bearer {cred.secret['api_key']}"},
-                timeout=CONNECTOR_TOOL_TIMEOUT,
-            )
-    except httpx.HTTPError as e:
-        return (f"Coralogix request failed: {type(e).__name__}", True)
-
-    if resp.status_code >= 400:
-        return (f"Coralogix API error {resp.status_code}:\n{resp.text}", True)
-    return (truncate_output(resp.text, "coralogix_query"), False)

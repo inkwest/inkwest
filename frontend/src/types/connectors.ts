@@ -1,6 +1,6 @@
 // External access connector types (mirror of backend ConnectorStatusResponse).
 
-export type ConnectorName = 'aws' | 'gitlab' | 'coralogix';
+export type ConnectorName = 'aws' | 'gitlab';
 
 export type ConnectorState =
   | 'not_connected'

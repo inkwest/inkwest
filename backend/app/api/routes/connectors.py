@@ -277,33 +277,6 @@ async def initiate(
     return RedirectResponseModel(redirect_url=url)
 
 
-@router.post("/{session_id}/coralogix/activate", response_model=ConnectorStatusResponse)
-async def activate_coralogix(
-    session_id: str,
-    current_user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-) -> ConnectorStatusResponse:
-    """Activate the fixed read-only Coralogix key for this session."""
-    _require_enabled()
-    sid = await _verify_session_owner(db, session_id, current_user)
-    conn = _get_enabled_connector("coralogix")
-    try:
-        cred = await conn.activate(current_user.id, sid)
-    except ConnectorError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
-    await get_credential_store().put(current_user.id, sid, cred)
-    await _audit(
-        db,
-        user_id=current_user.id,
-        session_id=sid,
-        connector="coralogix",
-        action="grant",
-        cred=cred,
-    )
-    logger.info("connector_granted", extra={"connector": "coralogix", "session_id": str(sid)})
-    return ConnectorStatusResponse.from_status(conn.public_status(cred))
-
-
 @router.get("/callback")
 async def callback(
     state: str = Query(...),

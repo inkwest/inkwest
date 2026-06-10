@@ -21,7 +21,6 @@ const connectorStore = vi.hoisted(() => ({
     openAwsVerification: vi.fn(),
     clearAwsDevice: vi.fn(),
     clearAwsModalRequest: vi.fn(),
-    activateCoralogix: vi.fn(),
     selectAwsRoles: vi.fn(),
     revoke: vi.fn(),
     setReauthRequired: vi.fn(),

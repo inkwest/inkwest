@@ -33,15 +33,6 @@ describe('connectorsStore', () => {
     expect(statuses.gitlab.state).toBe('connected');
   });
 
-  it('updates a single connector status on coralogix activation', async () => {
-    vi.spyOn(api, 'activateCoralogix').mockResolvedValue({
-      connector: 'coralogix',
-      state: 'connected',
-    });
-    await useConnectorsStore.getState().activateCoralogix('sess-1');
-    expect(useConnectorsStore.getState().statuses.coralogix.state).toBe('connected');
-  });
-
   it('clears reauthRequired when the same connector is revoked', async () => {
     useConnectorsStore.getState().setReauthRequired('aws');
     vi.spyOn(api, 'revokeConnector').mockResolvedValue({
@@ -87,19 +78,6 @@ describe('connectorsStore renewal', () => {
     await useConnectorsStore.getState().renewAll('sess-1');
     expect(startAws).not.toHaveBeenCalled();
     expect(useConnectorsStore.getState().awsAutoSelect).toBe(false);
-  });
-
-  it('renewAll re-activates Coralogix silently', async () => {
-    vi.spyOn(api, 'getRenewable').mockResolvedValue([
-      { connector: 'coralogix', live: false, state: 'not_connected' },
-    ]);
-    const activate = vi
-      .spyOn(api, 'activateCoralogix')
-      .mockResolvedValue({ connector: 'coralogix', state: 'connected' });
-    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([]);
-
-    await useConnectorsStore.getState().renewAll('sess-1');
-    expect(activate).toHaveBeenCalledWith('sess-1');
   });
 
   it('renewAll refreshes GitLab silently when possible', async () => {

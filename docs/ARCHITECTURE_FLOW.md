@@ -31,7 +31,7 @@ flowchart TD
     DB[("PostgreSQL<br/>messages, sessions, cli_session_id")]
     MODEL["☁️ API du modèle Claude"]
     K8S["Cluster Kubernetes"]
-    EXT["AWS / GitLab / Coralogix"]
+    EXT["AWS / GitLab"]
 
     U -->|"message (WebSocket)"| WSHOOK
     WSHOOK -->|"ws/chat/&lt;sid&gt; + ticket JWT"| CHAT
@@ -94,9 +94,9 @@ puis renvoie le résultat au modèle (boucle tool-use). Outils scopés, isolatio
 
 ```mermaid
 flowchart LR
-    M["Modèle (API)"] -->|"appel tool<br/>aws_call / gitlab_api / coralogix_query"| D["execute_tool() (dispatch)"]
+    M["Modèle (API)"] -->|"appel tool<br/>aws_call / gitlab_api"| D["execute_tool() (dispatch)"]
     D -->|"lit creds (user, session)"| S[("CredentialStore RAM")]
-    D -->|"injecte secret + exécute"| X["AWS CLI / API GitLab / API Coralogix"]
+    D -->|"injecte secret + exécute"| X["AWS CLI / API GitLab"]
     X -->|"résultat (sans secret)"| M
 ```
 

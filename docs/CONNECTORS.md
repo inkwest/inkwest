@@ -12,7 +12,9 @@ can investigate beyond the cluster. Access is granted by explicit per-session
 |-----------|-----------|----------|-------|
 | **AWS** | STS creds via IAM Identity Center SSO | ~1h | capped by the user's SSO permission sets, read-only verbs only |
 | **GitLab** | OAuth access token (+ refresh) | ~2h | `read_api read_repository` only |
-| **Coralogix** | fixed read-only API key (AWS Secrets Manager) | session | logs + metrics + traces |
+
+> **Coralogix** is no longer a connector. Observability (logs/metrics/traces) is
+> provided per-conversation through the **MCP catalog** — see [MCP.md](MCP.md).
 
 ## Deployment constraint (read this first)
 
@@ -124,32 +126,6 @@ RAM. The AI uses `gitlab_api` (GET-only) against `/api/v4/...`.
 
 ---
 
-## 3. Coralogix (fixed read-only key)
-
-Coralogix has no SSO-derived ephemeral credential, so Inkwest reads a fixed
-read-only API key from **AWS Secrets Manager**. The button only *activates* the key
-for the current session — it is never derived from SSO nor exposed.
-
-### a. Store the key
-Create a Secrets Manager secret holding the Coralogix read-only key. Either a raw
-string, or JSON `{"api_key": "..."}`. Ensure the key covers **logs + metrics +
-traces**. The backend runtime role needs `secretsmanager:GetSecretValue` on it.
-
-### b. Configure Inkwest
-
-```bash
-CORALOGIX_ENABLED=true
-CORALOGIX_SECRET_ID=arn:aws:secretsmanager:eu-west-1:123456789012:secret:coralogix-ro-xxxx
-CORALOGIX_SECRET_REGION=eu-west-1          # defaults to AWS_REGION
-CORALOGIX_API_ENDPOINT=https://api.<domain>.coralogix.com/api/v1/dataprime/query
-```
-
-### c. Flow
-Click **Give access to Coralogix** → key activated for the session. The AI uses
-`coralogix_query` (DataPrime or Lucene).
-
----
-
 ## Isolation & security
 
 - **Per (user, session, connector)**: a credential minted in one session is never
@@ -158,7 +134,7 @@ Click **Give access to Coralogix** → key activated for the session. The AI use
   `dev@localhost`, so isolation is by session only.
 - **Never to the client/model/logs**: REST only returns a secret-free
   `ConnectorStatus`; AWS creds are injected into the subprocess **environment**
-  (never argv); GitLab/Coralogix via an Authorization header at execution time. The
+  (never argv); GitLab via an Authorization header at execution time. The
   model only names a tool + parameters.
 - **Consent is bounded in time**: credentials expire (STS ~1h, GitLab ~2h). On
   expiry a tool returns a `connector_required` event and the UI prompts to re-grant.

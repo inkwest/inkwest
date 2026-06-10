@@ -146,9 +146,9 @@ already set up.
         # are granted; the external-access section below lists them.
         kube_section = """
 No Kubernetes cluster is configured for this session, so kubectl is unavailable.
-Investigate using the other connectors granted below (e.g. AWS, GitLab,
-Coralogix), and ask the user to configure cluster access if Kubernetes
-inspection turns out to be required.
+Investigate using the other connectors granted below (e.g. AWS, GitLab), and ask
+the user to configure cluster access if Kubernetes inspection turns out to be
+required.
 """
 
     # Persona/behavior comes from the managed system prompt (DB default or admin

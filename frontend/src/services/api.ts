@@ -181,9 +181,6 @@ export async function initiateConnector(
   return fetchAPI(`/api/connectors/${sessionId}/${connector}/initiate`, { method: 'POST' });
 }
 
-export async function activateCoralogix(sessionId: string): Promise<ConnectorStatus> {
-  return fetchAPI(`/api/connectors/${sessionId}/coralogix/activate`, { method: 'POST' });
-}
 
 export async function getAwsOptions(
   sessionId: string
