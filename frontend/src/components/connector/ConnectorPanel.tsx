@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Cloud, Gitlab, Activity, ExternalLink, Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
@@ -7,6 +7,7 @@ import { useConnectorsStore } from '@/store/connectors';
 import { ConnectorName, ConnectorState } from '@/types/connectors';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 import { ConnectorPermissions } from './ConnectorPermissions';
+import { cn } from '@/lib/utils';
 
 const LABELS: Record<ConnectorName, string> = {
   aws: 'AWS',
@@ -41,11 +42,19 @@ function StateBadge({ state, expiresAt }: { state: ConnectorState; expiresAt?: s
 
 interface Props {
   sessionId: string;
+  // When set, kick off this connector's grant once its status has loaded.
+  // Used by the start screen: granting access before the first message
+  // silently creates the session, then hands off to this panel.
+  autoStart?: ConnectorName | null;
+  // 'inline' (default) packs connectors on one wrapping row (in-conversation header).
+  // 'stacked' puts each connector on its own full-width row (start screen).
+  layout?: 'inline' | 'stacked';
 }
 
 // Per-session "Give access" panel for external connectors. Each button is a
 // bounded act of consent; expired credentials prompt a re-grant.
-export function ConnectorPanel({ sessionId }: Props) {
+export function ConnectorPanel({ sessionId, autoStart, layout = 'inline' }: Props) {
+  const stacked = layout === 'stacked';
   const {
     statuses,
     fetchStatus,
@@ -127,11 +136,6 @@ export function ConnectorPanel({ sessionId }: Props) {
     };
   }, [awsDevice?.status, sessionId, pollAwsDevice]);
 
-  const connectors = Object.keys(LABELS) as ConnectorName[];
-  // Only render connectors the backend reports (enabled ones).
-  const visible = connectors.filter((c) => statuses[c]);
-  if (visible.length === 0) return null;
-
   const handleClick = async (connector: ConnectorName) => {
     const status = statuses[connector];
     if (connector === 'aws' && status?.state === 'needs_selection') {
@@ -156,10 +160,27 @@ export function ConnectorPanel({ sessionId }: Props) {
     }
   };
 
+  // Auto-start a grant requested before the session existed (start screen).
+  // Wait until the connector's status has loaded so handleClick branches correctly.
+  // Kept above the empty-status early return so the hook order stays stable.
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStart && !autoStartedRef.current && statuses[autoStart]) {
+      autoStartedRef.current = true;
+      void handleClick(autoStart);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, statuses]);
+
+  const connectors = Object.keys(LABELS) as ConnectorName[];
+  // Only render connectors the backend reports (enabled ones).
+  const visible = connectors.filter((c) => statuses[c]);
+  if (visible.length === 0) return null;
+
   return (
-    <div className="px-4 py-2 border-b border-gray-800 bg-gray-900/60">
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-xs text-gray-500 mr-1">External access:</span>
+    <div className={cn('px-4 py-2 bg-gray-900/60', !stacked && 'border-b border-gray-800')}>
+      <div className={cn('flex gap-2', stacked ? 'flex-col items-stretch' : 'items-center flex-wrap')}>
+        <span className={cn('text-xs text-gray-500', stacked ? 'mb-0.5' : 'mr-1')}>External access:</span>
         {visible.map((c) => {
           const status = statuses[c];
           const Icon = ICONS[c];
@@ -168,13 +189,17 @@ export function ConnectorPanel({ sessionId }: Props) {
           return (
             <div
               key={c}
-              className={`group relative flex items-center gap-2 rounded-md px-2 py-1 ${
-                highlight ? 'ring-1 ring-yellow-600' : ''
-              }`}
+              className={cn(
+                'group relative flex items-center gap-2 rounded-md px-2 py-1',
+                highlight && 'ring-1 ring-yellow-600',
+                stacked && 'w-full justify-between',
+              )}
             >
-              <Icon className="h-4 w-4 text-gray-400" />
-              <span className="text-sm text-gray-200">{LABELS[c]}</span>
-              <StateBadge state={status.state} expiresAt={status.expires_at} />
+              <div className="flex items-center gap-2">
+                <Icon className="h-4 w-4 text-gray-400" />
+                <span className="text-sm text-gray-200">{LABELS[c]}</span>
+                <StateBadge state={status.state} expiresAt={status.expires_at} />
+              </div>
 
               {/* Hover popup: what this connector currently grants (secret-free). */}
               <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-60 rounded-md border border-gray-700 bg-gray-800 p-2 text-xs shadow-lg group-hover:block">

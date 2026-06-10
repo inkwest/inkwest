@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSessionsStore } from '@/store/sessions';
 import { Cluster } from '@/types/api';
 import * as api from '@/services/api';
+import { StartConversation } from '@/components/session/StartConversation';
 
 function parseHash(): { cluster?: string; q?: string } {
   const raw = window.location.hash.replace(/^#/, '');
@@ -113,9 +114,5 @@ export function NewSessionPage() {
     );
   }
 
-  return (
-    <div className="flex-1 flex items-center justify-center">
-      <p className="text-gray-500">Select a cluster to start debugging</p>
-    </div>
-  );
+  return <StartConversation />;
 }
