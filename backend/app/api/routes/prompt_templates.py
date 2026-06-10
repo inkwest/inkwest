@@ -137,5 +137,7 @@ async def delete_prompt_template(
             detail=f"Prompt template with ID '{template_id}' not found",
         )
 
-    template.is_active = False
+    # Hard delete: deactivation is already covered by PATCH is_active, and a
+    # soft-deleted row would keep the unique name taken forever (409 on re-create).
+    await db.delete(template)
     await db.flush()

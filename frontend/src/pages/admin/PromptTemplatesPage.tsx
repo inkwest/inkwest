@@ -97,7 +97,7 @@ export function PromptTemplatesPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm('Are you sure you want to deactivate this template?')) {
+    if (confirm('Are you sure you want to permanently delete this template?')) {
       await deleteTemplate(id);
     }
   };

@@ -23,7 +23,7 @@ Table `inkwest.prompt_templates` (see [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md)):
 | `name` | VARCHAR(255) | unique, indexed — shown in the palette |
 | `content` | TEXT | the prompt body; may contain `__________` blanks |
 | `description` | TEXT, nullable | optional, shown as a hint |
-| `is_active` | BOOLEAN, default `true` | soft-delete / hide flag |
+| `is_active` | BOOLEAN, default `true` | enable/disable flag (palette visibility) |
 | `created_at` / `updated_at` | TIMESTAMPTZ | `TimestampMixin` |
 
 SQLAlchemy model: `backend/app/models/prompt_template.py`.
@@ -40,7 +40,7 @@ Reads require authentication; writes require admin (same dependency pattern as c
 | `POST` | `/api/prompt-templates` | admin | Create (409 if `name` exists) |
 | `GET` | `/api/prompt-templates/{id}` | user | Fetch one (404 if missing) |
 | `PATCH` | `/api/prompt-templates/{id}` | admin | Update; renaming to a taken `name` → 409 |
-| `DELETE` | `/api/prompt-templates/{id}` | admin | Soft-delete (`is_active = false`) → 204 |
+| `DELETE` | `/api/prompt-templates/{id}` | admin | Hard delete (row removed, name freed) → 204 |
 
 Schemas: `PromptTemplate{Base,Create,Update,Response,List}` in `backend/app/models/schemas.py`.
 
