@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  wsBaseUrl,
   getClusters,
   createCluster,
   getSessions,
@@ -185,5 +186,34 @@ describe('error handling', () => {
     );
 
     await expect(getClusters()).rejects.toThrow('API error: 502');
+  });
+});
+
+describe('wsBaseUrl', () => {
+  const env = import.meta.env as Record<string, string | undefined>;
+  const original = env.VITE_WS_URL;
+
+  afterEach(() => {
+    if (original === undefined) {
+      delete env.VITE_WS_URL;
+    } else {
+      env.VITE_WS_URL = original;
+    }
+  });
+
+  it('returns the configured URL when VITE_WS_URL is set', () => {
+    env.VITE_WS_URL = 'wss://chat.example.com';
+    expect(wsBaseUrl()).toBe('wss://chat.example.com');
+  });
+
+  it('derives a same-origin URL when VITE_WS_URL is empty (combined image)', () => {
+    env.VITE_WS_URL = '';
+    const expected = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
+    expect(wsBaseUrl()).toBe(expected);
+  });
+
+  it('falls back to the dev backend when VITE_WS_URL is unset', () => {
+    delete env.VITE_WS_URL;
+    expect(wsBaseUrl()).toBe('ws://localhost:8000');
   });
 });

@@ -183,9 +183,34 @@ kubepanion/
 │       ├── services/        # API clients
 │       └── types/           # TypeScript types
 ├── docs/                    # Documentation
-├── deploy/                  # Kubernetes manifests
-└── docker-compose.yml       # Local development setup
+├── Dockerfile               # Combined production image (backend + built SPA)
+├── docker-compose.yml       # Local development setup (hot reload, 2 containers)
+└── docker-compose.prod.yml  # Production-style setup (single combined image)
 ```
+
+## Deployment
+
+Production ships as a **single combined image** built from the root `Dockerfile`:
+
+- Stage 1 builds the frontend (`npm run build`) with `VITE_API_URL=""` / `VITE_WS_URL=""` → the SPA uses same-origin URLs
+- Stage 2 is the FastAPI backend, with the built SPA baked into `/app/static`
+- FastAPI serves everything on port 8000: SPA (with `index.html` fallback for client-side routes), REST API, WebSockets — plus gzip and the browser security headers nginx used to add
+- Unknown `/api/*`, `/assets/*`, `/ws/*` paths return real 404s (no SPA fallback)
+
+CI builds and pushes one `inkwest` image. Test locally with
+[`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) or plain `docker build .`.
+
+Database migrations run separately (init container / Job pattern):
+
+```bash
+docker run --rm -e DATABASE_URL=... --entrypoint /app/entrypoint-migrate.sh <image>
+```
+
+Note: migrations create tables in the `inkwest` PostgreSQL schema — the app role
+needs it on its search_path (`ALTER ROLE <user> SET search_path = inkwest, public`).
+
+Dev is unchanged: `docker-compose.yml` runs vite (hot reload) + uvicorn `--reload`
+as two containers from `frontend/Dockerfile` and `backend/Dockerfile`.
 
 ## Available Tools
 

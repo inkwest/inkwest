@@ -70,3 +70,6 @@ temp/
 # Coverage reports
 frontend/coverage/
 backend/htmlcov/
+
+# gitlab-ci-local cache
+.gitlab-ci-local/

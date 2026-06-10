@@ -2,9 +2,9 @@ import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSessionsStore } from '@/store/sessions';
 import { useChatStore } from '@/store/chat';
-import { fetchWsTicket } from '@/services/api';
+import { fetchWsTicket, wsBaseUrl } from '@/services/api';
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const WS_URL = wsBaseUrl();
 const RECONNECT_DELAY = 3000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const PING_INTERVAL = 30000;

@@ -13,6 +13,15 @@ __pycache__/
 *.py[cod]
 .env
 .env.*
+# Patterns without a leading **/ only match at the context root; the combined
+# image builds from the repo root so per-subdir junk must be excluded too.
+**/.venv/
+**/node_modules/
+**/__pycache__/
+**/dist/
+**/.env
+**/.env.*
+!**/.env.example
 *.log
 .DS_Store
 .idea/

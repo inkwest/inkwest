@@ -1,6 +1,18 @@
 import { Cluster, Message, PromptTemplate, SearchResponse, Session, SessionWithMessages } from '@/types/api';
 
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// `??` not `||`: '' (set but empty) means same-origin — the combined prod
+// image serves the SPA from FastAPI itself, so relative URLs must survive.
+export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+
+export function wsBaseUrl(): string {
+  const configured = import.meta.env.VITE_WS_URL;
+  if (configured) return configured;
+  if (configured === '') {
+    // Same-origin: derive from the page; WebSocket() rejects relative URLs.
+    return `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
+  }
+  return 'ws://localhost:8000';
+}
 
 function getAuthHeaders(): HeadersInit {
   const token = localStorage.getItem('session_token');

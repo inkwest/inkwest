@@ -4,10 +4,17 @@ Inkwest Backend - FastAPI Application
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import FileResponse, Response
+from starlette.types import Scope
 
 from app.api.routes import (
     admin,
@@ -157,11 +164,64 @@ app.include_router(sync.router)  # Session sync WebSocket
 app.include_router(egress.router)  # Per-conversation squid egress log WebSocket
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    """Root endpoint."""
-    return {
-        "name": "Inkwest API",
-        "version": "0.1.0",
-        "docs": "/docs",
-    }
+class SPAStaticFiles(StaticFiles):
+    """Static files with index.html fallback so client-side routes resolve on reload."""
+
+    # Never fall back for these: a missing API endpoint must stay a 404 (version
+    # skew during rolling deploys would otherwise surface as JSON-parse errors
+    # client-side), and a purged hashed asset must not come back as text/html.
+    NO_FALLBACK_PREFIXES = ("api/", "assets/", "ws/")
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or path.startswith(self.NO_FALLBACK_PREFIXES):
+                raise
+            response = await super().get_response("index.html", scope)
+        # index.html must revalidate on every load: hashed asset names change per
+        # deploy, and a heuristically-cached index would reference purged bundles.
+        if isinstance(response, FileResponse) and response.path.endswith("index.html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def mount_spa(app: FastAPI, static_dir: Path) -> bool:
+    """Serve the built frontend from static_dir; no-op if it doesn't exist."""
+    if not static_dir.is_dir():
+        return False
+    app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="spa")
+    return True
+
+
+# The combined prod image bakes the built frontend into ./static; in dev the
+# dir doesn't exist (vite serves the SPA) so the API-info root is kept instead.
+if mount_spa(app, Path(__file__).resolve().parent.parent / "static"):
+    # Compensate what nginx provided in the split-image layout: response
+    # compression and browser security headers (CSP kept in sync with the
+    # values previously set in frontend/nginx.conf).
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; connect-src 'self' ws: wss:; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+        )
+        return response
+
+else:
+
+    @app.get("/")
+    async def root() -> dict[str, str]:
+        """Root endpoint."""
+        return {
+            "name": "Inkwest API",
+            "version": "0.1.0",
+            "docs": "/docs",
+        }
