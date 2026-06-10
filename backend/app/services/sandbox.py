@@ -181,6 +181,31 @@ async def provision(session_id: str) -> Sandbox:
     sandbox_home = settings.sandbox_home.rstrip("/")
     names = _names(session_id)
     root = session_dir(session_id)
+
+    # Per-session AWS/kube creds projection. When a shared RAM-backed creds volume is
+    # configured, bind-mount THIS session's `<id>/{.aws,kube}` (written by the connector
+    # layer on account/role select) read-only into the container, so the agent's `aws`
+    # finds the granted profiles. The dirs are pre-created here (backend-owned) so the
+    # daemon binds an existing source even before the user grants. Without the volume we
+    # fall back to empty tmpfs (creds simply aren't propagated — API-provider only).
+    creds_root = settings.sandbox_creds_root
+    if creds_root:
+        aws_src = os.path.join(creds_root, session_id, ".aws")
+        kube_src = os.path.join(creds_root, session_id, "kube")
+        # 0755 so the toolbox (a different uid) can traverse to the creds it's granted;
+        # the per-session read-only mount is the isolation boundary. The 0600/0644 files
+        # are written by the connector layer (write_aws_profiles).
+        for path in (aws_src, kube_src):
+            os.makedirs(path, mode=0o755, exist_ok=True)
+            os.chmod(path, 0o755)  # exist_ok skips mode on an existing dir — force it
+        creds_mounts = [
+            "-v",
+            f"{aws_src}:{sandbox_home}/.aws:ro",
+            "-v",
+            f"{kube_src}:{sandbox_home}/.kube:ro",
+        ]
+    else:
+        creds_mounts = ["--tmpfs", f"{sandbox_home}/.aws", "--tmpfs", f"{sandbox_home}/.kube"]
     logs_dir = os.path.join(root, "logs", "squid")
     claude_dir = os.path.join(
         root, "claude"
@@ -272,11 +297,9 @@ async def provision(session_id: str) -> Sandbox:
             f"{claude_dir}:{sandbox_home}/.claude",
             "-v",
             f"{work_dir}:/workdir",
-            # RAM-only creds location (per-session connector projection is future work).
-            "--tmpfs",
-            f"{sandbox_home}/.aws",
-            "--tmpfs",
-            f"{sandbox_home}/.kube",
+            # RAM-only creds: the session's ~/.aws/~/.kube, bind-mounted from the shared
+            # tmpfs creds volume (or an empty tmpfs when no such volume is configured).
+            *creds_mounts,
             "--cpus",
             settings.sandbox_cpu_limit,
             "--memory",

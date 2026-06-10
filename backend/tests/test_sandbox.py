@@ -6,6 +6,7 @@ All Docker interaction is mocked (``sandbox._docker`` / ``_is_running`` /
 """
 
 import asyncio
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -25,6 +26,7 @@ def _settings(tmp_path):
         sandbox_proxy_dns="",
         sandbox_env_file="",
         sandbox_sessions_root=str(tmp_path),
+        sandbox_creds_root="",
         sandbox_idle_ttl=1800,
         sandbox_provision_timeout=5,
         sandbox_cpu_limit="1.0",
@@ -187,6 +189,37 @@ async def test_provision_rolls_back_on_failure(tmp_path):
 
     # Pre-clean + rollback each remove the pair -> at least two `rm -f` invocations.
     assert sum(1 for a in calls if a[0] == "rm") >= 2
+
+
+@pytest.mark.asyncio
+async def test_provision_binds_shared_creds_volume(tmp_path):
+    """With a creds volume configured, the conversation container bind-mounts this
+    session's `<id>/{.aws,kube}` read-only (instead of an empty tmpfs), and the source
+    dirs are pre-created so the daemon binds an existing path before the user grants."""
+    settings = _settings(tmp_path)
+    settings.sandbox_creds_root = str(tmp_path / "creds")
+    conv_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        if args[0] == "run" and settings.sandbox_toolbox_image in args:
+            conv_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+    ):
+        await sandbox.provision("sid")
+
+    aws_src = str(tmp_path / "creds" / "sid" / ".aws")
+    kube_src = str(tmp_path / "creds" / "sid" / "kube")
+    assert f"{aws_src}:/home/sandbox/.aws:ro" in conv_run
+    assert f"{kube_src}:/home/sandbox/.kube:ro" in conv_run
+    assert "--tmpfs" not in conv_run  # bind mounts replace the empty tmpfs
+    # Source dirs exist and are traversable by the toolbox's (differing) uid.
+    assert os.path.isdir(aws_src) and (os.stat(aws_src).st_mode & 0o777) == 0o755
+    assert os.path.isdir(kube_src)
 
 
 @pytest.mark.asyncio

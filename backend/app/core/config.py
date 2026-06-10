@@ -179,6 +179,12 @@ class Settings(BaseSettings):
     # Host root for per-conversation dirs (logs/, home/, workdir/). Bind-mounted into
     # the backend at the same path so it can create the dirs the daemon then binds.
     sandbox_sessions_root: str = "/var/lib/inkwest/sessions"
+    # Root for per-session AWS/kube credentials, on a RAM-backed (tmpfs) volume shared
+    # between the backend and the dind daemon so the daemon can bind-mount each session's
+    # `<id>/.aws` into its conversation container — without the secrets ever touching
+    # disk. When set, it becomes the AWS creds base (see connector_exec._aws_base); empty
+    # falls back to the backend-local /dev/shm projection (no sandbox propagation).
+    sandbox_creds_root: str = ""
     sandbox_idle_ttl: int = 1800  # reap a conversation idle longer than this (s)
     sandbox_provision_timeout: int = 60  # wait for proxy healthy + toolbox up (s)
     sandbox_cpu_limit: str = "1.0"  # docker run --cpus, per container
