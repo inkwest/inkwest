@@ -28,7 +28,7 @@ Table `inkwest.system_prompts` (see [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md)):
 | `name` | VARCHAR(255) | unique, indexed |
 | `content` | TEXT | prompt body; may contain `{cluster_name}` / `{namespaces}` blanks |
 | `description` | TEXT, nullable | optional |
-| `is_active` | BOOLEAN, default `true` | soft-delete / hide flag |
+| `is_active` | BOOLEAN, default `true` | enable/disable flag (selector visibility) |
 | `is_default` | BOOLEAN, default `false` | the prompt non-admins get |
 | `created_at` / `updated_at` | TIMESTAMPTZ | `TimestampMixin` |
 
@@ -73,7 +73,7 @@ Reads require authentication; writes require admin (same dependency pattern as c
 | `POST` | `/api/system-prompts` | admin | Create (409 if `name` exists); `is_default=true` demotes the previous default |
 | `GET` | `/api/system-prompts/{id}` | user | Fetch one (404 if missing) |
 | `PATCH` | `/api/system-prompts/{id}` | admin | Update; promote default; rename collision → 409 |
-| `DELETE` | `/api/system-prompts/{id}` | admin | Soft-delete (`is_active=false`) → 204 |
+| `DELETE` | `/api/system-prompts/{id}` | admin | Hard delete (row removed, name freed; sessions fall back via `ON DELETE SET NULL`) → 204 |
 
 Default-invariant rules enforced by the API:
 
