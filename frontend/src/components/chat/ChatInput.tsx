@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, KeyboardEvent } from 'react';
 import { Send, Square } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
+import { useChatStore } from '@/store/chat';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 import { PromptTemplatePalette } from './PromptTemplatePalette';
 
@@ -33,6 +34,12 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const initialPromptApplied = useRef(false);
   const [shimmer, setShimmer] = useState(false);
+  const [focused, setFocused] = useState(false);
+  // "Invite to prompt": rotating-gradient border on a pristine new conversation.
+  // The start screen (large) is new by definition — the chat store may still hold
+  // the previous session's messages there, since resetChat only runs in ChatPage.
+  const noMessages = useChatStore((s) => s.messages.length === 0);
+  const inviteToPrompt = (large || noMessages) && !message.trim() && !focused;
 
   // Mirror edits into the persisted draft store keyed by session.
   const updateMessage = (value: string) => {
@@ -113,12 +120,15 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           value={message}
           onChange={(e) => updateMessage(e.target.value)}
           onKeyDown={handleKeyDown}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           autoFocus
           placeholder={placeholder ?? 'Describe what you want to investigate or analyse…'}
           disabled={disabled}
           className={cn(
-            'flex-1 bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 disabled:opacity-50',
+            'flex-1 bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 focus:shadow-[0_0_12px_rgba(59,130,246,0.3)] disabled:opacity-50',
             shimmer && message.trim() && 'shimmer-border',
+            inviteToPrompt && 'invite-border',
             large ? 'text-base' : TEXT_SIZE.body(compact),
           )}
           rows={large ? 6 : 1}

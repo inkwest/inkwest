@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatInput } from './ChatInput';
 import { useDraftsStore } from '@/store/drafts';
+import { useChatStore } from '@/store/chat';
+import { Message } from '@/types/api';
 
 describe('ChatInput', () => {
   const onSend = vi.fn();
@@ -10,6 +12,7 @@ describe('ChatInput', () => {
   beforeEach(() => {
     onSend.mockClear();
     useDraftsStore.setState({ drafts: {} });
+    useChatStore.setState({ messages: [] });
   });
 
   it('renders textarea and send button', () => {
@@ -122,5 +125,60 @@ describe('ChatInput', () => {
     render(<ChatInput onSend={onSend} isStreaming />);
     await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'second message{enter}');
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  describe('invite-to-prompt border', () => {
+    const existingMessage: Message = {
+      id: 'm1',
+      session_id: 's1',
+      role: 'user',
+      content: 'previous question',
+      created_at: '2026-01-01T00:00:00Z',
+    };
+
+    const getTextarea = () => screen.getByPlaceholderText(/investigate or analyse/i);
+
+    it('shows the animated invite border on a new conversation when empty and unfocused', () => {
+      render(<ChatInput onSend={onSend} />);
+      const textarea = getTextarea();
+      // autoFocus focuses the composer on mount; the invite only shows once blurred.
+      fireEvent.blur(textarea);
+      expect(textarea).toHaveClass('invite-border');
+    });
+
+    it('drops the invite border on focus, leaving only the static glow', () => {
+      render(<ChatInput onSend={onSend} />);
+      const textarea = getTextarea();
+      fireEvent.blur(textarea);
+      fireEvent.focus(textarea);
+      expect(textarea).not.toHaveClass('invite-border');
+      expect(textarea.className).toContain('focus:shadow-');
+    });
+
+    it('keeps the normal border when unfocused with text present', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      const textarea = getTextarea();
+      await user.type(textarea, 'draft in progress');
+      fireEvent.blur(textarea);
+      expect(textarea).not.toHaveClass('invite-border');
+    });
+
+    it('keeps the normal border when the conversation already has messages', () => {
+      useChatStore.setState({ messages: [existingMessage] });
+      render(<ChatInput onSend={onSend} />);
+      const textarea = getTextarea();
+      fireEvent.blur(textarea);
+      expect(textarea).not.toHaveClass('invite-border');
+    });
+
+    it('invites on the start screen even when the store holds a stale session', () => {
+      // resetChat only runs in ChatPage, so the start screen can see old messages.
+      useChatStore.setState({ messages: [existingMessage] });
+      render(<ChatInput onSend={onSend} large />);
+      const textarea = getTextarea();
+      fireEvent.blur(textarea);
+      expect(textarea).toHaveClass('invite-border');
+    });
   });
 });
