@@ -33,6 +33,7 @@ pre-commit run --all-files
 - **Real-time sync**: PostgreSQL `LISTEN/NOTIFY` → `pubsub.py` → per-WS `asyncio.Queue` fan-out
 - **Tool execution**: async subprocess kubectl with validation, timeout, output truncation
 - **WS dual-task pattern**: `chat.py` runs receive loop + process loop as concurrent tasks so `stop` messages arrive during streaming
+- **Combined prod image**: root `Dockerfile` builds the SPA (`VITE_API_URL=""` → same-origin) and bakes it into `/app/static`; `mount_spa()` in `app/main.py` serves it with index.html fallback (404-guarded for `api/`, `assets/`, `ws/`), `Cache-Control: no-cache` on index, gzip + security headers. Dev unchanged (no `static/` dir → JSON root endpoint). CI builds it, no variants
 
 ## Key Directories
 

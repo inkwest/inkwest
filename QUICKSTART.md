@@ -166,6 +166,23 @@ npm install
 npm run dev
 ```
 
+## Production
+
+Production uses a **single combined image** (root `Dockerfile`): FastAPI serves the
+built SPA, the API, and WebSockets on one port. Built by CI; locally:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d   # app on http://localhost:80
+```
+
+Run migrations first (separate entrypoint, init-container style):
+
+```bash
+docker compose -f docker-compose.prod.yml run --rm --entrypoint /app/entrypoint-migrate.sh backend
+```
+
+The dev URLs differ: dev = vite on :3000 + API on :8000; prod = everything on :80.
+
 ## Next Steps
 
 - Read the full [architecture overview](./docs/ARCHITECTURE.md)
