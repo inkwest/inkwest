@@ -32,3 +32,40 @@
   background-size: 100% 100%, 250% 100%;
   animation: border-wipe 2s ease-in-out 2;
 }
+
+/* Registered so the conic-gradient angle is interpolable — animating a plain
+   custom property would snap instead of rotating. */
+@property --invite-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes invite-spin {
+  to { --invite-angle: 360deg; }
+}
+
+/* "Fancy invite to prompt": slow low-contrast hue drifting around the border of a
+   pristine new-conversation composer. Same padding-box/border-box trick as
+   .shimmer-border so the gray-700 fill stays opaque under the gradient border. */
+.invite-border {
+  border-color: transparent !important;
+  background:
+    linear-gradient(rgb(55 65 81), rgb(55 65 81)) padding-box,
+    conic-gradient(
+      from var(--invite-angle),
+      rgb(75 85 99),
+      rgb(59 130 246 / 0.8),
+      rgb(75 85 99),
+      rgb(139 92 246 / 0.8),
+      rgb(75 85 99)
+    ) border-box;
+  animation: invite-spin 8s linear infinite;
+}
+
+/* Motion-sensitive users keep the subtle static gradient, just without rotation. */
+@media (prefers-reduced-motion: reduce) {
+  .invite-border {
+    animation: none;
+  }
+}
