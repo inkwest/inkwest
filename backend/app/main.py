@@ -36,7 +36,7 @@ from app.core.logging import AccessLogMiddleware, access_log_config, get_logger,
 from app.core.telemetry import shutdown_telemetry
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
-from app.services.messages import reconcile_interrupted_turns
+from app.services.messages import purge_empty_sessions, reconcile_interrupted_turns
 from app.services.prompts import ensure_default_system_prompt
 from app.services.pubsub import start_listener, stop_listener
 from app.services.sandbox import reap_orphans, start_sandbox_reaper, stop_sandbox_reaper
@@ -69,6 +69,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 logger.info("reconciled_interrupted_turns", count=reconciled)
         except Exception:
             logger.exception("reconcile_interrupted_turns_failed")
+        # Abandoned empty sessions (opened, configured, never messaged) are
+        # invisible in the UI — sweep the stale ones so they don't accumulate.
+        try:
+            purged = await purge_empty_sessions(db)
+            if purged:
+                logger.info("purged_empty_sessions", count=purged)
+        except Exception:
+            logger.exception("purge_empty_sessions_failed")
     await start_listener()
     logger.info("pubsub_listener_started")
     if settings.oidc_enabled:

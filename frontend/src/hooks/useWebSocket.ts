@@ -169,6 +169,10 @@ export function useWebSocket(sessionId: string) {
   ]);
 
   useEffect(() => {
+    // A previous socket's stale isConnected=true would let ChatInput's autoSubmit
+    // fire before this socket is open, and send() drops messages silently then.
+    setIsConnected(false);
+
     // Create and connect WebSocket
     const ws = new ChatWebSocket(sessionId);
     wsRef.current = ws;
@@ -183,8 +187,10 @@ export function useWebSocket(sessionId: string) {
     return () => {
       unsubscribe();
       ws.disconnect();
+      // The 'disconnected' event lands after unsubscribe, so reset it here.
+      setIsConnected(false);
     };
-  }, [sessionId, handleEvent]);
+  }, [sessionId, handleEvent, setIsConnected]);
 
   const sendMessage = useCallback((content: string) => {
     if (wsRef.current) {

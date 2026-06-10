@@ -13,6 +13,7 @@ export class ChatWebSocket {
   private pingInterval: number | null = null;
   private reconnectTimer: number | null = null;
   private _disconnected = false;
+  private pendingSends: SendMessage[] = [];
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -43,6 +44,9 @@ export class ChatWebSocket {
       console.log('WebSocket connected');
       this.reconnectAttempts = 0;
       this.startPingInterval();
+      for (const message of this.pendingSends.splice(0)) {
+        this.ws?.send(JSON.stringify(message));
+      }
       this.notifyHandlers({ type: 'connected' } as unknown as ChatEvent);
     };
 
@@ -107,6 +111,10 @@ export class ChatWebSocket {
   send(message: SendMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    } else if (message.type === 'message') {
+      // Never silently drop a user message during a connect/reconnect window —
+      // park it and flush on open. Pings/stops are meaningless on a dead socket.
+      this.pendingSends.push(message);
     } else {
       console.warn('WebSocket not connected, cannot send message');
     }
@@ -131,6 +139,7 @@ export class ChatWebSocket {
 
   disconnect(): void {
     this._disconnected = true;
+    this.pendingSends = [];
     this.stopPingInterval();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);

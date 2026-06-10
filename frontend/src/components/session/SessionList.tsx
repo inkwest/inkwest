@@ -69,6 +69,9 @@ export function SessionList() {
     moveSession, persistSessionOrder,
   } = useSessionsStore();
   const setSidebarOpen = useSettingsStore((s) => s.setSidebarOpen);
+  // Display-only filter: a session gets its title from the first user message,
+  // so a title-less session ("New conversation") has no interaction yet.
+  const visibleSessions = sessions.filter((s) => s.title);
   const [searchQuery, setSearchQuery] = useState('');
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
@@ -181,10 +184,10 @@ export function SessionList() {
           )
         ) : (
           <>
-            {(!sessions || sessions.length === 0) ? (
+            {visibleSessions.length === 0 ? (
               <div className="text-gray-500 text-sm px-2">No sessions yet</div>
             ) : (
-              sessions.map((session) => (
+              visibleSessions.map((session) => (
                 <div
                   key={session.id}
                   onDragOver={(e) => handleDragOver(e, session.id)}

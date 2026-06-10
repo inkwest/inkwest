@@ -56,6 +56,10 @@ async def list_sessions(
 ) -> SessionList:
     query = select(Session).options(selectinload(Session.cluster))
     query = query.where(Session.user_id == str(current_user.id))
+    # Sessions with no interaction yet (created on chat open / MCP setup) are
+    # hidden from the sidebar. Filtering here, not just client-side, keeps
+    # pagination honest — otherwise invisible empties crowd real ones off page 1.
+    query = query.where(Session.messages.any())
 
     if cluster_id:
         query = query.where(Session.cluster_id == cluster_id)

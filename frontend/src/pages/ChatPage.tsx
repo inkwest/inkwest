@@ -8,7 +8,7 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const { currentSession, fetchSession, isLoadingSession, consumePendingPrompt } = useSessionsStore();
-  const { setMessages, setTodos, resetChat } = useChatStore();
+  const { applyServerMessages, setTodos, resetChat } = useChatStore();
   // A prompt handed off from the start screen. It seeds the composer (so it stays
   // visible/recoverable if the WS never connects) and is auto-submitted once
   // connected — see ChatInput's autoSubmit.
@@ -34,13 +34,13 @@ export function ChatPage() {
   const serverMessages = currentSession?.messages;
   useEffect(() => {
     if (serverMessages) {
-      setMessages(serverMessages);
+      applyServerMessages(serverMessages);
       const todos = extractTodosFromMessages(serverMessages);
       if (todos.length > 0) {
         setTodos(todos);
       }
     }
-  }, [serverMessages, setMessages, setTodos]);
+  }, [serverMessages, applyServerMessages, setTodos]);
 
   const { sendMessage, stopStreaming } = useWebSocket(sessionId!);
 
