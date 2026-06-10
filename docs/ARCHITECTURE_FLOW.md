@@ -100,22 +100,36 @@ flowchart LR
     X -->|"résultat (sans secret)"| M
 ```
 
-## 4. Variante — sandbox (proposée, non implémentée)
+## 4. Variante — sandbox (implémentée, `SANDBOX_ENABLED=true`)
 
-Un conteneur éphémère par message → isolation forte (l'agent ne voit ni `/app` ni
-`~/.claude` du backend).
+Isolation forte : **une paire de conteneurs par conversation** (réutilisée d'un
+message à l'autre, pour `--resume`) au lieu de lancer `claude` dans le conteneur
+backend. Voir `app/services/sandbox.py`.
+
+- **toolbox** (`inkwest_conv_<sid>`) — image `SANDBOX_TOOLBOX_IMAGE` (`claude` +
+  `kubectl` + `aws`). Posé sur un réseau `--internal` : **aucun egress direct**. Le
+  backend y exécute `docker exec … claude -p` par message (stdout inchangé →
+  `parse_cli_response`).
+- **proxy squid** (`inkwest_proxy_<sid>`) — bi-réseau (internal + externe). Applique
+  une **allowlist statique** (`sandbox/squid.conf`, montée en lecture seule) qui
+  couvre déjà tous les connecteurs + backends de modèle ; un grant n'ouvre **pas** de
+  domaine (pas de reload). `access.log` est monté côté backend → audit egress durable
+  + onglet UI.
+- Le backend pilote un daemon **dind** dédié (DooD over TLS) ; provisioning paresseux
+  au 1er message, reaper d'inactivité (TTL), balayage des orphelins au démarrage.
 
 ```mermaid
 flowchart TD
-    ORCH["orchestrator_cli"] -->|"docker run --rm"| RUN["Conteneur éphémère par message"]
-    subgraph RUN_DETAIL["Conteneur jetable (sans socket Docker)"]
-      C2["claude -p"]
-      V1["-v inkwest_sess_&lt;sid&gt;:/home/app/.claude  (par session, pour --resume)"]
-      E1["-e AWS_* / GITLAB_TOKEN  (creds de la session)"]
-      KC["-v kubeconfigs:/etc/inkwest/kubeconfigs:ro"]
+    ORCH["orchestrator_cli<br/>sandbox.ensure(sid)"] -->|"docker exec (par message)"| CONV
+    subgraph PAIR["Paire par conversation — réseau internal (pas de route directe)"]
+      CONV["toolbox inkwest_conv_&lt;sid&gt;<br/>claude -p · HTTP(S)_PROXY=proxy:3128<br/>-v .claude (--resume) · -v /workdir<br/>--tmpfs .aws/.kube (creds RAM)"]
+      PROXY["proxy inkwest_proxy_&lt;sid&gt;<br/>squid.conf : allowlist statique"]
     end
-    RUN --> C2
-    C2 --> OUT["stdout stream-json → parse_cli_response"]
+    EXT["Egress autorisé : API modèle · .eks · *.eu-west-1.amazonaws.com<br/>gitlab.com · .coralogix.com · registries paquets"]
+    CONV -->|"stdout stream-json → parse_cli_response"| ORCH
+    CONV ==>|"tout l'egress via le proxy"| PROXY
+    PROXY --> EXT
+    CONV -. "tentative directe → bloquée (réseau internal)" .-> EXT
 ```
 
 ---
@@ -126,6 +140,7 @@ flowchart TD
 - **Historique** : en `claude-cli`, tenu par Claude Code via `--resume <cli_session_id>`
   (Inkwest mémorise l'ID en DB).
 - **Isolation conversations** : cwd `/tmp/inkwest-sessions/<sid>` distinct par session.
-- **Limite actuelle** : `claude` tourne dans le conteneur backend (accès filesystem) →
-  voir la variante sandbox §4 pour l'isolation forte.
+- **Isolation filesystem/réseau** : par défaut `claude` tourne dans le conteneur
+  backend (accès filesystem, egress libre) ; avec `SANDBOX_ENABLED=true` chaque
+  conversation est isolée dans sa paire toolbox+squid (§4).
 ```

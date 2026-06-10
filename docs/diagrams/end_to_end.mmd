@@ -4,17 +4,17 @@ sequenceDiagram
     participant FE as Frontend
     participant BE as Backend (chat / connectors / orchestrator_cli)
     participant ST as CredentialStore (RAM)
-    participant MGR as sandbox_manager
-    participant SQ as squid (conv)
-    participant RN as runner (conv)
+    participant MGR as sandbox (services/sandbox.py)
+    participant SQ as proxy squid (conv)
+    participant RN as toolbox (conv)
     participant EXT as Cibles externes (K8s / gitlab.com / AWS)
 
     Note over U,EXT: 1) OUVERTURE DE SESSION
     U->>FE: ouvre une session
     FE->>BE: WS connect
-    BE->>MGR: ensure_sandbox(sid, base = API modele + K8s API)
-    MGR->>SQ: cree reseau internal + squid (whitelist de base)
-    MGR->>RN: cree runner (HTTPS_PROXY=squid, vol .claude, kubeconfig RO)
+    BE->>MGR: sandbox.ensure(sid)  (provisioning paresseux au 1er message)
+    MGR->>SQ: cree reseau internal + proxy squid (allowlist STATIQUE)
+    MGR->>RN: cree toolbox (HTTP(S)_PROXY=squid, vol .claude/workdir, creds .aws/.kube RAM)
     BE-->>FE: pret
 
     Note over U,EXT: 2) MESSAGE #1 (aucun connecteur accorde)
@@ -37,8 +37,7 @@ sequenceDiagram
     BE->>EXT: exchange_code
     EXT-->>BE: access_token (~2 h)
     BE->>ST: put(sid, gitlab) - token en RAM
-    BE->>MGR: update_rules(sid, +gitlab)
-    MGR->>SQ: + acl dstdomain gitlab.com + reload
+    Note over BE,SQ: pas de reload squid - gitlab.com deja dans l'allowlist statique
     BE-->>FE: GitLab = connected
 
     Note over U,EXT: 4) DONNER ACCES A AWS
@@ -53,9 +52,8 @@ sequenceDiagram
     FE->>BE: aws/select
     BE->>EXT: GetRoleCredentials -> STS (~1 h)
     EXT-->>BE: creds STS
-    BE->>ST: put(sid, aws) - STS en RAM
-    BE->>MGR: update_rules(sid, +aws)
-    MGR->>SQ: + acl dstdomain *.amazonaws.com + reload
+    BE->>ST: put(sid, aws) - STS en RAM (projetes en .aws RAM du toolbox)
+    Note over BE,SQ: pas de reload squid - control-plane AWS deja dans l'allowlist statique
     BE-->>FE: AWS = connected (compte/role + expiration)
 
     Note over U,EXT: 5) MESSAGE #2 (GitLab + AWS accordes)
