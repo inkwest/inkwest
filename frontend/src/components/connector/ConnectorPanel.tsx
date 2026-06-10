@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Cloud, Gitlab, Activity, ExternalLink, Loader2 } from 'lucide-react';
+import { Cloud, Gitlab, ExternalLink, Loader2 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
@@ -13,13 +13,11 @@ import { cn } from '@/lib/utils';
 const LABELS: Record<ConnectorName, string> = {
   aws: 'AWS',
   gitlab: 'GitLab',
-  coralogix: 'Coralogix',
 };
 
 const ICONS: Record<ConnectorName, typeof Cloud> = {
   aws: Cloud,
   gitlab: Gitlab,
-  coralogix: Activity,
 };
 
 function expiryLabel(expiresAt?: string | null): string | null {
@@ -70,7 +68,6 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     awsDevice,
     awsModalRequested,
     clearAwsModalRequest,
-    activateCoralogix,
     revoke,
     reauthRequired,
     renewable,
@@ -149,9 +146,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     setBusy(connector);
     setStartError(null);
     try {
-      if (connector === 'coralogix') {
-        await activateCoralogix(sessionId);
-      } else if (connector === 'aws') {
+      if (connector === 'aws') {
         await startAwsDevice(sessionId); // device grant: shows code + URL, then polls
       } else {
         await initiate(sessionId, connector); // OAuth redirect (GitLab)

@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Any
 
-from app.tools.connector_exec import execute_aws, execute_coralogix, execute_gitlab
+from app.tools.connector_exec import execute_aws, execute_gitlab
 from app.tools.exec_context import ToolExecContext
 from app.tools.executor import execute_kubectl
 
@@ -26,8 +26,6 @@ async def execute_tool(
         return await execute_aws(tool_input, ctx)
     if tool_name == "gitlab_api":
         return await execute_gitlab(tool_input, ctx)
-    if tool_name == "coralogix_query":
-        return await execute_coralogix(tool_input, ctx)
     # Default: kubectl tools (validation inside rejects unknown names).
     # kubectl tools stay advertised even without a cluster (AWS access can
     # provide one mid-session); degrade gracefully when no kubeconfig is set.
@@ -46,7 +44,7 @@ async def execute_tools_parallel(
     """Execute multiple tool calls concurrently, routing each through ``execute_tool``.
 
     Mirrors :func:`app.tools.executor.execute_tools_parallel` but is connector-aware
-    (kubectl + AWS/GitLab/Coralogix). Used by the OpenAI-format orchestrators.
+    (kubectl + AWS/GitLab). Used by the OpenAI-format orchestrators.
     """
 
     async def run_one(tc: dict[str, Any]) -> dict[str, Any]:

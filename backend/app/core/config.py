@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     web_search_blocked_domains: str = ""
 
     # ==========================================================================
-    # External Access Connectors (AWS / GitLab / Coralogix)
+    # External Access Connectors (AWS / GitLab)
     # ==========================================================================
     connectors_enabled: bool = False
     connector_audit_enabled: bool = True
@@ -112,12 +112,6 @@ class Settings(BaseSettings):
     gitlab_base_url: str = "https://gitlab.com"
     gitlab_oauth_client_id: str | None = None
     gitlab_oauth_scopes: str = "read_api read_repository"
-
-    # Coralogix: fixed read-only API key fetched from AWS Secrets Manager.
-    coralogix_enabled: bool = False
-    coralogix_secret_id: str | None = None  # Secrets Manager secret id/ARN
-    coralogix_secret_region: str | None = None
-    coralogix_api_endpoint: str | None = None  # logs+metrics+traces query endpoint
 
     # ==========================================================================
     # Per-conversation Docker sandbox (claude-cli provider only)
@@ -220,13 +214,6 @@ def validate_settings() -> None:
             )
         if settings.gitlab_enabled and not settings.gitlab_oauth_client_id:
             raise ValueError("GITLAB_OAUTH_CLIENT_ID is required when GITLAB_ENABLED is true")
-        if settings.coralogix_enabled and not (
-            settings.coralogix_secret_id and settings.coralogix_api_endpoint
-        ):
-            raise ValueError(
-                "CORALOGIX_SECRET_ID and CORALOGIX_API_ENDPOINT are required "
-                "when CORALOGIX_ENABLED is true"
-            )
 
     # Fail fast on a malformed role filter (any env): a bad regex would otherwise
     # only surface at SSO enumeration time, mid-request.

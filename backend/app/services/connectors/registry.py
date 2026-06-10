@@ -9,14 +9,12 @@ ones are invisible to the API (404).
 
 from app.services.connectors.aws import AwsConnector
 from app.services.connectors.base import Connector
-from app.services.connectors.coralogix import CoralogixConnector
 from app.services.connectors.gitlab import GitLabConnector
 
 # Keyed by plain str so an arbitrary path param can be looked up safely.
 _REGISTRY: dict[str, Connector] = {
     "aws": AwsConnector(),
     "gitlab": GitLabConnector(),
-    "coralogix": CoralogixConnector(),
 }
 
 

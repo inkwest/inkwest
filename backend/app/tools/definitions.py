@@ -324,29 +324,6 @@ CONNECTOR_TOOLS: list[dict[str, Any]] = [
             "required": ["path"],
         },
     },
-    {
-        "name": "coralogix_query",
-        "description": (
-            "Query Coralogix (logs, metrics and traces) using the granted read-only"
-            " key. Supports DataPrime or Lucene query syntax."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "DataPrime or Lucene query string."},
-                "syntax": {
-                    "type": "string",
-                    "enum": ["lucene", "dataprime"],
-                    "description": "Query syntax. Defaults to 'lucene'.",
-                },
-                "time_range": {
-                    "type": "string",
-                    "description": "Relative range, e.g. '1h', '30m', '24h'. Defaults to '1h'.",
-                },
-            },
-            "required": ["query"],
-        },
-    },
 ]
 
 CONNECTOR_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in CONNECTOR_TOOLS)

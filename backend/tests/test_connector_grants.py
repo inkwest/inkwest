@@ -23,9 +23,9 @@ _SEL = {"profiles": [{"account_id": "111", "role_name": "ReadOnly", "name": "acm
 
 
 async def test_grant_only_included_without_selection() -> None:
-    db = _db_with_rows([("gitlab", "grant", None), ("coralogix", "grant", None)])
+    db = _db_with_rows([("gitlab", "grant", None), ("aws", "grant", None)])
     grants = {g.connector: g for g in await derive_prior_grants(db, uuid.uuid4())}
-    assert set(grants) == {"gitlab", "coralogix"}
+    assert set(grants) == {"gitlab", "aws"}
     assert grants["gitlab"].selection is None
 
 

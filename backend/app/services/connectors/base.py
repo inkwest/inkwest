@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 from uuid import UUID
 
-ConnectorType = Literal["aws", "gitlab", "coralogix"]
+ConnectorType = Literal["aws", "gitlab"]
 
 # Lifecycle state surfaced to the UI. Never carries a secret.
 ConnState = Literal[
@@ -46,7 +46,7 @@ class MintedCredential:
 
     connector: ConnectorType
     scope: str
-    expires_at: datetime | None  # None for fixed keys (Coralogix)
+    expires_at: datetime | None  # None for fixed (non-expiring) keys
     secret: dict[str, Any] = field(repr=False, default_factory=dict)
     selection: dict[str, Any] | None = None
     # AWS only: populated between auth and account/role selection.
@@ -117,8 +117,8 @@ class Connector(ABC):
     """
 
     type: ClassVar[ConnectorType]
-    # OAuth connectors redirect the browser to an IdP; key-based ones (Coralogix)
-    # are activated directly without a redirect.
+    # OAuth connectors redirect the browser to an IdP; key-based ones are
+    # activated directly without a redirect.
     requires_oauth: ClassVar[bool] = True
 
     @property

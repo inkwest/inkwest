@@ -157,7 +157,7 @@ pre-configured cluster to open.
   stay advertised to the model (cluster access can arrive mid-session via AWS),
   but invoking one without a kubeconfig returns a clean error instead of
   failing the turn. The system prompt notes that no cluster is configured.
-- Connector tools (AWS, GitLab, Coralogix) are unaffected and fully usable.
+- Connector tools (AWS, GitLab) are unaffected and fully usable.
 
 ### Quick-Start Links
 

@@ -47,13 +47,3 @@ def validate_gitlab_api(tool_input: dict[str, Any]) -> str | None:
     if ".." in path:
         return "path must not contain '..'"
     return None
-
-
-def validate_coralogix_query(tool_input: dict[str, Any]) -> str | None:
-    query = str(tool_input.get("query", "")).strip()
-    if not query:
-        return "query must not be empty"
-    syntax = tool_input.get("syntax")
-    if syntax is not None and syntax not in ("lucene", "dataprime"):
-        return "syntax must be 'lucene' or 'dataprime'"
-    return None

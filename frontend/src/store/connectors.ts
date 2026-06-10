@@ -40,7 +40,6 @@ interface ConnectorsState {
   openAwsVerification: () => void;
   clearAwsDevice: () => void;
   clearAwsModalRequest: () => void;
-  activateCoralogix: (sessionId: string) => Promise<void>;
   selectAwsRoles: (
     sessionId: string,
     selections: { account_id: string; role_name: string }[]
@@ -119,10 +118,10 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
     }
   },
 
-  // Re-grant exactly the previously-granted set (never adds new). Coralogix
-  // re-activates silently; GitLab refreshes silently when its token is still held,
-  // otherwise it must re-authorize via an OAuth redirect; AWS re-runs device
-  // approval and the poll auto-applies the saved selection.
+  // Re-grant exactly the previously-granted set (never adds new). GitLab refreshes
+  // silently when its token is still held, otherwise it must re-authorize via an
+  // OAuth redirect; AWS re-runs device approval and the poll auto-applies the saved
+  // selection.
   //
   // GitLab's redirect navigates away, so it can't run alongside an AWS device
   // approval. When both need it, AWS goes first (stays on the page) and the GitLab
@@ -141,14 +140,6 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
         .map((g) => g.connector)
     );
     const willRenewAws = granted.has('aws');
-
-    if (granted.has('coralogix')) {
-      try {
-        await get().activateCoralogix(sessionId);
-      } catch {
-        /* reflected by the subsequent status refresh */
-      }
-    }
 
     let gitlabNeedsOAuth = false;
     if (granted.has('gitlab')) {
@@ -257,11 +248,6 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
   },
 
   clearAwsModalRequest: () => set({ awsModalRequested: false }),
-
-  activateCoralogix: async (sessionId) => {
-    const status = await api.activateCoralogix(sessionId);
-    set((s) => ({ statuses: { ...s.statuses, coralogix: status } }));
-  },
 
   selectAwsRoles: async (sessionId, selections) => {
     const status = await api.selectAwsRoles(sessionId, selections);
