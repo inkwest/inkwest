@@ -39,11 +39,6 @@ class TestGetModelPricing:
         assert pricing.input_price == Decimal("5.00")
         assert pricing.output_price == Decimal("15.00")
 
-    def test_gpt_models(self):
-        """Should return pricing for GPT models."""
-        pricing = get_model_pricing("gpt-4o")
-        assert pricing.input_price == Decimal("2.50")
-
 
 class TestCalculateCost:
     """Tests for calculate_cost function."""

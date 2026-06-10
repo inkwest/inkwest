@@ -53,81 +53,6 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         input_price=Decimal("15.00"),
         output_price=Decimal("75.00"),
     ),
-    # Azure OpenAI / GPT models (estimated)
-    "gpt-5-codex": ModelPricing(
-        input_price=Decimal("5.00"),
-        output_price=Decimal("15.00"),
-    ),
-    "gpt-4-turbo": ModelPricing(
-        input_price=Decimal("10.00"),
-        output_price=Decimal("30.00"),
-    ),
-    "gpt-4o": ModelPricing(
-        input_price=Decimal("2.50"),
-        output_price=Decimal("10.00"),
-    ),
-    "gpt-4o-mini": ModelPricing(
-        input_price=Decimal("0.15"),
-        output_price=Decimal("0.60"),
-    ),
-    # OpenRouter models (provider/model format)
-    # Anthropic via OpenRouter
-    "anthropic/claude-opus-4": ModelPricing(
-        input_price=Decimal("15.00"),
-        output_price=Decimal("75.00"),
-    ),
-    "anthropic/claude-sonnet-4": ModelPricing(
-        input_price=Decimal("3.00"),
-        output_price=Decimal("15.00"),
-    ),
-    "anthropic/claude-3.5-sonnet": ModelPricing(
-        input_price=Decimal("3.00"),
-        output_price=Decimal("15.00"),
-    ),
-    "anthropic/claude-3-opus": ModelPricing(
-        input_price=Decimal("15.00"),
-        output_price=Decimal("75.00"),
-    ),
-    "anthropic/claude-3-haiku": ModelPricing(
-        input_price=Decimal("0.25"),
-        output_price=Decimal("1.25"),
-    ),
-    # OpenAI via OpenRouter
-    "openai/gpt-4o": ModelPricing(
-        input_price=Decimal("2.50"),
-        output_price=Decimal("10.00"),
-    ),
-    "openai/gpt-4o-mini": ModelPricing(
-        input_price=Decimal("0.15"),
-        output_price=Decimal("0.60"),
-    ),
-    "openai/gpt-4-turbo": ModelPricing(
-        input_price=Decimal("10.00"),
-        output_price=Decimal("30.00"),
-    ),
-    # Google via OpenRouter
-    "google/gemini-pro-1.5": ModelPricing(
-        input_price=Decimal("1.25"),
-        output_price=Decimal("5.00"),
-    ),
-    "google/gemini-flash-1.5": ModelPricing(
-        input_price=Decimal("0.075"),
-        output_price=Decimal("0.30"),
-    ),
-    # Meta via OpenRouter
-    "meta-llama/llama-3.1-405b-instruct": ModelPricing(
-        input_price=Decimal("2.70"),
-        output_price=Decimal("2.70"),
-    ),
-    "meta-llama/llama-3.1-70b-instruct": ModelPricing(
-        input_price=Decimal("0.52"),
-        output_price=Decimal("0.75"),
-    ),
-    # Mistral via OpenRouter
-    "mistralai/mistral-large": ModelPricing(
-        input_price=Decimal("2.00"),
-        output_price=Decimal("6.00"),
-    ),
 }
 
 # Default pricing for unknown models (conservative estimate)
@@ -219,13 +144,8 @@ def get_current_model_name() -> str:
     """Get the currently configured model name."""
     settings = get_settings()
 
-    if settings.ai_provider == "anthropic":
-        return settings.anthropic_model
-    elif settings.ai_provider == "bedrock":
+    if settings.ai_provider == "bedrock":
         return settings.bedrock_model_id
-    elif settings.ai_provider == "azure":
-        return settings.azure_openai_deployment or "unknown"
-    elif settings.ai_provider == "openrouter":
-        return settings.openrouter_model
     else:
-        return "unknown"
+        # anthropic and claude-cli use the configured Anthropic model
+        return settings.anthropic_model

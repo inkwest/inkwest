@@ -1,12 +1,12 @@
 # Inkwest
 
-AI-powered Kubernetes debugging assistant — chat interface backed by Claude that executes read-only kubectl commands.
+AI-powered investigation assistant — chat interface backed by Claude that brokers scoped, read-only access across connectors (Kubernetes/kubectl, AWS, GitLab, Coralogix) to investigate and correlate issues across systems.
 
 ## Tech Stack
 
 - **Backend**: FastAPI + SQLAlchemy async + PostgreSQL + asyncpg
 - **Frontend**: React + TypeScript + Vite + Zustand + Tailwind CSS
-- **AI**: Anthropic Claude (direct, Bedrock, Azure, OpenRouter, CLI)
+- **AI**: Anthropic Claude (direct, Bedrock, CLI)
 - **Auth**: OIDC (optional) with JWT session tokens, dev mode auto-login
 
 ## Dev Setup

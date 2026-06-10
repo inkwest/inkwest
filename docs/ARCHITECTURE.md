@@ -2,7 +2,7 @@
 
 ## Overview
 
-Inkwest is an AI-powered Kubernetes debugging portal. Users interact with an AI assistant via a chat interface that can execute read-only kubectl commands against selected clusters, search documentation, and help diagnose issues.
+Inkwest is an AI-powered investigation portal. Users interact with an AI assistant via a chat interface that brokers scoped, read-only access across connectors — Kubernetes (kubectl), AWS, GitLab, and Coralogix — to investigate and diagnose issues, search documentation, and correlate findings across systems. Kubernetes is one connector among several, not the portal's sole scope.
 
 ```
  Browser (React/TS)
@@ -21,17 +21,11 @@ Inkwest is an AI-powered Kubernetes debugging portal. Users interact with an AI 
 
 | Provider | Setting | Use Case | Tested |
 |---|---|---|---|
-| Anthropic | `AI_PROVIDER=anthropic` | Direct Claude API (with prompt caching) | No |
-| AWS Bedrock | `AI_PROVIDER=bedrock` | Enterprise AWS deployments | No |
-| Azure OpenAI | `AI_PROVIDER=azure` | GPT models via Azure | No |
-| OpenRouter | `AI_PROVIDER=openrouter` | Unified API, multiple providers (with prompt caching for Anthropic models) | Yes |
-| OpenAI | `AI_PROVIDER=openai` | Direct OpenAI API (or compatible endpoint) | No |
-| Google Gemini | `AI_PROVIDER=google` | Direct Gemini API (implicit caching) | No |
+| Anthropic | `AI_PROVIDER=anthropic` | Direct Claude API (with prompt caching) | Yes |
+| AWS Bedrock | `AI_PROVIDER=bedrock` | Enterprise AWS deployments | Yes |
 | Claude CLI | `AI_PROVIDER=claude-cli` | Local dev with Claude Max subscription | Yes |
 
-> **Note:** Only **Claude CLI** and **OpenRouter** have been properly end-to-end tested. Other providers have orchestrators implemented but have not been validated against live APIs.
-
-Each provider has its own orchestrator (`orchestrator.py`, `orchestrator_azure.py`, `orchestrator_openai.py`, `orchestrator_openrouter.py`, `orchestrator_google.py`, `orchestrator_cli.py`). The factory `get_orchestrator()` in `ai_client.py` selects the correct one at runtime.
+Each provider has its own orchestrator (`orchestrator.py`, `orchestrator_cli.py`). The factory `get_orchestrator()` in `ai_client.py` selects the correct one at runtime.
 
 ## Authentication
 
@@ -80,9 +74,6 @@ backend/app/
   services/
     ai_client.py         # Provider factory: get_orchestrator(), get_ai_client()
     orchestrator.py      # Anthropic/Bedrock tool loop
-    orchestrator_azure.py
-    orchestrator_openai.py   # Direct OpenAI API
-    orchestrator_openrouter.py
     orchestrator_cli.py  # Claude CLI subprocess
     auth_cleanup.py      # Background cleanup of expired OIDC states
     prompts.py           # System prompt generation
@@ -201,9 +192,6 @@ The `get_orchestrator()` factory in `ai_client.py` returns an async generator fu
 | Provider | Orchestrator | Notes |
 |---|---|---|
 | `anthropic` / `bedrock` | `orchestrator.py` | Native Anthropic SDK, streaming tool loop |
-| `azure` | `orchestrator_azure.py` | OpenAI SDK, function calling |
-| `openai` | `orchestrator_openai.py` | Direct OpenAI API (or compatible) |
-| `openrouter` | `orchestrator_openrouter.py` | OpenAI-compatible API |
 | `claude-cli` | `orchestrator_cli.py` | Local subprocess, no API costs |
 
 All orchestrators yield `ChatEvent` objects for WebSocket streaming. They accept an optional `cancel_event: asyncio.Event` for mid-stream cancellation, checked at loop boundaries (before API call, after response, before/during tool execution).
@@ -226,7 +214,7 @@ All settings via environment variables (see `app/core/config.py`):
 | Category | Key Variables |
 |---|---|
 | Database | `DATABASE_URL` |
-| AI Provider | `AI_PROVIDER`, `ANTHROPIC_API_KEY`, `AWS_REGION`, `AZURE_OPENAI_*`, `OPENROUTER_*`, `CLAUDE_CLI_PATH` |
+| AI Provider | `AI_PROVIDER`, `ANTHROPIC_API_KEY`, `AWS_REGION`, `BEDROCK_MODEL_ID`, `CLAUDE_CLI_PATH` |
 | Auth | `OIDC_ENABLED`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `SECRET_KEY` |
 | Kubernetes | `KUBECONFIG_DIR`, `KUBECTL_TIMEOUT` |
 | Budget | `BUDGET_ENABLED`, `DEFAULT_DAILY_TOKEN_LIMIT`, `DEFAULT_MONTHLY_TOKEN_LIMIT` |

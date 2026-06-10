@@ -90,9 +90,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if settings.sandbox_enabled:
         await stop_sandbox_reaper()
     await stop_listener()
-    from app.services.orchestrator_openai import close_cached_openai_client
-
-    await close_cached_openai_client()
     await close_db()
     logger.info("database_closed")
     shutdown_telemetry()
@@ -102,7 +99,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # Create FastAPI application
 app = FastAPI(
     title="Inkwest API",
-    description="AI-powered Kubernetes debugging assistant",
+    description=(
+        "AI-powered investigation assistant brokering read-only access "
+        "across Kubernetes, AWS, GitLab, and Coralogix"
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )
