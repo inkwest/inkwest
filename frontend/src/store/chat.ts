@@ -73,6 +73,7 @@ interface ChatState {
 
   // Actions
   setMessages: (messages: Message[]) => void;
+  applyServerMessages: (messages: Message[]) => void;
   appendStreamingText: (text: string) => void;
   clearStreamingMessage: () => void;
   setActiveToolCall: (tool: { name: string; input: Record<string, unknown> } | null) => void;
@@ -104,6 +105,15 @@ export const useChatStore = create<ChatState>((set) => ({
   error: null,
 
   setMessages: (messages) => set({ messages }),
+  // Mid-turn, a session refetch (StrictMode double-mount, sync events) can
+  // deliver a snapshot taken before the just-sent user message was persisted;
+  // blindly applying it would wipe the optimistic bubble while streaming.
+  applyServerMessages: (messages) =>
+    set((state) =>
+      state.isStreaming && messages.length < state.messages.length
+        ? state
+        : { messages }
+    ),
   appendStreamingText: (text) =>
     set((state) => {
       // Update legacy field
