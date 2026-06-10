@@ -169,5 +169,9 @@ async def delete_system_prompt(
             detail="Cannot delete the default system prompt; promote another first",
         )
 
-    prompt.is_active = False
+    # Hard delete: deactivation is already covered by PATCH is_active, and a
+    # soft-deleted row would keep the unique name taken forever (409 on re-create).
+    # Sessions referencing this prompt fall back to the default via the
+    # ON DELETE SET NULL FK, and the default itself is undeletable (409 above).
+    await db.delete(prompt)
     await db.flush()

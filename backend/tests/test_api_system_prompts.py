@@ -222,10 +222,13 @@ async def test_delete_system_prompt_as_admin(
     result_mock = MagicMock()
     result_mock.scalar_one_or_none.return_value = mock_system_prompt
     mock_db.execute = AsyncMock(return_value=result_mock)
+    mock_db.delete = AsyncMock()
     mock_db.flush = AsyncMock()
 
     resp = await admin_client.delete(f"/api/system-prompts/{mock_system_prompt.id}")
     assert resp.status_code == 204
+    # Must be a hard delete, not an is_active flip
+    mock_db.delete.assert_awaited_once_with(mock_system_prompt)
 
 
 # ----------------------------------------------------------------------------

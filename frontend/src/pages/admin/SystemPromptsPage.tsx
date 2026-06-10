@@ -102,7 +102,7 @@ export function SystemPromptsPage() {
 
   const handleDelete = async (prompt: AdminSystemPrompt) => {
     if (prompt.is_default) return; // guarded server-side too
-    if (confirm('Are you sure you want to deactivate this system prompt?')) {
+    if (confirm('Are you sure you want to permanently delete this system prompt?')) {
       await deletePrompt(prompt.id);
     }
   };
