@@ -26,7 +26,11 @@ import app.models  # noqa: F401  -- registers all tables on Base.metadata
 from app.models.base import Base
 from app.models.message import Message
 from app.models.session import Session
-from app.services.messages import INTERRUPTED_TURN_ERROR, reconcile_interrupted_turns
+from app.services.messages import (
+    INTERRUPTED_TURN_ERROR,
+    purge_empty_sessions,
+    reconcile_interrupted_turns,
+)
 
 # Process-global registration (a @compiles side effect of importing this module).
 # Harmless: only this test module spins up a real SQLite engine, and these merely
@@ -233,6 +237,7 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
     monkeypatch.setattr(app_main, "ensure_default_system_prompt", AsyncMock())
     reconcile = AsyncMock(side_effect=RuntimeError("boom"))
     monkeypatch.setattr(app_main, "reconcile_interrupted_turns", reconcile)
+    monkeypatch.setattr(app_main, "purge_empty_sessions", AsyncMock(return_value=0))
     monkeypatch.setattr(app_main, "start_listener", AsyncMock())
     monkeypatch.setattr(app_main, "stop_listener", AsyncMock())
     monkeypatch.setattr(app_main, "close_db", AsyncMock())
@@ -244,3 +249,77 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
 
     reconcile.assert_awaited_once()
     fake_logger.exception.assert_called_once_with("reconcile_interrupted_turns_failed")
+
+
+async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
+    fake_logger = MagicMock()
+    monkeypatch.setattr(app_main, "logger", fake_logger)
+    monkeypatch.setattr(
+        app_main,
+        "settings",
+        SimpleNamespace(oidc_enabled=False, connectors_enabled=False, sandbox_enabled=False),
+    )
+    monkeypatch.setattr(app_main, "init_db", AsyncMock())
+    monkeypatch.setattr(app_main, "async_session_maker", lambda: _DummySession())
+    monkeypatch.setattr(app_main, "ensure_default_system_prompt", AsyncMock())
+    monkeypatch.setattr(app_main, "reconcile_interrupted_turns", AsyncMock(return_value=0))
+    purge = AsyncMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(app_main, "purge_empty_sessions", purge)
+    monkeypatch.setattr(app_main, "start_listener", AsyncMock())
+    monkeypatch.setattr(app_main, "stop_listener", AsyncMock())
+    monkeypatch.setattr(app_main, "close_db", AsyncMock())
+    monkeypatch.setattr(app_main, "shutdown_telemetry", MagicMock())
+
+    async with app_main.lifespan(app_main.app):
+        pass
+
+    purge.assert_awaited_once()
+    fake_logger.exception.assert_called_once_with("purge_empty_sessions_failed")
+
+
+async def _session_ids(db: AsyncSession) -> set[uuid.UUID]:
+    db.expire_all()
+    return set((await db.execute(select(Session.id))).scalars().all())
+
+
+def _naive_utc_now() -> datetime:
+    """Match the column semantics: created_at is naive (timezone-less) UTC."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+async def test_purge_deletes_stale_empty_session(db: AsyncSession) -> None:
+    stale = uuid.uuid4()
+    db.add(Session(id=stale, created_at=_naive_utc_now() - timedelta(days=2)))
+    await db.commit()
+
+    assert await purge_empty_sessions(db) == 1
+    assert await _session_ids(db) == set()
+
+
+async def test_purge_keeps_recent_empty_session(db: AsyncSession) -> None:
+    recent = uuid.uuid4()
+    db.add(Session(id=recent, created_at=_naive_utc_now() - timedelta(hours=1)))
+    await db.commit()
+
+    assert await purge_empty_sessions(db) == 0
+    assert await _session_ids(db) == {recent}
+
+
+async def test_purge_keeps_stale_session_with_messages(db: AsyncSession) -> None:
+    old = _naive_utc_now() - timedelta(days=2)
+    sid = uuid.uuid4()
+    db.add(Session(id=sid, created_at=old))
+    db.add(
+        Message(
+            id=uuid.uuid4(),
+            session_id=sid,
+            role="user",
+            content="hi",
+            status="success",
+            created_at=old,
+        )
+    )
+    await db.commit()
+
+    assert await purge_empty_sessions(db) == 0
+    assert await _session_ids(db) == {sid}

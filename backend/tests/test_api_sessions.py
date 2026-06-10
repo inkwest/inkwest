@@ -44,6 +44,26 @@ async def test_list_sessions_returns_items(
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_excludes_sessions_without_messages(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    count_result = MagicMock()
+    count_result.scalar.return_value = 0
+    list_result = MagicMock()
+    list_result.scalars.return_value.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
+
+    resp = await authenticated_client.get("/api/sessions")
+    assert resp.status_code == 200
+
+    # Message-less sessions (created on chat open / MCP setup) must be filtered
+    # at the query level so pagination and totals stay honest.
+    list_query = str(mock_db.execute.call_args_list[1].args[0])
+    assert "EXISTS" in list_query
+    assert "messages" in list_query
+
+
+@pytest.mark.asyncio
 async def test_create_session_cluster_not_found(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:

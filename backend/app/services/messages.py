@@ -7,9 +7,10 @@ and managing session metadata like titles.
 
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -252,6 +253,31 @@ async def reconcile_interrupted_turns(db: AsyncSession) -> int:
 
     # execute() is typed Result, but a DML statement yields a CursorResult.
     # The caller (lifespan) logs the count as a structured event.
+    return cast("CursorResult[Any]", result).rowcount or 0
+
+
+# A session row is created as soon as a chat is opened (e.g. to attach MCP or
+# connector config), so abandoned ones pile up with no messages — invisible in
+# the UI (the list endpoint hides them) and undeletable there. A generous age
+# keeps any in-progress setup safe across restarts.
+EMPTY_SESSION_MAX_AGE = timedelta(hours=24)
+
+
+async def purge_empty_sessions(db: AsyncSession) -> int:
+    """
+    Delete sessions older than EMPTY_SESSION_MAX_AGE that never received a message.
+
+    Returns the number of sessions purged.
+    """
+    # created_at is a naive (timezone-less) column — bind a naive UTC cutoff;
+    # an aware one makes asyncpg refuse the TIMESTAMP WITHOUT TIME ZONE bind.
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - EMPTY_SESSION_MAX_AGE
+    result = await db.execute(
+        delete(Session)
+        .where(Session.created_at < cutoff, ~Session.messages.any())
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
     return cast("CursorResult[Any]", result).rowcount or 0
 
 
