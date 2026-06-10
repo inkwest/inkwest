@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Plug } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
+import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
 
@@ -17,8 +18,8 @@ interface Props {
   // Optional hook run before the modal opens — used on the start screen to
   // lazily create the session (so the selection has somewhere to persist).
   onBeforeOpen?: () => Promise<void> | void;
-  // 'inline' (default): compact button for the in-conversation connector bar.
-  // 'row': full-width connector-style row (start screen, stacked layout).
+  // 'inline' (default): connector-style item in the in-conversation connector bar.
+  // 'row': full-width connector-style item (start screen, stacked layout).
   variant?: 'inline' | 'row';
   // Open the modal as soon as this becomes true. Used to reopen after the start
   // screen lazily creates the session (which remounts this component).
@@ -35,8 +36,8 @@ interface Props {
  * Per-conversation MCP selector. Opens a modal listing the catalog of available
  * MCP servers, one per line with a checkbox. Toggling persists the selection and
  * re-merges the conversation's .claude.json server-side; it takes effect on the
- * NEXT message (the CLI reads its config at launch). Renders either as a compact
- * button ('inline') or as a connector-style row ('row').
+ * NEXT message (the CLI reads its config at launch). Renders as a connector-style
+ * item in both the chat bar ('inline') and the start screen ('row').
  */
 export function McpPanel({
   sessionId,
@@ -48,8 +49,9 @@ export function McpPanel({
 }: Props) {
   const [catalog, setCatalog] = useState<string[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
+  const [draftEnabled, setDraftEnabled] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState(autoOpen);
-  const [saving, setSaving] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
 
@@ -63,13 +65,16 @@ export function McpPanel({
 
         if (!sessionId) {
           setEnabled(new Set());
+          setDraftEnabled(new Set());
           setExpiresAt(null);
           return;
         }
 
         const sel = await getSessionMcp(sessionId);
         if (!cancelled) {
-          setEnabled(new Set(sel.enabled));
+          const next = new Set(sel.enabled);
+          setEnabled(next);
+          setDraftEnabled(next);
           setExpiresAt(sel.expires_at ?? null);
         }
       } catch {
@@ -82,25 +87,34 @@ export function McpPanel({
     };
   }, [sessionId]);
 
-  const toggle = async (key: string) => {
+  const toggleDraft = (key: string) => {
     if (saving) return;
-    const next = new Set(enabled);
+    const next = new Set(draftEnabled);
     next.has(key) ? next.delete(key) : next.add(key);
+    setDraftEnabled(next);
+  };
 
-    // Optimistic: reflect the toggle immediately, revert on failure.
-    const previous = enabled;
-    setEnabled(next);
-    setSaving(key);
+  const handleClose = () => {
+    setDraftEnabled(new Set(enabled));
+    setError(null);
+    setOpen(false);
+  };
+
+  const applySelection = async () => {
+    if (saving || !sessionId) return;
+    setSaving(true);
     setError(null);
     try {
-      const res = await setSessionMcp(sessionId, [...next]);
-      setEnabled(new Set(res.enabled));
+      const res = await setSessionMcp(sessionId, [...draftEnabled]);
+      const next = new Set(res.enabled);
+      setEnabled(next);
+      setDraftEnabled(next);
       setExpiresAt(res.expires_at ?? null);
+      setOpen(false);
     } catch {
-      setEnabled(previous);
       setError('Failed to update MCP selection');
     } finally {
-      setSaving(null);
+      setSaving(false);
     }
   };
 
@@ -119,69 +133,60 @@ export function McpPanel({
   const handleOpen = async () => {
     if (!hasCatalog) return;
     if (onBeforeOpen) await onBeforeOpen();
-    if (!deferOpen) setOpen(true);
+    if (!deferOpen) {
+      setDraftEnabled(new Set(enabled));
+      setError(null);
+      setOpen(true);
+    }
   };
 
   return (
     <>
-      {variant === 'row' ? (
-        // Connector-style full-width row (matches the "External access" rows).
-        <div className="group relative flex w-full items-center justify-between rounded-md px-2 py-1">
-          <div className="flex items-center gap-2">
-            <Plug className="h-4 w-4 text-gray-400" />
-            <span className="text-sm text-gray-200">MCP servers</span>
-            {hasCatalog ? (
-              <Badge variant={anyOn ? 'success' : 'default'}>{badgeText}</Badge>
-            ) : (
-              <Badge variant="default">none</Badge>
-            )}
-          </div>
-          {hasCatalog && (
-            <button
-              onClick={handleOpen}
-              className="text-xs text-blue-400 hover:text-blue-300"
-            >
-              Configure
-            </button>
+      <div
+        className={`group relative flex items-center gap-2 rounded-md px-2 py-1 ${
+          variant === 'row' ? 'w-full justify-between' : ''
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <Plug className="h-4 w-4 text-gray-400" />
+          <span className="text-sm text-gray-200">MCP servers</span>
+          {hasCatalog ? (
+            <Badge variant={anyOn ? 'success' : 'default'}>{badgeText}</Badge>
+          ) : (
+            <Badge variant="default">none</Badge>
           )}
-          <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-60 rounded-md border border-gray-700 bg-gray-800 p-2 text-xs shadow-lg group-hover:block">
-            <div className="mb-1 font-medium text-gray-300">Permissions</div>
-            {enabledKeys.length > 0 ? (
-              <ul className="space-y-1 text-gray-400">
-                {enabledKeys.map((key) => (
-                  <li key={key}>
-                    <span className="truncate text-gray-300">{key}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="text-gray-400">No access granted</div>
-            )}
-          </div>
         </div>
-      ) : (
-        // Compact button for the in-conversation connector bar.
-        <button
-          onClick={handleOpen}
-          title="Choose which MCP servers this conversation can use"
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-sm border transition-colors ${
-            anyOn
-              ? 'border-green-600 bg-green-900/30 text-green-300'
-              : 'border-gray-700 text-gray-300 hover:bg-gray-800'
-          }`}
-        >
-          <Plug className="h-3.5 w-3.5" />
-          MCP{catalog.length ? ` ${count}/${catalog.length}` : ''}
-        </button>
-      )}
+        {hasCatalog && (
+          <button
+            onClick={handleOpen}
+            className="text-xs text-blue-400 hover:text-blue-300"
+          >
+            Configure
+          </button>
+        )}
+        <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-60 rounded-md border border-gray-700 bg-gray-800 p-2 text-xs shadow-lg group-hover:block">
+          <div className="mb-1 font-medium text-gray-300">Permissions</div>
+          {enabledKeys.length > 0 ? (
+            <ul className="space-y-1 text-gray-400">
+              {enabledKeys.map((key) => (
+                <li key={key}>
+                  <span className="truncate text-gray-300">{key}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-gray-400">No access granted</div>
+          )}
+        </div>
+      </div>
 
-      <Modal isOpen={open && hasCatalog} onClose={() => setOpen(false)} title="MCP servers" size="sm">
+      <Modal isOpen={open && hasCatalog} onClose={handleClose} title="MCP servers" size="sm">
         <p className="text-sm text-gray-400 mb-3">
           Choose which MCP servers this conversation can use.
         </p>
         <div className="space-y-1">
           {catalog.map((key) => {
-            const on = enabled.has(key);
+            const on = draftEnabled.has(key);
             return (
               <label
                 key={key}
@@ -190,8 +195,8 @@ export function McpPanel({
                 <input
                   type="checkbox"
                   checked={on}
-                  disabled={saving !== null}
-                  onChange={() => toggle(key)}
+                  disabled={saving}
+                  onChange={() => toggleDraft(key)}
                   className="h-4 w-4 accent-green-600 disabled:opacity-50"
                 />
                 <span className="text-sm text-gray-200">{key}</span>
@@ -204,6 +209,14 @@ export function McpPanel({
         ) : (
           <p className="text-xs text-gray-500 mt-3">Changes apply to the next message.</p>
         )}
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-700 pt-3">
+          <span className="text-xs text-gray-500">
+            {catalog.filter((key) => draftEnabled.has(key)).length}/{catalog.length} selected
+          </span>
+          <Button size="sm" onClick={applySelection} disabled={!sessionId} isLoading={saving}>
+            OK
+          </Button>
+        </div>
       </Modal>
     </>
   );
