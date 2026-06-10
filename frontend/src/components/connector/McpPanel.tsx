@@ -4,6 +4,14 @@ import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
 
+function expiryLabel(expiresAt?: string | null): string | null {
+  if (!expiresAt) return null;
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  if (ms <= 0) return 'expired';
+  const mins = Math.round(ms / 60000);
+  return mins >= 60 ? `${Math.floor(mins / 60)}h${mins % 60}m left` : `${mins}m left`;
+}
+
 interface Props {
   sessionId: string;
   // Optional hook run before the modal opens — used on the start screen to
@@ -18,6 +26,9 @@ interface Props {
   // Skip opening here on click (the caller reopens elsewhere, e.g. via autoOpen
   // on the post-session instance). Avoids a flash on the soon-to-unmount instance.
   deferOpen?: boolean;
+  // Keep the control visible even when the MCP catalog is empty. Used by the
+  // start screen after it lazily creates a session from the MCP row.
+  showWhenEmpty?: boolean;
 }
 
 /**
@@ -33,26 +44,39 @@ export function McpPanel({
   variant = 'inline',
   autoOpen = false,
   deferOpen = false,
+  showWhenEmpty = false,
 }: Props) {
   const [catalog, setCatalog] = useState<string[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState(autoOpen);
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expiresAt, setExpiresAt] = useState<string | null>(null);
 
   useEffect(() => {
-    // No session yet (start screen before first interaction) — nothing to fetch.
-    if (!sessionId) return;
     let cancelled = false;
-    Promise.all([getMcpCatalog(), getSessionMcp(sessionId)])
-      .then(([cat, sel]) => {
+    const load = async () => {
+      try {
+        const cat = await getMcpCatalog();
         if (cancelled) return;
         setCatalog(cat.keys);
-        setEnabled(new Set(sel.enabled));
-      })
-      .catch(() => {
+
+        if (!sessionId) {
+          setEnabled(new Set());
+          setExpiresAt(null);
+          return;
+        }
+
+        const sel = await getSessionMcp(sessionId);
+        if (!cancelled) {
+          setEnabled(new Set(sel.enabled));
+          setExpiresAt(sel.expires_at ?? null);
+        }
+      } catch {
         if (!cancelled) setError('Failed to load MCP servers');
-      });
+      }
+    };
+    void load();
     return () => {
       cancelled = true;
     };
@@ -71,6 +95,7 @@ export function McpPanel({
     try {
       const res = await setSessionMcp(sessionId, [...next]);
       setEnabled(new Set(res.enabled));
+      setExpiresAt(res.expires_at ?? null);
     } catch {
       setEnabled(previous);
       setError('Failed to update MCP selection');
@@ -79,15 +104,20 @@ export function McpPanel({
     }
   };
 
-  // In-conversation bar: no catalog configured → render nothing. On the start
-  // screen (onBeforeOpen set) the button shows before the session exists, so we
-  // keep it even with an empty catalog (it loads once the session is created).
-  if (catalog.length === 0 && !onBeforeOpen) return null;
+  // In-conversation bar: no catalog configured -> render nothing. On the start
+  // screen the row remains visible before and after lazy session creation, so a
+  // click on Configure never makes the MCP affordance vanish.
+  if (catalog.length === 0 && !onBeforeOpen && !showWhenEmpty) return null;
 
-  const count = enabled.size;
+  const hasCatalog = catalog.length > 0;
+  const enabledKeys = catalog.filter((key) => enabled.has(key));
+  const count = enabledKeys.length;
   const anyOn = count > 0;
+  const exp = expiryLabel(expiresAt);
+  const badgeText = exp ? `${count}/${catalog.length} enabled · ${exp}` : `${count}/${catalog.length} enabled`;
 
   const handleOpen = async () => {
+    if (!hasCatalog) return;
     if (onBeforeOpen) await onBeforeOpen();
     if (!deferOpen) setOpen(true);
   };
@@ -96,24 +126,38 @@ export function McpPanel({
     <>
       {variant === 'row' ? (
         // Connector-style full-width row (matches the "External access" rows).
-        <div className="flex w-full items-center justify-between rounded-md px-2 py-1">
+        <div className="group relative flex w-full items-center justify-between rounded-md px-2 py-1">
           <div className="flex items-center gap-2">
             <Plug className="h-4 w-4 text-gray-400" />
             <span className="text-sm text-gray-200">MCP servers</span>
-            {anyOn ? (
-              <Badge variant="success">
-                {count}/{catalog.length} enabled
-              </Badge>
+            {hasCatalog ? (
+              <Badge variant={anyOn ? 'success' : 'default'}>{badgeText}</Badge>
             ) : (
               <Badge variant="default">none</Badge>
             )}
           </div>
-          <button
-            onClick={handleOpen}
-            className="text-xs text-blue-400 hover:text-blue-300"
-          >
-            Configure
-          </button>
+          {hasCatalog && (
+            <button
+              onClick={handleOpen}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              Configure
+            </button>
+          )}
+          <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-60 rounded-md border border-gray-700 bg-gray-800 p-2 text-xs shadow-lg group-hover:block">
+            <div className="mb-1 font-medium text-gray-300">Permissions</div>
+            {enabledKeys.length > 0 ? (
+              <ul className="space-y-1 text-gray-400">
+                {enabledKeys.map((key) => (
+                  <li key={key}>
+                    <span className="truncate text-gray-300">{key}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-gray-400">No access granted</div>
+            )}
+          </div>
         </div>
       ) : (
         // Compact button for the in-conversation connector bar.
@@ -131,7 +175,7 @@ export function McpPanel({
         </button>
       )}
 
-      <Modal isOpen={open} onClose={() => setOpen(false)} title="MCP servers" size="sm">
+      <Modal isOpen={open && hasCatalog} onClose={() => setOpen(false)} title="MCP servers" size="sm">
         <p className="text-sm text-gray-400 mb-3">
           Choose which MCP servers this conversation can use.
         </p>

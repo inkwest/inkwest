@@ -28,6 +28,60 @@ describe('McpPanel', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('can stay visible with an empty catalog without offering configuration', async () => {
+    mockGetCatalog.mockResolvedValue({ keys: [] });
+    mockGetSession.mockResolvedValue({ enabled: [] });
+
+    render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
+
+    await waitFor(() => expect(mockGetCatalog).toHaveBeenCalled());
+    expect(screen.getByText('MCP servers')).toBeInTheDocument();
+    expect(screen.getByText('none')).toBeInTheDocument();
+    expect(screen.getByText('Permissions')).toBeInTheDocument();
+    expect(screen.getByText('No access granted')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Configure' })).not.toBeInTheDocument();
+    expect(screen.queryByText('No MCP servers are configured.')).not.toBeInTheDocument();
+  });
+
+  it('keeps configuration available and shows a gray zero count when no catalog server is selected', async () => {
+    mockGetCatalog.mockResolvedValue({ keys: ['coralogix'] });
+    mockGetSession.mockResolvedValue({ enabled: [] });
+
+    render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
+
+    await waitFor(() => expect(mockGetCatalog).toHaveBeenCalled());
+    expect(screen.getByText('MCP servers')).toBeInTheDocument();
+    const badge = screen.getByText('0/1 enabled');
+    expect(badge).toBeInTheDocument();
+    expect(badge.className).toContain('gray');
+    expect(screen.getByText('No access granted')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Configure' })).toBeInTheDocument();
+  });
+
+  it('shows selected count and only selected servers in the row overlay', async () => {
+    mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab', 'prometheus'] });
+    mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
+
+    render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
+
+    expect(await screen.findByText('1/3 enabled')).toBeInTheDocument();
+    expect(screen.getByText('coralogix')).toBeInTheDocument();
+    expect(screen.queryByText('gitlab')).not.toBeInTheDocument();
+    expect(screen.queryByText('prometheus')).not.toBeInTheDocument();
+  });
+
+  it('adds time left to the selected count when the MCP selection has an expiry', async () => {
+    mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab', 'prometheus'] });
+    mockGetSession.mockResolvedValue({
+      enabled: ['coralogix'],
+      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+
+    render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
+
+    expect(await screen.findByText(/1\/3 enabled · .* left/)).toBeInTheDocument();
+  });
+
   it('shows selected/total and green styling when servers are enabled', async () => {
     mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab'] });
     mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
