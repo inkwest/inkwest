@@ -88,8 +88,12 @@ describe('McpPanel', () => {
 
     render(<McpPanel sessionId="s1" />);
 
-    const btn = await screen.findByRole('button', { name: /MCP 1\/2/ });
-    expect(btn.className).toContain('green');
+    const badge = await screen.findByText('1/2 enabled');
+    expect(badge.className).toContain('green');
+    expect(screen.getByRole('button', { name: 'Configure' })).toBeInTheDocument();
+    expect(screen.getByText('Permissions')).toBeInTheDocument();
+    expect(screen.getByText('coralogix')).toBeInTheDocument();
+    expect(screen.queryByText('gitlab')).not.toBeInTheDocument();
   });
 
   it('shows 0/total and no green styling when nothing is enabled', async () => {
@@ -98,18 +102,20 @@ describe('McpPanel', () => {
 
     render(<McpPanel sessionId="s1" />);
 
-    const btn = await screen.findByRole('button', { name: /MCP 0\/2/ });
-    expect(btn.className).not.toContain('green');
+    const badge = await screen.findByText('0/2 enabled');
+    expect(badge.className).not.toContain('green');
+    expect(screen.getByRole('button', { name: 'Configure' })).toBeInTheDocument();
+    expect(screen.getByText('No access granted')).toBeInTheDocument();
   });
 
-  it('lists servers with checkboxes in the modal and persists a toggle', async () => {
+  it('persists selected servers only when OK is clicked and then closes the modal', async () => {
     mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab'] });
     mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
     mockSetSession.mockResolvedValue({ enabled: ['coralogix', 'gitlab'] });
 
     render(<McpPanel sessionId="s1" />);
 
-    const btn = await screen.findByRole('button', { name: /MCP/ });
+    const btn = await screen.findByRole('button', { name: 'Configure' });
     fireEvent.click(btn);
 
     // One checkbox per catalog key; the enabled one is checked.
@@ -119,9 +125,20 @@ describe('McpPanel', () => {
     expect(gitlab).not.toBeChecked();
 
     fireEvent.click(gitlab);
+    expect(mockSetSession).not.toHaveBeenCalled();
+
+    await waitFor(() =>
+      expect(screen.getByText('2/2 selected')).toBeInTheDocument()
+    );
+
+    expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
 
     await waitFor(() =>
       expect(mockSetSession).toHaveBeenCalledWith('s1', ['coralogix', 'gitlab'])
     );
+    expect(screen.queryByText('Choose which MCP servers this conversation can use.')).not.toBeInTheDocument();
   });
 });

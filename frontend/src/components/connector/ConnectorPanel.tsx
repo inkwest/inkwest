@@ -242,15 +242,11 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
           </button>
         )}
         {startError && <span className="text-xs text-red-400">{startError}</span>}
-        {/* MCP selector: a connector-style row in the stacked layout, a compact
-            button (after a divider) on the in-conversation bar. */}
+        {/* MCP selector: connector-style item in both start and chat layouts. */}
         {stacked ? (
           <McpPanel sessionId={sessionId} variant="row" autoOpen={autoOpenMcp} showWhenEmpty />
         ) : (
-          <>
-            <span className="mx-1 h-5 w-px bg-gray-700" aria-hidden />
-            <McpPanel sessionId={sessionId} variant="inline" />
-          </>
+          <McpPanel sessionId={sessionId} variant="inline" />
         )}
       </div>
 
