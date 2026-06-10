@@ -319,6 +319,45 @@ async def test_build_connector_env_no_kubeconfigs_leaves_kubeconfig_unset():
         await get_credential_store().revoke_session(uid, sid)
 
 
+async def test_build_connector_env_projects_in_container_paths(tmp_path):
+    """With a shared creds volume, the env must point at the IN-CONTAINER mount paths
+    (<sandbox_home>/.aws|.kube), not the backend's write paths — the sandboxed agent
+    can't see the backend filesystem. The creds files land on the shared (RAM) volume,
+    world-readable so the toolbox's differing uid can read them through the RO mount."""
+    import os
+    from types import SimpleNamespace
+
+    from app.services.connectors.store import get_credential_store
+    from app.tools import connector_exec
+    from app.tools.connector_exec import build_connector_env, session_kube_dir
+
+    creds_root = str(tmp_path / "creds")
+    fake_settings = SimpleNamespace(sandbox_creds_root=creds_root, sandbox_home="/home/sandbox")
+    uid, sid = uuid.uuid4(), uuid.uuid4()
+    await get_credential_store().put(uid, sid, _aws_cred_with_profile())
+    with patch.object(connector_exec, "get_settings", return_value=fake_settings):
+        kube = session_kube_dir(sid)  # now under creds_root
+        os.makedirs(kube, mode=0o755, exist_ok=True)
+        for fname in ("eks--acme--prod", "eks--acme--stg"):
+            open(os.path.join(kube, fname), "w").close()
+        try:
+            env, injected = await build_connector_env(uid, sid)
+            assert env["AWS_SHARED_CREDENTIALS_FILE"] == "/home/sandbox/.aws/credentials"
+            assert env["AWS_CONFIG_FILE"] == "/home/sandbox/.aws/config"
+            assert env["AWS_DEFAULT_REGION"] == "eu-west-1"
+            assert env["KUBECONFIG"] == (
+                "/home/sandbox/.kube/eks--acme--prod:/home/sandbox/.kube/eks--acme--stg"
+            )
+            assert "aws" in injected and "eks" in injected
+            # Files were written to the shared volume, world-readable for the toolbox.
+            cred_file = os.path.join(creds_root, str(sid), ".aws", "credentials")
+            assert os.path.exists(cred_file)
+            assert (os.stat(cred_file).st_mode & 0o777) == 0o644
+            assert (os.stat(os.path.dirname(cred_file)).st_mode & 0o777) == 0o755
+        finally:
+            await get_credential_store().revoke_session(uid, sid)
+
+
 # --------------------------------------------------------------------------- #
 # Public status projection carries no secret field
 # --------------------------------------------------------------------------- #

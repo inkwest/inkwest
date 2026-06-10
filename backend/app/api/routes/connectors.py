@@ -36,6 +36,7 @@ from app.services.connectors.grants import aws_selections_from_grant, derive_pri
 from app.services.connectors.registry import all_connectors, get_connector
 from app.services.connectors.store import get_credential_store
 from app.services.eks_refresh import schedule_session_eks_refresh
+from app.tools.connector_exec import write_aws_profiles
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -193,6 +194,10 @@ async def _apply_aws_selection(
     except ConnectorError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     await get_credential_store().put(user_id, sid, cred)
+    # Build the per-session ~/.aws projection now — the account/role pick is the trigger.
+    # On a shared creds volume this is what the sandbox container bind-mounts, so the
+    # granted profiles are present before the first turn provisions the sandbox.
+    write_aws_profiles(sid, cred)
     # Discover EKS clusters for the freshly minted profiles and generate one
     # (tmpfs) kubeconfig each — async, must not block the response.
     schedule_session_eks_refresh(sid, cred)

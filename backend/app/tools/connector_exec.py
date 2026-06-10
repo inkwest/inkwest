@@ -58,12 +58,20 @@ def connector_for_tool(tool_name: str) -> ConnectorType | None:
 
 
 # AWS profiles are projected to a tmpfs (RAM) ~/.aws so `aws --profile` works with
-# several accounts at once, WITHOUT persisting credentials to disk. /dev/shm is a
-# RAM-backed filesystem (present in the Linux runtime container); files are mode
-# 0600, regenerated each turn from the RAM store (the source of truth), and removed
-# on revoke / session end. Off-container (e.g. macOS tests) we fall back to a temp
-# dir — the RAM guarantee matters in the container where the agent actually runs.
+# several accounts at once, WITHOUT persisting credentials to disk. Files are mode
+# 0600, regenerated from the RAM store (the source of truth), and removed on revoke /
+# session end.
+#
+# Base selection, in order:
+#   1. ``sandbox_creds_root`` — a RAM-backed volume shared with the dind daemon, so the
+#      sandboxed agent's container can bind-mount the session's ~/.aws (see sandbox.py).
+#   2. ``/dev/shm/inkwest`` — backend-local RAM tmpfs (no sandbox / API-provider only).
+#   3. a temp dir — off-container fallback (e.g. macOS tests); the RAM guarantee matters
+#      in the container where the agent actually runs.
 def _aws_base() -> str:
+    creds_root = get_settings().sandbox_creds_root
+    if creds_root:
+        return creds_root
     if os.path.isdir("/dev/shm"):  # noqa: S108 — RAM-backed tmpfs, intentional
         return "/dev/shm/inkwest"
     import tempfile
@@ -107,9 +115,16 @@ def _creds_block(name: str, p: dict[str, Any]) -> str:
     )
 
 
-def _write_secure(path: str, content: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+def _write_secure(path: str, content: str, mode: int = 0o600) -> None:
+    # fchmod after open: O_CREAT's mode is ignored when the file already exists
+    # (idempotent re-write), so force the mode explicitly each time.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.fchmod(fd, mode)
+    except BaseException:
+        os.close(fd)  # fdopen hasn't taken ownership yet — close the raw fd ourselves
+        raise
+    with os.fdopen(fd, "w") as f:  # now owns fd; closes it on exit/error
         f.write(content)
 
 
@@ -118,12 +133,21 @@ def write_aws_profiles(session_id: UUID, cred: MintedCredential) -> dict[str, st
 
     Returns {} if the credential has no minted profiles yet. The first profile is
     also written as ``[default]`` so a bare ``aws ...`` works.
+
+    On the shared sandbox creds volume the dir/files are world-readable (0755/0644)
+    so the toolbox container — which runs as a different uid than the backend — can
+    read them; the per-session read-only bind mount is the isolation boundary (same
+    rationale as the 0777 durable dirs in sandbox.py). On the backend-local /dev/shm
+    projection they stay 0700/0600 (only the backend, same uid, ever reads them).
     """
     profiles = cred.secret.get("profiles") or []
     if not profiles:
         return {}
+    shared = bool(get_settings().sandbox_creds_root)
+    dir_mode, file_mode = (0o755, 0o644) if shared else (0o700, 0o600)
     base = _aws_session_dir(session_id)
-    os.makedirs(base, mode=0o700, exist_ok=True)
+    os.makedirs(base, mode=dir_mode, exist_ok=True)
+    os.chmod(base, dir_mode)  # exist_ok skips mode on an existing dir — force it
     cred_path = os.path.join(base, "credentials")
     cfg_path = os.path.join(base, "config")
 
@@ -140,8 +164,8 @@ def write_aws_profiles(session_id: UUID, cred: MintedCredential) -> dict[str, st
             f"# {p.get('account_name')} ({p.get('account_id')}) / {p.get('role_name')}\n"
         )
 
-    _write_secure(cred_path, "\n".join(cred_blocks))
-    _write_secure(cfg_path, "\n".join(cfg_blocks))
+    _write_secure(cred_path, "\n".join(cred_blocks), file_mode)
+    _write_secure(cfg_path, "\n".join(cfg_blocks), file_mode)
     return {
         "AWS_SHARED_CREDENTIALS_FILE": cred_path,
         "AWS_CONFIG_FILE": cfg_path,
@@ -172,15 +196,31 @@ async def build_connector_env(
     """
     if user_id is None:
         return {}, []
+    settings = get_settings()
     store = get_credential_store()
     env: dict[str, str] = {}
     injected: list[str] = []
+
+    # When the sandbox projects the per-session creds into the conversation container
+    # (sandbox_creds_root set), the env must reference the IN-CONTAINER mount paths
+    # (<sandbox_home>/.aws), not the backend's write paths — the container can't see
+    # the backend filesystem. With no sandbox, the backend-local write paths are right.
+    sandbox_home = settings.sandbox_home.rstrip("/")
+    project_to_sandbox = bool(settings.sandbox_creds_root)
 
     aws = await store.get(user_id, session_id, "aws")
     # Only a fully selected AWS credential carries minted profiles (provisional =
     # SSO token only). Profiles are written to a tmpfs ~/.aws (RAM, not disk).
     if aws is not None and aws.secret.get("profiles"):
-        env.update(write_aws_profiles(session_id, aws))
+        # Ensure the files exist on the (shared) creds tmpfs; idempotent.
+        local_env = write_aws_profiles(session_id, aws)
+        if project_to_sandbox:
+            env["AWS_SHARED_CREDENTIALS_FILE"] = f"{sandbox_home}/.aws/credentials"
+            env["AWS_CONFIG_FILE"] = f"{sandbox_home}/.aws/config"
+            if local_env.get("AWS_DEFAULT_REGION"):
+                env["AWS_DEFAULT_REGION"] = local_env["AWS_DEFAULT_REGION"]
+        else:
+            env.update(local_env)
         injected.append("aws")
         # Wire the per-session EKS kubeconfigs (generated on role select) into
         # KUBECONFIG so the agent's `kubectl` finds them. Without this the refresh
@@ -189,7 +229,12 @@ async def build_connector_env(
         # turn if discovery hasn't finished — then we just leave KUBECONFIG unset.
         kubeconfigs = session_kubeconfigs(session_id)
         if kubeconfigs:
-            env["KUBECONFIG"] = ":".join(kubeconfigs)
+            if project_to_sandbox:
+                env["KUBECONFIG"] = ":".join(
+                    f"{sandbox_home}/.kube/{os.path.basename(k)}" for k in kubeconfigs
+                )
+            else:
+                env["KUBECONFIG"] = ":".join(kubeconfigs)
             injected.append("eks")
 
     gitlab = await store.get(user_id, session_id, "gitlab")
