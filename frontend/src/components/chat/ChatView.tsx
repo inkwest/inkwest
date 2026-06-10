@@ -15,10 +15,12 @@ interface Props {
   onSendMessage: (content: string) => void;
   onStopStreaming?: () => void;
   initialPrompt?: string | null;
+  // Auto-submit initialPrompt once the composer is enabled (WS connected).
+  autoSubmit?: boolean;
   sessionId?: string;
 }
 
-export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, sessionId }: Props) {
+export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSubmit, sessionId }: Props) {
   const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks, currentTodos } = useChatStore();
   const compact = useSettingsStore((s) => s.compactToolCards);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -105,7 +107,7 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, sessio
           {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
           <div ref={bottomRef} />
         </div>
-        <ChatInput onSend={onSendMessage} onStop={onStopStreaming} disabled={!isConnected} isStreaming={isStreaming} initialPrompt={initialPrompt} sessionId={sessionId} />
+        <ChatInput onSend={onSendMessage} onStop={onStopStreaming} disabled={!isConnected} isStreaming={isStreaming} initialPrompt={initialPrompt} autoSubmit={autoSubmit} sessionId={sessionId} />
       </div>
 
       {showEgress && <EgressLog events={egress.events} connected={egress.connected} />}
