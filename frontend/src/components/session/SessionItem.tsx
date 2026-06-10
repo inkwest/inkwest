@@ -118,6 +118,10 @@ export function SessionItem({ session, dragHandleProps }: Props) {
     <>
       <Link
         to={`/session/${session.id}`}
+        // Firefox: anchors are native drag sources, and the link drag hijacks a
+        // grab on the nested grip (its dragstart never fires). Disable link
+        // dragging so the grip is the only drag source.
+        draggable={false}
         className={cn(
           'group block px-3 py-2 rounded-lg text-sm transition-colors relative',
           isActive
