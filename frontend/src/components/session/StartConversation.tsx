@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Cloud, Gitlab, Activity } from 'lucide-react';
+import { Cloud, Gitlab } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore, useSystemPromptStore } from '@/store/admin';
 import { ConnectorName } from '@/types/connectors';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
+import { McpPanel } from '@/components/connector/McpPanel';
 
 const CUSTOM = '__custom__';
 
@@ -14,7 +15,6 @@ const CUSTOM = '__custom__';
 const PRESESSION_CONNECTORS: { name: ConnectorName; label: string; Icon: typeof Cloud }[] = [
   { name: 'aws', label: 'AWS', Icon: Cloud },
   { name: 'gitlab', label: 'GitLab', Icon: Gitlab },
-  { name: 'coralogix', label: 'Coralogix', Icon: Activity },
 ];
 
 // Centered "ready to start a conversation" surface shown at the session root.
@@ -100,6 +100,17 @@ export function StartConversation() {
     }
   };
 
+  // Create the session before the MCP picker opens, so the selection persists.
+  const handleConfigureMcp = async () => {
+    if (customInvalid) return;
+    setError(null);
+    try {
+      await ensureSession();
+    } catch (e) {
+      setError(`Could not start the session: ${(e as Error).message}`);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-3xl space-y-4">
@@ -165,6 +176,13 @@ export function StartConversation() {
             ))}
           </div>
         )}
+
+        {/* MCP servers — selectable per conversation. The session is created
+            lazily when the picker opens (same "en soumsoum" rule as Give access). */}
+        <div className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-900/60 px-4 py-2">
+          <span className="text-xs text-gray-500">MCP servers:</span>
+          <McpPanel sessionId={sessionId ?? ''} onBeforeOpen={handleConfigureMcp} />
+        </div>
 
         {error && (
           <div role="alert" className="rounded-md border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">

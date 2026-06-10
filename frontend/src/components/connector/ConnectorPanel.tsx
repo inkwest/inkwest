@@ -245,7 +245,12 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline' }: Prop
         )}
         {startError && <span className="text-xs text-red-400">{startError}</span>}
         {/* MCP selector, inline on the connector bar (in-conversation header only). */}
-        {!stacked && <McpPanel sessionId={sessionId} />}
+        {!stacked && (
+          <>
+            <span className="mx-1 h-5 w-px bg-gray-700" aria-hidden />
+            <McpPanel sessionId={sessionId} />
+          </>
+        )}
       </div>
 
       {/* AWS device authorization — our own centered modal (the AWS page itself

@@ -5,6 +5,9 @@ import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
 
 interface Props {
   sessionId: string;
+  // Optional hook run before the modal opens — used on the start screen to
+  // lazily create the session (so the selection has somewhere to persist).
+  onBeforeOpen?: () => Promise<void> | void;
 }
 
 /**
@@ -14,7 +17,7 @@ interface Props {
  * conversation's .claude.json server-side; it takes effect on the NEXT message
  * (the CLI reads its config at launch).
  */
-export function McpPanel({ sessionId }: Props) {
+export function McpPanel({ sessionId, onBeforeOpen }: Props) {
   const [catalog, setCatalog] = useState<string[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState(false);
@@ -22,6 +25,8 @@ export function McpPanel({ sessionId }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // No session yet (start screen before first interaction) — nothing to fetch.
+    if (!sessionId) return;
     let cancelled = false;
     Promise.all([getMcpCatalog(), getSessionMcp(sessionId)])
       .then(([cat, sel]) => {
@@ -58,17 +63,23 @@ export function McpPanel({ sessionId }: Props) {
     }
   };
 
-  // Nothing to offer (no catalog configured) — render nothing.
-  if (catalog.length === 0) return null;
+  // In-conversation bar: no catalog configured → render nothing. On the start
+  // screen (onBeforeOpen set) the button shows before the session exists, so we
+  // keep it even with an empty catalog (it loads once the session is created).
+  if (catalog.length === 0 && !onBeforeOpen) return null;
 
   const count = enabled.size;
   const anyOn = count > 0;
 
+  const handleOpen = async () => {
+    if (onBeforeOpen) await onBeforeOpen();
+    setOpen(true);
+  };
+
   return (
     <>
-      <span className="mx-1 h-5 w-px bg-gray-700" aria-hidden />
       <button
-        onClick={() => setOpen(true)}
+        onClick={handleOpen}
         title="Choose which MCP servers this conversation can use"
         className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-sm border transition-colors ${
           anyOn
@@ -77,7 +88,7 @@ export function McpPanel({ sessionId }: Props) {
         }`}
       >
         <Plug className="h-3.5 w-3.5" />
-        MCP {count}/{catalog.length}
+        MCP{catalog.length ? ` ${count}/${catalog.length}` : ''}
       </button>
 
       <Modal isOpen={open} onClose={() => setOpen(false)} title="MCP servers" size="sm">
