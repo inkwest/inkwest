@@ -48,9 +48,10 @@ KUBECTL_TOOLS: list[dict[str, Any]] = [
                 },
                 "output": {
                     "type": "string",
-                    "enum": ["wide", "yaml", "json"],
+                    "enum": ["wide", "yaml", "json", "name"],
                     "description": (
-                        "Output format. Use 'wide' for more columns, 'yaml' for full spec."
+                        "Output format. Use 'wide' for more columns, 'yaml' for full"
+                        " spec, 'name' for just resource names."
                     ),
                 },
                 "all_namespaces": {

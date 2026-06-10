@@ -18,6 +18,8 @@ import subprocess
 import sys
 from typing import Any
 
+from app.tools.validation import validate_tool_input
+
 # Configure logging to stderr (stdout is for MCP protocol)
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("MCP_DEBUG") else logging.INFO,
@@ -248,6 +250,15 @@ def execute_kubectl(tool_name: str, args: dict[str, Any]) -> tuple[str, bool]:
     Returns:
         Tuple of (output string, is_error bool)
     """
+    # Security: reject flag-shaped / malformed free-string args before they reach
+    # the kubectl argv, otherwise a value like '--kubeconfig=...' or '--raw=...' smuggled as a
+    # resource pivots clusters or bypasses the read-only output allow-list. Shared with the API
+    # path so both kubectl entry points enforce the same boundary.
+    validation_error = validate_tool_input(tool_name, args)
+    if validation_error:
+        logger.warning(f"Validation failed for {tool_name}: {validation_error}")
+        return f"Validation error: {validation_error}", True
+
     kubeconfig = os.environ.get("KUBECONFIG", "")
     context = os.environ.get("KUBECTL_CONTEXT", "")
 

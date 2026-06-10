@@ -83,7 +83,10 @@ class TestValidation:
         assert error is None
 
     def test_validate_unknown_resource_allowed(self):
-        """Unknown resource types are allowed — RBAC handles access control."""
+        """Unknown but well-formed resource kinds are allowed — RBAC handles access control.
+
+        Only the *shape* is constrained: the value must be a plain kind, never a flag.
+        """
         error = validate_tool_input("kubectl_get", {"resource": "hackme"})
         assert error is None
 
@@ -202,6 +205,11 @@ class TestValidation:
         assert error is not None
         assert "output format" in error
 
+    def test_validate_output_name_accepted(self):
+        """'name' is a schema-advertised output and must pass validation."""
+        error = validate_tool_input("kubectl_get", {"resource": "pods", "output": "name"})
+        assert error is None
+
     def test_validate_invalid_sort_by(self):
         """sort_by outside {cpu, memory} is rejected."""
         error = validate_tool_input("kubectl_top", {"resource": "pods", "sort_by": "disk"})
@@ -213,6 +221,119 @@ class TestValidation:
         error = validate_tool_input("kubectl_events", {"types": "Critical"})
         assert error is not None
         assert "event type" in error
+
+
+class TestEnumDriftGuard:
+    """the validator's enum allow-lists must match the tool schema enums.
+
+    The validator keeps its own constants (so validation.py stays a pure leaf module
+    with no intra-package import), but a schema enum and its validator allow-list that
+    disagree silently reject (or admit) values — exactly the gap that blocked
+    output='name'. These tests fail if the two ever drift again.
+
+    Note: ALLOWED_TOP_RESOURCES is intentionally NOT pinned here — it is a
+    deliberate superset of the kubectl_top 'resource' enum (it also accepts the
+    singular 'pod'/'node'), so it is not subject to the drift these tests guard.
+    """
+
+    @staticmethod
+    def _schema_enum(prop: str) -> set[str]:
+        """Collect the `enum` declared for `prop` across all kubectl tool schemas."""
+        values: set[str] = set()
+        for tool in KUBECTL_TOOLS:
+            spec = tool["input_schema"]["properties"].get(prop)
+            if spec and "enum" in spec:
+                values.update(spec["enum"])
+        return values
+
+    def test_output_allow_list_matches_schema(self):
+        from app.tools.validation import ALLOWED_OUTPUT_FORMATS
+
+        assert ALLOWED_OUTPUT_FORMATS == self._schema_enum("output")
+
+    def test_sort_by_allow_list_matches_schema(self):
+        from app.tools.validation import ALLOWED_SORT_BY
+
+        assert ALLOWED_SORT_BY == self._schema_enum("sort_by")
+
+    def test_event_types_allow_list_matches_schema(self):
+        from app.tools.validation import ALLOWED_EVENT_TYPES
+
+        assert ALLOWED_EVENT_TYPES == self._schema_enum("types")
+
+
+class TestArgumentInjection:
+    """free-string args must never reach the kubectl argv flag-shaped.
+
+    A prompt-injected tool call could otherwise smuggle a flag as a value, e.g. a 'resource'
+    of '--kubeconfig=...' (cluster pivot, bypassing check_cluster_access) or '--raw=...'
+    (bypassing the -o output allow-list to read any RBAC-permitted API path).
+    """
+
+    def test_resource_rejects_raw_flag(self):
+        """'--raw=...' smuggled as a resource is rejected before argv assembly."""
+        error = validate_tool_input(
+            "kubectl_get", {"resource": "--raw=/api/v1/namespaces/kube-system/secrets"}
+        )
+        assert error is not None
+        assert "Invalid resource" in error
+
+    def test_resource_rejects_kubeconfig_flag(self):
+        """'--kubeconfig=...' smuggled as a resource is rejected (cluster pivot)."""
+        error = validate_tool_input(
+            "kubectl_get", {"resource": "--kubeconfig=/etc/inkwest/kubeconfigs/other.yaml"}
+        )
+        assert error is not None
+        assert "Invalid resource" in error
+
+    def test_resource_rejects_bare_leading_dash(self):
+        """Any leading dash is rejected, even without an '=' payload."""
+        error = validate_tool_input("kubectl_get", {"resource": "-A"})
+        assert error is not None
+        assert "Invalid resource" in error
+
+    def test_resource_type_rejects_flag(self):
+        """The MCP server's 'resource_type' key gets the same guard as 'resource'."""
+        error = validate_tool_input("kubectl_top", {"resource_type": "--kubeconfig=/etc/x.yaml"})
+        assert error is not None
+        assert "Invalid resource" in error
+
+    def test_container_rejects_flag(self):
+        """'container' lands after '-c'; a flag-shaped value is rejected."""
+        error = validate_tool_input(
+            "kubectl_logs", {"pod_name": "my-pod", "container": "--kubeconfig=/x"}
+        )
+        assert error is not None
+        assert "Invalid container" in error
+
+    def test_api_group_rejects_flag(self):
+        """'api_group' lands after '--api-group'; a flag-shaped value is rejected."""
+        error = validate_tool_input("kubectl_api_resources", {"api_group": "--raw=/x"})
+        assert error is not None
+        assert "Invalid API group" in error
+
+    def test_verbs_rejects_flag(self):
+        """'verbs' lands after '--verbs'; a flag-shaped value is rejected."""
+        error = validate_tool_input("kubectl_api_resources", {"verbs": "--raw=/x"})
+        assert error is not None
+        assert "Invalid verbs" in error
+
+    def test_legitimate_resource_paths_still_pass(self):
+        """Valid kinds and explain field paths must not be over-restricted."""
+        assert validate_tool_input("kubectl_get", {"resource": "pods"}) is None
+        assert validate_tool_input("kubectl_get", {"resource": "networkpolicies"}) is None
+        assert validate_tool_input("kubectl_explain", {"resource": "pod.spec.containers"}) is None
+
+    def test_legitimate_container_and_verbs_still_pass(self):
+        """Valid container names and verb lists must not be over-restricted."""
+        assert (
+            validate_tool_input("kubectl_logs", {"pod_name": "my-pod", "container": "nginx-proxy"})
+            is None
+        )
+        assert validate_tool_input("kubectl_api_resources", {"verbs": "get,list,watch"}) is None
+        assert (
+            validate_tool_input("kubectl_api_resources", {"api_group": "networking.k8s.io"}) is None
+        )
 
 
 class TestLabelSelectorValidation:
@@ -594,7 +715,8 @@ class TestParallelExecution:
 
 
 class TestResourceValidation:
-    """Tests for resource type validation — RBAC handles access, we only validate kubectl_top."""
+    """Resource type validation — RBAC handles access; we constrain the value's shape
+    and additionally restrict kubectl_top to pods/nodes."""
 
     def test_top_rejects_invalid_resource(self):
         """kubectl_top only accepts pods/nodes."""
@@ -612,6 +734,40 @@ class TestResourceValidation:
         assert validate_tool_input("kubectl_get", {"resource": "pods"}) is None
         assert validate_tool_input("kubectl_get", {"resource": "applications"}) is None
         assert validate_tool_input("kubectl_get", {"resource": "certificates"}) is None
+
+
+class TestMcpServerArgumentInjection:
+    """the standalone MCP server enforces the same flag-shape guard as the API path."""
+
+    def test_mcp_rejects_raw_resource(self):
+        """'--raw=...' as a resource never reaches kubectl on the MCP path."""
+        from app.mcp_server import execute_kubectl as mcp_execute_kubectl
+
+        output, is_error = mcp_execute_kubectl(
+            "kubectl_get", {"resource": "--raw=/api/v1/namespaces/kube-system/secrets"}
+        )
+        assert is_error is True
+        assert "Validation error" in output
+
+    def test_mcp_rejects_kubeconfig_resource_type(self):
+        """'--kubeconfig=...' as a kubectl_top resource_type is rejected (cluster pivot)."""
+        from app.mcp_server import execute_kubectl as mcp_execute_kubectl
+
+        output, is_error = mcp_execute_kubectl(
+            "kubectl_top", {"resource_type": "--kubeconfig=/etc/inkwest/kubeconfigs/other.yaml"}
+        )
+        assert is_error is True
+        assert "Validation error" in output
+
+    def test_mcp_rejects_container_flag(self):
+        """'--kubeconfig=...' smuggled as a log container is rejected on the MCP path."""
+        from app.mcp_server import execute_kubectl as mcp_execute_kubectl
+
+        output, is_error = mcp_execute_kubectl(
+            "kubectl_logs", {"pod_name": "my-pod", "container": "--kubeconfig=/x"}
+        )
+        assert is_error is True
+        assert "Validation error" in output
 
 
 class TestKubectlWithoutCluster:
