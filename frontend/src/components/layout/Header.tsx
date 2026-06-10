@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Check, Menu, User, LogOut, Shield } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { ArrowLeft, Check, Menu, User, LogOut, Shield } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore, TaskListPosition } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
@@ -15,6 +15,9 @@ const TASK_LIST_OPTIONS: { value: TaskListPosition; label: string }[] = [
 
 export function Header() {
   const navigate = useNavigate();
+  // Inside the admin panel the entry flips to "Back to Chat" — otherwise it
+  // would only navigate to where the user already is, with no way back.
+  const inAdminPanel = useLocation().pathname.startsWith('/admin');
   const currentSession = useSessionsStore((s) => s.currentSession);
   const { compactToolCards, toggleCompactToolCards, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
   const { user, oidcEnabled, logout } = useAuthStore();
@@ -122,11 +125,11 @@ export function Header() {
                 <div className="border-t border-gray-700 p-2 space-y-1">
                   {user?.is_admin && (
                     <button
-                      onClick={() => { navigate('/admin'); setShowMenu(false); }}
+                      onClick={() => { navigate(inAdminPanel ? '/' : '/admin'); setShowMenu(false); }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
                     >
-                      <Shield className="h-4 w-4" />
-                      Admin Panel
+                      {inAdminPanel ? <ArrowLeft className="h-4 w-4" /> : <Shield className="h-4 w-4" />}
+                      {inAdminPanel ? 'Back to Chat' : 'Admin Panel'}
                     </button>
                   )}
                   {oidcEnabled && (
