@@ -205,6 +205,11 @@ class TestValidation:
         assert error is not None
         assert "output format" in error
 
+    def test_validate_output_name_accepted(self):
+        """'name' is a schema-advertised output and must pass validation."""
+        error = validate_tool_input("kubectl_get", {"resource": "pods", "output": "name"})
+        assert error is None
+
     def test_validate_invalid_sort_by(self):
         """sort_by outside {cpu, memory} is rejected."""
         error = validate_tool_input("kubectl_top", {"resource": "pods", "sort_by": "disk"})
@@ -216,6 +221,45 @@ class TestValidation:
         error = validate_tool_input("kubectl_events", {"types": "Critical"})
         assert error is not None
         assert "event type" in error
+
+
+class TestEnumDriftGuard:
+    """the validator's enum allow-lists must match the tool schema enums.
+
+    The validator keeps its own constants (so validation.py stays a pure leaf module
+    with no intra-package import), but a schema enum and its validator allow-list that
+    disagree silently reject (or admit) values — exactly the gap that blocked
+    output='name'. These tests fail if the two ever drift again.
+
+    Note: ALLOWED_TOP_RESOURCES is intentionally NOT pinned here — it is a
+    deliberate superset of the kubectl_top 'resource' enum (it also accepts the
+    singular 'pod'/'node'), so it is not subject to the drift these tests guard.
+    """
+
+    @staticmethod
+    def _schema_enum(prop: str) -> set[str]:
+        """Collect the `enum` declared for `prop` across all kubectl tool schemas."""
+        values: set[str] = set()
+        for tool in KUBECTL_TOOLS:
+            spec = tool["input_schema"]["properties"].get(prop)
+            if spec and "enum" in spec:
+                values.update(spec["enum"])
+        return values
+
+    def test_output_allow_list_matches_schema(self):
+        from app.tools.validation import ALLOWED_OUTPUT_FORMATS
+
+        assert ALLOWED_OUTPUT_FORMATS == self._schema_enum("output")
+
+    def test_sort_by_allow_list_matches_schema(self):
+        from app.tools.validation import ALLOWED_SORT_BY
+
+        assert ALLOWED_SORT_BY == self._schema_enum("sort_by")
+
+    def test_event_types_allow_list_matches_schema(self):
+        from app.tools.validation import ALLOWED_EVENT_TYPES
+
+        assert ALLOWED_EVENT_TYPES == self._schema_enum("types")
 
 
 class TestArgumentInjection:

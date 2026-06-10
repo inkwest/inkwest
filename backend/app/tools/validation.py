@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 # Resources allowed for kubectl_top
 ALLOWED_TOP_RESOURCES: set[str] = {"pods", "nodes", "pod", "node"}
 
+# Enum allow-lists. These MUST stay in sync with the matching ``enum`` in the tool
+# schema (app/tools/definitions.py); test_tools.py pins them together so any future
+# drift fails CI rather than silently rejecting a schema-advertised value.
+ALLOWED_OUTPUT_FORMATS: set[str] = {"wide", "yaml", "json", "name"}
+ALLOWED_SORT_BY: set[str] = {"cpu", "memory"}
+ALLOWED_EVENT_TYPES: set[str] = {"Normal", "Warning"}
+
 # Validation patterns based on Kubernetes naming conventions
 # Namespace: lowercase alphanumeric with hyphens, must start/end with alphanumeric
 NAMESPACE_PATTERN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -147,19 +154,20 @@ def validate_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str | Non
 
     # Validate output format
     output = tool_input.get("output")
-    if output and output not in ["wide", "yaml", "json"]:
+    if output and output not in ALLOWED_OUTPUT_FORMATS:
         logger.warning(f"Invalid output format: {output}")
-        return f"Invalid output format: {output}. Use 'wide', 'yaml', or 'json'"
+        allowed = ", ".join(sorted(ALLOWED_OUTPUT_FORMATS))
+        return f"Invalid output format: {output}. Use one of: {allowed}"
 
     # Validate sort_by for kubectl_top
     sort_by = tool_input.get("sort_by")
-    if sort_by and sort_by not in ["cpu", "memory"]:
+    if sort_by and sort_by not in ALLOWED_SORT_BY:
         logger.warning(f"Invalid sort_by value: {sort_by}")
         return f"Invalid sort_by: {sort_by}. Use 'cpu' or 'memory'"
 
     # Validate event types
     types = tool_input.get("types")
-    if types and types not in ["Normal", "Warning"]:
+    if types and types not in ALLOWED_EVENT_TYPES:
         logger.warning(f"Invalid event type: {types}")
         return f"Invalid event type: {types}. Use 'Normal' or 'Warning'"
 
