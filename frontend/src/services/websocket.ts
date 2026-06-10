@@ -1,5 +1,5 @@
 import { ChatEvent, SendMessage } from '@/types/events';
-import { fetchWsTicket } from '@/services/api';
+import { fetchWsTicket, wsBaseUrl } from '@/services/api';
 
 type EventHandler = (event: ChatEvent) => void;
 
@@ -20,7 +20,7 @@ export class ChatWebSocket {
 
   async connect(): Promise<void> {
     if (this._disconnected) return;
-    const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+    const wsUrl = wsBaseUrl();
     const token = localStorage.getItem('session_token');
     let protocols: string[] = ['inkwest'];
     if (token) {

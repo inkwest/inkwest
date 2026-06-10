@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchWsTicket } from '@/services/api';
+import { fetchWsTicket, wsBaseUrl } from '@/services/api';
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const WS_URL = wsBaseUrl();
 const RECONNECT_DELAY = 3000;
 const MAX_RECONNECT_ATTEMPTS = 3;
 const MAX_EVENTS = 500;

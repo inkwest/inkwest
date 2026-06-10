@@ -1,3 +1,5 @@
+# Dev/compose image. KEEP IN SYNC with the root Dockerfile (combined prod image)
+# for the tooling layers (kubectl, AWS CLI, docker CLI, Claude CLI).
 FROM python:3.11-slim AS base
 
 ARG BUILD_TIMESTAMP="1970-01-01T00:00:00+00:00"
