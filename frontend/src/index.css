@@ -55,9 +55,9 @@
     conic-gradient(
       from var(--invite-angle),
       rgb(75 85 99),
-      rgb(59 130 246 / 0.55),
+      rgb(59 130 246 / 0.8),
       rgb(75 85 99),
-      rgb(139 92 246 / 0.55),
+      rgb(139 92 246 / 0.8),
       rgb(75 85 99)
     ) border-box;
   animation: invite-spin 8s linear infinite;

@@ -126,7 +126,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           placeholder={placeholder ?? 'Describe what you want to investigate or analyse…'}
           disabled={disabled}
           className={cn(
-            'flex-1 bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 focus:shadow-[0_0_12px_rgba(59,130,246,0.3)] disabled:opacity-50',
+            'flex-1 bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 focus:shadow-[0_0_20px_3px_rgba(59,130,246,0.45)] disabled:opacity-50',
             shimmer && message.trim() && 'shimmer-border',
             inviteToPrompt && 'invite-border',
             large ? 'text-base' : TEXT_SIZE.body(compact),
