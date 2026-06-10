@@ -1,6 +1,6 @@
 # Inkwest
 
-AI-powered investigation assistant — chat interface backed by Claude that brokers scoped, read-only access across connectors (Kubernetes/kubectl, AWS, GitLab, Coralogix) to investigate and correlate issues across systems.
+AI-powered investigation assistant — chat interface backed by Claude that brokers scoped, read-only access across connectors (Kubernetes/kubectl, AWS, GitLab) plus Coralogix observability via MCP, to investigate and correlate issues across systems.
 
 ## Tech Stack
 

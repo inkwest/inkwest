@@ -1,6 +1,6 @@
 # Inkwest
 
-AI-powered investigation assistant. Chat with an AI that brokers scoped, read-only access across Kubernetes, AWS, GitLab, and Coralogix to help diagnose issues, explain configurations, and trace problems end to end.
+AI-powered investigation assistant. Chat with an AI that brokers scoped, read-only access across Kubernetes, AWS, and GitLab — plus Coralogix observability via MCP — to help diagnose issues, explain configurations, and trace problems end to end.
 
 ## Why Inkwest?
 
@@ -13,7 +13,7 @@ It also solves the permissions problem. Instead of handing out broad access "jus
 ## Features
 
 - **Conversational investigation**: Describe your problem in natural language
-- **Cross-connector access**: Kubernetes, AWS, GitLab, and Coralogix, scoped read-only per session
+- **Cross-system access**: Kubernetes, AWS, and GitLab connectors plus Coralogix observability (logs/metrics/traces) via MCP — all scoped read-only per session
 - **Intelligent tool use**: AI automatically runs relevant queries across the granted connectors
 - **Session persistence**: Resume previous investigation sessions with rename/delete support
 - **Multi-cluster support**: Switch between different Kubernetes contexts
