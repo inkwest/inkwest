@@ -18,7 +18,10 @@ export function Header() {
   // Inside the admin panel the entry flips to "Back to Chat" — otherwise it
   // would only navigate to where the user already is, with no way back.
   const inAdminPanel = useLocation().pathname.startsWith('/admin');
-  const currentSession = useSessionsStore((s) => s.currentSession);
+  // Session context belongs to the chat — hide it on admin pages, but keep the
+  // store intact so the chat restores as-is when navigating back.
+  const storeSession = useSessionsStore((s) => s.currentSession);
+  const currentSession = inAdminPanel ? null : storeSession;
   const { compactToolCards, toggleCompactToolCards, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
   const { user, oidcEnabled, logout } = useAuthStore();
   const [showMenu, setShowMenu] = useState(false);

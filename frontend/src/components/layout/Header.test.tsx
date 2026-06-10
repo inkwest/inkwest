@@ -126,6 +126,28 @@ describe('Header', () => {
     expect(screen.queryByText('Admin Panel')).not.toBeInTheDocument();
   });
 
+  it('hides session context inside the admin panel', () => {
+    useSessionsStore.setState({
+      currentSession: {
+        id: 's1',
+        cluster_id: 'c1',
+        title: 'Debug Crash',
+        total_input_tokens: 1500,
+        total_output_tokens: 800,
+        cluster: { id: 'c1', name: 'prod', display_name: 'Production', is_active: true, created_at: new Date().toISOString() },
+        messages: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    });
+    renderHeader('/admin/clusters');
+
+    expect(screen.queryByText('Debug Crash')).not.toBeInTheDocument();
+    expect(screen.queryByText('Production')).not.toBeInTheDocument();
+    expect(screen.queryByTitle(/input.*output/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('connection-status')).not.toBeInTheDocument();
+  });
+
   it('shows back-to-chat link instead of admin link inside the admin panel', async () => {
     useAuthStore.setState({
       user: { id: 'u1', email: 'admin@localhost', display_name: 'Admin', is_admin: true, roles: ['admin'], oidc_issuer: '' },
