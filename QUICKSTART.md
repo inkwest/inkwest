@@ -28,29 +28,11 @@ AI_PROVIDER=claude-cli
 AI_PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Option C: Azure OpenAI
-AI_PROVIDER=azure
-AZURE_OPENAI_ENDPOINT=https://your-instance.openai.azure.com
-AZURE_OPENAI_API_KEY=your-key
-AZURE_OPENAI_DEPLOYMENT=gpt-5-codex
-
-# Option D: AWS Bedrock
+# Option C: AWS Bedrock
 AI_PROVIDER=bedrock
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
-
-# Option E: OpenAI (direct)
-AI_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-
-# Option F: Google Gemini
-AI_PROVIDER=google
-GOOGLE_API_KEY=...
-
-# Option G: OpenRouter (multi-model)
-AI_PROVIDER=openrouter
-OPENROUTER_API_KEY=sk-or-...
 ```
 
 ## 2. Add Kubeconfigs
@@ -111,13 +93,8 @@ docker compose up -d
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AI_PROVIDER` | AI backend: `claude-cli`, `anthropic`, `bedrock`, `azure`, `openai`, `google`, `openrouter` | `claude-cli` |
+| `AI_PROVIDER` | AI backend: `claude-cli`, `anthropic`, `bedrock` | `claude-cli` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | - |
-| `OPENAI_API_KEY` | OpenAI API key | - |
-| `GOOGLE_API_KEY` | Google Gemini API key | - |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL | - |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | - |
-| `AZURE_OPENAI_DEPLOYMENT` | Azure deployment name | - |
 | `AWS_REGION` | AWS region for Bedrock | - |
 | `KUBECONFIG_DIR` | Host path to kubeconfigs | `./kubeconfigs` |
 

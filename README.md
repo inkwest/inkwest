@@ -17,7 +17,7 @@ It also solves the permissions problem. Instead of giving developers broad clust
 - **Session persistence**: Resume previous debugging sessions with rename/delete support
 - **Multi-cluster support**: Switch between different Kubernetes contexts
 - **Read-only safety**: No destructive operations allowed
-- **Multiple AI providers**: Claude CLI (default), Anthropic API, AWS Bedrock, Azure OpenAI, OpenAI, Google Gemini, OpenRouter
+- **Multiple AI providers**: Claude CLI (default), Anthropic API, AWS Bedrock
 - **Admin dashboard**: Manage clusters, users, budgets, and usage reports
 - **Enterprise features**: OIDC authentication, role-based access, budget management
 
@@ -39,10 +39,10 @@ It also solves the permissions problem. Instead of giving developers broad clust
 │  - Chat View    │     │    - AI Orchestration           │     │  - Claude CLI   │
 │  - Admin Panel  │     │    - Tool Execution             │     │  - Anthropic    │
 │  - Sessions     │     │    - Session Management         │     │  - Bedrock      │
-└─────────────────┘     │    - Budget Tracking            │     │  - OpenAI       │
-        │               └─────────────────────────────────┘     │  - Google       │
-        │                           │          │                │  - OpenRouter   │
-        │    WebSocket              │          │                └─────────────────┘
+└─────────────────┘     │    - Budget Tracking            │     └─────────────────┘
+        │               └─────────────────────────────────┘
+        │                           │          │
+        │    WebSocket              │          │
         └───────────────────────────┘          │
                                                ▼
                                         ┌─────────────┐
@@ -108,19 +108,6 @@ AI_PROVIDER=claude-cli
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
 
-# OR for OpenAI (direct)
-# AI_PROVIDER=openai
-# OPENAI_API_KEY=sk-...
-
-# OR for Google Gemini
-# AI_PROVIDER=google
-# GOOGLE_API_KEY=...
-
-# OR for OpenRouter (multiple models)
-# AI_PROVIDER=openrouter
-# OPENROUTER_API_KEY=sk-or-...
-# OPENROUTER_MODEL=anthropic/claude-sonnet-4
-
 # Database
 DATABASE_URL=postgresql+asyncpg://inkwest:inkwest@localhost:5432/inkwest
 
@@ -145,10 +132,6 @@ KUBECONFIG_DIR=/path/to/kubeconfigs
 | Claude CLI    | Free*       | Pre-installed    | Development, local use    |
 | Anthropic     | Pay-per-use | API key          | Production, high volume   |
 | AWS Bedrock   | Pay-per-use | AWS credentials  | AWS environments          |
-| Azure OpenAI  | Pay-per-use | Azure deployment | Azure environments        |
-| OpenAI        | Pay-per-use | API key          | GPT models direct         |
-| Google Gemini | Pay-per-use | API key          | Google Cloud environments |
-| OpenRouter    | Pay-per-use | API key          | Multi-model flexibility   |
 
 *Claude CLI uses your existing Claude subscription
 

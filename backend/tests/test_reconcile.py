@@ -237,8 +237,6 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
     monkeypatch.setattr(app_main, "stop_listener", AsyncMock())
     monkeypatch.setattr(app_main, "close_db", AsyncMock())
     monkeypatch.setattr(app_main, "shutdown_telemetry", MagicMock())
-    # Imported lazily inside the shutdown path, so patch it at its source module.
-    monkeypatch.setattr("app.services.orchestrator_openai.close_cached_openai_client", AsyncMock())
 
     # Entering (startup) and exiting (shutdown) must not propagate the reconcile error.
     async with app_main.lifespan(app_main.app):

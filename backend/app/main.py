@@ -83,9 +83,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if settings.sandbox_enabled:
         await stop_sandbox_reaper()
     await stop_listener()
-    from app.services.orchestrator_openai import close_cached_openai_client
-
-    await close_cached_openai_client()
     await close_db()
     logger.info("database_closed")
     shutdown_telemetry()

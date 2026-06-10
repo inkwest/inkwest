@@ -6,7 +6,7 @@ AI-powered Kubernetes debugging assistant — chat interface backed by Claude th
 
 - **Backend**: FastAPI + SQLAlchemy async + PostgreSQL + asyncpg
 - **Frontend**: React + TypeScript + Vite + Zustand + Tailwind CSS
-- **AI**: Anthropic Claude (direct, Bedrock, Azure, OpenRouter, CLI)
+- **AI**: Anthropic Claude (direct, Bedrock, CLI)
 - **Auth**: OIDC (optional) with JWT session tokens, dev mode auto-login
 
 ## Dev Setup
