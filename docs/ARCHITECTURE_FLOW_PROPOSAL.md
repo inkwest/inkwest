@@ -1,6 +1,29 @@
 # Proposition d'architecture — Sandbox `claude` par conversation (avec Squid dédié)
 
-> **Statut : proposition (non implémentée).** Objectif : exécuter `claude` dans une
+> **Statut : IMPLÉMENTÉE** (`SANDBOX_ENABLED=true`) — voir `app/services/sandbox.py`,
+> `sandbox/squid.conf`, `docker-compose.yml`. Ce document est conservé comme trace de
+> conception ; l'implémentation a divergé sur plusieurs points (ci-dessous). Pour le
+> flux à jour, voir `ARCHITECTURE_FLOW.md` §4 et `docs/diagrams/end_to_end.mmd`.
+>
+> **Divergences proposition → implémentation :**
+> - **Allowlist Squid STATIQUE, pas dynamique.** Pas de `update_rules()` ni de
+>   `squid -k reconfigure` : un `squid.conf` unique (monté en lecture seule) autorise
+>   déjà *tous* les connecteurs + backends de modèle. Un grant/revoke n'agit que sur
+>   la **couche creds** (RAM) — la « défense en profondeur réseau par conversation »
+>   du §5 n'a pas été retenue (simplicité ; le moindre privilège reste porté par les
+>   creds). Les §4/§5/§10-phase-4 décrivant le reload dynamique sont **obsolètes**.
+> - **Nommage** : service `sandbox.py` (pas `sandbox_manager.py`) ; flag
+>   `SANDBOX_ENABLED` (pas `CLAUDE_CLI_SANDBOX`) ; conteneurs `inkwest_conv_<sid>` /
+>   `inkwest_proxy_<sid>`, réseaux `inkwest_intnet_<sid>` / `inkwest_extnet_<sid>`.
+>   Image = `SANDBOX_TOOLBOX_IMAGE` (« toolbox », pas « runner »).
+> - **DooD via un daemon dind dédié** (TLS), pas le socket Docker de l'hôte.
+> - **Ajouts non prévus** : pages d'erreur Squid LLM-parseables (`sandbox/errors`),
+>   tail d'`access.log` pour un onglet UI, projection creds `.aws`/`.kube` en RAM,
+>   limites CPU/mémoire/pids par conteneur.
+>
+> ---
+>
+> **Énoncé initial.** Objectif : exécuter `claude` dans une
 > image Docker **isolée filesystem + réseau**, dont **tout l'egress passe par un
 > Squid propre à la conversation**, avec une **whitelist par conversation** (chaque
 > conversation peut avoir des règles différentes, alignées sur les connecteurs
