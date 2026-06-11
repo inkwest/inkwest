@@ -123,15 +123,37 @@ class AwsConnector(Connector):
             s.aws_sso_region,
         )
 
-    async def provisional_from_token(
-        self, access_token: str, expires_in: int, refresh_token: str | None = None
-    ) -> MintedCredential:
-        """Build the provisional (``needs_selection``) credential from the SSO token."""
+    async def enumerate_accounts_roles(
+        self, access_token: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """List the accounts/roles the SSO token can assume (role-filter applied).
+
+        The expensive part of a grant: one AWS round-trip per account. Callers cache
+        the result on the warm grant so re-opening the picker doesn't re-enumerate.
+        """
         s = get_settings()
         accounts, roles = await asyncio.to_thread(
             _list_accounts_and_roles, access_token, s.aws_sso_region
         )
-        accounts, roles = _filter_by_role(accounts, roles, s.aws_sso_role_filter)
+        return _filter_by_role(accounts, roles, s.aws_sso_role_filter)
+
+    async def provisional_from_token(
+        self,
+        access_token: str,
+        expires_in: int,
+        refresh_token: str | None = None,
+        *,
+        accounts: list[dict[str, Any]] | None = None,
+        roles: list[dict[str, Any]] | None = None,
+    ) -> MintedCredential:
+        """Build the provisional (``needs_selection``) credential from the SSO token.
+
+        ``accounts``/``roles`` skip enumeration when a fresh cached list is supplied
+        (warm-grant cache); otherwise the SSO portal is queried.
+        """
+        s = get_settings()
+        if accounts is None or roles is None:
+            accounts, roles = await self.enumerate_accounts_roles(access_token)
         return MintedCredential(
             connector="aws",
             scope=_SSO_SCOPE,

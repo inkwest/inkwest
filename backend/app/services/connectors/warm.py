@@ -128,7 +128,11 @@ async def store_gitlab_warm(user_id: UUID, refresh_token: str | None) -> None:
 
 
 async def store_aws_warm(user_id: UUID, provisional: MintedCredential) -> None:
-    """Capture the SSO token from a fresh device grant as the user's warm grant."""
+    """Capture the SSO token + enumerated accounts/roles as the user's warm grant.
+
+    Caching the enumeration (already done to build ``provisional``) lets later
+    conversations open the picker without re-querying the SSO portal.
+    """
     access_token = provisional.secret.get("sso_access_token")
     if not access_token:
         return
@@ -140,10 +144,24 @@ async def store_aws_warm(user_id: UUID, provisional: MintedCredential) -> None:
                 "sso_access_token": access_token,
                 "sso_refresh_token": provisional.secret.get("sso_refresh_token"),
                 "region": provisional.secret.get("region"),
+                "accounts": provisional.available_accounts or [],
+                "roles": provisional.available_roles or [],
             },
             not_after=warm_window_cap(provisional.expires_at),
         ),
     )
+
+
+async def update_aws_warm_options(
+    user_id: UUID, accounts: list[dict[str, Any]], roles: list[dict[str, Any]]
+) -> None:
+    """Refresh the cached accounts/roles on the live warm grant (after a forced reload)."""
+    warm = await get_warm_store().get(user_id, "aws")
+    if warm is None:
+        return
+    warm.secret["accounts"] = accounts
+    warm.secret["roles"] = roles
+    await get_warm_store().put(user_id, warm)
 
 
 async def grant_gitlab_from_warm(user_id: UUID) -> MintedCredential | None:
@@ -195,11 +213,17 @@ async def grant_aws_provisional_from_warm(user_id: UUID) -> MintedCredential | N
     if warm is None:
         return None
     expires_in = int((warm.not_after - datetime.now(UTC)).total_seconds())
+    # Reuse the cached accounts/roles from the original login — no SSO portal call.
+    # A user-driven refresh (aws/options/refresh) re-queries and updates the cache.
+    cached_accounts = warm.secret.get("accounts")
+    cached_roles = warm.secret.get("roles")
     try:
         cred = await AwsConnector().provisional_from_token(
             warm.secret["sso_access_token"],
             expires_in,
             refresh_token=warm.secret.get("sso_refresh_token"),
+            accounts=cached_accounts,
+            roles=cached_roles,
         )
     except Exception as e:  # noqa: BLE001 — boto raises varied client errors here
         fatal = _aws_error_is_fatal(e)

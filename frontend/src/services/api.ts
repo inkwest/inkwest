@@ -200,6 +200,13 @@ export async function getAwsOptions(
   return fetchAPI(`/api/connectors/${sessionId}/aws/options`);
 }
 
+// Force a re-enumeration of the SSO accounts/roles (bypasses the warm cache).
+export async function refreshAwsOptions(
+  sessionId: string
+): Promise<{ accounts: { account_id: string; account_name: string }[]; roles: { account_id: string; role_name: string }[] }> {
+  return fetchAPI(`/api/connectors/${sessionId}/aws/options/refresh`, { method: 'POST' });
+}
+
 export async function selectAwsRoles(
   sessionId: string,
   selections: { account_id: string; role_name: string }[]

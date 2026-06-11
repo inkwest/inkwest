@@ -278,6 +278,47 @@ async def test_grant_from_warm_gitlab_connected(
     store.put.assert_awaited_once()
 
 
+async def test_aws_options_refresh_reenumerates_and_updates_cache(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    provisional = _aws_provisional()
+    accounts = [{"account_id": "111", "account_name": "acme"}]
+    roles = [{"account_id": "111", "role_name": "ReadOnly"}]
+    store = MagicMock(get=AsyncMock(return_value=provisional), put=AsyncMock())
+    conn = MagicMock(type="aws", enumerate_accounts_roles=AsyncMock(return_value=(accounts, roles)))
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.api.routes.connectors.update_aws_warm_options", AsyncMock()) as upd,
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/options/refresh"
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"accounts": accounts, "roles": roles}
+    conn.enumerate_accounts_roles.assert_awaited_once()
+    store.put.assert_awaited_once()  # provisional cred re-stored with fresh lists
+    upd.assert_awaited_once_with(mock_user.id, accounts, roles)
+
+
+async def test_aws_options_refresh_409_when_no_provisional(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=None))
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=MagicMock(type="aws")),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/options/refresh"
+        )
+    assert resp.status_code == 409
+
+
 async def test_grant_from_warm_409_without_warm_grant(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:

@@ -40,6 +40,7 @@ from app.services.connectors.warm import (
     grant_gitlab_from_warm,
     store_aws_warm,
     store_gitlab_warm,
+    update_aws_warm_options,
 )
 from app.services.eks_refresh import schedule_session_eks_refresh
 from app.tools.connector_exec import write_aws_profiles
@@ -448,6 +449,38 @@ async def aws_options(
         accounts=cred.available_accounts or [],
         roles=cred.available_roles or [],
     )
+
+
+@router.post("/{session_id}/aws/options/refresh", response_model=AwsOptionsResponse)
+async def aws_options_refresh(
+    session_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> AwsOptionsResponse:
+    """Force a re-enumeration of the SSO accounts/roles, bypassing the warm cache.
+
+    Drives the picker's refresh button: re-queries the SSO portal with the live
+    token, updates the provisional credential and the warm-grant cache so later
+    opens see the fresh list too.
+    """
+    _require_enabled()
+    sid = await _verify_session_owner(db, session_id, current_user)
+    conn = _get_enabled_connector("aws")
+    cred = await get_credential_store().get(current_user.id, sid, "aws")
+    if cred is None or cred.selection is not None:
+        raise HTTPException(status_code=409, detail="No pending AWS authentication; re-initiate")
+    access_token = cred.secret.get("sso_access_token")
+    if not access_token:
+        raise HTTPException(status_code=409, detail="No SSO token; re-initiate")
+    try:
+        accounts, roles = await conn.enumerate_accounts_roles(access_token)
+    except Exception as e:  # noqa: BLE001 — boto raises varied client errors here
+        raise HTTPException(status_code=502, detail="AWS enumeration failed") from e
+    cred.available_accounts = accounts
+    cred.available_roles = roles
+    await get_credential_store().put(current_user.id, sid, cred)
+    await update_aws_warm_options(current_user.id, accounts, roles)
+    return AwsOptionsResponse(accounts=accounts, roles=roles)
 
 
 @router.post("/{session_id}/aws/select", response_model=ConnectorStatusResponse)

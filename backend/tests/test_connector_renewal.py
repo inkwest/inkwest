@@ -218,6 +218,62 @@ async def test_grant_aws_provisional_from_warm_enumerates_without_device_flow():
         await get_warm_store().delete(uid, "aws")
 
 
+async def test_grant_aws_provisional_from_warm_uses_cached_options():
+    uid = uuid.uuid4()
+    accounts = [{"account_id": "111", "account_name": "acme"}]
+    roles = [{"account_id": "111", "role_name": "ReadOnly"}]
+    await get_warm_store().put(
+        uid,
+        WarmGrant(
+            platform="aws",
+            secret={"sso_access_token": "SSO", "accounts": accounts, "roles": roles},
+            not_after=_FUTURE,
+        ),
+    )
+    try:
+        # Cached lists present → must NOT hit the SSO portal.
+        with patch(
+            "app.services.connectors.aws._list_accounts_and_roles",
+            side_effect=AssertionError("enumeration must be skipped when cached"),
+        ):
+            cred = await grant_aws_provisional_from_warm(uid)
+        assert cred is not None
+        assert cred.available_accounts == accounts
+        assert cred.available_roles == roles
+    finally:
+        await get_warm_store().delete(uid, "aws")
+
+
+async def test_store_aws_warm_caches_enumerated_options():
+    from app.services.connectors.warm import store_aws_warm, update_aws_warm_options
+
+    uid = uuid.uuid4()
+    accounts = [{"account_id": "111", "account_name": "acme"}]
+    roles = [{"account_id": "111", "role_name": "ReadOnly"}]
+    provisional = MintedCredential(
+        connector="aws",
+        scope="sso:account:access",
+        expires_at=_FUTURE,
+        secret={"sso_access_token": "SSO", "region": "eu-west-1"},
+        available_accounts=accounts,
+        available_roles=roles,
+    )
+    try:
+        await store_aws_warm(uid, provisional)
+        warm = await get_warm_store().get(uid, "aws")
+        assert warm is not None
+        assert warm.secret["accounts"] == accounts
+        assert warm.secret["roles"] == roles
+
+        # A forced refresh replaces the cache.
+        new_roles = [{"account_id": "111", "role_name": "Admin"}]
+        await update_aws_warm_options(uid, accounts, new_roles)
+        warm = await get_warm_store().get(uid, "aws")
+        assert warm is not None and warm.secret["roles"] == new_roles
+    finally:
+        await get_warm_store().delete(uid, "aws")
+
+
 async def test_grant_aws_provisional_from_warm_drops_grant_on_dead_sso_token():
     from botocore.exceptions import ClientError
 
