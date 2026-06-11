@@ -123,7 +123,9 @@ class AwsConnector(Connector):
             s.aws_sso_region,
         )
 
-    async def provisional_from_token(self, access_token: str, expires_in: int) -> MintedCredential:
+    async def provisional_from_token(
+        self, access_token: str, expires_in: int, refresh_token: str | None = None
+    ) -> MintedCredential:
         """Build the provisional (``needs_selection``) credential from the SSO token."""
         s = get_settings()
         accounts, roles = await asyncio.to_thread(
@@ -134,7 +136,11 @@ class AwsConnector(Connector):
             connector="aws",
             scope=_SSO_SCOPE,
             expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
-            secret={"sso_access_token": access_token, "region": s.aws_sso_region},
+            secret={
+                "sso_access_token": access_token,
+                "sso_refresh_token": refresh_token,
+                "region": s.aws_sso_region,
+            },
             selection=None,  # awaiting account/role choice
             available_accounts=accounts,
             available_roles=roles,
@@ -165,38 +171,35 @@ class AwsConnector(Connector):
         if not selections:
             raise ConnectorError("No account/role selected")
 
-        profiles: list[dict[str, Any]] = []
-        min_expiration: float | None = None
+        picks: list[dict[str, str]] = []
         for sel in selections:
             account_id = sel["account_id"]
             role_name = sel["role_name"]
             # Defense in depth: only mint pairs the user was actually offered.
             if (account_id, role_name) not in offered:
                 raise ConnectorError(f"Account/role not authorized: {account_id}/{role_name}")
-            creds = await asyncio.to_thread(
-                _get_role_credentials, access_token, account_id, role_name, s.aws_sso_region
-            )
-            account_name = name_by_id.get(account_id, account_id)
-            profiles.append(
+            picks.append(
                 {
-                    "name": _profile_name(account_name, role_name),
                     "account_id": account_id,
-                    "account_name": account_name,
                     "role_name": role_name,
-                    "access_key_id": creds["accessKeyId"],
-                    "secret_access_key": creds["secretAccessKey"],
-                    "session_token": creds["sessionToken"],
-                    "region": s.aws_sso_region,
+                    "account_name": name_by_id.get(account_id, account_id),
                 }
             )
-            exp = creds["expiration"] / 1000
-            min_expiration = exp if min_expiration is None else min(min_expiration, exp)
 
+        profiles, min_expiration = await _mint_sts_profiles(access_token, picks, s.aws_sso_region)
         return MintedCredential(
             connector="aws",
             scope=f"{len(profiles)} compte(s)/rôle(s) (read-only)",
             expires_at=datetime.fromtimestamp(min_expiration or 0, tz=UTC),
-            secret={"region": s.aws_sso_region, "profiles": profiles},
+            # Keep the SSO token: it outlives the ~1h STS creds (~8h) and lets
+            # remint_profiles() silently re-derive them without a new device flow.
+            secret={
+                "region": s.aws_sso_region,
+                "profiles": profiles,
+                "sso_access_token": access_token,
+                "sso_refresh_token": provisional.secret.get("sso_refresh_token"),
+            },
+            renew_until=provisional.expires_at,  # SSO token lifetime
             selection={
                 "profiles": [
                     {
@@ -208,6 +211,36 @@ class AwsConnector(Connector):
                     for p in profiles
                 ]
             },
+        )
+
+    async def remint_profiles(self, cred: MintedCredential) -> MintedCredential:
+        """Silently re-mint the STS profiles of an expired credential.
+
+        Works while the held SSO access token is still alive (``renew_until``):
+        same account/role selection (validated at the original pick), fresh ~1h
+        STS creds, no device flow and no popup.
+        """
+        s = get_settings()
+        access_token = cred.secret.get("sso_access_token")
+        picked = (cred.selection or {}).get("profiles") or []
+        if not access_token or not picked:
+            raise ConnectorError("No SSO token or saved selection; re-authenticate")
+        if not cred.is_renewable():
+            raise ConnectorError("SSO session expired; re-authenticate")
+
+        profiles, min_expiration = await _mint_sts_profiles(access_token, picked, s.aws_sso_region)
+        return MintedCredential(
+            connector="aws",
+            scope=cred.scope,
+            expires_at=datetime.fromtimestamp(min_expiration or 0, tz=UTC),
+            secret={
+                "region": s.aws_sso_region,
+                "profiles": profiles,
+                "sso_access_token": access_token,
+                "sso_refresh_token": cred.secret.get("sso_refresh_token"),
+            },
+            renew_until=cred.renew_until,  # still bounded by the SSO token lifetime
+            selection=cred.selection,
         )
 
     async def revoke(self, cred: MintedCredential) -> None:
@@ -234,6 +267,41 @@ class AwsConnector(Connector):
             scope=cred.scope,
             selection=cred.selection,
         )
+
+
+async def _mint_sts_profiles(
+    access_token: str, picks: list[dict[str, str]], region: str | None
+) -> tuple[list[dict[str, Any]], float | None]:
+    """Mint one STS profile per account/role pick. Returns (profiles, min expiration).
+
+    Authorization is the caller's concern: ``select_account_roles`` validates picks
+    against the offered list; ``remint_profiles`` replays an already-validated
+    selection.
+    """
+    profiles: list[dict[str, Any]] = []
+    min_expiration: float | None = None
+    for pick in picks:
+        account_id = pick["account_id"]
+        role_name = pick["role_name"]
+        creds = await asyncio.to_thread(
+            _get_role_credentials, access_token, account_id, role_name, region
+        )
+        account_name = pick.get("account_name", account_id)
+        profiles.append(
+            {
+                "name": _profile_name(account_name, role_name),
+                "account_id": account_id,
+                "account_name": account_name,
+                "role_name": role_name,
+                "access_key_id": creds["accessKeyId"],
+                "secret_access_key": creds["secretAccessKey"],
+                "session_token": creds["sessionToken"],
+                "region": region,
+            }
+        )
+        exp = creds["expiration"] / 1000
+        min_expiration = exp if min_expiration is None else min(min_expiration, exp)
+    return profiles, min_expiration
 
 
 def _start_device_authorization(
@@ -282,6 +350,9 @@ def _create_token_device(
         return {
             "access_token": resp["accessToken"],
             "expires_in": int(resp.get("expiresIn", 8 * 3600)),
+            # Only present when the OIDC client was registered with the
+            # refresh_token grant type; captured for future silent SSO renewal.
+            "refresh_token": resp.get("refreshToken"),
         }
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
