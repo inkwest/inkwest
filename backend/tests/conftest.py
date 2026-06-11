@@ -8,6 +8,7 @@ Provides mocks for:
 - API route testing (users, clients)
 """
 
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -66,6 +67,25 @@ def make_response(
 # ============================================================================
 # Fixtures
 # ============================================================================
+
+
+@pytest.fixture(autouse=True)
+def _frozen_model_catalog():
+    """No test may trigger a live catalog fetch (network call / aws subprocess).
+
+    Marking the cache fresh turns refresh_catalog() into a no-op; the catalog
+    unit tests bypass it with force=True and patch the fetchers themselves.
+    Module-level cache state is reset so it cannot leak between tests.
+    """
+    from app.services import model_catalog
+
+    model_catalog._live_models = None
+    model_catalog._fetched_at = time.monotonic()
+    model_catalog._last_fetch_failed = False
+    yield
+    model_catalog._live_models = None
+    model_catalog._fetched_at = 0.0
+    model_catalog._last_fetch_failed = False
 
 
 @pytest.fixture
@@ -345,6 +365,7 @@ def mock_session_obj(mock_cluster: MagicMock) -> MagicMock:
     session.user_id = str(_USER_ID)
     session.system_prompt_id = None
     session.system_prompt_custom = None
+    session.model = None
     session.title = "Test Session"
     session.summary = "A test summary"
     session.is_archived = False

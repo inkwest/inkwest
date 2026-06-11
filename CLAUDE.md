@@ -33,6 +33,7 @@ pre-commit run --all-files
 - **Real-time sync**: PostgreSQL `LISTEN/NOTIFY` → `pubsub.py` → per-WS `asyncio.Queue` fan-out
 - **Tool execution**: async subprocess kubectl with validation, timeout, output truncation
 - **WS dual-task pattern**: `chat.py` runs receive loop + process loop as concurrent tasks so `stop` messages arrive during streaming
+- **Model selection**: admin-curated catalog (`/admin/model`) + per-session user choice, resolved per turn (session pin → admin default in DB → newest enabled model; no env-configured model), each honored only while in the admin-enabled subset and validated against the current provider's catalog so `AI_PROVIDER` switches degrade gracefully. Catalog is live-discovered (`model_catalog.py`: Anthropic API, Bedrock via aws CLI, or the sandbox's backend from `sandbox.env`) with a pricing-table fallback. Admin settings + catalog are cached in-process: multiple replicas pick up changes on restart/TTL only. Switching a session's model invalidates its Anthropic prompt cache (first turn after re-pays full input)
 - **Combined prod image**: root `Dockerfile` builds the SPA (`VITE_API_URL=""` → same-origin) and bakes it into `/app/static`; `mount_spa()` in `app/main.py` serves it with index.html fallback (404-guarded for `api/`, `assets/`, `ws/`), `Cache-Control: no-cache` on index, gzip + security headers. Dev unchanged (no `static/` dir → JSON root endpoint). CI builds it, no variants
 
 ## Key Directories

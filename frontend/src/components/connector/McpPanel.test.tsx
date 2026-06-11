@@ -51,7 +51,8 @@ describe('McpPanel', () => {
 
     await waitFor(() => expect(mockGetCatalog).toHaveBeenCalled());
     expect(screen.getByText('MCP servers')).toBeInTheDocument();
-    const badge = screen.getByText('0/1 enabled');
+    // findByText: the badge renders only after the catalog promise resolves
+    const badge = await screen.findByText('0/1 enabled');
     expect(badge).toBeInTheDocument();
     expect(badge.className).toContain('gray');
     expect(screen.getByText('No access granted')).toBeInTheDocument();

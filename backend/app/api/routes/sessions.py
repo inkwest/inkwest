@@ -30,9 +30,19 @@ from app.models.schemas import (
 )
 from app.models.session import Session
 from app.models.system_prompt import SystemPrompt
+from app.services.model_catalog import selectable_models
 from app.services.pubsub import notify
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+def check_model_selectable(model: str | None) -> None:
+    """Raise 400 when the requested model is not in the admin-enabled list."""
+    if model is not None and model not in selectable_models():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model '{model}' is not enabled",
+        )
 
 
 async def check_session_access(session: Session, user: CurrentUser) -> None:
@@ -100,6 +110,8 @@ async def create_session(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> SessionResponse:
+    check_model_selectable(session_data.model)
+
     # A cluster is optional: with no cluster configured the session starts
     # without a Kube context. Validate access only when one is requested.
     if session_data.cluster_id is not None:
@@ -244,6 +256,8 @@ async def update_session(
     await check_session_access(session, current_user)
 
     update_data = session_data.model_dump(exclude_unset=True)
+    if "model" in update_data:
+        check_model_selectable(update_data["model"])
     for field, value in update_data.items():
         setattr(session, field, value)
 

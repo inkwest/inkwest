@@ -9,10 +9,16 @@ Supports two AI provider families:
 import logging
 from functools import lru_cache
 from typing import TypeAlias
+from uuid import UUID
 
 from anthropic import AsyncAnthropic, AsyncAnthropicBedrock
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.models.session import Session
+from app.services.app_settings import get_model_override
+from app.services.model_catalog import default_model, selectable_models
 
 logger = logging.getLogger(__name__)
 
@@ -111,20 +117,40 @@ def validate_ai_client() -> bool:
 
 def get_model_name() -> str:
     """
-    Get the model name to use based on provider.
-
-    Returns:
-        Model name/ID string appropriate for the configured provider
+    Get the default model name to use: the admin-selected default when valid
+    for the current provider, otherwise the provider's env-configured default.
     """
-    settings = get_settings()
+    return default_model()
 
-    if settings.ai_provider == "bedrock":
-        # Return the Bedrock model ID (can be overridden via config)
-        return settings.bedrock_model_id
 
-    else:
-        # Anthropic and claude-cli use the configured model
-        return settings.anthropic_model
+async def resolve_session_model_choice(db: AsyncSession, session_id: "str | UUID") -> str | None:
+    """
+    The explicit model choice for a chat turn: the session's own pick, else the
+    admin-set default — each honored only while in the admin-ENABLED subset of
+    the current provider's catalog. Checking enabled (not just available) is
+    what makes an admin "disable" actually bite: a session pinned to a model
+    the admin later unchecks falls back to the default from its next turn.
+    None means nobody chose: the engine's own default applies (catalog default
+    for the API, the CLI's own configuration for claude-cli).
+    """
+    selectable = selectable_models()
+    session_model = await db.scalar(select(Session.model).where(Session.id == session_id))
+    if session_model:
+        if session_model in selectable:
+            return session_model
+        logger.warning(
+            f"Session {session_id} pinned to model {session_model} which is no longer "
+            "enabled/available; using the default"
+        )
+    override = get_model_override()
+    if override and override in selectable:
+        return override
+    return None
+
+
+async def resolve_session_model(db: AsyncSession, session_id: "str | UUID") -> str:
+    """Resolve the model for an API chat turn: explicit choice or the default."""
+    return await resolve_session_model_choice(db, session_id) or default_model()
 
 
 def get_orchestrator():

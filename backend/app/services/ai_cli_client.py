@@ -39,6 +39,7 @@ async def execute_claude_cli(
     system_prompt: str | None = None,
     container: str | None = None,
     docker_path: str = "docker",
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     """
     Execute Claude CLI and stream output.
@@ -65,6 +66,8 @@ async def execute_claude_cli(
             container via `docker exec` (the sandboxed path) instead of as a local
             subprocess. The streaming/timeout/parse behavior is identical either way.
         docker_path: Path to the `docker` CLI used for the `docker exec` wrapper.
+        model: Explicit model for this turn (`claude --model`). None = let the
+            CLI use its own configured default.
 
     Yields:
         Lines of JSON output from the CLI
@@ -89,6 +92,10 @@ async def execute_claude_cli(
     # Layer the session's managed system prompt over Claude Code's default.
     if system_prompt:
         inner += ["--append-system-prompt", system_prompt]
+
+    # Explicit per-session/admin model choice; omitted = CLI's own default.
+    if model:
+        inner += ["--model", model]
 
     # Add --resume if we have a CLI session ID from a previous interaction
     if resume_session_id:
@@ -236,12 +243,19 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
 
         event_type = parsed.get("type")
 
-        # Handle system init event - contains CLI session ID for --resume
+        # Handle system init event - contains CLI session ID for --resume and
+        # the model the CLI actually runs with (for accurate cost attribution).
         if event_type == "system" and parsed.get("subtype") == "init":
             cli_session_id = parsed.get("session_id")
             if cli_session_id:
                 logger.info(f"Claude CLI session ID: {cli_session_id}")
-                yield ChatEvent(type="session_info", metadata={"cli_session_id": cli_session_id})
+                yield ChatEvent(
+                    type="session_info",
+                    metadata={
+                        "cli_session_id": cli_session_id,
+                        "model": parsed.get("model"),
+                    },
+                )
 
         elif event_type == "assistant":
             message = parsed.get("message", {})

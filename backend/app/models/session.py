@@ -117,6 +117,14 @@ class Session(Base, TimestampMixin):
         comment="Claude CLI session ID for conversation resumption",
     )
 
+    # Per-session model choice (from the admin-enabled list); NULL = use the
+    # global default resolved at turn time. Changeable mid-session.
+    model: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="AI model for this session; NULL = global default",
+    )
+
     # Per-conversation MCP selection: catalog keys (see app.services.mcp_catalog)
     # the user enabled for this session. Merged into the conversation's
     # .claude.json mcpServers; persisted so the choice survives reload / --resume.

@@ -28,7 +28,7 @@ from app.core.constants import (
     MAX_RESPONSE_TOKENS,
 )
 from app.core.retry import retry_with_backoff
-from app.services.ai_client import get_ai_client, get_model_name
+from app.services.ai_client import get_ai_client, resolve_session_model
 from app.services.budget_service import record_usage
 from app.services.events import (
     ChatEvent,
@@ -176,7 +176,7 @@ async def orchestrate_chat(
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
     system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
-    model = get_model_name()
+    model = await resolve_session_model(db, session_id)
 
     # Prompt caching: cache system prompt and tool definitions across iterations
     cached_system = [
@@ -510,7 +510,7 @@ async def orchestrate_chat_streaming(
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
     system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
-    model = get_model_name()
+    model = await resolve_session_model(db, session_id)
 
     cached_system = [
         {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}

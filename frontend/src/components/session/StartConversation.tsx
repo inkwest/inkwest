@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Cloud, Gitlab } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore, useSystemPromptStore } from '@/store/admin';
+import { useConfigStore } from '@/store/config';
 import { ConnectorName } from '@/types/connectors';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
@@ -31,6 +32,10 @@ export function StartConversation() {
   const [selectedPrompt, setSelectedPrompt] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
 
+  // Per-session model choice; '' until the config (default + enabled list) loads.
+  const { config, fetchConfig } = useConfigStore();
+  const [selectedModel, setSelectedModel] = useState('');
+
   // Lazily-created session: null until the first interaction materializes it.
   const [sessionId, setSessionId] = useState<string | null>(null);
   const creatingRef = useRef<Promise<string> | null>(null);
@@ -41,6 +46,15 @@ export function StartConversation() {
   useEffect(() => {
     if (isAdmin) fetchPrompts(true); // active only
   }, [isAdmin, fetchPrompts]);
+
+  useEffect(() => {
+    fetchConfig();
+  }, [fetchConfig]);
+
+  // Preselect the default model once loaded (don't clobber a manual pick).
+  useEffect(() => {
+    if (config) setSelectedModel((cur) => cur || config.model);
+  }, [config]);
 
   // Preselect the default prompt once loaded (don't clobber a manual pick).
   useEffect(() => {
@@ -55,12 +69,17 @@ export function StartConversation() {
   const ensureSession = useCallback(async (): Promise<string> => {
     if (sessionId) return sessionId;
     if (!creatingRef.current) {
-      const opts =
+      const opts: { systemPromptId?: string; systemPromptCustom?: string; model?: string } =
         isAdmin && selectedPrompt === CUSTOM
           ? { systemPromptCustom: customPrompt.trim() }
           : isAdmin && selectedPrompt
             ? { systemPromptId: selectedPrompt }
-            : undefined;
+            : {};
+      // Pin the model only on an explicit non-default pick — untouched sessions
+      // keep following the global default if the admin later changes it.
+      if (selectedModel && selectedModel !== config?.model) {
+        opts.model = selectedModel;
+      }
       creatingRef.current = createSession(undefined, opts)
         .then((s) => {
           setSessionId(s.id);
@@ -74,7 +93,7 @@ export function StartConversation() {
         });
     }
     return creatingRef.current;
-  }, [sessionId, isAdmin, selectedPrompt, customPrompt, createSession]);
+  }, [sessionId, isAdmin, selectedPrompt, customPrompt, selectedModel, config, createSession]);
 
   const handleSend = async (message: string) => {
     if (customInvalid) return;
@@ -152,6 +171,24 @@ export function StartConversation() {
                 className="mt-2 w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white font-mono text-sm"
               />
             )}
+          </div>
+        )}
+
+        {config && config.available_models.length > 1 && (
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">Model</label>
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+            >
+              {config.available_models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                  {m.id === config.model ? ' (default)' : ''}
+                </option>
+              ))}
+            </select>
           </div>
         )}
 
