@@ -83,7 +83,7 @@ GET /api/mcp/oauth/callback ◄────────────────�
 
 session start: apply_session_mcp_selection()
   └─ oauth entry ─► .claude.json: {"type":"http",
-                                   "url":"http://<backend-host>:8000/api/mcp-proxy/{key}",
+                                   "url":"http://host-gateway-alias:8000/api/mcp-proxy/{key}/",
                                    "headers":{"Authorization":"Bearer <internal JWT>"}}
 
 CLI tool call ──► squid (allowlisted backend host, host-gateway) ──► /api/mcp-proxy/{key}
@@ -146,7 +146,7 @@ CREATE TABLE inkwest.mcp_user_tokens (
 CREATE TABLE inkwest.mcp_oauth_pending_states (
     id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     state         VARCHAR(255) NOT NULL UNIQUE,
-    code_verifier VARCHAR(255) NOT NULL,
+    code_verifier VARCHAR(128) NOT NULL,
     mcp_key       VARCHAR(255) NOT NULL,
     user_id       UUID NOT NULL REFERENCES inkwest.users(id) ON DELETE CASCADE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -279,7 +279,7 @@ authorization servers (discovered at runtime), needs DCR, and persists per-user 
 - Mint-stable: before minting, decode the JWT already present in the current config entry;
   if valid for this (user, session, key) with > 1 h remaining, keep it unchanged. The CLI
   restarts per message and `apply_session_mcp_selection()` runs each time
-  (`orchestrator_cli.py:194`) — without this, a fresh JWT every message would defeat the
+  (`orchestrator_cli.py:195`) — without this, a fresh JWT every message would defeat the
   `merged == config` no-op check in `mcp_config.py:131` and rewrite the config on every
   turn.
 
@@ -354,7 +354,9 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
 - Catch-all `{path:path}` because servers differ on `/mcp` vs `/`; catalog stores the full
   base URL, the proxy appends the path **as an opaque path segment** — it must not be able
   to inject a scheme/host (join against the parsed base URL, never string-concatenate into
-  the authority part).
+  the authority part). Starlette only matches the catch-all with the literal `/` after
+  `{key}` present — the injected `.claude.json` URL therefore ends with a trailing slash
+  (work item 8); keep the two in sync or add an empty-path route variant.
 - Request bodies are JSON-RPC and small — buffering once is fine and is what makes the
   401-retry correct (a consumed `Request` stream cannot be re-sent; a "pure streaming
   optimization" here silently breaks the retry — there is a test for body-intact-on-retry
@@ -420,7 +422,7 @@ For selected oauth entries, emit into the sandbox `.claude.json`:
 ```json
 {
   "type": "http",
-  "url": "http://host-gateway-alias:8000/api/mcp-proxy/notion",
+  "url": "http://host-gateway-alias:8000/api/mcp-proxy/notion/",
   "headers": {"Authorization": "Bearer <internal-jwt>"}
 }
 ```

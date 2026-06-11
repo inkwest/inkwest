@@ -6,13 +6,13 @@ usable credentials.
 **TL;DR verdict**: the *connector* credentials (AWS STS, GitLab OAuth) already meet the goal —
 RAM-only, expiring, gone on restart. The real at-rest exposure is elsewhere: (1) MCP catalog
 secrets fanned out in plaintext to durable, world-readable `.claude.json` files per
-conversation; (2) the same secrets sitting in the `MCP_CATALOG` env var; (3) the planned
-OAuth2-proxy design (Fernet key in env + ciphertext in Postgres = self-contained decryption);
-(4) static admin kubeconfigs and the sandbox model-creds env file on plain disk. A full
-browser-held-key scheme is **not worth it** as a blanket policy (the background-turn
-constraint breaks it, and org-level secrets have no single user to hold the key) — adopt it
-*partially* for per-user MCP OAuth tokens, fix the disk leaks mechanically, and use
-KMS/sealed-key envelope encryption for everything org-level.
+conversation; (2) the same secrets sitting in the `MCP_CATALOG` env var; (3) an earlier draft of the OAuth2-proxy
+design (Fernet key in env + ciphertext in Postgres = self-contained decryption — since
+resolved, §1.6); (4) static admin kubeconfigs and the sandbox model-creds env file on plain
+disk. A full browser-held-key scheme is **not worth it** as a blanket policy (the
+background-turn constraint breaks it, and org-level secrets have no single user to hold the
+key) — optionally adopt it for per-user MCP OAuth tokens, fix the disk leaks mechanically,
+and use KMS/sealed-key envelope encryption for everything org-level.
 
 ---
 
@@ -123,7 +123,7 @@ server unwraps DEK into RAM.
 
 | Scheme | Dump of DB+disk+env yields creds? | Live-host attacker | Ops cost |
 |---|---|---|---|
-| Fernet key in env (current plan) | **yes** | yes | ~zero |
+| Fernet key in env (rejected earlier draft) | **yes** | yes | ~zero |
 | Sealed key at startup (operator passphrase / init secret, RAM-only) | no — key not at rest | yes | manual unseal on every restart |
 | KMS envelope, **instance-role auth (no static AWS creds in env)** | no — decryption requires *executing* inside the role, not possessing files | yes (attacker with exec can call KMS) | low (AWS-native); ties deploy to AWS |
 | Browser-held KEK (2.1/2.2) | no | yes (while a key is in RAM) | UX + recovery flows |
@@ -168,7 +168,8 @@ classes, three treatments:
 
 | Class | Treatment |
 |---|---|
-| Per-session connector creds (AWS/GitLab) | keep RAM-only store — already meets the goal; no change |
+| Per-session connector creds (AWS/GitLab, derived layer) | keep RAM-only store — already meets the goal; no change |
+| Per-user platform grants (planned, `docs/connector-hot-auth.md` §5) | durable refresh tokens in the vault — encrypted with Phase B key custody; same browser-DEK upgrade path as MCP tokens applies |
 | Org-level secrets (MCP catalog, OIDC/IdC client secrets, JWT key, model keys) | no user owns these → browser keys structurally impossible; use KMS envelope (instance role) or sealed-at-startup key; meanwhile kill the plaintext-on-disk copies |
 | Per-user MCP OAuth tokens (planned proxy) | the one good fit for browser-wrapped envelope encryption — user-owned, re-obtainable on key loss, decryption naturally co-occurs with user activity |
 
