@@ -9,7 +9,7 @@ a refresh token, both held in RAM.
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
 import httpx
 
@@ -24,6 +24,11 @@ from app.services.connectors.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Policy cap on how long a held refresh token may silently renew access tokens.
+# GitLab refresh tokens never expire provider-side; without a cap a RAM credential
+# would be renewable forever. 24h ≈ "re-consent once a day".
+_RENEW_WINDOW: Final = timedelta(hours=24)
 
 
 class GitLabConnector(Connector):
@@ -76,7 +81,11 @@ class GitLabConnector(Connector):
             "refresh_token": refresh_token,
         }
         token = await _post_token(s.gitlab_base_url, data)
-        return _credential_from_token(token, s.gitlab_oauth_scopes)
+        renewed = _credential_from_token(token, s.gitlab_oauth_scopes)
+        # The renewal window is anchored to the original consent, not to each
+        # refresh — otherwise every silent refresh would slide it forever.
+        renewed.renew_until = cred.renew_until
+        return renewed
 
     async def revoke(self, cred: MintedCredential) -> None:
         s = get_settings()
@@ -123,13 +132,18 @@ def _credential_from_token(token: dict[str, Any], scope: str) -> MintedCredentia
     if not access_token:
         raise ConnectorError("GitLab token response missing access_token")
     expires_in = int(token.get("expires_in", 7200))
+    refresh_token = token.get("refresh_token")
+    now = datetime.now(UTC)
     return MintedCredential(
         connector="gitlab",
         scope=scope,
-        expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+        expires_at=now + timedelta(seconds=expires_in),
+        # With a refresh token held, the credential stays silently renewable past
+        # access-token expiry — bounded by the policy window, not forever.
+        renew_until=(now + _RENEW_WINDOW) if refresh_token else None,
         secret={
             "access_token": access_token,
-            "refresh_token": token.get("refresh_token"),
+            "refresh_token": refresh_token,
             "token_type": token.get("token_type", "Bearer"),
         },
     )

@@ -406,7 +406,9 @@ async def aws_device_poll(
         return AwsDevicePollResponse(status="pending")
 
     # Approved → mint the provisional (needs_selection) credential and store it.
-    cred = await conn.provisional_from_token(token["access_token"], token["expires_in"])
+    cred = await conn.provisional_from_token(
+        token["access_token"], token["expires_in"], refresh_token=token.get("refresh_token")
+    )
     await get_credential_store().put(current_user.id, sid, cred)
     _aws_device_pending.pop(key, None)
     await _audit(
@@ -528,13 +530,14 @@ async def gitlab_renew(
 ) -> ConnectorStatusResponse:
     """Silently renew GitLab from the held refresh token.
 
-    409 when no live cred with a refresh token is held (token evicted on expiry):
-    the frontend then falls back to the normal OAuth re-initiate.
+    Works on a live OR expired credential — the refresh token survives access-token
+    expiry (bounded by the renewal window). 409 when none is held: the frontend
+    then falls back to the normal OAuth re-initiate.
     """
     _require_enabled()
     sid = await _verify_session_owner(db, session_id, current_user)
     conn = _get_enabled_connector("gitlab")
-    cred = await get_credential_store().get(current_user.id, sid, "gitlab")
+    cred = await get_credential_store().get(current_user.id, sid, "gitlab", include_expired=True)
     if cred is None or not cred.secret.get("refresh_token"):
         raise HTTPException(
             status_code=409, detail="GitLab cannot be renewed silently; re-initiate"

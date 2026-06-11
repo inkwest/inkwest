@@ -49,6 +49,10 @@ class MintedCredential:
     expires_at: datetime | None  # None for fixed (non-expiring) keys
     secret: dict[str, Any] = field(repr=False, default_factory=dict)
     selection: dict[str, Any] | None = None
+    # Until when the secret carries warm material that can silently re-mint a fresh
+    # credential after expiry (GitLab refresh token, AWS SSO access token). None =
+    # nothing renewable: the credential is garbage as soon as it expires.
+    renew_until: datetime | None = None
     # AWS only: populated between auth and account/role selection.
     available_accounts: list[dict[str, Any]] | None = None
     available_roles: list[dict[str, Any]] | None = None
@@ -61,6 +65,10 @@ class MintedCredential:
         if self.expires_at is None:
             return False
         return datetime.now(UTC) >= self.expires_at
+
+    def is_renewable(self) -> bool:
+        """Whether expired-but-warm material is still usable for a silent renewal."""
+        return self.renew_until is not None and datetime.now(UTC) < self.renew_until
 
 
 @dataclass

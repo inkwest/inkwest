@@ -20,7 +20,7 @@ import httpx
 from app.core.config import get_settings
 from app.core.constants import CONNECTOR_TOOL_TIMEOUT
 from app.services.connectors.base import ConnectorType, MintedCredential
-from app.services.connectors.store import get_credential_store
+from app.services.connectors.renewal import get_or_renew_cred
 from app.tools.connector_validation import (
     validate_aws_call,
     validate_gitlab_api,
@@ -195,7 +195,6 @@ async def build_connector_env(
     if user_id is None:
         return {}, []
     settings = get_settings()
-    store = get_credential_store()
     env: dict[str, str] = {}
     injected: list[str] = []
 
@@ -206,7 +205,7 @@ async def build_connector_env(
     sandbox_home = settings.sandbox_home.rstrip("/")
     project_to_sandbox = bool(settings.sandbox_creds_root)
 
-    aws = await store.get(user_id, session_id, "aws")
+    aws = await get_or_renew_cred(user_id, session_id, "aws")
     # Only a fully selected AWS credential carries minted profiles (provisional =
     # SSO token only). Profiles are written to a tmpfs ~/.aws (RAM, not disk).
     if aws is not None and aws.secret.get("profiles"):
@@ -235,7 +234,7 @@ async def build_connector_env(
                 env["KUBECONFIG"] = ":".join(kubeconfigs)
             injected.append("eks")
 
-    gitlab = await store.get(user_id, session_id, "gitlab")
+    gitlab = await get_or_renew_cred(user_id, session_id, "gitlab")
     if gitlab is not None and gitlab.secret.get("access_token"):
         env["GITLAB_TOKEN"] = gitlab.secret["access_token"]
         env["GITLAB_BASE_URL"] = get_settings().gitlab_base_url
@@ -290,9 +289,9 @@ def is_needs_auth(output: str, is_error: bool) -> bool:
 
 
 async def _get_cred(ctx: ToolExecContext, connector: ConnectorType) -> MintedCredential | None:
-    if ctx.user_id is None:
-        return None
-    return await get_credential_store().get(ctx.user_id, ctx.session_id, connector)
+    # Renew-on-read: an expired credential with live warm material (GitLab refresh
+    # token, AWS SSO token) is silently re-derived instead of failing NEEDS_AUTH.
+    return await get_or_renew_cred(ctx.user_id, ctx.session_id, connector)
 
 
 async def execute_aws(tool_input: dict[str, Any], ctx: ToolExecContext) -> tuple[str, bool]:

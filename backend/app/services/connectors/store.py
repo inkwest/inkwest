@@ -39,17 +39,30 @@ class CredentialStore:
             self._creds[_key(user_id, session_id, cred.connector)] = cred
 
     async def get(
-        self, user_id: UUID, session_id: UUID, connector: ConnectorType
+        self,
+        user_id: UUID,
+        session_id: UUID,
+        connector: ConnectorType,
+        *,
+        include_expired: bool = False,
     ) -> MintedCredential | None:
-        """Return the held credential, evicting and returning None if expired."""
+        """Return the held credential; None if expired (unless ``include_expired``).
+
+        An expired credential is evicted only once its warm material is gone too
+        (``renew_until`` unset or passed) — destroying it earlier would throw away
+        the GitLab refresh token / AWS SSO token exactly when a silent renewal
+        needs it. ``include_expired=True`` is for renewal paths only.
+        """
         async with self._lock:
             k = _key(user_id, session_id, connector)
             cred = self._creds.get(k)
             if cred is None:
                 return None
             if cred.is_expired():
-                del self._creds[k]
-                return None
+                if not cred.is_renewable():
+                    del self._creds[k]
+                    return None
+                return cred if include_expired else None
             return cred
 
     async def revoke(
@@ -67,12 +80,12 @@ class CredentialStore:
                 del self._creds[k]
 
     async def sweep(self) -> int:
-        """Evict all expired credentials. Returns the count removed."""
+        """Evict credentials that are expired AND no longer renewable. Returns count."""
         async with self._lock:
-            expired = [k for k, c in self._creds.items() if c.is_expired()]
-            for k in expired:
+            dead = [k for k, c in self._creds.items() if c.is_expired() and not c.is_renewable()]
+            for k in dead:
                 del self._creds[k]
-            return len(expired)
+            return len(dead)
 
 
 _store: CredentialStore | None = None
