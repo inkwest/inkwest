@@ -521,6 +521,12 @@ async def grant_from_warm(
     sid = await _verify_session_owner(db, session_id, current_user)
     conn = _get_enabled_connector(connector)
     cred: MintedCredential | None = None
+    # Keyed by the ACTING user, not the session owner. Warm grants are per-user;
+    # the minted credential is stored under (current_user.id, sid) and read back
+    # under the same key at tool-exec time — so an admin acting on another user's
+    # session grants from *their own* warm auth and the owner's turns can't see it.
+    # Do not "fix" this to session.user_id: that would inject one user's master
+    # auth into another user's conversation. Same identity model as the device flow.
     if connector == "aws":
         cred = await grant_aws_provisional_from_warm(current_user.id)
     elif connector == "gitlab":

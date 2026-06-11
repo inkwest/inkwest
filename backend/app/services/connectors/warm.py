@@ -203,7 +203,11 @@ async def grant_aws_provisional_from_warm(user_id: UUID) -> MintedCredential | N
         )
     except Exception as e:  # noqa: BLE001 — boto raises varied client errors here
         fatal = _aws_error_is_fatal(e)
-        logger.info("aws_warm_enumeration_failed", extra={"reason": str(e), "fatal": fatal})
+        # Log the error *code* only — full boto exception strings carry request
+        # metadata (never tokens, but noisy and identifying).
+        logger.info(
+            "aws_warm_enumeration_failed", extra={"code": _aws_error_code(e), "fatal": fatal}
+        )
         # Same policy as GitLab: only a dead SSO token kills the grant; a
         # throttle/timeout/5xx keeps it for the next attempt.
         if fatal:
@@ -212,8 +216,20 @@ async def grant_aws_provisional_from_warm(user_id: UUID) -> MintedCredential | N
     return cred
 
 
+def _aws_error_code(e: Exception) -> str:
+    """Extract the botocore ClientError code, or the exception type name."""
+    resp = getattr(e, "response", None)  # botocore ClientError shape
+    if isinstance(resp, dict):
+        code = resp.get("Error", {}).get("Code", "")
+        if code:
+            return str(code)
+    return type(e).__name__
+
+
 def _aws_error_is_fatal(e: Exception) -> bool:
     """Whether a boto error means the SSO token itself is dead (vs a provider blip)."""
-    resp = getattr(e, "response", None)  # botocore ClientError shape
-    code = resp.get("Error", {}).get("Code", "") if isinstance(resp, dict) else ""
-    return code in {"UnauthorizedException", "ExpiredTokenException", "AccessDeniedException"}
+    return _aws_error_code(e) in {
+        "UnauthorizedException",
+        "ExpiredTokenException",
+        "AccessDeniedException",
+    }

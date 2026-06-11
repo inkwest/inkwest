@@ -117,6 +117,7 @@ describe('connectorsStore renewal', () => {
       { connector: 'aws', live: false, state: 'not_connected' },
     ]);
     vi.spyOn(api, 'gitlabRenew').mockRejectedValue(new Error('409'));
+    vi.spyOn(api, 'grantFromWarm').mockRejectedValue(new Error('409')); // no warm grant
     const initiate = vi.spyOn(api, 'initiateConnector');
     vi.spyOn(api, 'startAwsDevice').mockResolvedValue({
       user_code: 'X',
@@ -157,6 +158,7 @@ describe('connectorsStore renewal', () => {
     vi.spyOn(api, 'getRenewable').mockResolvedValue([
       { connector: 'aws', live: false, state: 'not_connected' },
     ]);
+    vi.spyOn(api, 'grantFromWarm').mockRejectedValue(new Error('409')); // no warm grant
     vi.spyOn(api, 'startAwsDevice').mockResolvedValue({
       user_code: 'ABCD-1234',
       verification_uri: 'https://device.aws',
@@ -205,6 +207,63 @@ describe('connectorsStore renewal', () => {
     const s = useConnectorsStore.getState();
     expect(s.awsModalRequested).toBe(true); // fell back to manual picker
     expect(s.awsAutoSelect).toBe(false);
+  });
+
+  it('tryWarmGrant grants GitLab and reports success', async () => {
+    vi.spyOn(api, 'grantFromWarm').mockResolvedValue({ connector: 'gitlab', state: 'connected' });
+    const ok = await useConnectorsStore.getState().tryWarmGrant('sess-1', 'gitlab');
+    expect(ok).toBe(true);
+    expect(useConnectorsStore.getState().statuses.gitlab.state).toBe('connected');
+  });
+
+  it('tryWarmGrant opens the AWS picker on needs_selection by default', async () => {
+    vi.spyOn(api, 'grantFromWarm').mockResolvedValue({
+      connector: 'aws',
+      state: 'needs_selection',
+    });
+    const ok = await useConnectorsStore.getState().tryWarmGrant('sess-1', 'aws');
+    expect(ok).toBe(true);
+    expect(useConnectorsStore.getState().awsModalRequested).toBe(true);
+  });
+
+  it('tryWarmGrant with openPicker=false does not flash the AWS picker', async () => {
+    vi.spyOn(api, 'grantFromWarm').mockResolvedValue({
+      connector: 'aws',
+      state: 'needs_selection',
+    });
+    const ok = await useConnectorsStore
+      .getState()
+      .tryWarmGrant('sess-1', 'aws', { openPicker: false });
+    expect(ok).toBe(true);
+    expect(useConnectorsStore.getState().awsModalRequested).toBe(false);
+  });
+
+  it('tryWarmGrant returns false on a warm miss (409)', async () => {
+    vi.spyOn(api, 'grantFromWarm').mockRejectedValue(new Error('409'));
+    const ok = await useConnectorsStore.getState().tryWarmGrant('sess-1', 'gitlab');
+    expect(ok).toBe(false);
+  });
+
+  it('renewAll grants AWS from warm without a device flow', async () => {
+    vi.spyOn(api, 'getRenewable').mockResolvedValue([
+      { connector: 'aws', live: false, state: 'not_connected', aws_selection: { profiles: [] } },
+    ]);
+    vi.spyOn(api, 'grantFromWarm').mockResolvedValue({
+      connector: 'aws',
+      state: 'needs_selection',
+    });
+    const startAws = vi.spyOn(api, 'startAwsDevice');
+    const renewSelect = vi
+      .spyOn(api, 'awsRenewSelect')
+      .mockResolvedValue({ connector: 'aws', state: 'connected' });
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([
+      { connector: 'aws', state: 'connected' },
+    ]);
+
+    await useConnectorsStore.getState().renewAll('sess-1');
+    expect(startAws).not.toHaveBeenCalled(); // warm path skips the device flow
+    expect(renewSelect).toHaveBeenCalledWith('sess-1');
+    expect(useConnectorsStore.getState().awsModalRequested).toBe(false); // no picker flash
   });
 
   it('reset clears renewal state', () => {
