@@ -181,6 +181,41 @@ async def test_same_cluster_via_two_roles_dedups_and_prefers_eks_role():
         cleanup_aws_files(sid)
 
 
+async def test_kubeconfig_exec_uses_in_container_aws_paths_in_sandbox(tmp_path):
+    """Sandbox: the exec block must point at the in-container ~/.aws mount, not the
+    backend's write path — else `aws eks get-token` can't find the profile (the plugin
+    runs inside the toolbox where the backend path doesn't exist)."""
+    sid = uuid.uuid4()
+    eks = _mock_eks({"c1": _cluster_payload("c1")})
+    # sandbox_creds_root set => paths must be translated to <sandbox_home>/.aws/*.
+    settings = MagicMock(
+        aws_cli_path="aws",
+        sandbox_creds_root=str(tmp_path),
+        sandbox_home="/home/sandbox",
+    )
+    try:
+        # session_kube_dir / cleanup resolve their base via get_settings too, so keep
+        # everything that touches paths inside the patch context.
+        with (
+            patch("boto3.client", return_value=eks),
+            patch("app.services.eks_refresh.get_settings", return_value=settings),
+            patch("app.tools.connector_exec.get_settings", return_value=settings),
+        ):
+            await refresh_session_eks(sid, _cred())
+
+            raw = open(os.path.join(session_kube_dir(sid), "eks--acme0--c1")).read()
+            env = {
+                e["name"]: e["value"]
+                for e in yaml.safe_load(raw)["users"][0]["user"]["exec"]["env"]
+            }
+            assert env["AWS_CONFIG_FILE"] == "/home/sandbox/.aws/config"
+            assert env["AWS_SHARED_CREDENTIALS_FILE"] == "/home/sandbox/.aws/credentials"
+            assert str(tmp_path) not in raw  # backend write path must NOT leak in
+            cleanup_aws_files(sid)
+    finally:
+        cleanup_aws_files(sid)
+
+
 async def test_refresh_no_profiles_is_noop():
     sid = uuid.uuid4()
     cred = MintedCredential(connector="aws", scope="read", expires_at=None, secret={})

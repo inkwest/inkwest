@@ -72,8 +72,21 @@ async def refresh_session_eks(session_id: UUID, cred: MintedCredential) -> int:
     # Ensure the tmpfs ~/.aws projection exists so the kubeconfig exec plugin
     # (`aws eks get-token --profile ...`) can resolve credentials at kubectl time.
     aws_env = write_aws_profiles(session_id, cred)
-    cred_file = aws_env["AWS_SHARED_CREDENTIALS_FILE"]
-    cfg_file = aws_env["AWS_CONFIG_FILE"]
+    settings = get_settings()
+    # The exec block runs WHERE kubectl runs. For the sandbox/claude-cli provider that
+    # is inside the toolbox container, where the session's ~/.aws is bind-mounted at
+    # `<sandbox_home>/.aws` — NOT at the backend's write path (`sandbox_creds_root/<sid>/
+    # .aws`), which the container can't see. So reference the in-container path, mirroring
+    # the translation build_connector_env does for the direct env; otherwise the plugin's
+    # AWS_CONFIG_FILE points at a nonexistent path and `aws eks get-token` can't find the
+    # profile. With no sandbox, kubectl runs on the backend and the write paths are right.
+    if settings.sandbox_creds_root:
+        home = settings.sandbox_home.rstrip("/")
+        cred_file = f"{home}/.aws/credentials"
+        cfg_file = f"{home}/.aws/config"
+    else:
+        cred_file = aws_env["AWS_SHARED_CREDENTIALS_FILE"]
+        cfg_file = aws_env["AWS_CONFIG_FILE"]
 
     # One list+describe round-trip set per profile; fan out in threads (the boto3
     # low-level client is thread-safe) to avoid a serial N×latency walk.
@@ -82,7 +95,7 @@ async def refresh_session_eks(session_id: UUID, cred: MintedCredential) -> int:
     # selected roles in one account; collapse those to a single file.
     clusters = _dedup_prefer_eks(clusters)
 
-    aws_cli = get_settings().aws_cli_path
+    aws_cli = settings.aws_cli_path
     dest = session_kube_dir(session_id)
     staging = f"{dest}.new"
     shutil.rmtree(staging, ignore_errors=True)
