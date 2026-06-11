@@ -70,20 +70,20 @@ async def test_gitlab_renew_success(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:
     _session_lookup(mock_db, mock_session_obj, mock_user.id)
-    held = MintedCredential(
-        "gitlab", "read", datetime.now(UTC) + timedelta(hours=1), secret={"refresh_token": "r"}
-    )
     renewed = MintedCredential(
-        "gitlab", "read", datetime.now(UTC) + timedelta(hours=2), secret={"refresh_token": "r2"}
+        "gitlab", "read", datetime.now(UTC) + timedelta(hours=2), secret={"access_token": "a2"}
     )
-    store = MagicMock(get=AsyncMock(return_value=held), put=AsyncMock())
-    conn = MagicMock(type="gitlab", refresh=AsyncMock(return_value=renewed))
+    store = MagicMock(put=AsyncMock())
+    conn = MagicMock(type="gitlab")
     conn.public_status.return_value = ConnectorStatus(connector="gitlab", state="connected")
 
     with (
         patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
         patch("app.api.routes.connectors.get_connector", return_value=conn),
         patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.grant_gitlab_from_warm", AsyncMock(return_value=renewed)
+        ) as warm_grant,
     ):
         resp = await authenticated_client.post(
             f"/api/connectors/{mock_session_obj.id}/gitlab/renew"
@@ -91,20 +91,19 @@ async def test_gitlab_renew_success(
 
     assert resp.status_code == 200
     assert resp.json()["state"] == "connected"
-    conn.refresh.assert_awaited_once_with(held)
+    warm_grant.assert_awaited_once_with(mock_user.id)
     store.put.assert_awaited_once()
 
 
-async def test_gitlab_renew_409_without_refresh_token(
+async def test_gitlab_renew_409_without_warm_grant(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:
     _session_lookup(mock_db, mock_session_obj, mock_user.id)
-    store = MagicMock(get=AsyncMock(return_value=None))  # nothing held (evicted)
     conn = MagicMock(type="gitlab")
     with (
         patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
         patch("app.api.routes.connectors.get_connector", return_value=conn),
-        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.api.routes.connectors.grant_gitlab_from_warm", AsyncMock(return_value=None)),
     ):
         resp = await authenticated_client.post(
             f"/api/connectors/{mock_session_obj.id}/gitlab/renew"

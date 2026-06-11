@@ -31,7 +31,18 @@ ConnState = Literal[
 
 
 class ConnectorError(Exception):
-    """Raised when a connector flow fails (auth exchange, minting, revoke)."""
+    """Raised when a connector flow fails (auth exchange, minting, revoke).
+
+    ``fatal`` distinguishes "the credential/grant is dead" (invalid_grant, 401 —
+    holders should be dropped) from "the provider hiccuped" (timeout, 5xx — retry
+    later, do NOT destroy renewable material). Defaults to True: most raisers are
+    authorization failures, and treating an unknown error as fatal only costs a
+    re-login, never a stuck grant.
+    """
+
+    def __init__(self, message: str = "", *, fatal: bool = True) -> None:
+        super().__init__(message)
+        self.fatal = fatal
 
 
 @dataclass

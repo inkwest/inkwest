@@ -69,23 +69,23 @@ class GitLabConnector(Connector):
         token = await _post_token(s.gitlab_base_url, data)
         return _credential_from_token(token, s.gitlab_oauth_scopes)
 
-    async def refresh(self, cred: MintedCredential) -> MintedCredential:
-        """Mint a fresh access token from the held refresh token."""
-        s = get_settings()
-        refresh_token = cred.secret.get("refresh_token")
+    async def refresh_from_token(self, refresh_token: str) -> MintedCredential:
+        """Mint a fresh access token from a refresh token.
+
+        The returned credential's secret includes the ROTATED refresh token (GitLab
+        rotation is single-use) — the caller owns persisting it and stripping it
+        from any session-scoped copy (see app.services.connectors.warm).
+        """
         if not refresh_token:
             raise ConnectorError("No refresh token available")
+        s = get_settings()
         data = {
             "client_id": s.gitlab_oauth_client_id,
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
         token = await _post_token(s.gitlab_base_url, data)
-        renewed = _credential_from_token(token, s.gitlab_oauth_scopes)
-        # The renewal window is anchored to the original consent, not to each
-        # refresh — otherwise every silent refresh would slide it forever.
-        renewed.renew_until = cred.renew_until
-        return renewed
+        return _credential_from_token(token, s.gitlab_oauth_scopes)
 
     async def revoke(self, cred: MintedCredential) -> None:
         s = get_settings()
@@ -122,9 +122,19 @@ async def _post_token(base_url: str, data: dict[str, Any]) -> dict[str, Any]:
             resp.raise_for_status()
             result: dict[str, Any] = resp.json()
             return result
-        except httpx.HTTPError as e:
+        except httpx.HTTPStatusError as e:
+            # 400/401 from the token endpoint = the grant itself is rejected
+            # (invalid_grant, revoked client) — fatal. 5xx is a provider hiccup.
+            fatal = e.response.status_code in (400, 401)
             # Do not log the response body — it may carry tokens.
-            raise ConnectorError(f"GitLab token exchange failed: {type(e).__name__}") from e
+            raise ConnectorError(
+                f"GitLab token exchange failed: HTTP {e.response.status_code}", fatal=fatal
+            ) from e
+        except httpx.HTTPError as e:
+            # Network-level failure (timeout, reset, DNS): the grant may be fine.
+            raise ConnectorError(
+                f"GitLab token exchange failed: {type(e).__name__}", fatal=False
+            ) from e
 
 
 def _credential_from_token(token: dict[str, Any], scope: str) -> MintedCredential:

@@ -57,7 +57,7 @@ async def get_or_renew_cred(
         held = await store.get(user_id, session_id, connector, include_expired=True)
         if held is None:
             return None
-        fresh = await _renew(held)
+        fresh = await _renew(user_id, held)
         if fresh is None:
             return None
         # Persist before returning: with GitLab rotation the old refresh token is
@@ -72,18 +72,20 @@ async def get_or_renew_cred(
         return fresh
 
 
-async def _renew(held: MintedCredential) -> MintedCredential | None:
+async def _renew(user_id: UUID, held: MintedCredential) -> MintedCredential | None:
     from app.services.connectors.aws import AwsConnector
-    from app.services.connectors.gitlab import GitLabConnector
+    from app.services.connectors.warm import grant_gitlab_from_warm
 
     conn = get_connector(held.connector)
     if conn is None:  # connector disabled since the grant
         return None
+    if held.connector == "gitlab":
+        # The refresh token is user-scoped warm material (rotation-safe home);
+        # session credentials never carry it.
+        return await grant_gitlab_from_warm(user_id)
     try:
         if isinstance(conn, AwsConnector):
             return await conn.remint_profiles(held)
-        if isinstance(conn, GitLabConnector):
-            return await conn.refresh(held)
     except ConnectorError as e:
         logger.info(
             "connector_silent_renewal_failed",

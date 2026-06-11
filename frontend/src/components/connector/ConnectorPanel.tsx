@@ -74,6 +74,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     fetchRenewable,
     renewAll,
     awsAutoSelect,
+    tryWarmGrant,
   } = useConnectorsStore();
   const [busy, setBusy] = useState<ConnectorName | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
@@ -146,6 +147,9 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     setBusy(connector);
     setStartError(null);
     try {
+      // Warm platform auth (user logged in earlier today) → grant without a login
+      // flow: AWS opens the account/role picker directly, GitLab connects silently.
+      if (await tryWarmGrant(sessionId, connector)) return;
       if (connector === 'aws') {
         await startAwsDevice(sessionId); // device grant: shows code + URL, then polls
       } else {

@@ -34,6 +34,11 @@ interface ConnectorsState {
   fetchStatus: (sessionId: string) => Promise<void>;
   fetchRenewable: (sessionId: string) => Promise<void>;
   renewAll: (sessionId: string) => Promise<void>;
+  tryWarmGrant: (
+    sessionId: string,
+    connector: ConnectorName,
+    opts?: { openPicker?: boolean }
+  ) => Promise<boolean>;
   initiate: (sessionId: string, connector: ConnectorName) => Promise<void>;
   startAwsDevice: (sessionId: string) => Promise<void>;
   pollAwsDevice: (sessionId: string) => Promise<string>;
@@ -152,6 +157,22 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
     }
 
     if (willRenewAws) {
+      // Warm SSO token (user logged in to AWS earlier today) → skip the device
+      // approval entirely: provisional from warm + auto-apply the saved selection.
+      if (await get().tryWarmGrant(sessionId, 'aws', { openPicker: false })) {
+        try {
+          const aws = await api.awsRenewSelect(sessionId);
+          set((s) => ({ statuses: { ...s.statuses, aws } }));
+        } catch {
+          set({ awsModalRequested: true }); // saved selection invalid → manual picker
+        }
+        if (gitlabNeedsOAuth) {
+          await get().initiate(sessionId, 'gitlab'); // redirect — navigates away
+          return;
+        }
+        await get().fetchStatus(sessionId);
+        return;
+      }
       // Defer any GitLab redirect until AWS device approval finishes.
       set({ awsAutoSelect: true, gitlabReauthPending: gitlabNeedsOAuth });
       await get().startAwsDevice(sessionId);
@@ -164,6 +185,27 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
     }
 
     await get().fetchStatus(sessionId);
+  },
+
+  // Grant from the user's warm platform auth (no login flow). True when granted:
+  // AWS lands on needs_selection and the picker opens; GitLab lands connected.
+  // False (409 or error) → the caller runs the regular login flow.
+  tryWarmGrant: async (sessionId, connector, opts) => {
+    try {
+      const status = await api.grantFromWarm(sessionId, connector);
+      // openPicker=false: renewal auto-applies the saved selection, so the manual
+      // picker must not flash open between the grant and the auto-select.
+      const openPicker = opts?.openPicker ?? true;
+      set((s) => ({
+        statuses: { ...s.statuses, [connector]: status },
+        ...(connector === 'aws' && status.state === 'needs_selection' && openPicker
+          ? { awsModalRequested: true }
+          : {}),
+      }));
+      return true;
+    } catch {
+      return false;
+    }
   },
 
   // OAuth redirect connectors (GitLab). On return the callback page refreshes status.

@@ -181,6 +181,18 @@ export async function initiateConnector(
   return fetchAPI(`/api/connectors/${sessionId}/${connector}/initiate`, { method: 'POST' });
 }
 
+// Grant this session from the user's warm platform auth (no login flow).
+// AWS → needs_selection (picker opens directly); GitLab → connected.
+// 409 → no warm grant: the caller falls back to the regular login flow.
+export async function grantFromWarm(
+  sessionId: string,
+  connector: ConnectorName
+): Promise<ConnectorStatus> {
+  return fetchAPI(`/api/connectors/${sessionId}/${connector}/grant-from-warm`, {
+    method: 'POST',
+  });
+}
+
 
 export async function getAwsOptions(
   sessionId: string
