@@ -211,6 +211,8 @@ class SessionCreate(SessionBase):
 
     system_prompt_id: UUID | None = None
     system_prompt_custom: str | None = Field(None, min_length=1)
+    # One of the admin-enabled models (enforced in the route); omitted = default.
+    model: str | None = Field(None, min_length=1, max_length=255)
 
 
 class SessionUpdate(BaseModel):
@@ -219,6 +221,8 @@ class SessionUpdate(BaseModel):
     title: str | None = Field(None, max_length=255)
     summary: str | None = None
     is_archived: bool | None = None
+    # Changeable mid-session; validated against the enabled models in the route.
+    model: str | None = Field(None, min_length=1, max_length=255)
 
 
 class SessionReorder(BaseModel):
@@ -249,6 +253,7 @@ class SessionResponse(SessionBase):
     cluster: ClusterSummary | None = None
     system_prompt_id: UUID | None = None
     system_prompt_custom: str | None = None
+    model: str | None = None
     # Usage statistics
     total_input_tokens: int = 0
     total_output_tokens: int = 0

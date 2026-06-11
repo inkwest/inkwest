@@ -219,6 +219,11 @@ Access the admin panel at `/admin` (requires admin role):
 - **Users**: Manage user accounts and roles
 - **Role Mappings**: Map OIDC roles to cluster access
 - **Usage Reports**: View usage statistics by user/model
+- **Model**: Curate which AI models users may select per conversation, and set
+  the default. The catalog is auto-discovered at runtime from the configured
+  provider (Anthropic `/v1/models`, Bedrock inference profiles, or the
+  sandbox's own backend via `sandbox.env`), with a pricing-table fallback;
+  `CLAUDE_CLI_MODELS` pins it manually for undetectable CLI backends
 
 ## Security
 

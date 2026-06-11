@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
-from app.services.pricing import calculate_cost, get_current_model_name
+from app.services.model_catalog import default_model
+from app.services.pricing import calculate_cost
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +332,7 @@ async def record_usage(
     settings = get_settings()
 
     if model is None:
-        model = get_current_model_name()
+        model = default_model()
     if provider is None:
         provider = settings.ai_provider
 

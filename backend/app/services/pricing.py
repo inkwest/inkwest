@@ -4,10 +4,9 @@ Model pricing calculations.
 Tracks cost per token for different AI models and providers.
 """
 
+import re
 from decimal import Decimal
 from typing import NamedTuple
-
-from app.core.config import get_settings
 
 
 class ModelPricing(NamedTuple):
@@ -15,43 +14,81 @@ class ModelPricing(NamedTuple):
 
     input_price: Decimal  # USD per 1M input tokens
     output_price: Decimal  # USD per 1M output tokens
+    # Older generation: kept for cost reporting on past usage, flagged in the
+    # admin UI so admins know not to enable it for users.
+    legacy: bool = False
 
 
-# Pricing as of January 2026 (USD per million tokens)
+# Pricing as of June 2026 (USD per million tokens). Dict order = display order
+# in the model selectors (newest first).
 MODEL_PRICING: dict[str, ModelPricing] = {
-    # Anthropic Claude models
+    # Current Anthropic Claude models
+    "claude-fable-5": ModelPricing(
+        input_price=Decimal("10.00"),
+        output_price=Decimal("50.00"),
+    ),
+    "claude-opus-4-8": ModelPricing(
+        input_price=Decimal("5.00"),
+        output_price=Decimal("25.00"),
+    ),
+    "claude-opus-4-7": ModelPricing(
+        input_price=Decimal("5.00"),
+        output_price=Decimal("25.00"),
+    ),
+    "claude-opus-4-6": ModelPricing(
+        input_price=Decimal("5.00"),
+        output_price=Decimal("25.00"),
+    ),
+    "claude-sonnet-4-6": ModelPricing(
+        input_price=Decimal("3.00"),
+        output_price=Decimal("15.00"),
+    ),
+    "claude-haiku-4-5": ModelPricing(
+        input_price=Decimal("1.00"),
+        output_price=Decimal("5.00"),
+    ),
+    # Older Anthropic Claude models (kept for cost reporting on past usage;
+    # uncheck them in the admin Model screen to hide from users)
     "claude-opus-4-20250514": ModelPricing(
         input_price=Decimal("15.00"),
         output_price=Decimal("75.00"),
+        legacy=True,
     ),
     "claude-sonnet-4-20250514": ModelPricing(
         input_price=Decimal("3.00"),
         output_price=Decimal("15.00"),
+        legacy=True,
     ),
     "claude-3-5-sonnet-20241022": ModelPricing(
         input_price=Decimal("3.00"),
         output_price=Decimal("15.00"),
+        legacy=True,
     ),
     "claude-3-opus-20240229": ModelPricing(
         input_price=Decimal("15.00"),
         output_price=Decimal("75.00"),
+        legacy=True,
     ),
     "claude-3-sonnet-20240229": ModelPricing(
         input_price=Decimal("3.00"),
         output_price=Decimal("15.00"),
+        legacy=True,
     ),
     "claude-3-haiku-20240307": ModelPricing(
         input_price=Decimal("0.25"),
         output_price=Decimal("1.25"),
+        legacy=True,
     ),
     # Bedrock Claude models (same pricing)
     "anthropic.claude-3-5-sonnet-20241022-v2:0": ModelPricing(
         input_price=Decimal("3.00"),
         output_price=Decimal("15.00"),
+        legacy=True,
     ),
     "anthropic.claude-3-opus-20240229-v1:0": ModelPricing(
         input_price=Decimal("15.00"),
         output_price=Decimal("75.00"),
+        legacy=True,
     ),
 }
 
@@ -62,9 +99,71 @@ DEFAULT_PRICING = ModelPricing(
 )
 
 
+def model_label(model_id: str) -> str:
+    """Human-friendly display name for a model ID.
+
+    Derived, not hardcoded, so any catalog entry gets a sensible label:
+    "claude-3-5-sonnet-20241022" -> "Sonnet 3.5",
+    "claude-opus-4-20250514" -> "Opus 4.0",
+    "eu.anthropic.claude-opus-4-8" -> "Opus 4.8",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0" -> "Sonnet 3.5".
+    """
+    name = re.sub(r"^(?:us|eu|apac|us-gov|global)\.", "", model_id)  # Bedrock routing profiles
+    name = name.removeprefix("anthropic.").removeprefix("claude-")
+    name = re.sub(r"-\d{8}.*$", "", name)  # drop date snapshot and Bedrock suffix
+    name = re.sub(r"-v\d+(:\d+)?$", "", name)  # undated Bedrock version suffix (-v1:0)
+    tokens = name.split("-")
+    family = " ".join(t.capitalize() for t in tokens if not t.isdigit())
+    numbers = [t for t in tokens if t.isdigit()]
+    if len(numbers) == 1:
+        numbers.append("0")  # major-only IDs: show an explicit minor ("Opus 4.0")
+    version = ".".join(numbers)
+    return f"{family} {version}".strip() or model_id
+
+
+def is_legacy_model(model_id: str) -> bool:
+    """Whether a model belongs to an older generation (per the catalog).
+
+    Unknown IDs (e.g. an env-configured default outside the table) are not
+    flagged — exact match only, no fuzzy lookup.
+    """
+    pricing = MODEL_PRICING.get(model_id)
+    return pricing.legacy if pricing else False
+
+
+def has_pricing(model_id: str) -> bool:
+    """Whether cost tracking has real pricing for this model.
+
+    False means `get_model_pricing` would fall back to the conservative
+    DEFAULT_PRICING estimate — surfaced in the admin UI so unpriced
+    live-discovered models are visible.
+    """
+    return get_model_pricing(model_id) is not DEFAULT_PRICING
+
+
+_ROUTE_PREFIX_RE = re.compile(r"^(?:us|eu|apac|us-gov|global)\.")
+
+
+def _pricing_candidates(model: str) -> list[str]:
+    """Progressively normalized forms of a (possibly Bedrock-routed) model ID.
+
+    eu.anthropic.claude-haiku-4-5-20251001-v1:0 ->
+    anthropic.claude-haiku-4-5-20251001-v1:0 -> anthropic.claude-haiku-4-5-20251001
+    -> claude-haiku-4-5-20251001 -> claude-haiku-4-5
+    """
+    base = _ROUTE_PREFIX_RE.sub("", model)
+    no_version = re.sub(r"-v\d+(:\d+)?$", "", base)
+    bare = no_version.removeprefix("anthropic.")
+    return [model, base, no_version, bare, re.sub(r"-\d{8}$", "", bare)]
+
+
 def get_model_pricing(model: str) -> ModelPricing:
     """
     Get pricing for a model.
+
+    Matches by exact ID, then by progressively normalized forms (Bedrock
+    routing prefix, version suffix, date snapshot stripped) — never by
+    substring, which would let unrelated IDs inherit a price.
 
     Args:
         model: Model name or ID
@@ -72,16 +171,9 @@ def get_model_pricing(model: str) -> ModelPricing:
     Returns:
         ModelPricing with input and output prices
     """
-    # Try exact match first
-    if model in MODEL_PRICING:
-        return MODEL_PRICING[model]
-
-    # Try partial match (for versioned models)
-    model_lower = model.lower()
-    for known_model, pricing in MODEL_PRICING.items():
-        if known_model.lower() in model_lower or model_lower in known_model.lower():
-            return pricing
-
+    for candidate in _pricing_candidates(model):
+        if candidate in MODEL_PRICING:
+            return MODEL_PRICING[candidate]
     return DEFAULT_PRICING
 
 
@@ -138,14 +230,3 @@ def estimate_cost(
         "estimated_cost_usd": float(total_cost),
         "estimated_cost_cents": int(total_cost * 100),
     }
-
-
-def get_current_model_name() -> str:
-    """Get the currently configured model name."""
-    settings = get_settings()
-
-    if settings.ai_provider == "bedrock":
-        return settings.bedrock_model_id
-    else:
-        # anthropic and claude-cli use the configured Anthropic model
-        return settings.anthropic_model

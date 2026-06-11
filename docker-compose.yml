@@ -57,17 +57,16 @@ services:
       - AI_PROVIDER=${AI_PROVIDER:-claude-cli}
       # Anthropic
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
       - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
       # AWS Bedrock
       - CLAUDE_CODE_USE_BEDROCK=${CLAUDE_CODE_USE_BEDROCK:-}
       - AWS_REGION=${AWS_REGION:-}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-}
       # Claude CLI
       - CLAUDE_CLI_PATH=${CLAUDE_CLI_PATH:-claude}
       - CLAUDE_CLI_TIMEOUT=${CLAUDE_CLI_TIMEOUT:-120}
+      - CLAUDE_CLI_MODELS=${CLAUDE_CLI_MODELS:-}
       # App settings
       - APP_ENV=${APP_ENV:-development}
       - SECRET_KEY=${SECRET_KEY:-change-this-to-a-random-secret-in-production}

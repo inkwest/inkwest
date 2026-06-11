@@ -183,6 +183,37 @@ export async function getUsageTimeseries(
 }
 
 // ============================================================================
+// Model Settings API
+// ============================================================================
+
+export interface ModelSettings {
+  provider: string;
+  default_model: string;
+  /** Model IDs users may pick per session (admin-enabled subset). */
+  enabled_models: string[];
+  /** Full catalog the admin can enable from (live provider list when available). */
+  available_models: { id: string; label: string; legacy: boolean; priced: boolean }[];
+}
+
+export interface UpdateModelSettingsRequest {
+  default_model: string;
+  enabled_models: string[];
+}
+
+export async function getModelSettings(): Promise<ModelSettings> {
+  return fetchAPI('/api/admin/settings/model');
+}
+
+export async function updateModelSettings(
+  data: UpdateModelSettingsRequest
+): Promise<ModelSettings> {
+  return fetchAPI('/api/admin/settings/model', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+// ============================================================================
 // Cluster API
 // ============================================================================
 

@@ -4,7 +4,9 @@ import { ArrowLeft, Check, Menu, User, LogOut, Shield } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore, TaskListPosition } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
+import { useConfigStore } from '@/store/config';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
+import { modelLabel } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
 
 const TASK_LIST_OPTIONS: { value: TaskListPosition; label: string }[] = [
@@ -23,9 +25,15 @@ export function Header() {
   const storeSession = useSessionsStore((s) => s.currentSession);
   const currentSession = inAdminPanel ? null : storeSession;
   const { compactToolCards, toggleCompactToolCards, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
-  const { user, oidcEnabled, logout } = useAuthStore();
+  const { user, oidcEnabled, isAuthenticated, logout } = useAuthStore();
+  const { config, fetchConfig } = useConfigStore();
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // The /api/config endpoint requires auth — fetch only once signed in.
+  useEffect(() => {
+    if (isAuthenticated) fetchConfig();
+  }, [isAuthenticated, fetchConfig]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -67,6 +75,16 @@ export function Header() {
         )}
       </div>
       <div className="flex items-center gap-3">
+        {/* In a chat the model selector lives in the conversation toolbar
+            (ConnectorPanel); here only the global default outside sessions. */}
+        {config && !currentSession && (
+          <span
+            className="text-xs text-gray-400 bg-gray-800 border border-gray-700 rounded-full px-2.5 py-0.5 hidden sm:inline truncate max-w-48"
+            title={`Provider: ${config.provider} · Default model: ${config.model}`}
+          >
+            {modelLabel(config.available_models, config.model)}
+          </span>
+        )}
         {currentSession && (currentSession.total_input_tokens || currentSession.total_output_tokens) ? (
           <span className="text-xs text-gray-500 hidden sm:inline" title="Input / Output tokens">
             {formatTokenCount(currentSession.total_input_tokens || 0)}&darr; {formatTokenCount(currentSession.total_output_tokens || 0)}&uarr;

@@ -19,13 +19,22 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import AdminUser, get_db
+from app.core.config import get_settings
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import Session
 from app.models.user import User
+from app.services.app_settings import set_model_settings
 from app.services.budget_service import (
     get_period_start,
 )
+from app.services.model_catalog import (
+    available_models,
+    default_model,
+    refresh_catalog,
+    selectable_models,
+)
+from app.services.pricing import has_pricing, is_legacy_model, model_label
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -164,6 +173,36 @@ class UsageSummaryResponse(BaseModel):
     total_tokens: int
     total_cost_usd: float
     request_count: int
+
+
+class ModelInfo(BaseModel):
+    """A model: internal ID, human-friendly display name, lifecycle flags."""
+
+    id: str
+    label: str
+    legacy: bool
+    # False = no pricing entry; cost tracking falls back to a conservative
+    # default estimate for this model.
+    priced: bool
+
+
+class ModelSettingsResponse(BaseModel):
+    """Schema for model settings."""
+
+    provider: str
+    default_model: str
+    # Model IDs users may pick per session (admin-enabled subset).
+    enabled_models: list[str]
+    # Full catalog the admin can enable from (live provider list when
+    # available, static pricing-table fallback otherwise).
+    available_models: list[ModelInfo]
+
+
+class UpdateModelSettingsRequest(BaseModel):
+    """Schema for updating the model configuration."""
+
+    default_model: str = Field(..., min_length=1, max_length=255)
+    enabled_models: list[str] = Field(..., min_length=1)
 
 
 # =============================================================================
@@ -759,3 +798,58 @@ async def get_usage_timeseries(
         }
         for row in result.all()
     ]
+
+
+# =============================================================================
+# Model Settings Endpoints
+# =============================================================================
+
+
+def _model_settings_response() -> ModelSettingsResponse:
+    settings = get_settings()
+    return ModelSettingsResponse(
+        provider=settings.ai_provider,
+        default_model=default_model(),
+        enabled_models=selectable_models(),
+        available_models=[
+            ModelInfo(id=m, label=model_label(m), legacy=is_legacy_model(m), priced=has_pricing(m))
+            for m in available_models()
+        ],
+    )
+
+
+@router.get("/settings/model", response_model=ModelSettingsResponse)
+async def get_model_settings(admin: AdminUser) -> ModelSettingsResponse:
+    """Get the model configuration: default, enabled subset, full catalog."""
+    await refresh_catalog()  # TTL-aware; no-op while fresh
+    return _model_settings_response()
+
+
+@router.put("/settings/model", response_model=ModelSettingsResponse)
+async def update_model_settings(
+    body: UpdateModelSettingsRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> ModelSettingsResponse:
+    """Set the enabled models and the default model."""
+    await refresh_catalog()  # validate against a current view of the provider catalog
+
+    available = set(available_models())
+    unknown = [m for m in body.enabled_models if m not in available]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown models: {', '.join(unknown)}",
+        )
+    if body.default_model not in body.enabled_models:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The default model must be one of the enabled models",
+        )
+
+    await set_model_settings(db, body.default_model, body.enabled_models)
+    logger.info(
+        f"Model settings changed by {admin.email}: "
+        f"default={body.default_model}, enabled={body.enabled_models}"
+    )
+    return _model_settings_response()

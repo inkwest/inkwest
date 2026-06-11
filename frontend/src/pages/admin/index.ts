@@ -6,3 +6,4 @@ export { SystemPromptsPage } from './SystemPromptsPage';
 export { UsersPage } from './UsersPage';
 export { RoleMappingsPage } from './RoleMappingsPage';
 export { UsagePage } from './UsagePage';
+export { ModelSettingsPage } from './ModelSettingsPage';

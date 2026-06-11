@@ -21,6 +21,7 @@ from app.api.routes import (
     auth,
     chat,
     clusters,
+    config,
     connectors,
     egress,
     health,
@@ -34,9 +35,11 @@ from app.core.config import get_settings
 from app.core.database import async_session_maker, close_db, init_db
 from app.core.logging import AccessLogMiddleware, access_log_config, get_logger, setup_logging
 from app.core.telemetry import shutdown_telemetry
+from app.services.app_settings import load_model_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
 from app.services.messages import purge_empty_sessions, reconcile_interrupted_turns
+from app.services.model_catalog import refresh_catalog
 from app.services.prompts import ensure_default_system_prompt
 from app.services.pubsub import start_listener, stop_listener
 from app.services.sandbox import reap_orphans, start_sandbox_reaper, stop_sandbox_reaper
@@ -60,6 +63,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with async_session_maker() as db:
         await ensure_default_system_prompt(db)
         logger.info("default_system_prompt_ensured")
+        # Apply the admin model configuration persisted in app_settings.
+        await load_model_settings(db)
+        # Fetch the provider's live model catalog (best-effort, static fallback).
+        await refresh_catalog()
         # Recover turns killed mid-flight by the previous shutdown (restart,
         # rolling deploy, crash): no turn is in flight yet, so any session ending
         # on an unanswered user message is an interrupted turn — mark it retryable.
@@ -165,6 +172,7 @@ app.include_router(sessions.router, prefix="/api")
 app.include_router(sessions.search_router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(config.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
 app.include_router(chat.router)  # WebSocket routes (no prefix needed)

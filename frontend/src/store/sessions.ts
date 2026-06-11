@@ -17,10 +17,11 @@ interface SessionsState {
   fetchSession: (id: string) => Promise<void>;
   createSession: (
     clusterId?: string,
-    opts?: { systemPromptId?: string; systemPromptCustom?: string }
+    opts?: { systemPromptId?: string; systemPromptCustom?: string; model?: string }
   ) => Promise<Session>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
+  setSessionModel: (id: string, model: string | null) => Promise<void>;
   setCurrentSession: (session: SessionWithMessages | null) => void;
   moveSession: (fromId: string, toId: string) => void;
   persistSessionOrder: () => Promise<void>;
@@ -69,11 +70,15 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
   },
 
-  createSession: async (clusterId?: string, opts?: { systemPromptId?: string; systemPromptCustom?: string }) => {
+  createSession: async (
+    clusterId?: string,
+    opts?: { systemPromptId?: string; systemPromptCustom?: string; model?: string }
+  ) => {
     const session = await api.createSession({
       ...(clusterId ? { cluster_id: clusterId } : {}),
       ...(opts?.systemPromptId ? { system_prompt_id: opts.systemPromptId } : {}),
       ...(opts?.systemPromptCustom ? { system_prompt_custom: opts.systemPromptCustom } : {}),
+      ...(opts?.model ? { model: opts.model } : {}),
     });
     set((state) => ({ sessions: [session, ...state.sessions] }));
     return session;
@@ -95,6 +100,17 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       sessions: state.sessions.map((s) => (s.id === id ? { ...s, title: updated.title } : s)),
       currentSession: state.currentSession?.id === id
         ? { ...state.currentSession, title: updated.title }
+        : state.currentSession,
+    }));
+  },
+
+  // model: null un-pins the session (follow the global default again)
+  setSessionModel: async (id: string, model: string | null) => {
+    const updated = await api.updateSession(id, { model });
+    set((state) => ({
+      sessions: state.sessions.map((s) => (s.id === id ? { ...s, model: updated.model } : s)),
+      currentSession: state.currentSession?.id === id
+        ? { ...state.currentSession, model: updated.model }
         : state.currentSession,
     }));
   },

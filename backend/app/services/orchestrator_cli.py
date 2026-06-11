@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
+from app.services.ai_client import resolve_session_model_choice
 from app.services.budget_service import record_usage
 from app.services.events import (
     ChatEvent,
@@ -157,6 +158,10 @@ required.
     base_prompt = await resolve_session_system_prompt(db, session_id)
     system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
 
+    # Explicit model choice (session pick or admin default) is forwarded to the
+    # CLI; None lets the in-toolbox claude use its own configured default.
+    model_choice = await resolve_session_model_choice(db, session_id)
+
     prompt = f"""{kube_section}
 User question: {user_message}
 
@@ -206,6 +211,8 @@ and any external access listed below."""
         content: list[dict] = []
         received_done = False
         new_cli_session_id: str | None = None
+        # Model reported by the CLI's init event — what actually ran this turn.
+        actual_model: str | None = None
         total_input_tokens = 0
         total_output_tokens = 0
         resume_id = cli_session_id
@@ -229,6 +236,7 @@ and any external access listed below."""
                     system_prompt=system_prompt,
                     container=container,
                     docker_path=settings.sandbox_docker_path,
+                    model=model_choice,
                 )
 
                 async for event in parse_cli_response(output_stream):
@@ -243,6 +251,10 @@ and any external access listed below."""
                         # the transcript missing and fails; the retry must still fire).
                         new_cli_session_id = event.metadata["cli_session_id"]
                         logger.info(f"Captured new CLI session ID: {new_cli_session_id}")
+                        # The model the CLI actually runs with (its own default when no
+                        # --model was passed) — used for accurate cost attribution.
+                        if event.metadata.get("model"):
+                            actual_model = event.metadata["model"]
                         continue
 
                     # Any client-visible event means the turn produced output → don't retry.
@@ -335,6 +347,10 @@ and any external access listed below."""
                     session_id=uuid.UUID(str(session_id)),
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    # Attribute to what actually ran: CLI-reported model, else the
+                    # explicit choice; None falls back to the catalog default
+                    # (approximate — the CLI used its own default then).
+                    model=actual_model or model_choice,
                 )
                 await db.commit()
             except Exception as e:

@@ -18,19 +18,25 @@ class Settings(BaseSettings):
     # AI Provider: anthropic, bedrock, or claude-cli
     ai_provider: Literal["anthropic", "bedrock", "claude-cli"] = "claude-cli"
 
-    # Anthropic settings
+    # Anthropic settings. The default model is NOT env-configured: it lives in
+    # the database (admin Model screen), falling back to the newest model of
+    # the provider's catalog (see app.services.model_catalog).
     anthropic_api_key: str | None = None
-    anthropic_model: str = "claude-sonnet-4-20250514"  # claude-opus-4-20250514, etc.
 
     # AWS Bedrock settings
     aws_region: str | None = None
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
-    bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 
     # Claude CLI settings (for local development without API costs)
     claude_cli_path: str = "claude"  # Path to claude binary
     claude_cli_timeout: int = 120  # Longer timeout for CLI
+    # Comma-separated model IDs the CLI's backend serves (Anthropic API, Bedrock
+    # profiles, gateway...). There is no catalog API for this provider, so the
+    # operator declares it; selected models are passed via `claude --model`.
+    # Order matters: the FIRST entry is the zero-config default model.
+    # Empty = fall back to the pricing-table catalog.
+    claude_cli_models: str = ""
 
     # Kubernetes
     kubeconfig_dir: str = "/etc/inkwest/kubeconfigs"

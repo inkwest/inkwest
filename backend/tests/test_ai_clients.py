@@ -2,7 +2,7 @@
 Tests for AI client factory and configuration.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -95,37 +95,43 @@ class TestGetAIClient:
 
 
 class TestGetModelName:
-    """Tests for get_model_name function."""
+    """Tests for get_model_name (delegates to model_catalog.default_model)."""
 
-    def test_anthropic_returns_configured_model(self):
-        """Should return configured model for Anthropic provider."""
-        mock_settings = MagicMock()
-        mock_settings.ai_provider = "anthropic"
-        mock_settings.anthropic_model = "claude-opus-4-20250514"
+    def test_returns_admin_default_when_valid(self):
+        from app.services import model_catalog
 
-        with patch("app.services.ai_client.get_settings", return_value=mock_settings):
-            model = get_model_name()
-            assert model == "claude-opus-4-20250514"
+        model_catalog._live_models = ["claude-fable-5", "claude-opus-4-8"]
+        try:
+            with patch(
+                "app.services.model_catalog.get_model_override",
+                return_value="claude-opus-4-8",
+            ):
+                assert get_model_name() == "claude-opus-4-8"
+        finally:
+            model_catalog._live_models = None
 
-    def test_bedrock_returns_configured_model_id(self):
-        """Should return configured Bedrock model ID."""
-        mock_settings = MagicMock()
-        mock_settings.ai_provider = "bedrock"
-        mock_settings.bedrock_model_id = "anthropic.claude-3-opus-20240229-v1:0"
+    def test_falls_back_to_newest_catalog_model(self):
+        from app.services import model_catalog
 
-        with patch("app.services.ai_client.get_settings", return_value=mock_settings):
-            model = get_model_name()
-            assert model == "anthropic.claude-3-opus-20240229-v1:0"
+        model_catalog._live_models = ["claude-fable-5", "claude-opus-4-8"]
+        try:
+            with patch("app.services.model_catalog.get_model_override", return_value=None):
+                assert get_model_name() == "claude-fable-5"
+        finally:
+            model_catalog._live_models = None
 
-    def test_claude_cli_returns_anthropic_model(self):
-        """Should fall back to the Anthropic model for claude-cli provider."""
-        mock_settings = MagicMock()
-        mock_settings.ai_provider = "claude-cli"
-        mock_settings.anthropic_model = "claude-sonnet-4-20250514"
+    def test_ignores_override_absent_from_catalog(self):
+        from app.services import model_catalog
 
-        with patch("app.services.ai_client.get_settings", return_value=mock_settings):
-            model = get_model_name()
-            assert model == "claude-sonnet-4-20250514"
+        model_catalog._live_models = ["anthropic.claude-x"]
+        try:
+            with patch(
+                "app.services.model_catalog.get_model_override",
+                return_value="claude-opus-4-8",
+            ):
+                assert get_model_name() == "anthropic.claude-x"
+        finally:
+            model_catalog._live_models = None
 
 
 class TestGetOrchestrator:
@@ -157,3 +163,53 @@ class TestGetOrchestrator:
         with patch("app.services.ai_client.get_settings", return_value=mock_settings):
             orchestrator = get_orchestrator()
             assert orchestrator.__name__ == "orchestrate_chat_cli"
+
+
+class TestResolveSessionModelChoice:
+    """Turn-time enforcement of the admin-enabled subset."""
+
+    @pytest.mark.asyncio
+    async def test_pinned_model_honored_while_enabled(self):
+        from app.services.ai_client import resolve_session_model_choice
+
+        db = AsyncMock()
+        db.scalar = AsyncMock(return_value="claude-opus-4-8")
+        with patch(
+            "app.services.ai_client.selectable_models",
+            return_value=["claude-opus-4-8", "claude-haiku-4-5"],
+        ):
+            assert await resolve_session_model_choice(db, "s1") == "claude-opus-4-8"
+
+    @pytest.mark.asyncio
+    async def test_pinned_model_falls_back_when_admin_disables_it(self):
+        """An admin uncheck must bite existing sessions, not just new pins."""
+        from app.services.ai_client import resolve_session_model_choice
+
+        db = AsyncMock()
+        db.scalar = AsyncMock(return_value="claude-fable-5")
+        with (
+            patch(
+                "app.services.ai_client.selectable_models",
+                return_value=["claude-haiku-4-5"],
+            ),
+            patch("app.services.ai_client.get_model_override", return_value=None),
+        ):
+            assert await resolve_session_model_choice(db, "s1") is None
+
+    @pytest.mark.asyncio
+    async def test_admin_default_must_also_be_enabled(self):
+        from app.services.ai_client import resolve_session_model_choice
+
+        db = AsyncMock()
+        db.scalar = AsyncMock(return_value=None)
+        with (
+            patch(
+                "app.services.ai_client.selectable_models",
+                return_value=["claude-haiku-4-5"],
+            ),
+            patch(
+                "app.services.ai_client.get_model_override",
+                return_value="claude-fable-5",
+            ),
+        ):
+            assert await resolve_session_model_choice(db, "s1") is None

@@ -272,3 +272,108 @@ async def test_usage_by_model(admin_client: AsyncClient, mock_db: AsyncMock) -> 
 
     resp = await admin_client.get("/api/admin/usage/by-model")
     assert resp.status_code == 200
+
+
+# ============================================================================
+# Model Settings (admin)
+# ============================================================================
+
+
+@pytest.fixture
+def reset_model_settings():
+    """Restore the in-memory model settings mutated by PUT tests."""
+    from app.services import app_settings
+
+    yield
+    app_settings._model_override = None
+    app_settings._enabled_models = None
+
+
+@pytest.mark.asyncio
+async def test_model_settings_forbidden_for_non_admin(
+    authenticated_client: AsyncClient,
+) -> None:
+    resp = await authenticated_client.get("/api/admin/settings/model")
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_model_settings(admin_client: AsyncClient) -> None:
+    resp = await admin_client.get("/api/admin/settings/model")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["default_model"] in data["enabled_models"]
+    available_ids = [m["id"] for m in data["available_models"]]
+    # Nothing configured yet: all available models are enabled
+    assert data["enabled_models"] == available_ids
+    # Bedrock model IDs must not be offered
+    assert not any(m.startswith("anthropic.") for m in available_ids)
+    # Human-friendly labels, not internal IDs
+    labels = {m["id"]: m["label"] for m in data["available_models"]}
+    assert labels["claude-sonnet-4-20250514"] == "Sonnet 4.0"
+    assert labels["claude-3-5-sonnet-20241022"] == "Sonnet 3.5"
+    # Older generations carry the legacy flag, current ones don't
+    legacy = {m["id"]: m["legacy"] for m in data["available_models"]}
+    assert legacy["claude-opus-4-8"] is False
+    assert legacy["claude-sonnet-4-20250514"] is True
+
+
+@pytest.mark.asyncio
+async def test_update_model_settings(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+
+    enabled = ["claude-opus-4-20250514", "claude-sonnet-4-20250514"]
+    resp = await admin_client.put(
+        "/api/admin/settings/model",
+        json={"default_model": "claude-opus-4-20250514", "enabled_models": enabled},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["default_model"] == "claude-opus-4-20250514"
+    assert data["enabled_models"] == enabled
+    assert mock_db.execute.await_count == 2  # one ON CONFLICT upsert per settings key
+    mock_db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_model_settings_unknown_model(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    resp = await admin_client.put(
+        "/api/admin/settings/model",
+        json={"default_model": "gpt-4o", "enabled_models": ["gpt-4o"]},
+    )
+    assert resp.status_code == 400
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_model_settings_default_not_enabled(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    resp = await admin_client.put(
+        "/api/admin/settings/model",
+        json={
+            "default_model": "claude-opus-4-20250514",
+            "enabled_models": ["claude-sonnet-4-20250514"],
+        },
+    )
+    assert resp.status_code == 400
+    assert "default model" in resp.json()["detail"].lower()
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_model_settings_empty_enabled_list(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    resp = await admin_client.put(
+        "/api/admin/settings/model",
+        json={"default_model": "claude-sonnet-4-20250514", "enabled_models": []},
+    )
+    assert resp.status_code == 422  # rejected by schema (min_length=1)
+    mock_db.commit.assert_not_awaited()

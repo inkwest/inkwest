@@ -48,6 +48,33 @@ export async function fetchAPI<T>(
   return response.json();
 }
 
+// App config
+export interface ModelInfo {
+  /** Internal model ID, e.g. "claude-opus-4-8". */
+  id: string;
+  /** Human-friendly display name, e.g. "Opus 4.8". */
+  label: string;
+  /** Older generation, kept for cost reporting — not recommended for use. */
+  legacy: boolean;
+}
+
+export interface AppConfig {
+  provider: string;
+  /** Default model (ID) applied when a session has no explicit choice. */
+  model: string;
+  /** Admin-enabled models users may pick per session. */
+  available_models: ModelInfo[];
+}
+
+/** Display name for a model ID; falls back to the raw ID when unknown. */
+export function modelLabel(models: ModelInfo[], id: string): string {
+  return models.find((m) => m.id === id)?.label ?? id;
+}
+
+export async function getAppConfig(): Promise<AppConfig> {
+  return fetchAPI('/api/config');
+}
+
 // Clusters
 interface PaginatedClusters {
   items: Cluster[];
@@ -98,6 +125,7 @@ export async function createSession(data: {
   cluster_id?: string;
   system_prompt_id?: string;
   system_prompt_custom?: string;
+  model?: string;
 }): Promise<Session> {
   return fetchAPI('/api/sessions', {
     method: 'POST',
@@ -113,7 +141,10 @@ export async function deleteSession(id: string): Promise<void> {
   await fetchAPI(`/api/sessions/${id}`, { method: 'DELETE' });
 }
 
-export async function updateSession(id: string, data: { title?: string }): Promise<Session> {
+export async function updateSession(
+  id: string,
+  data: { title?: string; model?: string | null }
+): Promise<Session> {
   return fetchAPI(`/api/sessions/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(data),

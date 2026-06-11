@@ -389,3 +389,84 @@ async def test_search_requires_min_length(
 ) -> None:
     resp = await authenticated_client.get("/api/search?q=x")
     assert resp.status_code == 422
+
+
+# ============================================================================
+# Per-session model selection
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_create_session_rejects_disabled_model(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    resp = await authenticated_client.post(
+        "/api/sessions",
+        json={"model": "gpt-4o"},
+    )
+    assert resp.status_code == 400
+    assert "not enabled" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_session_rejects_disabled_model(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result_mock)
+
+    resp = await authenticated_client.patch(
+        f"/api/sessions/{mock_session_obj.id}",
+        json={"model": "gpt-4o"},
+    )
+    assert resp.status_code == 400
+    assert "not enabled" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_session_accepts_enabled_model(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+    mock_user: MagicMock,
+) -> None:
+    mock_session_obj.user_id = str(mock_user.id)
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result_mock)
+    mock_db.flush = AsyncMock()
+    mock_db.refresh = AsyncMock()
+
+    with patch("app.api.routes.sessions.notify", return_value=None):
+        resp = await authenticated_client.patch(
+            f"/api/sessions/{mock_session_obj.id}",
+            json={"model": "claude-opus-4-20250514"},
+        )
+    assert resp.status_code == 200
+    assert mock_session_obj.model == "claude-opus-4-20250514"
+
+
+@pytest.mark.asyncio
+async def test_update_session_unpins_model_with_null(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+    mock_user: MagicMock,
+) -> None:
+    """Explicit null clears the pin so the session follows the global default."""
+    mock_session_obj.user_id = str(mock_user.id)
+    mock_session_obj.model = "claude-opus-4-20250514"
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result_mock)
+    mock_db.flush = AsyncMock()
+    mock_db.refresh = AsyncMock()
+
+    with patch("app.api.routes.sessions.notify", return_value=None):
+        resp = await authenticated_client.patch(
+            f"/api/sessions/{mock_session_obj.id}",
+            json={"model": None},
+        )
+    assert resp.status_code == 200
+    assert mock_session_obj.model is None

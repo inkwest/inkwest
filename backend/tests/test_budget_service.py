@@ -161,7 +161,7 @@ class TestBudgetServiceIntegration:
             mock_settings.return_value = MagicMock(
                 ai_provider="anthropic",
             )
-            with patch("app.services.budget_service.get_current_model_name") as mock_model:
+            with patch("app.services.budget_service.default_model") as mock_model:
                 mock_model.return_value = "claude-sonnet-4-20250514"
 
                 record = await record_usage(

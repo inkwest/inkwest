@@ -299,7 +299,10 @@ class TestParseCliResponse:
         """Test parsing system init event with CLI session ID."""
 
         async def mock_stream():
-            yield ('{"type": "system", "subtype": "init", "session_id": "abc123-def456-ghi789"}')
+            yield (
+                '{"type": "system", "subtype": "init", '
+                '"session_id": "abc123-def456-ghi789", "model": "claude-opus-4-8"}'
+            )
             yield '{"type": "text", "content": "Hello"}'
             yield '{"type": "done"}'
 
@@ -312,6 +315,8 @@ class TestParseCliResponse:
         assert events[0].type == "session_info"
         sid = "abc123-def456-ghi789"
         assert events[0].metadata["cli_session_id"] == sid
+        # The CLI-reported model rides along for accurate cost attribution
+        assert events[0].metadata["model"] == "claude-opus-4-8"
         assert events[1].type == "text_delta"
         assert events[2].type == "done"
 
@@ -373,6 +378,33 @@ class TestExecuteClaudeCli:
 
         assert len(lines) == 2
         assert '{"type": "text", "content": "Hello"}' in lines[0]
+
+    @pytest.mark.asyncio
+    async def test_execute_cli_model_flag(self):
+        """An explicit model is forwarded via --model; omitted otherwise."""
+        captured: list[list[str]] = []
+
+        def make_process(*cmd, **kwargs):
+            captured.append(list(cmd))
+            mock_process = MagicMock()
+            mock_process.stdout = AsyncMock()
+            mock_process.stderr = AsyncMock()
+            mock_process.returncode = 0
+            mock_process.stdout.readline = AsyncMock(side_effect=[b'{"type": "done"}\n', b""])
+            mock_process.stderr.read = AsyncMock(return_value=b"")
+            mock_process.wait = AsyncMock(return_value=0)
+            return mock_process
+
+        with patch("asyncio.create_subprocess_exec", side_effect=make_process):
+            async for _ in execute_claude_cli("s1", "Hello", model="claude-opus-4-8"):
+                pass
+            async for _ in execute_claude_cli("s1", "Hello"):
+                pass
+
+        with_model, without_model = captured
+        idx = with_model.index("--model")
+        assert with_model[idx + 1] == "claude-opus-4-8"
+        assert "--model" not in without_model
 
     @pytest.mark.asyncio
     async def test_execute_cli_timeout(self):

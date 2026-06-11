@@ -8,6 +8,7 @@ import {
   Users,
   Shield,
   BarChart3,
+  Cpu,
   ArrowLeft,
 } from 'lucide-react';
 import { useAuthStore } from '@/store/admin';
@@ -21,6 +22,7 @@ const navItems = [
   { to: '/admin/users', icon: Users, label: 'Users' },
   { to: '/admin/roles', icon: Shield, label: 'Role Mappings' },
   { to: '/admin/usage', icon: BarChart3, label: 'Usage Reports' },
+  { to: '/admin/model', icon: Cpu, label: 'Model' },
 ];
 
 function AdminSidebar() {

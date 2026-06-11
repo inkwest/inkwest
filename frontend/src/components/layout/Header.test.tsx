@@ -6,6 +6,7 @@ import { Header } from './Header';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
+import { useConfigStore } from '@/store/config';
 
 vi.mock('@/components/chat/ConnectionStatus', () => ({
   ConnectionStatus: () => <div data-testid="connection-status">Connected</div>,
@@ -39,6 +40,8 @@ describe('Header', () => {
       checkAuth: mockCheckAuth,
       logout: mockLogout,
     });
+    // Stub fetchConfig so the mount effect never hits the network.
+    useConfigStore.setState({ config: null, fetchConfig: vi.fn() });
   });
 
   it('renders Inkwest branding', () => {
@@ -95,6 +98,54 @@ describe('Header', () => {
     });
     renderHeader();
     expect(screen.getByTestId('connection-status')).toBeInTheDocument();
+  });
+
+  it('shows the default model badge when no session is active', () => {
+    useConfigStore.setState({
+      config: {
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        available_models: [
+          { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true },
+          { id: 'claude-opus-4-20250514', label: 'Opus 4.0', legacy: true },
+        ],
+      },
+    });
+    renderHeader();
+    const badge = screen.getByTitle(
+      'Provider: anthropic · Default model: claude-sonnet-4-20250514',
+    );
+    expect(badge).toHaveTextContent('Sonnet 4.0');
+  });
+
+  it('hides the model badge when config is not loaded', () => {
+    renderHeader();
+    expect(screen.queryByTitle(/Provider:/)).not.toBeInTheDocument();
+  });
+
+  it('hides the model badge during an active session (selector lives in the chat toolbar)', () => {
+    useConfigStore.setState({
+      config: {
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        available_models: [
+          { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true },
+        ],
+      },
+    });
+    useSessionsStore.setState({
+      currentSession: {
+        id: 's1',
+        cluster_id: null,
+        model: null,
+        cluster: null,
+        messages: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    });
+    renderHeader();
+    expect(screen.queryByTitle(/Provider:/)).not.toBeInTheDocument();
   });
 
   it('opens profile menu on click', async () => {

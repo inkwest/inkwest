@@ -30,6 +30,8 @@ export interface Session {
   cluster_id?: string | null;
   title?: string;
   cluster?: ClusterSummary | null;
+  /** Per-session model; null/undefined = global default. */
+  model?: string | null;
   total_input_tokens?: number;
   total_output_tokens?: number;
   created_at: string;

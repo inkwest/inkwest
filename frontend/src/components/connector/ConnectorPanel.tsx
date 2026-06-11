@@ -8,6 +8,7 @@ import { ConnectorName, ConnectorState } from '@/types/connectors';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 import { ConnectorPermissions } from './ConnectorPermissions';
 import { McpPanel } from './McpPanel';
+import { SessionModelSelect } from '@/components/chat/SessionModelSelect';
 import { cn } from '@/lib/utils';
 
 const LABELS: Record<ConnectorName, string> = {
@@ -174,7 +175,9 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
   const connectors = Object.keys(LABELS) as ConnectorName[];
   // Only render connectors the backend reports (enabled ones).
   const visible = connectors.filter((c) => statuses[c]);
-  if (visible.length === 0 && !stacked) return null;
+  // Connectors disabled entirely: keep the model selector reachable in its own
+  // strip (it renders nothing itself when no session/config is loaded).
+  if (visible.length === 0 && !stacked) return <SessionModelSelect asBar />;
 
   return (
     <div className={cn('px-4 py-2 bg-gray-900/60', !stacked && 'border-b border-gray-800')}>
@@ -248,6 +251,8 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
         ) : (
           <McpPanel sessionId={sessionId} variant="inline" />
         )}
+        {/* Per-conversation model, right-aligned (start screen has its own picker). */}
+        {!stacked && <SessionModelSelect className="ml-auto" />}
       </div>
 
       {/* AWS device authorization — our own centered modal (the AWS page itself
