@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,7 +34,7 @@ class Message(Base):
     role: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
-    )  # user, assistant, tool_result
+    )  # user, assistant, tool_result, system (UI-only events; never sent to the model)
     content: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
@@ -103,5 +103,13 @@ class Message(Base):
         lazy="selectin",
     )
 
-    # Indexes
-    __table_args__ = (Index("ix_messages_session_created", "session_id", "created_at"),)
+    # Indexes + constraints. The role CHECK mirrors the DB migration so model-built
+    # test schemas (SQLite) enforce it too — a new role must be added in BOTH places
+    # (here and a migration), or tests catch the drift.
+    __table_args__ = (
+        Index("ix_messages_session_created", "session_id", "created_at"),
+        CheckConstraint(
+            "role IN ('user', 'assistant', 'tool_result', 'system')",
+            name="messages_role_check",
+        ),
+    )

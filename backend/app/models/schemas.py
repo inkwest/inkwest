@@ -176,7 +176,7 @@ class SystemPromptList(BaseModel):
 class MessageBase(BaseModel):
     """Base message schema with common fields."""
 
-    role: str = Field(..., pattern="^(user|assistant|tool_result)$")
+    role: str = Field(..., pattern="^(user|assistant|tool_result|system)$")
     content: dict[str, Any] | str | list[Any]  # Support dict, string, or list content
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None

@@ -100,7 +100,6 @@ services:
       - WEB_SEARCH_BLOCKED_DOMAINS=${WEB_SEARCH_BLOCKED_DOMAINS:-}
       # External Access Connectors (AWS / GitLab / Coralogix)
       - CONNECTORS_ENABLED=${CONNECTORS_ENABLED:-false}
-      - CONNECTOR_AUDIT_ENABLED=${CONNECTOR_AUDIT_ENABLED:-true}
       # Local dev: callback hits the backend directly (no Vite /api proxy).
       - CONNECTOR_REDIRECT_BASE=${CONNECTOR_REDIRECT_BASE:-http://localhost:8000/api/connectors/callback}
       # AWS IAM Identity Center

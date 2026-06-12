@@ -79,6 +79,11 @@ async def get_session_messages(
 
     formatted_messages = []
     for msg in messages:
+        # 'system' messages are UI-only event markers (e.g. connector grant/revoke).
+        # They are never part of the model's conversation — skip them entirely so the
+        # Claude API payload stays valid (no 'system' role in the messages array).
+        if msg.role == "system":
+            continue
         content = msg.content
         # tool_result messages are stored separately for UI but sent as role="user" per API spec
         api_role = "user" if msg.role == "tool_result" else msg.role
@@ -165,6 +170,40 @@ async def save_message(
 
     logger.debug(f"Saved {role} message {message.id} to session {session_id}")
     return message
+
+
+async def save_session_event(
+    db: AsyncSession,
+    session_id: str | uuid.UUID,
+    subject: str,
+    action: str,
+    targets: list[dict[str, Any]] | None = None,
+) -> None:
+    """Record a session activity event as a fully-structured 'system' message.
+
+    Stores subject-agnostic, machine-readable data — ``{type, subject, action, targets}``
+    — so any source (AWS, GitLab, MCP, model, …) reuses one path and the wording lives
+    only in the frontend. ``targets`` is a structured list of what changed (AWS
+    account/role objects, MCP server keys, the new model, …), kept as data so a
+    conversation export is a plain ``SELECT`` with no string parsing.
+
+    Surfaced inline in the conversation as a faded note. Excluded from the model's
+    context (see :func:`get_session_messages`). Best-effort — a failure here must never
+    break the change it accompanies.
+    """
+    content: dict[str, Any] = {"type": "session_event", "subject": subject, "action": action}
+    if targets:
+        content["targets"] = targets
+    try:
+        await save_message(db, session_id, "system", content)
+    except Exception:  # noqa: BLE001 — the conversation note is non-critical
+        # Roll back so a failed event write can't leave the session in a
+        # PendingRollback state and break the request's own commit downstream.
+        await db.rollback()
+        logger.warning(
+            "session_event_persist_failed",
+            extra={"subject": subject, "action": action, "session_id": str(session_id)},
+        )
 
 
 # Shown on turns that never produced a reply — killed mid-flight by a server
@@ -351,14 +390,17 @@ async def ensure_session_title(
 
 async def get_message_count(db: AsyncSession, session_id: str | uuid.UUID) -> int:
     """
-    Get the number of messages in a session.
+    Get the number of conversation messages in a session.
+
+    Excludes 'system' event messages (connector/MCP/model changes) — they are UI-only
+    markers, not turns, so they must not inflate a user-facing message count.
 
     Args:
         db: Database session
         session_id: UUID of the chat session
 
     Returns:
-        Number of messages
+        Number of conversation messages
     """
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
@@ -366,7 +408,10 @@ async def get_message_count(db: AsyncSession, session_id: str | uuid.UUID) -> in
     from sqlalchemy import func
 
     result = await db.execute(
-        select(func.count(Message.id)).where(Message.session_id == session_id)
+        select(func.count(Message.id)).where(
+            Message.session_id == session_id,
+            Message.role != "system",
+        )
     )
     return result.scalar_one()
 

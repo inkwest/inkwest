@@ -69,7 +69,10 @@ async def list_sessions(
     # Sessions with no interaction yet (created on chat open / MCP setup) are
     # hidden from the sidebar. Filtering here, not just client-side, keeps
     # pagination honest — otherwise invisible empties crowd real ones off page 1.
-    query = query.where(Session.messages.any())
+    # 'system' event messages (connector/MCP/model changes) don't count as interaction:
+    # granting access on the start screen before the first message must not surface the
+    # session.
+    query = query.where(Session.messages.any(Message.role != "system"))
 
     if cluster_id:
         query = query.where(Session.cluster_id == cluster_id)
@@ -258,12 +261,26 @@ async def update_session(
     update_data = session_data.model_dump(exclude_unset=True)
     if "model" in update_data:
         check_model_selectable(update_data["model"])
+    model_changed = "model" in update_data and update_data["model"] != session.model
+    new_model = update_data.get("model")
     for field, value in update_data.items():
         setattr(session, field, value)
 
     await db.flush()
     await db.refresh(session)
     await db.commit()
+
+    # Record a model switch inline in the conversation. On a reset (model=None) we store
+    # the *resolved* default model the session will now use, not null — so the event is a
+    # complete, self-contained record. Other field edits aren't surfaced.
+    if model_changed:
+        from app.services.messages import save_session_event
+        from app.services.model_catalog import default_model
+
+        effective_model = new_model or default_model()
+        await save_session_event(
+            db, session.id, "model", "changed", targets=[{"model": effective_model}]
+        )
 
     await notify({"type": "session_updated", "session_id": str(session.id)})
 
@@ -322,8 +339,10 @@ async def set_session_mcp(
     """
     from app.services.mcp_catalog import catalog_keys
     from app.services.mcp_config import apply_session_mcp_selection
+    from app.services.messages import save_session_event
 
     session = await _load_owned_session(session_id, current_user, db)
+    previous = list(session.enabled_mcp_servers or [])
 
     # Dedupe while preserving order; reject anything not in the catalog.
     enabled = list(dict.fromkeys(body.enabled))
@@ -340,6 +359,16 @@ async def set_session_mcp(
 
     # Reconcile the conversation's .claude.json (no-op in non-sandbox mode).
     apply_session_mcp_selection(str(session_id), enabled)
+
+    # Surface the change inline in the conversation: one batched event for the servers
+    # connected and one for those disconnected (targets carry the structured keys).
+    prev_set, new_set = set(previous), set(enabled)
+    added = [{"server": k} for k in enabled if k not in prev_set]
+    removed = [{"server": k} for k in previous if k not in new_set]
+    if added:
+        await save_session_event(db, session_id, "mcp", "connected", targets=added)
+    if removed:
+        await save_session_event(db, session_id, "mcp", "disconnected", targets=removed)
 
     return SessionMcpResponse(enabled=enabled)
 
@@ -553,12 +582,15 @@ async def search_global(
     )
     title_sessions = {s.id: s for s in title_result.scalars().all()}
 
-    # Messages matching by content (cast JSONB to text)
+    # Messages matching by content (cast JSONB to text). Exclude 'system' event
+    # messages: their structured JSON would match on metadata (e.g. "connected",
+    # account names) — noise — and could surface sessions the sidebar's empty filter hides.
     msg_query = (
         select(Message)
         .join(Session, Message.session_id == Session.id)
         .where(
             Session.is_archived == False,  # noqa: E712
+            Message.role != "system",
             cast(Message.content, String).ilike(pattern),
         )
     )

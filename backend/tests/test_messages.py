@@ -11,7 +11,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest_asyncio
 from sqlalchemy import Table
@@ -32,6 +32,7 @@ from app.services.messages import (
     get_session_messages,
     get_session_stats,
     save_message,
+    save_session_event,
     set_cli_session_id,
     truncate_messages,
     update_session_stats,
@@ -176,6 +177,20 @@ async def test_get_messages_accepts_str_session_id(db: AsyncSession) -> None:
     assert out[0]["content"] == "hi"
 
 
+async def test_get_messages_excludes_system_events(db: AsyncSession) -> None:
+    # 'system' messages are UI-only event markers and must never reach the model's
+    # payload (no 'system' role in the Claude messages array).
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "before", minute=0)
+    await _add_message(
+        db, sid, "system", {"type": "session_event", "subject": "aws", "action": "granted"}, 1
+    )
+    await _add_message(db, sid, "assistant", "after", minute=2)
+    out = await get_session_messages(db, sid)
+    assert [m["content"] for m in out] == ["before", "after"]
+    assert all(m["role"] != "system" for m in out)
+
+
 # --- save_message ---------------------------------------------------------------
 
 
@@ -188,6 +203,90 @@ async def test_save_message_persists_and_returns(db: AsyncSession) -> None:
     # token_count is not passed → falls back to output_tokens.
     assert msg.token_count == 20
     assert await get_message_count(db, sid) == 1
+
+
+async def test_save_session_event_persists_structured_system_message(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    targets = [{"account_id": "111", "account_name": "acme", "role": "ReadOnly"}]
+    await save_session_event(db, sid, "aws", "granted", targets=targets)
+    result = await db.execute(Message.__table__.select())
+    row = result.mappings().one()
+    assert row["role"] == "system"
+    assert row["content"] == {
+        "type": "session_event",
+        "subject": "aws",
+        "action": "granted",
+        "targets": targets,
+    }
+    # Excluded from the model payload — it's a UI-only event.
+    assert await get_session_messages(db, sid) == []
+
+
+async def test_message_count_excludes_system_events(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "hi", minute=0)
+    await _add_message(db, sid, "assistant", "hello", minute=1)
+    await save_session_event(db, sid, "aws", "granted")  # 'system' — must not be counted
+    assert await get_message_count(db, sid) == 2
+
+
+async def test_save_session_event_omits_targets_when_absent(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    await save_session_event(db, sid, "gitlab", "renewed")
+    result = await db.execute(Message.__table__.select())
+    row = result.mappings().one()
+    assert row["content"] == {"type": "session_event", "subject": "gitlab", "action": "renewed"}
+
+
+async def test_messages_role_check_rejects_unknown_role(db: AsyncSession) -> None:
+    # Guards against ORM/migration drift: the role CHECK must be on the model so the
+    # SQLite test schema enforces it (the 'system' role insert failed in prod against
+    # a Postgres-only CHECK that the model lacked — this test would have caught it).
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    sid = await _make_session(db)
+    db.add(Message(id=uuid.uuid4(), session_id=sid, role="bogus", content="x"))
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+
+
+async def test_set_session_mcp_emits_batched_events_against_real_schema(db: AsyncSession) -> None:
+    """Integration: the MCP route writes batched session events end-to-end against the
+    REAL schema (incl. the role CHECK). Route tests elsewhere mock the DB, so the
+    save→commit→constraint path is otherwise untested — exactly the gap the original
+    'system'-role production bug slipped through."""
+    from app.api.routes.sessions import SessionMcpUpdate, set_session_mcp
+
+    sid = await _make_session(db, enabled_mcp_servers=["coralogix"])
+    session_obj = await db.get(Session, sid)
+
+    with (
+        # Ownership lookup pulls a User relationship not in this minimal schema; stub it.
+        # The point under test is the event save → real INSERT against the role CHECK.
+        patch("app.api.routes.sessions._load_owned_session", AsyncMock(return_value=session_obj)),
+        patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix", "sentry"]),
+        patch("app.services.mcp_config.apply_session_mcp_selection"),
+    ):
+        # coralogix -> sentry: one "connected" (sentry) + one "disconnected" (coralogix).
+        await set_session_mcp(sid, SessionMcpUpdate(enabled=["sentry"]), MagicMock(), db)
+
+    rows = (
+        (
+            await db.execute(
+                Message.__table__.select()
+                .where(Message.role == "system")
+                .order_by(Message.created_at)
+            )
+        )
+        .mappings()
+        .all()
+    )
+    events = {(r["content"]["action"], r["content"]["targets"][0]["server"]) for r in rows}
+    assert events == {("connected", "sentry"), ("disconnected", "coralogix")}
+    # And they are excluded from the model payload.
+    assert await get_session_messages(db, sid) == []
 
 
 async def test_save_message_explicit_token_count_wins(db: AsyncSession) -> None:

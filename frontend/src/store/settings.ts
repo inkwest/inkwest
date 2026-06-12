@@ -24,7 +24,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
       compactToolCards: true,
-      showTimestamps: false,
+      showTimestamps: true,
       taskListPosition: 'bottom',
       sidebarOpen: false,
       sidebarWidth: 256,

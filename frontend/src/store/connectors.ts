@@ -1,6 +1,15 @@
 import { create } from 'zustand';
 import * as api from '@/services/api';
 import { ConnectorName, ConnectorStatus, PriorGrant } from '@/types/connectors';
+import { useSessionsStore } from '@/store/sessions';
+
+// Grant/revoke/renew persist a 'system' event message server-side; re-fetch the open
+// session so it appears inline in the stream. Fire-and-forget (the access change must
+// not wait on a UI refresh) and flicker-free — fetchSession only shows the loading
+// state on an initial load, not a refresh of the session already open.
+function reloadConversation(sessionId: string): void {
+  void useSessionsStore.getState().fetchSession(sessionId);
+}
 
 // AWS device-authorization prompt shown while the user approves in their browser.
 export interface AwsDeviceState {
@@ -163,6 +172,7 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
       try {
         const status = await api.gitlabRenew(sessionId);
         set((s) => ({ statuses: { ...s.statuses, gitlab: status } }));
+        reloadConversation(sessionId); // GitLab "renewed" event now persisted
       } catch {
         gitlabNeedsOAuth = true; // token gone → silent refresh impossible
       }
@@ -214,6 +224,9 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
           ? { awsModalRequested: true }
           : {}),
       }));
+      // GitLab is granted outright here (→ event persisted); AWS only authenticates
+      // (needs_selection) and emits its event at the account/role pick, so skip it.
+      if (connector !== 'aws') reloadConversation(sessionId);
       return true;
     } catch {
       return false;
@@ -264,6 +277,7 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
         const aws = await api.awsRenewSelect(sessionId);
         set((s) => ({ statuses: { ...s.statuses, aws }, awsDevice: null, awsAutoSelect: false }));
         await get().fetchStatus(sessionId);
+        reloadConversation(sessionId); // AWS "renewed" event now persisted
         // AWS is now connected & persisted, so it's safe to navigate away to renew
         // GitLab (a redirect we deferred until the AWS device approval completed).
         if (get().gitlabReauthPending) {
@@ -316,6 +330,7 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
       // A completed selection grants AWS — drop any pending re-auth prompt for it.
       reauthRequired: s.reauthRequired === 'aws' ? null : s.reauthRequired,
     }));
+    reloadConversation(sessionId); // AWS "granted" event (with account/role) now persisted
   },
 
   revoke: async (sessionId, connector) => {
@@ -324,6 +339,7 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
       statuses: { ...s.statuses, [connector]: status },
       reauthRequired: get().reauthRequired === connector ? null : get().reauthRequired,
     }));
+    reloadConversation(sessionId); // "revoked" event now persisted
   },
 
   setReauthRequired: (connector) => set({ reauthRequired: connector }),

@@ -113,6 +113,11 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         ? { ...state.currentSession, model: updated.model }
         : state.currentSession,
     }));
+    // A model switch persists a "Model changed" event server-side; reload the open
+    // conversation so it appears inline (flicker-free for the already-open session).
+    if (get().currentSession?.id === id) {
+      await get().fetchSession(id);
+    }
   },
 
   setCurrentSession: (session) => set({ currentSession: session }),
