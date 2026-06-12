@@ -52,7 +52,10 @@ export function ShellLayout({ sidebar, mainClassName = 'flex-1 overflow-hidden m
   }, [setSidebarWidth]);
 
   return (
-    <div className="flex h-screen bg-gray-900 text-white overflow-hidden">
+    <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
+      {/* Full-width reload notice pinned to the very top of the window. */}
+      <UpdateBanner />
+      <div className="flex flex-1 min-h-0">
       {sidebarOpen && (
         <div
           className="fixed inset-0 bg-black/50 z-30 md:hidden"
@@ -82,10 +85,10 @@ export function ShellLayout({ sidebar, mainClassName = 'flex-1 overflow-hidden m
 
       <div className="flex-1 flex flex-col min-w-0">
         <Header />
-        <UpdateBanner />
         <main className={mainClassName}>
           {children}
         </main>
+      </div>
       </div>
     </div>
   );
