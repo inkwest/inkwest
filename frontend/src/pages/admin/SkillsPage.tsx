@@ -35,9 +35,7 @@ export function SkillsPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<AdminSkill | null>(null);
   const [formData, setFormData] = useState<Partial<CreateSkillRequest>>({
-    name: '',
     content: '',
-    description: '',
   });
 
   useEffect(() => {
@@ -60,14 +58,10 @@ export function SkillsPage() {
   const handleOpenModal = (template?: AdminSkill) => {
     if (template) {
       setEditingTemplate(template);
-      setFormData({
-        name: template.name,
-        content: template.content,
-        description: template.description || '',
-      });
+      setFormData({ content: template.content });
     } else {
       setEditingTemplate(null);
-      setFormData({ name: '', content: '', description: '' });
+      setFormData({ content: '' });
     }
     setIsModalOpen(true);
   };
@@ -82,11 +76,7 @@ export function SkillsPage() {
     e.preventDefault();
     try {
       if (editingTemplate) {
-        await updateTemplate(editingTemplate.id, {
-          name: formData.name,
-          content: formData.content,
-          description: formData.description || undefined,
-        });
+        await updateTemplate(editingTemplate.id, { content: formData.content });
       } else {
         await createTemplate(formData as CreateSkillRequest);
       }
@@ -223,7 +213,7 @@ export function SkillsPage() {
         isOpen={isModalOpen}
         onClose={handleCloseModal}
         title={editingTemplate ? 'Edit Skill' : 'Create Skill'}
-        size="md"
+        size="xl"
       >
         <form onSubmit={handleSubmit} className="space-y-4">
           {error && (
@@ -232,38 +222,28 @@ export function SkillsPage() {
             </div>
           )}
 
-          <Input
-            label="Name"
-            value={formData.name || ''}
-            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            required
-            helperText={'Unique. The part before a trailing "(...)" is the /slug trigger; the parens are the argument hint — e.g. Summarize MR(merge request URL)'}
-          />
-
           <div className="w-full">
-            <label htmlFor="template-content" className="block text-sm font-medium text-gray-300 mb-1">
-              Content
+            <label htmlFor="skill-content" className="block text-sm font-medium text-gray-300 mb-1">
+              SKILL.md
             </label>
             <textarea
-              id="template-content"
+              id="skill-content"
               value={formData.content || ''}
               onChange={(e) => setFormData({ ...formData, content: e.target.value })}
               required
-              rows={6}
+              rows={22}
+              placeholder={
+                '---\nname: my-skill\ndescription: When to use it (also drives auto-invoke)\narguments: [arg1, arg2]\n---\nInstructions… use $ARGUMENTS (or $1, $2) for the typed arguments.'
+              }
               className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
             <p className="mt-1 text-sm text-gray-500">
-              The skill instructions. Use $ARGUMENTS (or $1, $2) where the arguments typed
-              after /&lt;slug&gt; should go.
+              Full SKILL.md. The <code>---</code> frontmatter sets <code>name</code> (→ the
+              /slug trigger, normalized), <code>description</code>, and optional{' '}
+              <code>arguments</code>. Use <code>$ARGUMENTS</code> (or <code>$1</code>,{' '}
+              <code>$2</code>) in the body for the typed arguments.
             </p>
           </div>
-
-          <Input
-            label="Description"
-            value={formData.description || ''}
-            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            helperText="Optional: when to use this skill (also helps Claude auto-invoke it)"
-          />
 
           <div className="flex justify-end gap-3 pt-4">
             <Button type="button" variant="secondary" onClick={handleCloseModal}>

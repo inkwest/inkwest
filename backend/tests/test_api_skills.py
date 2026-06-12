@@ -42,7 +42,7 @@ async def test_create_skill_requires_admin(
 ) -> None:
     resp = await authenticated_client.post(
         "/api/skills",
-        json={"name": "new-template", "content": "Do __________."},
+        json={"content": "---\nname: x\n---\nbody"},
     )
     # Regular user -> 403 (admin required via dependency)
     assert resp.status_code == 403
@@ -60,22 +60,22 @@ async def test_create_skill_as_admin(
 
     def fake_refresh(obj: MagicMock) -> None:
         obj.id = mock_skill.id
-        obj.name = "new-template"
-        obj.content = "Do __________."
-        obj.description = None
+        obj.name = "new-skill"
+        obj.content = "---\nname: new-skill\ndescription: New\n---\nDo $ARGUMENTS.\n"
+        obj.description = "New"
         obj.is_active = True
         obj.created_at = datetime.now(UTC)
         obj.updated_at = datetime.now(UTC)
 
     mock_db.refresh = AsyncMock(side_effect=fake_refresh)
 
+    # Frontmatter name "New Skill" → slug "new-skill".
     resp = await admin_client.post(
         "/api/skills",
-        json={"name": "new-template", "content": "Do __________."},
+        json={"content": "---\nname: New Skill\ndescription: New\n---\nDo $ARGUMENTS."},
     )
     assert resp.status_code == 201
-    data = resp.json()
-    assert data["name"] == "new-template"
+    assert resp.json()["name"] == "new-skill"
 
 
 @pytest.mark.asyncio
@@ -88,9 +88,16 @@ async def test_create_skill_conflict(
 
     resp = await admin_client.post(
         "/api/skills",
-        json={"name": "test-template", "content": "Anything"},
+        json={"content": "---\nname: test-template\n---\nx"},
     )
     assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_create_skill_invalid_frontmatter(admin_client: AsyncClient) -> None:
+    # No frontmatter → 422 before any DB work.
+    resp = await admin_client.post("/api/skills", json={"content": "no frontmatter here"})
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -124,7 +131,7 @@ async def test_update_skill_requires_admin(
     tid = uuid.uuid4()
     resp = await authenticated_client.patch(
         f"/api/skills/{tid}",
-        json={"description": "Updated"},
+        json={"content": "---\nname: x\n---\nbody"},
     )
     assert resp.status_code == 403
 
@@ -139,9 +146,10 @@ async def test_update_skill_as_admin(
     mock_db.flush = AsyncMock()
     mock_db.refresh = AsyncMock()
 
+    # Same slug ("test-template") → no rename-conflict lookup.
     resp = await admin_client.patch(
         f"/api/skills/{mock_skill.id}",
-        json={"description": "Updated description"},
+        json={"content": "---\nname: test-template\ndescription: Updated\n---\nDo $ARGUMENTS."},
     )
     assert resp.status_code == 200
 
@@ -164,7 +172,7 @@ async def test_update_skill_rename_conflict(
 
     resp = await admin_client.patch(
         f"/api/skills/{mock_skill.id}",
-        json={"name": "already-taken"},
+        json={"content": "---\nname: already-taken\n---\nx"},
     )
     assert resp.status_code == 409
 

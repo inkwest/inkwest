@@ -8,7 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from app.core.slug import parse_skill_name
+from app.core.skill_md import frontmatter_argument_hint
+from app.core.slug import slugify
 
 # =============================================================================
 # Cluster Schemas
@@ -64,35 +65,32 @@ class ClusterList(BaseModel):
 # =============================================================================
 
 
-class SkillBase(BaseModel):
-    """Base skill schema with common fields."""
+class SkillCreate(BaseModel):
+    """Create a skill from a single SKILL.md document (frontmatter + body).
 
-    name: str = Field(..., min_length=1, max_length=255)
+    ``name``/``description``/``arguments`` are parsed from the frontmatter, not sent
+    as separate fields (see app.core.skill_md).
+    """
+
     content: str = Field(..., min_length=1)
-    description: str | None = None
-
-
-class SkillCreate(SkillBase):
-    """Schema for creating a new skill."""
-
-    pass
 
 
 class SkillUpdate(BaseModel):
-    """Schema for updating a skill."""
+    """Update a skill. ``content`` is the full SKILL.md; ``is_active`` toggles only."""
 
-    name: str | None = Field(None, min_length=1, max_length=255)
     content: str | None = Field(None, min_length=1)
-    description: str | None = None
     is_active: bool | None = None
 
 
-class SkillResponse(SkillBase):
+class SkillResponse(BaseModel):
     """Schema for skill response."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    name: str
+    content: str
+    description: str | None = None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -100,17 +98,16 @@ class SkillResponse(SkillBase):
     @computed_field  # type: ignore[prop-decorator]  # mypy: decorator over @property
     @property
     def slug(self) -> str:
-        """The ``/<slug>`` skill trigger — derived from ``name`` (the base before any
-        trailing ``(...)`` arg signature), server-authoritative so the UI and the sandbox
-        skill generator agree. Not stored in the DB (see docs §5.4)."""
-        return parse_skill_name(self.name)[0]
+        """The ``/<slug>`` skill trigger. ``name`` is already the normalized slug
+        (set on save); slugify again defensively."""
+        return slugify(self.name)
 
     @computed_field  # type: ignore[prop-decorator]  # mypy: decorator over @property
     @property
     def argument_hint(self) -> str | None:
-        """Argument hint parsed from a trailing ``(...)`` in the name — e.g.
-        ``"Summarize MR(merge request URL)"`` → ``"merge request URL"``; None if absent."""
-        return parse_skill_name(self.name)[1]
+        """Argument hint parsed from the SKILL.md frontmatter (``arguments`` /
+        ``argument-hint``); None if absent."""
+        return frontmatter_argument_hint(self.content)
 
 
 class SkillList(BaseModel):

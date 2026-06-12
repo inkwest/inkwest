@@ -330,8 +330,11 @@ def mock_skill() -> MagicMock:
     template = MagicMock()
     template.id = _SKILL_ID
     template.name = "test-template"
-    template.content = "Investigate pod __________ in namespace __________."
-    template.description = "A test template"
+    template.content = (
+        "---\nname: test-template\ndescription: A test skill\narguments: [target]\n---\n"
+        "Investigate $ARGUMENTS.\n"
+    )
+    template.description = "A test skill"
     template.is_active = True
     template.created_at = datetime.now(UTC)
     template.updated_at = datetime.now(UTC)

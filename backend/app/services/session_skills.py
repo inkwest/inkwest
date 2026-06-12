@@ -1,29 +1,29 @@
 """
 Generate per-conversation Claude skill files from the DB skills.
 
-Each active skill is materialized as a Claude skill at
-``<CLAUDE_CONFIG_DIR>/skills/<slug>/SKILL.md`` inside the conversation's sandbox, so
-the agent can trigger it explicitly (``/<slug> <args>``) and the model can auto-invoke
-it based on the skill ``description``.
+Each skill's ``content`` IS a full SKILL.md (frontmatter + body, authored in the admin
+UI). It is written **verbatim** to ``<CLAUDE_CONFIG_DIR>/skills/<slug>/SKILL.md`` inside
+the conversation's sandbox, so the agent can trigger it (``/<slug> <args>``) and the
+model can auto-invoke it from the frontmatter ``description``.
 
-Mirrors the per-conversation MCP reconcile in :mod:`app.services.mcp_config`: the
-skills dir is owned entirely by Inkwest, reconciled to a desired state (write the
-active set, prune the rest), with idempotent atomic writes, and a no-op outside
-sandbox mode. The orchestrator regenerates it every turn from the DB — the CLI reads
-its config at launch, so the next turn of every session picks up template edits and
-the set survives a sandbox rebuild.
+Mirrors the per-conversation MCP reconcile in :mod:`app.services.mcp_config`: the skills
+dir is owned entirely by Inkwest, reconciled to a desired state (write the active set,
+prune the rest), idempotent atomic writes, no-op outside sandbox mode. The orchestrator
+regenerates it every turn from the DB.
 """
 
 import contextlib
-import json
 import logging
 import os
-import re
 import shutil
 import tempfile
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import get_settings
-from app.core.slug import parse_skill_name
+from app.core.skill_md import legacy_to_skill_md
+from app.core.slug import slugify
 from app.models.skill import Skill
 
 logger = logging.getLogger(__name__)
@@ -43,47 +43,26 @@ def skills_dir(session_id: str) -> str | None:
     return os.path.join(sandbox.session_dir(session_id), "claude", "skills")
 
 
-def render_skill_md(template: Skill, slug: str, argument_hint: str | None = None) -> str:
-    """Render one template as ``SKILL.md`` content (frontmatter + body).
+def apply_session_skills(session_id: str, skills: list[Skill]) -> None:
+    """Reconcile the conversation's skills dir to ``skills`` (no-op off-sandbox).
 
-    No ``disable-model-invocation`` flag: the model may auto-invoke based on
-    ``description``. ``$ARGUMENTS`` is appended when the body references no argument
-    placeholder, so a ``/<slug> args`` invocation reaches the body — while staying
-    tolerant of an empty value when the model auto-invokes without arguments. The
-    optional ``argument-hint`` mirrors the inline ``(...)`` signature from the name.
-    """
-    # Collapse whitespace to single valid YAML lines; JSON-dump (a valid YAML scalar)
-    # to escape any quote/colon in the user-authored text.
-    description = " ".join((template.description or template.name).split())
-    body = template.content.rstrip()
-    if not re.search(r"\$(?:ARGUMENTS|\d)", body):
-        body = f"{body}\n\n$ARGUMENTS"
-    lines = [f"name: {slug}", f"description: {json.dumps(description, ensure_ascii=False)}"]
-    if argument_hint:
-        lines.append(f"argument-hint: {json.dumps(argument_hint, ensure_ascii=False)}")
-    frontmatter = "---\n" + "\n".join(lines) + "\n---\n"
-    return f"{frontmatter}{body}\n"
-
-
-def apply_session_skills(session_id: str, templates: list[Skill]) -> None:
-    """Reconcile the conversation's skills dir to ``templates`` (no-op off-sandbox).
-
-    Idempotent: unchanged ``SKILL.md`` files are left untouched; folders for templates
-    no longer present are pruned.
+    Each skill's ``content`` is already a full SKILL.md → written verbatim. Idempotent:
+    unchanged files are left untouched; folders for skills no longer present are pruned.
     """
     target = skills_dir(session_id)
     if target is None:
         return
 
     desired: dict[str, str] = {}
-    for t in templates:
-        slug, argument_hint = parse_skill_name(t.name)
+    for skill in skills:
+        slug = slugify(skill.name)  # name is the normalized slug; slugify is idempotent
         if slug in desired:
             # name is unique, but two distinct names can slugify alike; keep the first
             # deterministically and skip the collision rather than overwrite.
-            logger.warning("skill_slug_collision", extra={"slug": slug, "name": t.name})
+            logger.warning("skill_slug_collision", extra={"slug": slug, "skill_name": skill.name})
             continue
-        desired[slug] = render_skill_md(t, slug, argument_hint)
+        content = skill.content if skill.content.endswith("\n") else skill.content + "\n"
+        desired[slug] = content
 
     # 0755 so the toolbox (a different uid) can traverse/read; per-conversation dir.
     os.makedirs(target, mode=0o755, exist_ok=True)
@@ -102,6 +81,43 @@ def apply_session_skills(session_id: str, templates: list[Skill]) -> None:
         path = os.path.join(skill_dir, "SKILL.md")
         if _read(path) != content:  # idempotent: skip rewrite when unchanged
             _write_atomic(path, content)
+
+
+async def ensure_skills_frontmatter(db: AsyncSession) -> None:
+    """Idempotently migrate legacy skills (``content`` without a frontmatter) to the
+    SKILL.md format, rebuilding the frontmatter from the old ``name`` (``(...)`` arg
+    signature) + ``description``. No-op once converted; run at startup.
+    """
+    skills = list((await db.execute(select(Skill))).scalars().all())
+    # `name` is UNIQUE: a legacy slug must not collide with a modern row's name or with
+    # another legacy slug — else the single commit below raises IntegrityError and crashes
+    # startup. The old "(...)" name encoding makes collisions plausible (e.g. two skills
+    # sharing a base name), so suffix on collision to keep the migration always safe.
+    taken = {s.name for s in skills if s.content.lstrip().startswith("---")}
+    converted = 0
+    for skill in skills:
+        if skill.content.lstrip().startswith("---"):
+            continue  # already a SKILL.md
+        slug, content = legacy_to_skill_md(skill.name, skill.content, skill.description)
+        if slug in taken:
+            n = 2
+            while f"{slug}-{n}" in taken:
+                n += 1
+            resolved = f"{slug}-{n}"
+            logger.warning(
+                "skill_slug_collision_on_migration",
+                extra={"skill_name": skill.name, "slug": slug, "resolved": resolved},
+            )
+            slug, content = legacy_to_skill_md(
+                skill.name, skill.content, skill.description, slug=resolved
+            )
+        taken.add(slug)
+        skill.name = slug
+        skill.content = content
+        converted += 1
+    if converted:
+        await db.commit()
+        logger.info("skills_frontmatter_migrated", extra={"count": converted})
 
 
 def _read(path: str) -> str | None:

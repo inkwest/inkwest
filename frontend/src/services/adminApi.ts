@@ -292,15 +292,12 @@ export interface AdminSkill {
 }
 
 export interface CreateSkillRequest {
-  name: string;
+  // Full SKILL.md (frontmatter + body); name/description/arguments parsed server-side.
   content: string;
-  description?: string;
 }
 
 export interface UpdateSkillRequest {
-  name?: string;
   content?: string;
-  description?: string;
   is_active?: boolean;
 }
 
