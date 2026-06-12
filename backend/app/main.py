@@ -57,7 +57,12 @@ settings = get_settings()
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan management."""
     # Startup
-    logger.info("starting_api", version="0.1.0")
+    logger.info(
+        "starting_api",
+        version=settings.version,
+        commit_hash=settings.commit_hash,
+        build_timestamp=settings.build_timestamp,
+    )
     await init_db()
     logger.info("database_initialized")
     # Seed the hardcoded system prompt as the DB default on first startup.
@@ -128,7 +133,7 @@ app = FastAPI(
         "AI-powered investigation assistant brokering read-only access "
         "across Kubernetes, AWS, and GitLab"
     ),
-    version="0.1.0",
+    version=settings.version,
     lifespan=lifespan,
 )
 
@@ -248,6 +253,6 @@ else:
         """Root endpoint."""
         return {
             "name": "Inkwest API",
-            "version": "0.1.0",
+            "version": settings.version,
             "docs": "/docs",
         }

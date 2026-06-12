@@ -3,10 +3,18 @@ Application configuration using pydantic-settings.
 """
 
 import re
+from datetime import datetime
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Captured once at import (≈ process startup). When no build-time VERSION is
+# injected (the "dev" sentinel below), the backend reports this startup-stamped
+# version so every restart looks like a fresh deploy to the update-banner check
+# letting the banner be exercised locally without building an image.
+_DEV_VERSION = f"0.0.0-dev-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
 class Settings(BaseSettings):
@@ -41,6 +49,13 @@ class Settings(BaseSettings):
     # Kubernetes
     kubeconfig_dir: str = "/etc/inkwest/kubeconfigs"
     kubectl_timeout: int = 30
+
+    # Build metadata, injected as env vars at image build time (see Dockerfile:
+    # VERSION / COMMIT_HASH). Surfaced read-only via /version so the SPA can detect
+    # a newer deployment and prompt a reload. Defaults are dev/local placeholders.
+    version: str = "dev"
+    commit_hash: str = "unknown"
+    build_timestamp: str = "unknown"
 
     # App
     app_env: Literal["development", "production"] = "development"
@@ -180,6 +195,16 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
+
+    @model_validator(mode="after")
+    def _stamp_dev_version(self) -> "Settings":
+        # "dev" means no build-time VERSION was injected. On a local/dev run, swap it
+        # for a startup-stamped version so a backend restart trips the update banner.
+        # Gated on app_env: a prod image that forgot to inject VERSION keeps the static
+        # "dev" sentinel rather than churning a fresh version (and banner) per restart.
+        if self.version == "dev" and self.app_env == "development":
+            self.version = _DEV_VERSION
+        return self
 
 
 @lru_cache

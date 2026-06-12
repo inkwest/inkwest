@@ -75,6 +75,18 @@ export async function getAppConfig(): Promise<AppConfig> {
   return fetchAPI('/api/config');
 }
 
+// Build metadata of the running backend (see backend /version). Used to detect a
+// newer deployment after a WebSocket reconnect. Not under /api — the health
+// router is mounted at the root.
+export interface VersionInfo {
+  version: string;
+  commit: string;
+}
+
+export async function getVersion(): Promise<VersionInfo> {
+  return fetchAPI('/version');
+}
+
 // Clusters
 interface PaginatedClusters {
   items: Cluster[];
