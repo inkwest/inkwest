@@ -1,4 +1,4 @@
-import { Cluster, Message, PromptTemplate, SearchResponse, Session, SessionWithMessages } from '@/types/api';
+import { Cluster, Message, Skill, SearchResponse, Session, SessionWithMessages } from '@/types/api';
 
 // `??` not `||`: '' (set but empty) means same-origin — the combined prod
 // image serves the SPA from FastAPI itself, so relative URLs must survive.
@@ -86,14 +86,14 @@ export async function getClusters(): Promise<Cluster[]> {
   return response.items;
 }
 
-// Prompt templates (read-only; consumed by the chat palette)
-interface PaginatedPromptTemplates {
-  items: PromptTemplate[];
+// Skills (read-only; consumed by the chat palette)
+interface PaginatedSkills {
+  items: Skill[];
   total: number;
 }
 
-export async function getPromptTemplates(): Promise<PromptTemplate[]> {
-  const response = await fetchAPI<PaginatedPromptTemplates>('/api/prompt-templates');
+export async function getSkills(): Promise<Skill[]> {
+  const response = await fetchAPI<PaginatedSkills>('/api/skills');
   return response.items;
 }
 

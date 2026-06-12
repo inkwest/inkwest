@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { LibraryBig } from 'lucide-react';
 import { Button, Modal } from '@/components/ui';
-import { usePromptTemplatesStore } from '@/store/promptTemplates';
-import { PromptTemplate } from '@/types/api';
+import { useSkillsStore } from '@/store/skills';
+import { Skill } from '@/types/api';
 import { cn } from '@/lib/utils';
 
 interface Props {
-  // Called with the chosen template's content. The caller decides what to do
-  // with it (here: replace the chat input, leaving it editable before send).
-  onSelect: (content: string) => void;
+  // Called with the chosen template's slug. The caller turns it into a `/<slug>`
+  // skill invocation in the chat input (see ChatInput), editable before send.
+  onSelect: (slug: string) => void;
   disabled?: boolean;
   // Override the trigger button styling (e.g. a square corner button).
   className?: string;
 }
 
-export function PromptTemplatePalette({ onSelect, disabled, className }: Props) {
-  const { templates, isLoading, error, fetchTemplates } = usePromptTemplatesStore();
+export function SkillPalette({ onSelect, disabled, className }: Props) {
+  const { templates, isLoading, error, fetchTemplates } = useSkillsStore();
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
 
@@ -40,8 +40,8 @@ export function PromptTemplatePalette({ onSelect, disabled, className }: Props) 
     setQuery('');
   };
 
-  const handleSelect = (template: PromptTemplate) => {
-    onSelect(template.content);
+  const handleSelect = (template: Skill) => {
+    onSelect(template.slug);
     handleClose();
   };
 
@@ -51,8 +51,8 @@ export function PromptTemplatePalette({ onSelect, disabled, className }: Props) 
         type="button"
         onClick={() => setIsOpen(true)}
         disabled={disabled}
-        title="Insert a prompt template"
-        aria-label="Insert a prompt template"
+        title="Insert a skill"
+        aria-label="Insert a skill"
         className={cn(
           'flex items-center justify-center px-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed',
           className,
@@ -61,23 +61,23 @@ export function PromptTemplatePalette({ onSelect, disabled, className }: Props) 
         <LibraryBig className="h-4 w-4" />
       </button>
 
-      <Modal isOpen={isOpen} onClose={handleClose} title="Prompt templates" size="lg">
+      <Modal isOpen={isOpen} onClose={handleClose} title="Skills" size="lg">
         <div className="flex flex-col" style={{ maxHeight: '70vh' }}>
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
-            placeholder="Search templates…"
+            placeholder="Search skills…"
             className="w-full bg-gray-900 text-gray-100 text-sm rounded-md px-3 py-2 mb-3 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
 
           <div className="overflow-y-auto -mx-2 px-2">
-            {isLoading && <p className="text-gray-400 text-sm py-3">Loading templates…</p>}
+            {isLoading && <p className="text-gray-400 text-sm py-3">Loading skills…</p>}
             {error && <p className="text-red-400 text-sm py-3">{error}</p>}
             {!isLoading && !error && filtered.length === 0 && (
               <p className="text-gray-400 text-sm py-3">
-                {query ? 'No templates match your search.' : 'No templates available.'}
+                {query ? 'No skills match your search.' : 'No skills available.'}
               </p>
             )}
             <div className="space-y-2">

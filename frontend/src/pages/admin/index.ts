@@ -1,7 +1,7 @@
 export { AdminLayout } from './AdminLayout';
 export { DashboardPage } from './DashboardPage';
 export { ClustersPage } from './ClustersPage';
-export { PromptTemplatesPage } from './PromptTemplatesPage';
+export { SkillsPage } from './SkillsPage';
 export { SystemPromptsPage } from './SystemPromptsPage';
 export { UsersPage } from './UsersPage';
 export { RoleMappingsPage } from './RoleMappingsPage';

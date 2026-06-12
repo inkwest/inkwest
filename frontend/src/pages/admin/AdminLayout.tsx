@@ -17,7 +17,7 @@ import { ShellLayout } from '@/components/layout/ShellLayout';
 const navItems = [
   { to: '/admin', icon: LayoutDashboard, label: 'Dashboard', end: true },
   { to: '/admin/clusters', icon: Server, label: 'Clusters' },
-  { to: '/admin/prompt-templates', icon: FileText, label: 'Prompt Templates' },
+  { to: '/admin/skills', icon: FileText, label: 'Skills' },
   { to: '/admin/system-prompts', icon: Terminal, label: 'System Prompts' },
   { to: '/admin/users', icon: Users, label: 'Users' },
   { to: '/admin/roles', icon: Shield, label: 'Role Mappings' },

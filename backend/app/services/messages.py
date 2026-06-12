@@ -17,6 +17,7 @@ from sqlalchemy.orm import aliased
 
 from app.models.message import Message
 from app.models.session import Session
+from app.models.skill import Skill
 from app.services.pubsub import notify
 
 logger = logging.getLogger(__name__)
@@ -493,6 +494,16 @@ async def get_enabled_mcp_servers(db: AsyncSession, session_id: str | uuid.UUID)
 
     result = await db.execute(select(Session.enabled_mcp_servers).where(Session.id == session_id))
     return result.scalar_one_or_none() or []
+
+
+async def get_active_skills(db: AsyncSession) -> list[Skill]:
+    """All active skills, ordered by name (deterministic skill generation)."""
+    result = await db.execute(
+        select(Skill)
+        .where(Skill.is_active == True)  # noqa: E712
+        .order_by(Skill.name)
+    )
+    return list(result.scalars().all())
 
 
 async def set_cli_session_id(

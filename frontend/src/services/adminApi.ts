@@ -278,10 +278,10 @@ export async function deleteCluster(id: string): Promise<void> {
 }
 
 // ============================================================================
-// Prompt Template API
+// Skill API
 // ============================================================================
 
-export interface AdminPromptTemplate {
+export interface AdminSkill {
   id: string;
   name: string;
   content: string;
@@ -291,54 +291,54 @@ export interface AdminPromptTemplate {
   updated_at: string;
 }
 
-export interface CreatePromptTemplateRequest {
+export interface CreateSkillRequest {
   name: string;
   content: string;
   description?: string;
 }
 
-export interface UpdatePromptTemplateRequest {
+export interface UpdateSkillRequest {
   name?: string;
   content?: string;
   description?: string;
   is_active?: boolean;
 }
 
-interface PromptTemplateListResponse {
-  items: AdminPromptTemplate[];
+interface SkillListResponse {
+  items: AdminSkill[];
   total: number;
 }
 
-export async function getPromptTemplates(
+export async function getSkills(
   activeOnly: boolean = false
-): Promise<AdminPromptTemplate[]> {
-  const response = await fetchAPI<PromptTemplateListResponse>(
-    `/api/prompt-templates?active_only=${activeOnly}`
+): Promise<AdminSkill[]> {
+  const response = await fetchAPI<SkillListResponse>(
+    `/api/skills?active_only=${activeOnly}`
   );
   return response.items;
 }
 
-export async function createPromptTemplate(
-  data: CreatePromptTemplateRequest
-): Promise<AdminPromptTemplate> {
-  return fetchAPI('/api/prompt-templates', {
+export async function createSkill(
+  data: CreateSkillRequest
+): Promise<AdminSkill> {
+  return fetchAPI('/api/skills', {
     method: 'POST',
     body: JSON.stringify(data),
   });
 }
 
-export async function updatePromptTemplate(
+export async function updateSkill(
   id: string,
-  data: UpdatePromptTemplateRequest
-): Promise<AdminPromptTemplate> {
-  return fetchAPI(`/api/prompt-templates/${id}`, {
+  data: UpdateSkillRequest
+): Promise<AdminSkill> {
+  return fetchAPI(`/api/skills/${id}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
 }
 
-export async function deletePromptTemplate(id: string): Promise<void> {
-  await fetchAPI(`/api/prompt-templates/${id}`, { method: 'DELETE' });
+export async function deleteSkill(id: string): Promise<void> {
+  await fetchAPI(`/api/skills/${id}`, { method: 'DELETE' });
 }
 
 // ============================================================================

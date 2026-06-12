@@ -26,8 +26,8 @@ from app.api.routes import (
     egress,
     health,
     mcp,
-    prompt_templates,
     sessions,
+    skills,
     sync,
     system_prompts,
 )
@@ -166,7 +166,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 # Include routers
 app.include_router(health.router)
 app.include_router(clusters.router, prefix="/api")
-app.include_router(prompt_templates.router, prefix="/api")
+app.include_router(skills.router, prefix="/api")
 app.include_router(system_prompts.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(sessions.search_router, prefix="/api")

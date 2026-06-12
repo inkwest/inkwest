@@ -6,7 +6,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+from app.core.slug import parse_skill_name
 
 # =============================================================================
 # Cluster Schemas
@@ -58,26 +60,26 @@ class ClusterList(BaseModel):
 
 
 # =============================================================================
-# Prompt Template Schemas
+# Skill Schemas
 # =============================================================================
 
 
-class PromptTemplateBase(BaseModel):
-    """Base prompt template schema with common fields."""
+class SkillBase(BaseModel):
+    """Base skill schema with common fields."""
 
     name: str = Field(..., min_length=1, max_length=255)
     content: str = Field(..., min_length=1)
     description: str | None = None
 
 
-class PromptTemplateCreate(PromptTemplateBase):
-    """Schema for creating a new prompt template."""
+class SkillCreate(SkillBase):
+    """Schema for creating a new skill."""
 
     pass
 
 
-class PromptTemplateUpdate(BaseModel):
-    """Schema for updating a prompt template."""
+class SkillUpdate(BaseModel):
+    """Schema for updating a skill."""
 
     name: str | None = Field(None, min_length=1, max_length=255)
     content: str | None = Field(None, min_length=1)
@@ -85,8 +87,8 @@ class PromptTemplateUpdate(BaseModel):
     is_active: bool | None = None
 
 
-class PromptTemplateResponse(PromptTemplateBase):
-    """Schema for prompt template response."""
+class SkillResponse(SkillBase):
+    """Schema for skill response."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -95,11 +97,26 @@ class PromptTemplateResponse(PromptTemplateBase):
     created_at: datetime
     updated_at: datetime
 
+    @computed_field  # type: ignore[prop-decorator]  # mypy: decorator over @property
+    @property
+    def slug(self) -> str:
+        """The ``/<slug>`` skill trigger — derived from ``name`` (the base before any
+        trailing ``(...)`` arg signature), server-authoritative so the UI and the sandbox
+        skill generator agree. Not stored in the DB (see docs §5.4)."""
+        return parse_skill_name(self.name)[0]
 
-class PromptTemplateList(BaseModel):
-    """Schema for list of prompt templates."""
+    @computed_field  # type: ignore[prop-decorator]  # mypy: decorator over @property
+    @property
+    def argument_hint(self) -> str | None:
+        """Argument hint parsed from a trailing ``(...)`` in the name — e.g.
+        ``"Summarize MR(merge request URL)"`` → ``"merge request URL"``; None if absent."""
+        return parse_skill_name(self.name)[1]
 
-    items: list[PromptTemplateResponse]
+
+class SkillList(BaseModel):
+    """Schema for list of skills."""
+
+    items: list[SkillResponse]
     total: int
 
 

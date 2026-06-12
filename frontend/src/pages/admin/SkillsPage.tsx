@@ -13,13 +13,13 @@ import {
   Modal,
   Input,
 } from '@/components/ui';
-import { usePromptTemplateStore } from '@/store/admin';
+import { useSkillStore } from '@/store/admin';
 import {
-  AdminPromptTemplate,
-  CreatePromptTemplateRequest,
+  AdminSkill,
+  CreateSkillRequest,
 } from '@/services/adminApi';
 
-export function PromptTemplatesPage() {
+export function SkillsPage() {
   const {
     templates,
     isLoading,
@@ -29,12 +29,12 @@ export function PromptTemplatesPage() {
     updateTemplate,
     deleteTemplate,
     clearError,
-  } = usePromptTemplateStore();
+  } = useSkillStore();
 
   const [query, setQuery] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingTemplate, setEditingTemplate] = useState<AdminPromptTemplate | null>(null);
-  const [formData, setFormData] = useState<Partial<CreatePromptTemplateRequest>>({
+  const [editingTemplate, setEditingTemplate] = useState<AdminSkill | null>(null);
+  const [formData, setFormData] = useState<Partial<CreateSkillRequest>>({
     name: '',
     content: '',
     description: '',
@@ -57,7 +57,7 @@ export function PromptTemplatesPage() {
     );
   }, [templates, query]);
 
-  const handleOpenModal = (template?: AdminPromptTemplate) => {
+  const handleOpenModal = (template?: AdminSkill) => {
     if (template) {
       setEditingTemplate(template);
       setFormData({
@@ -88,7 +88,7 @@ export function PromptTemplatesPage() {
           description: formData.description || undefined,
         });
       } else {
-        await createTemplate(formData as CreatePromptTemplateRequest);
+        await createTemplate(formData as CreateSkillRequest);
       }
       handleCloseModal();
     } catch {
@@ -102,7 +102,7 @@ export function PromptTemplatesPage() {
     }
   };
 
-  const handleToggleActive = async (template: AdminPromptTemplate) => {
+  const handleToggleActive = async (template: AdminSkill) => {
     await updateTemplate(template.id, { is_active: !template.is_active });
   };
 
@@ -114,14 +114,15 @@ export function PromptTemplatesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Prompt Templates</h1>
+          <h1 className="text-2xl font-bold">Skills</h1>
           <p className="text-gray-400 mt-1">
-            Manage reusable prompt templates offered as an editable palette in the chat
+            Manage skills — reusable prompts triggered via /&lt;slug&gt; in the chat (and
+            auto-invokable by Claude)
           </p>
         </div>
         <Button onClick={() => handleOpenModal()}>
           <Plus className="w-4 h-4 mr-2" />
-          Add Template
+          Add Skill
         </Button>
       </div>
 
@@ -206,8 +207,8 @@ export function PromptTemplatesPage() {
                   <TableRow>
                     <TableCell colSpan={5} className="text-center py-8 text-gray-400">
                       {query
-                        ? 'No templates match your search.'
-                        : 'No templates configured. Click "Add Template" to create one.'}
+                        ? 'No skills match your search.'
+                        : 'No skills configured. Click "Add Skill" to create one.'}
                     </TableCell>
                   </TableRow>
                 )}
@@ -221,7 +222,7 @@ export function PromptTemplatesPage() {
       <Modal
         isOpen={isModalOpen}
         onClose={handleCloseModal}
-        title={editingTemplate ? 'Edit Template' : 'Create Template'}
+        title={editingTemplate ? 'Edit Skill' : 'Create Skill'}
         size="md"
       >
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -236,7 +237,7 @@ export function PromptTemplatesPage() {
             value={formData.name || ''}
             onChange={(e) => setFormData({ ...formData, name: e.target.value })}
             required
-            helperText="Unique name shown in the palette"
+            helperText={'Unique. The part before a trailing "(...)" is the /slug trigger; the parens are the argument hint — e.g. Summarize MR(merge request URL)'}
           />
 
           <div className="w-full">
@@ -252,7 +253,8 @@ export function PromptTemplatesPage() {
               className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded-md text-white placeholder-gray-500 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
             <p className="mt-1 text-sm text-gray-500">
-              Use blanks like __________ for parts the user fills in before sending
+              The skill instructions. Use $ARGUMENTS (or $1, $2) where the arguments typed
+              after /&lt;slug&gt; should go.
             </p>
           </div>
 
@@ -260,7 +262,7 @@ export function PromptTemplatesPage() {
             label="Description"
             value={formData.description || ''}
             onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            helperText="Optional: describe what this template is for"
+            helperText="Optional: when to use this skill (also helps Claude auto-invoke it)"
           />
 
           <div className="flex justify-end gap-3 pt-4">

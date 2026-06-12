@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { ChatInput } from './ChatInput';
 import { useDraftsStore } from '@/store/drafts';
 import { useChatStore } from '@/store/chat';
-import { Message } from '@/types/api';
+import { useSkillsStore } from '@/store/skills';
+import { Message, Skill } from '@/types/api';
 
 describe('ChatInput', () => {
   const onSend = vi.fn();
@@ -13,6 +14,14 @@ describe('ChatInput', () => {
     onSend.mockClear();
     useDraftsStore.setState({ drafts: {} });
     useChatStore.setState({ messages: [] });
+    // Stub the templates store so the on-mount fetch is a no-op (no real network) and
+    // the "/" autocomplete starts empty unless a test populates it.
+    useSkillsStore.setState({
+      templates: [],
+      fetchTemplates: vi.fn(),
+      isLoading: false,
+      error: null,
+    });
   });
 
   it('renders textarea and send button', () => {
@@ -179,6 +188,104 @@ describe('ChatInput', () => {
       const textarea = getTextarea();
       fireEvent.blur(textarea);
       expect(textarea).toHaveClass('invite-border');
+    });
+  });
+
+  describe('skill autocomplete ("/")', () => {
+    const templates: Skill[] = [
+      {
+        id: '1',
+        name: 'Analyse Logs',
+        slug: 'analyse-logs',
+        content: 'x',
+        description: 'Inspect pod logs',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
+      {
+        id: '2',
+        name: 'Summarize Incident',
+        slug: 'summarize-incident',
+        argument_hint: 'merge request URL',
+        content: 'y',
+        description: 'Write a summary',
+        is_active: true,
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    ];
+    const getTextarea = () =>
+      screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
+
+    beforeEach(() => {
+      useSkillsStore.setState({ templates, fetchTemplates: vi.fn() });
+    });
+
+    it('opens the dropdown listing skills when the message starts with "/"', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), '/');
+      expect(screen.getByText('/analyse-logs')).toBeInTheDocument();
+      expect(screen.getByText('/summarize-incident')).toBeInTheDocument();
+    });
+
+    it('filters the list as the query is typed', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), '/sum');
+      expect(screen.getByText('/summarize-incident')).toBeInTheDocument();
+      expect(screen.queryByText('/analyse-logs')).not.toBeInTheDocument();
+    });
+
+    it('selects with Enter (inserts "/<slug> ") instead of sending', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      const textarea = getTextarea();
+      await user.type(textarea, '/analyse{enter}');
+      expect(textarea.value).toBe('/analyse-logs ');
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('inserts the trigger on click', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      const textarea = getTextarea();
+      await user.type(textarea, '/sum');
+      fireEvent.mouseDown(screen.getByRole('button', { name: /summarize-incident/i }));
+      expect(textarea.value).toBe('/summarize-incident ');
+    });
+
+    it('closes the dropdown on Escape', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), '/ana{escape}');
+      expect(screen.queryByText('/analyse-logs')).not.toBeInTheDocument();
+    });
+
+    it('triggers mid-message and replaces the token in place', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      const textarea = getTextarea();
+      await user.type(textarea, 'look at /sum');
+      expect(screen.getByText('/summarize-incident')).toBeInTheDocument();
+      fireEvent.mouseDown(screen.getByRole('button', { name: /summarize-incident/i }));
+      expect(textarea.value).toBe('look at /summarize-incident ');
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('shows a generic hint line when the skill has no argument_hint', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), '/analyse{enter}'); // selects -> "/analyse-logs "
+      expect(screen.getByText(/Inspect pod logs/)).toBeInTheDocument();
+      expect(screen.getByText(/arguments libres/)).toBeInTheDocument();
+    });
+
+    it('shows the skill-specific argument_hint when present', async () => {
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), '/summarize{enter}'); // -> "/summarize-incident "
+      expect(screen.getByText(/\[merge request URL\]/)).toBeInTheDocument(); // bracketed
+      expect(screen.queryByText(/arguments libres/)).not.toBeInTheDocument();
     });
   });
 });
