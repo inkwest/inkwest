@@ -300,6 +300,7 @@ async def orchestrate_chat(
                 output_tokens=iter_output_tokens,
                 thinking_content=thinking_content,
                 latency_ms=iter_latency_ms,
+                model=model,
             )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")
@@ -638,6 +639,7 @@ async def orchestrate_chat_streaming(
                 assistant_content,
                 tool_calls=tool_calls if tool_calls else None,
                 token_count=response.usage.output_tokens if response.usage else None,
+                model=model,
             )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")

@@ -119,6 +119,7 @@ async def save_message(
     output_tokens: int | None = None,
     thinking_content: str | None = None,
     latency_ms: int | None = None,
+    model: str | None = None,
 ) -> Message:
     """
     Save a message to the database.
@@ -135,6 +136,7 @@ async def save_message(
         output_tokens: Number of output tokens for this API call
         thinking_content: AI reasoning/thinking content if extended thinking enabled
         latency_ms: API call latency in milliseconds
+        model: Model that produced this turn (assistant messages) for cost attribution
 
     Returns:
         Created Message object
@@ -163,6 +165,7 @@ async def save_message(
         output_tokens=output_tokens,
         thinking_content=thinking_content,
         latency_ms=latency_ms,
+        model=model,
     )
     db.add(message)
     await db.commit()
@@ -333,11 +336,18 @@ async def update_session_title(db: AsyncSession, session_id: str | uuid.UUID, ti
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
 
+    # Capture the owner so the change event is fanned out only to that user's tabs.
+    owner_id = (
+        await db.execute(select(Session.user_id).where(Session.id == session_id))
+    ).scalar_one_or_none()
     await db.execute(update(Session).where(Session.id == session_id).values(title=title))
     await db.commit()
     logger.debug(f"Updated title for session {session_id}: {title}")
 
-    await notify({"type": "session_updated", "session_id": str(session_id)})
+    await notify(
+        {"type": "session_updated", "session_id": str(session_id)},
+        user_id=str(owner_id) if owner_id else None,
+    )
 
 
 async def ensure_session_title(

@@ -302,6 +302,16 @@ async def test_save_message_explicit_zero_token_count_preserved(db: AsyncSession
     assert msg.token_count == 0
 
 
+async def test_save_message_persists_model_for_cost_attribution(db: AsyncSession) -> None:
+    # The per-turn model is captured at generation time so cost stays accurate even
+    # if the session model changes later. Defaults to NULL when not provided.
+    sid = await _make_session(db)
+    with_model = await save_message(db, sid, "assistant", "done", model="claude-opus-4-8")
+    assert with_model.model == "claude-opus-4-8"
+    without = await save_message(db, sid, "user", "hi")
+    assert without.model is None
+
+
 # --- update_session_title / ensure_session_title --------------------------------
 
 

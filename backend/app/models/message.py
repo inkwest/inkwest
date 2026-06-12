@@ -47,6 +47,14 @@ class Message(Base):
         String(255),
         nullable=True,
     )
+    # The model that produced this (assistant) turn, captured at generation time.
+    # Per-turn cost is model-dependent and the session model can change mid-chat,
+    # so this is the only reliable source for accurate cost attribution. NULL for
+    # non-assistant rows and for messages predating this column.
+    model: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
     token_count: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,

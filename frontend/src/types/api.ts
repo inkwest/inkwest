@@ -56,6 +56,8 @@ export interface Message {
   // 'system' = UI-only event line (e.g. a connector access change); never sent to the model.
   role: 'user' | 'assistant' | 'tool_result' | 'system';
   content: MessageContent;
+  /** Model that produced this assistant turn; null/undefined for older or non-assistant rows. */
+  model?: string | null;
   status?: MessageStatus;
   error_message?: string;
   is_retryable?: boolean;

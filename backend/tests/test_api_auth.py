@@ -373,7 +373,7 @@ async def test_pubsub_notify_calls_pg_notify() -> None:
         from app.services.pubsub import notify
 
         payload = {"title": "it's a test"}
-        await notify(payload)
+        await notify(payload, user_id="u1")
 
     mock_driver.execute.assert_called_once()
     call_args = mock_driver.execute.call_args
@@ -381,4 +381,5 @@ async def test_pubsub_notify_calls_pg_notify() -> None:
     assert call_args[0][1] == "session_changes"
     import json
 
-    assert json.loads(call_args[0][2]) == payload
+    # notify() merges the scoping user_id into the published payload.
+    assert json.loads(call_args[0][2]) == {**payload, "user_id": "u1"}

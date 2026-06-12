@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MessageBubble } from './MessageBubble';
 import type { Message } from '@/types/api';
 import { useSettingsStore } from '@/store/settings';
+import { useAuthStore } from '@/store/admin';
+import { useConfigStore } from '@/store/config';
 import { formatTimestamp, formatFullTimestamp } from '@/lib/utils';
 
 vi.mock('./MarkdownContent', () => ({
@@ -202,6 +204,116 @@ describe('MessageBubble', () => {
     const msg: Message = { ...baseMessage, role: 'system', content: 'GitLab access renewed' };
     render(<MessageBubble message={msg} />);
     expect(screen.getByText(/GitLab access renewed/)).toBeInTheDocument();
+  });
+
+  describe('copy as Markdown', () => {
+    beforeEach(() => {
+      useAuthStore.setState({
+        user: { id: 'u1', email: 'd@x', display_name: 'Damien Degois', is_admin: false, roles: [] } as never,
+      });
+      useConfigStore.setState({
+        config: {
+          model: 'claude-opus-4-8',
+          available_models: [
+            { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+            { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+          ],
+        } as never,
+      });
+    });
+
+    it('copies the assistant message as Markdown with an attribution footer', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      const msg: Message = { ...baseMessage, role: 'assistant', content: 'Here are your pods.' };
+      render(<MessageBubble message={msg} />);
+
+      // "Copy as Markdown" lives in the ellipsis menu.
+      fireEvent.click(screen.getByRole('button', { name: /more copy options/i }));
+      fireEvent.click(screen.getByRole('menuitem', { name: /copy as markdown/i }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain('Here are your pods.');
+      expect(copied).toContain('Powered by Inkwest');
+      expect(copied).toContain('Conversation with Damien Degois');
+      expect(copied).toContain('Claude Opus 4.8');
+      expect(copied).toContain('conversation: sess-1 · message: msg-1');
+      vi.unstubAllGlobals();
+    });
+
+    it("uses the message's own model over the session default in the footer", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      // Session default is Opus, but this turn ran on Haiku — the footer must reflect the turn.
+      const msg: Message = { ...baseMessage, role: 'assistant', content: 'Answer.', model: 'claude-haiku-4-5' };
+      render(<MessageBubble message={msg} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /more copy options/i }));
+      fireEvent.click(screen.getByRole('menuitem', { name: /copy as markdown/i }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain('Claude Haiku 4.5');
+      expect(copied).not.toContain('Claude Opus 4.8');
+      vi.unstubAllGlobals();
+    });
+
+    it('primary "formatted" copy writes rich + plain via ClipboardItem', async () => {
+      const write = vi.fn().mockResolvedValue(undefined);
+      const seen: Record<string, unknown>[] = [];
+      class FakeClipboardItem {
+        constructor(items: Record<string, unknown>) {
+          seen.push(items);
+        }
+      }
+      vi.stubGlobal('ClipboardItem', FakeClipboardItem);
+      vi.stubGlobal('navigator', { clipboard: { write } });
+      const msg: Message = { ...baseMessage, role: 'assistant', content: '**bold** answer' };
+      render(<MessageBubble message={msg} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /copy formatted/i }));
+
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+      expect(Object.keys(seen[0])).toEqual(['text/html', 'text/plain']);
+      vi.unstubAllGlobals();
+    });
+
+    it('the menu offers a Teams-specific rich copy', async () => {
+      const write = vi.fn().mockResolvedValue(undefined);
+      const seen: Record<string, unknown>[] = [];
+      class FakeClipboardItem {
+        constructor(items: Record<string, unknown>) {
+          seen.push(items);
+        }
+      }
+      vi.stubGlobal('ClipboardItem', FakeClipboardItem);
+      vi.stubGlobal('navigator', { clipboard: { write } });
+      const msg: Message = { ...baseMessage, role: 'assistant', content: '```js\nx\n```' };
+      render(<MessageBubble message={msg} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /more copy options/i }));
+      fireEvent.click(screen.getByRole('menuitem', { name: /copy for teams/i }));
+
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+      expect(Object.keys(seen[0])).toEqual(['text/html', 'text/plain']);
+      vi.unstubAllGlobals();
+    });
+
+    it('offers no copy button on user messages', () => {
+      render(<MessageBubble message={baseMessage} />);
+      expect(screen.queryByRole('button', { name: /copy formatted/i })).not.toBeInTheDocument();
+    });
+
+    it('offers no copy button on a tool-only assistant turn (no Markdown body)', () => {
+      const msg: Message = {
+        ...baseMessage,
+        role: 'assistant',
+        content: [{ type: 'tool_use', name: 'kubectl_get', input: {} }],
+      };
+      render(<MessageBubble message={msg} />);
+      expect(screen.queryByRole('button', { name: /copy formatted/i })).not.toBeInTheDocument();
+    });
   });
 
   it('hides the timestamp on system events when showTimestamps is off (event text stays)', () => {

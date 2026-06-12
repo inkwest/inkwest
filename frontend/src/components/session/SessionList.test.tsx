@@ -50,10 +50,13 @@ describe('SessionList', () => {
     expect(screen.getByText('Loading...')).toBeInTheDocument();
   });
 
-  it('shows error state', () => {
-    useSessionsStore.setState({ error: 'Network error', isLoading: false });
+  it('shows a recoverable error state with a retry that refetches', () => {
+    const retry = vi.fn();
+    useSessionsStore.setState({ error: 'Network error', isLoading: false, fetchSessions: retry });
     renderWithRouter();
-    expect(screen.getByText('Failed to load sessions')).toBeInTheDocument();
+    expect(screen.getByText(/couldn't load your sessions/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(retry).toHaveBeenCalled();
   });
 
   it('shows empty state', () => {
@@ -167,6 +170,14 @@ describe('SessionList', () => {
       fireEvent.dragOver(screen.getByTestId('session-s3'), { dataTransfer: dataTransfer() });
       fireEvent.dragEnd(screen.getByTestId('session-s1'), { dataTransfer: dataTransfer() });
       expect(persistSessionOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not persist on a grab-and-release with no actual move', () => {
+      renderWithRouter();
+      startDrag('s1');
+      // No dragover onto another row → nothing reordered.
+      fireEvent.dragEnd(screen.getByTestId('session-s1'), { dataTransfer: dataTransfer() });
+      expect(persistSessionOrder).not.toHaveBeenCalled();
     });
 
     it('forgets the drag when the dragged session disappears mid-drag', () => {

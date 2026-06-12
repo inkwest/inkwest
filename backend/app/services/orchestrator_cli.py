@@ -335,10 +335,14 @@ required.
             except Exception as e:
                 logger.warning(f"Failed to store CLI session ID: {e}")
 
-        # Save assistant message if we have content
+        # Save assistant message if we have content. Attribute to what actually
+        # ran (CLI-reported model, else the explicit choice) — the same source the
+        # usage stats use below — for accurate per-turn cost.
         if content:
             try:
-                await save_message(db, session_id, "assistant", content)
+                await save_message(
+                    db, session_id, "assistant", content, model=actual_model or model_choice
+                )
             except Exception as e:
                 logger.error(f"Failed to save assistant message: {e}")
                 # Continue anyway - response was already streamed

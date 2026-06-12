@@ -7,7 +7,8 @@ import { useSkillsStore } from '@/store/skills';
 import { Skill } from '@/types/api';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 import { SkillPalette } from './SkillPalette';
-import { SkillAutocomplete, formatArgs } from './SkillAutocomplete';
+import { SkillAutocomplete } from './SkillAutocomplete';
+import { formatArgs } from '@/lib/skillArgs';
 
 interface Props {
   onSend: (message: string) => void;

@@ -192,6 +192,8 @@ class MessageResponse(MessageBase):
 
     id: UUID
     session_id: UUID
+    # Model that produced this assistant turn (NULL for older/non-assistant rows).
+    model: str | None = None
     token_count: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None

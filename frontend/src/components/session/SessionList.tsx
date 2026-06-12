@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, X, Loader2 } from 'lucide-react';
+import { Search, X, Loader2, RefreshCw } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { SessionItem } from './SessionItem';
@@ -99,8 +99,13 @@ export function SessionList() {
     clearSearch();
   }, [clearSearch]);
 
+  // Tracks whether the drag actually moved anything, so a grab-and-release with no
+  // reorder doesn't fire a needless persist (and its cross-tab notify).
+  const movedRef = useRef(false);
+
   const handleDragStart = (e: React.DragEvent, id: string) => {
     setDraggingId(id);
+    movedRef.current = false;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', id);
   };
@@ -115,10 +120,11 @@ export function SessionList() {
     e.dataTransfer.dropEffect = 'move';
     if (draggingId === overId) return;
     moveSession(draggingId, overId); // live, optimistic reorder
+    movedRef.current = true;
   };
 
   const handleDragEnd = () => {
-    if (draggingId) persistSessionOrder(); // save the final arrangement once
+    if (draggingId && movedRef.current) persistSessionOrder(); // save only a real reorder
     setDraggingId(null);
   };
 
@@ -141,8 +147,23 @@ export function SessionList() {
     return <div className="p-4 text-gray-400">Loading...</div>;
   }
 
+  // A failed initial load (often a transient 500 while the backend is still warming
+  // up on a cold start) shouldn't dead-end the sidebar: explain it and offer a retry
+  // so the user can recover without a full page reload.
   if (error && !isInSearchMode) {
-    return <div className="p-4 text-red-400 text-sm">Failed to load sessions</div>;
+    return (
+      <div className="p-4 text-sm">
+        <p className="text-gray-300">Couldn&apos;t load your sessions.</p>
+        <p className="mt-1 text-xs text-gray-500">The server may be starting up or briefly unavailable.</p>
+        <button
+          onClick={() => fetchSessions()}
+          className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-gray-700 px-2.5 py-1.5 text-xs text-gray-200 hover:bg-gray-600 transition-colors"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          Retry
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -196,6 +217,7 @@ export function SessionList() {
                 >
                   <SessionItem
                     session={session}
+                    isDragging={draggingId === session.id}
                     dragHandleProps={{
                       draggable: true,
                       onDragStart: (e) => handleDragStart(e, session.id),

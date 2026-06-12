@@ -20,7 +20,8 @@ async def test_sync_auth_dev_mode_accepts() -> None:
 
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    assert result is True
+    # Dev (single user) is unscoped: ok, but no user_id to filter on.
+    assert result == (True, None)
 
 
 @pytest.mark.asyncio
@@ -37,7 +38,7 @@ async def test_sync_auth_oidc_no_token_rejects() -> None:
 
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    assert result is False
+    assert result == (False, None)
 
 
 @pytest.mark.asyncio
@@ -57,7 +58,7 @@ async def test_sync_auth_oidc_invalid_ticket_rejects() -> None:
 
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    assert result is False
+    assert result == (False, None)
 
 
 @pytest.mark.asyncio
@@ -68,6 +69,7 @@ async def test_sync_auth_oidc_valid_ticket_accepts() -> None:
 
     mock_user = MagicMock()
     mock_user.is_active = True
+    mock_user.id = "user-id"
     mock_result = MagicMock()
     mock_result.scalar_one_or_none.return_value = mock_user
     mock_db = AsyncMock()
@@ -86,7 +88,8 @@ async def test_sync_auth_oidc_valid_ticket_accepts() -> None:
 
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    assert result is True
+    # Accepted and scoped to the authenticated user's id (events isolated per user).
+    assert result == (True, "user-id")
 
 
 @pytest.mark.asyncio
@@ -115,7 +118,7 @@ async def test_sync_auth_oidc_inactive_user_rejects() -> None:
 
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    assert result is False
+    assert result == (False, None)
 
 
 @pytest.mark.asyncio
@@ -142,7 +145,7 @@ async def test_sync_auth_oidc_unknown_user_rejects() -> None:
 
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    assert result is False
+    assert result == (False, None)
 
 
 @pytest.mark.asyncio
@@ -154,4 +157,4 @@ async def test_sync_auth_exception_returns_false() -> None:
     with patch("app.api.routes.sync.get_settings", side_effect=RuntimeError("config broken")):
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    assert result is False
+    assert result == (False, None)

@@ -175,7 +175,9 @@ async def create_session(
     await db.refresh(session)
     await db.commit()
 
-    await notify({"type": "session_created", "session_id": str(session.id)})
+    await notify(
+        {"type": "session_created", "session_id": str(session.id)}, user_id=str(current_user.id)
+    )
 
     return SessionResponse.model_validate(session)
 
@@ -211,6 +213,10 @@ async def reorder_sessions(
             pos += 1
 
     await db.commit()
+
+    # Propagate the new order to the user's other tabs: same fan-out path as
+    # create/update/delete — clients just re-fetch the position-ordered list.
+    await notify({"type": "session_reordered"}, user_id=str(current_user.id))
     return None
 
 
@@ -282,7 +288,9 @@ async def update_session(
             db, session.id, "model", "changed", targets=[{"model": effective_model}]
         )
 
-    await notify({"type": "session_updated", "session_id": str(session.id)})
+    await notify(
+        {"type": "session_updated", "session_id": str(session.id)}, user_id=str(session.user_id)
+    )
 
     return SessionResponse.model_validate(session)
 
@@ -417,7 +425,10 @@ async def delete_session(
         await sandbox.teardown(str(session.id))
 
     await close_session_connections(str(session.id))
-    await notify({"type": "session_deleted", "session_id": str(session.id)})
+    await notify(
+        {"type": "session_deleted", "session_id": str(session.id)},
+        user_id=str(session.user_id) if session.user_id else None,
+    )
 
 
 @router.get("/{session_id}/stats")
