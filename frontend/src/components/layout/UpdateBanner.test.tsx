@@ -20,6 +20,14 @@ describe('UpdateBanner', () => {
     expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument();
   });
 
+  it('names the newer version when known', () => {
+    useUpdateStore.setState({ updateAvailable: true, availableVersion: 'v1.2.3' });
+    render(<UpdateBanner />);
+    expect(
+      screen.getByText('A new version of Inkwest is available (v1.2.3).'),
+    ).toBeInTheDocument();
+  });
+
   it('dismiss hides the banner without forcing a reload', () => {
     useUpdateStore.setState({ updateAvailable: true });
     render(<UpdateBanner />);

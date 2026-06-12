@@ -5,6 +5,7 @@ import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore, TaskListPosition } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
+import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { modelLabel } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
@@ -27,6 +28,7 @@ export function Header() {
   const { compactToolCards, toggleCompactToolCards, showTimestamps, toggleShowTimestamps, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
   const { user, oidcEnabled, isAuthenticated, logout } = useAuthStore();
   const { config, fetchConfig } = useConfigStore();
+  const version = useUpdateStore((s) => s.loadedVersion);
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -60,7 +62,14 @@ export function Header() {
           <Menu className="h-5 w-5 text-gray-400" />
         </button>
         <div className="flex flex-col min-w-0 md:hidden">
-          <span className="text-sm font-semibold leading-tight">Inkwest</span>
+          <span className="flex items-baseline gap-1.5 min-w-0">
+            <span className="text-sm font-semibold leading-tight">Inkwest</span>
+            {version && (
+              <span className="font-mono text-[9px] text-gray-500 truncate" title={`Version ${version}`}>
+                {version}
+              </span>
+            )}
+          </span>
           <span className="text-[10px] text-gray-500 truncate">Secure infrastructure &amp; code assistant</span>
         </div>
         {currentSession && (
