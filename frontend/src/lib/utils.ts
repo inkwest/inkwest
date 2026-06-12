@@ -14,6 +14,45 @@ export function formatDate(date: string): string {
   });
 }
 
+/**
+ * Per-message timestamp: 24h `HH:MM:SS`. The ISO calendar date (`YYYY-MM-DD`) is
+ * prefixed only when the message is not from today, so same-day conversations
+ * stay terse while older messages remain unambiguous. Date parts are taken from
+ * local time (not `toISOString`, which is UTC and could show the wrong day).
+ */
+export function formatTimestamp(date: string): string {
+  const d = new Date(date);
+  const now = new Date();
+  const isToday =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (isToday) return localTime(d);
+  return `${localIsoDate(d)} ${localTime(d)}`;
+}
+
+/**
+ * Full local timestamp `YYYY-MM-DD HH:MM:SS`, always with the date and seconds.
+ * Used as the hover overlay (title) on per-message timestamps so the full date
+ * is reachable even when the inline form omits it for today's messages.
+ */
+export function formatFullTimestamp(date: string): string {
+  const d = new Date(date);
+  return `${localIsoDate(d)} ${localTime(d)}`;
+}
+
+/** Local wall-clock time as 24h `HH:MM:SS`. */
+function localTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** Local calendar date as `YYYY-MM-DD` (not UTC — avoids off-by-one near midnight). */
+function localIsoDate(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 /** Compact mode font size classes (centralized to keep UI consistent) */
 export const TEXT_SIZE = {
   body: (compact: boolean) => compact ? 'text-[13px]' : 'text-sm',

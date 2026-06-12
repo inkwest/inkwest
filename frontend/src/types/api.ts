@@ -53,7 +53,8 @@ export type MessageStatus = 'pending' | 'success' | 'error';
 export interface Message {
   id: string;
   session_id: string;
-  role: 'user' | 'assistant' | 'tool_result';
+  // 'system' = UI-only event line (e.g. a connector access change); never sent to the model.
+  role: 'user' | 'assistant' | 'tool_result' | 'system';
   content: MessageContent;
   status?: MessageStatus;
   error_message?: string;
@@ -62,7 +63,29 @@ export interface Message {
   created_at: string;
 }
 
-export type MessageContent = string | ContentBlock[];
+export type MessageContent = string | ContentBlock[] | SessionEventContent;
+
+// One structured target of a session event. Subject-specific fields are all optional
+// so the shape stays generic: AWS uses account_id/account_name/role, MCP uses server,
+// model uses model. Stored as data (not a rendered string) so an exported conversation
+// carries full machine-readable detail.
+export interface SessionEventTarget {
+  account_id?: string;
+  account_name?: string;
+  role?: string;
+  server?: string;
+  model?: string | null;
+}
+
+// Generic session activity event (connector grant/revoke/renew, MCP connect/disconnect,
+// model change, …), rendered inline as a faded note. `subject` + `action` drive the
+// wording; `targets` carries the structured detail.
+export interface SessionEventContent {
+  type: 'session_event';
+  subject: string;
+  action: string;
+  targets?: SessionEventTarget[];
+}
 
 export interface ContentBlock {
   type: 'text' | 'tool_use' | 'tool_result';

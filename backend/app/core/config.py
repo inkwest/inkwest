@@ -96,7 +96,6 @@ class Settings(BaseSettings):
     # External Access Connectors (AWS / GitLab)
     # ==========================================================================
     connectors_enabled: bool = False
-    connector_audit_enabled: bool = True
     # Backend callback URL the IdPs redirect to. Defaults to
     # f"{frontend_url}/api/connectors/callback" when unset.
     connector_redirect_base: str | None = None

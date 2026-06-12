@@ -43,6 +43,7 @@ from app.services.connectors.warm import (
     update_aws_warm_options,
 )
 from app.services.eks_refresh import schedule_session_eks_refresh
+from app.services.messages import save_session_event
 from app.tools.connector_exec import write_aws_profiles
 
 logger = logging.getLogger(__name__)
@@ -161,8 +162,9 @@ async def _audit(
     action: str,
     cred: MintedCredential | None = None,
 ) -> None:
-    if not get_settings().connector_audit_enabled:
-        return
+    # The audit log is the only durable record of connector grants — it is what
+    # `derive_prior_grants` reads to offer renewal — so it is always written, not
+    # gated behind a flag. Disabling it would silently break session renewal.
     db.add(
         ConnectorAuditLog(
             user_id=user_id,
@@ -174,6 +176,25 @@ async def _audit(
         )
     )
     await db.commit()
+
+
+def _aws_targets(cred: MintedCredential | None) -> list[dict[str, Any]]:
+    """Structured ``{account_id, account_name, role}`` targets from an AWS selection.
+
+    Kept as data (not a joined string) so the conversation event is a parse-free audit
+    record; the frontend renders the wording.
+    """
+    profiles = (cred.selection or {}).get("profiles") if cred and cred.selection else None
+    if not profiles:
+        return []
+    return [
+        {
+            "account_id": p.get("account_id"),
+            "account_name": p.get("account_name"),
+            "role": p.get("role_name"),
+        }
+        for p in profiles
+    ]
 
 
 def _get_enabled_connector(name: str) -> Any:
@@ -191,10 +212,14 @@ async def _apply_aws_selection(
     conn: Any,
     provisional: MintedCredential,
     selections: list[dict[str, str]],
+    event: str = "granted",
 ) -> ConnectorStatusResponse:
     """Mint STS creds for the given account/role pairs, persist, refresh EKS, audit.
 
-    Shared tail of ``aws_select`` (manual pick) and ``aws_renew_select`` (saved pick).
+    Shared tail of ``aws_select`` (manual pick → "granted") and ``aws_renew_select``
+    (saved pick → "renewed"); ``event`` distinguishes the two for the inline note.
+    AWS becomes usable only here (after the pick), so this — not the device step — is
+    where the conversation event with the chosen account/role is emitted.
     """
     try:
         cred = await conn.select_account_roles(provisional, selections=selections)
@@ -209,6 +234,7 @@ async def _apply_aws_selection(
     # (tmpfs) kubeconfig each — async, must not block the response.
     schedule_session_eks_refresh(sid, cred)
     await _audit(db, user_id=user_id, session_id=sid, connector="aws", action="select", cred=cred)
+    await save_session_event(db, sid, "aws", event, targets=_aws_targets(cred))
     return ConnectorStatusResponse.from_status(conn.public_status(cred))
 
 
@@ -349,6 +375,7 @@ async def callback(
         action="grant",
         cred=cred,
     )
+    await save_session_event(db, row.session_id, row.connector, "granted")
     logger.info(
         "connector_granted",
         extra={"connector": row.connector, "session_id": str(row.session_id)},
@@ -532,6 +559,7 @@ async def revoke(
         await _audit(
             db, user_id=current_user.id, session_id=sid, connector=connector, action="revoke"
         )
+        await save_session_event(db, sid, connector, "revoked")
     return ConnectorStatusResponse.from_status(conn.public_status(None))
 
 
@@ -570,6 +598,10 @@ async def grant_from_warm(
     await _audit(
         db, user_id=current_user.id, session_id=sid, connector=connector, action="grant", cred=cred
     )
+    # AWS lands on needs_selection here — defer its event to the account/role pick
+    # (where account+role are known); emit now only for connectors granted outright.
+    if conn.public_status(cred).state == "connected":
+        await save_session_event(db, sid, connector, "granted")
     logger.info(
         "connector_granted_from_warm", extra={"connector": connector, "session_id": str(sid)}
     )
@@ -639,6 +671,7 @@ async def gitlab_renew(
         action="grant",
         cred=renewed,
     )
+    await save_session_event(db, sid, "gitlab", "renewed")
     return ConnectorStatusResponse.from_status(conn.public_status(renewed))
 
 
@@ -671,4 +704,5 @@ async def aws_renew_select(
         conn=conn,
         provisional=provisional,
         selections=selections,
+        event="renewed",
     )

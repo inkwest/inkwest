@@ -42,7 +42,6 @@ invisible from another and the user just sees "not connected".
 
 ```bash
 CONNECTORS_ENABLED=true
-CONNECTOR_AUDIT_ENABLED=true          # default true; logs who granted what & when
 # Callback URL the IdPs redirect to. Default: {FRONTEND_URL}/api/connectors/callback
 CONNECTOR_REDIRECT_BASE=https://inkwest.example.com/api/connectors/callback
 ```
@@ -152,8 +151,9 @@ RAM. The AI uses `gitlab_api` (GET-only) against `/api/v4/...`.
   model only names a tool + parameters.
 - **Consent is bounded in time**: credentials expire (STS ~1h, GitLab ~2h). On
   expiry a tool returns a `connector_required` event and the UI prompts to re-grant.
-- **Audit**: grants/selections/revocations are logged to `connector_audit_log`
-  (no secrets) when `CONNECTOR_AUDIT_ENABLED=true`.
+- **Audit**: grants/selections/revocations are always logged to `connector_audit_log`
+  (no secrets). It is the only durable record of grants and drives renewal, so it is
+  not optional.
 - **Revocation**: the **Revoke** button drops the credential immediately; deleting a
   session drops all of its credentials.
 

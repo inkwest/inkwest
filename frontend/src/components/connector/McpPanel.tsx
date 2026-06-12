@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
+import { useSessionsStore } from '@/store/sessions';
 
 function expiryLabel(expiresAt?: string | null): string | null {
   if (!expiresAt) return null;
@@ -111,6 +112,9 @@ export function McpPanel({
       setDraftEnabled(next);
       setExpiresAt(res.expires_at ?? null);
       setOpen(false);
+      // Per-server connect/disconnect events were persisted server-side — reload the
+      // conversation so they appear inline (flicker-free for the already-open session).
+      void useSessionsStore.getState().fetchSession(sessionId);
     } catch {
       setError('Failed to update MCP selection');
     } finally {

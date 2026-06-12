@@ -8,8 +8,35 @@ from httpx import AsyncClient
 from app.services.connectors.base import ConnectorError, ConnectorStatus, MintedCredential
 from app.services.connectors.grants import PriorGrant
 
-_SETTINGS = MagicMock(connectors_enabled=True, connector_audit_enabled=False)
+_SETTINGS = MagicMock(connectors_enabled=True)
 _AWS_SEL = {"profiles": [{"account_id": "111", "role_name": "ReadOnly", "name": "acme-ReadOnly"}]}
+
+
+def test_aws_targets_are_structured() -> None:
+    from app.api.routes.connectors import _aws_targets
+
+    cred = MagicMock(
+        selection={
+            "profiles": [
+                {
+                    "account_id": "111122223333",
+                    "account_name": "acme-prod",
+                    "role_name": "ReadOnly",
+                },
+                {"account_id": "444455556666", "account_name": "acme-dev", "role_name": "Admin"},
+            ]
+        }
+    )
+    assert _aws_targets(cred) == [
+        {"account_id": "111122223333", "account_name": "acme-prod", "role": "ReadOnly"},
+        {"account_id": "444455556666", "account_name": "acme-dev", "role": "Admin"},
+    ]
+
+
+def test_aws_targets_empty_without_selection() -> None:
+    from app.api.routes.connectors import _aws_targets
+
+    assert _aws_targets(MagicMock(selection=None)) == []
 
 
 def _session_lookup(mock_db: AsyncMock, mock_session_obj: MagicMock, owner_id) -> None:

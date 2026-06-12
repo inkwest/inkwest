@@ -1,44 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { Cloud, Gitlab, ExternalLink, Loader2 } from 'lucide-react';
-import { Badge } from '@/components/ui/Badge';
+import { ExternalLink, Loader2 } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useConnectorsStore } from '@/store/connectors';
-import { ConnectorName, ConnectorState } from '@/types/connectors';
+import { ConnectorName } from '@/types/connectors';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 import { ConnectorPermissions } from './ConnectorPermissions';
 import { McpPanel } from './McpPanel';
+import { LABELS, ICONS } from './connectorChrome';
+import { StateBadge } from './StateBadge';
+import { useConnectorGrant } from './useConnectorGrant';
 import { SessionModelSelect } from '@/components/chat/SessionModelSelect';
 import { cn } from '@/lib/utils';
-
-const LABELS: Record<ConnectorName, string> = {
-  aws: 'AWS',
-  gitlab: 'GitLab',
-};
-
-const ICONS: Record<ConnectorName, typeof Cloud> = {
-  aws: Cloud,
-  gitlab: Gitlab,
-};
-
-function expiryLabel(expiresAt?: string | null): string | null {
-  if (!expiresAt) return null;
-  const ms = new Date(expiresAt).getTime() - Date.now();
-  if (ms <= 0) return 'expired';
-  const mins = Math.round(ms / 60000);
-  return mins >= 60 ? `${Math.floor(mins / 60)}h${mins % 60}m left` : `${mins}m left`;
-}
-
-function StateBadge({ state, expiresAt }: { state: ConnectorState; expiresAt?: string | null }) {
-  if (state === 'connected') {
-    const exp = expiryLabel(expiresAt);
-    return <Badge variant="success">connected{exp ? ` · ${exp}` : ''}</Badge>;
-  }
-  if (state === 'needs_selection') return <Badge variant="info">choose account</Badge>;
-  if (state === 'expired') return <Badge variant="warning">expired</Badge>;
-  if (state === 'error') return <Badge variant="danger">error</Badge>;
-  return <Badge variant="default">not connected</Badge>;
-}
 
 interface Props {
   sessionId: string;
@@ -61,8 +34,6 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
   const {
     statuses,
     fetchStatus,
-    initiate,
-    startAwsDevice,
     pollAwsDevice,
     openAwsVerification,
     clearAwsDevice,
@@ -75,10 +46,8 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     fetchRenewable,
     renewAll,
     awsAutoSelect,
-    tryWarmGrant,
   } = useConnectorsStore();
-  const [busy, setBusy] = useState<ConnectorName | null>(null);
-  const [startError, setStartError] = useState<string | null>(null);
+  const { grant, busy, error: startError } = useConnectorGrant(sessionId);
   const [renewing, setRenewing] = useState(false);
   const [awsModalOpen, setAwsModalOpen] = useState(false);
 
@@ -139,39 +108,14 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     };
   }, [awsDevice?.status, sessionId, pollAwsDevice]);
 
-  const handleClick = async (connector: ConnectorName) => {
-    const status = statuses[connector];
-    if (connector === 'aws' && status?.state === 'needs_selection') {
-      setAwsModalOpen(true);
-      return;
-    }
-    setBusy(connector);
-    setStartError(null);
-    try {
-      // Warm platform auth (user logged in earlier today) → grant without a login
-      // flow: AWS opens the account/role picker directly, GitLab connects silently.
-      if (await tryWarmGrant(sessionId, connector)) return;
-      if (connector === 'aws') {
-        await startAwsDevice(sessionId); // device grant: shows code + URL, then polls
-      } else {
-        await initiate(sessionId, connector); // OAuth redirect (GitLab)
-      }
-    } catch (e) {
-      const detail = e instanceof Error && e.message ? `: ${e.message}` : '';
-      setStartError(`Failed to start ${LABELS[connector]} authorization${detail}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-
   // Auto-start a grant requested before the session existed (start screen).
-  // Wait until the connector's status has loaded so handleClick branches correctly.
+  // Wait until the connector's status has loaded so grant() branches correctly.
   // Kept above the empty-status early return so the hook order stays stable.
   const autoStartedRef = useRef(false);
   useEffect(() => {
     if (autoStart && !autoStartedRef.current && statuses[autoStart]) {
       autoStartedRef.current = true;
-      void handleClick(autoStart);
+      void grant(autoStart);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStart, statuses]);
@@ -221,7 +165,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
                 </button>
               ) : (
                 <button
-                  onClick={() => handleClick(c)}
+                  onClick={() => grant(c)}
                   disabled={busy === c}
                   className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
                 >

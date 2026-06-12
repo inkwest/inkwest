@@ -44,6 +44,38 @@ describe('connectorsStore', () => {
     expect(s.statuses.aws.state).toBe('not_connected');
     expect(s.reauthRequired).toBeNull();
   });
+
+  it('clears reauthRequired once a fetched status shows the connector connected', async () => {
+    useConnectorsStore.getState().setReauthRequired('gitlab');
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([
+      { connector: 'gitlab', state: 'connected', expires_at: '2030-01-01T00:00:00Z' },
+    ]);
+    await useConnectorsStore.getState().fetchStatus('sess-1');
+    expect(useConnectorsStore.getState().reauthRequired).toBeNull();
+  });
+
+  it('keeps reauthRequired when the fetched status is still not connected', async () => {
+    useConnectorsStore.getState().setReauthRequired('aws');
+    vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([
+      { connector: 'aws', state: 'expired' },
+    ]);
+    await useConnectorsStore.getState().fetchStatus('sess-1');
+    expect(useConnectorsStore.getState().reauthRequired).toBe('aws');
+  });
+
+  it('clears reauthRequired for AWS after a successful account/role selection', async () => {
+    useConnectorsStore.getState().setReauthRequired('aws');
+    vi.spyOn(api, 'selectAwsRoles').mockResolvedValue({ connector: 'aws', state: 'connected' });
+    await useConnectorsStore
+      .getState()
+      .selectAwsRoles('sess-1', [{ account_id: '1', role_name: 'r' }]);
+    expect(useConnectorsStore.getState().reauthRequired).toBeNull();
+  });
+
+  it('requestAwsModal asks the panel to open the picker', () => {
+    useConnectorsStore.getState().requestAwsModal();
+    expect(useConnectorsStore.getState().awsModalRequested).toBe(true);
+  });
 });
 
 describe('connectorsStore renewal', () => {

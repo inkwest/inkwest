@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Message } from '@/types/api';
+import { Message, MessageContent, SessionEventContent, SessionEventTarget } from '@/types/api';
 import { ToolCallCard } from './ToolCallCard';
 import { MarkdownContent } from './MarkdownContent';
 import { useSettingsStore } from '@/store/settings';
 import { useSessionsStore } from '@/store/sessions';
-import { cn, TEXT_SIZE } from '@/lib/utils';
+import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils';
 import { AlertCircle, RefreshCw, Loader2, Link2, Check } from 'lucide-react';
 import * as api from '@/services/api';
 
@@ -14,6 +14,124 @@ interface Props {
   onRetry?: (message: Message) => void;
 }
 
+// Display labels for session-event subjects; falls back to the raw key so a new
+// subject still renders sensibly without a change here.
+const SUBJECT_LABELS: Record<string, string> = { aws: 'AWS', gitlab: 'GitLab', mcp: 'MCP' };
+
+// "a, b and c" — Oxford-less natural join for the target list.
+function joinNatural(items: string[]): string {
+  const xs = items.filter(Boolean);
+  if (xs.length <= 1) return xs[0] ?? '';
+  return `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+}
+
+// Display the human account name and role only — the account id stays in the stored
+// `targets` structure (full detail for export/audit) but is kept out of the line.
+function awsTargetLabel(t: SessionEventTarget): string {
+  const acct = t.account_name || t.account_id || '';
+  return t.role ? `${acct}/${t.role}` : acct;
+}
+
+// Compose the inline wording from the structured event into a `lead` phrase plus the
+// list of target labels (kept separate so long lists can truncate with an expander).
+// Subject-specific phrasing lives here; unknown subjects degrade gracefully.
+function sessionEventParts(c: SessionEventContent): { lead: string; items: string[] } {
+  const targets = c.targets ?? [];
+  switch (c.subject) {
+    case 'aws': {
+      const items = targets.map(awsTargetLabel).filter(Boolean);
+      return { lead: items.length ? `AWS access ${c.action} to:` : `AWS access ${c.action}`, items };
+    }
+    case 'gitlab':
+      return { lead: `GitLab access ${c.action}`, items: [] };
+    case 'mcp': {
+      const items = targets.map((t) => t.server ?? '').filter(Boolean);
+      const prep = c.action === 'connected' ? 'to' : 'from';
+      return { lead: items.length ? `MCP ${c.action} ${prep}:` : `MCP ${c.action}`, items };
+    }
+    case 'model': {
+      const model = targets[0]?.model;
+      return { lead: model ? `Model changed to ${model}` : 'Model reset to the default', items: [] };
+    }
+    default:
+      return { lead: `${SUBJECT_LABELS[c.subject] ?? c.subject} ${c.action}`, items: [] };
+  }
+}
+
+// Beyond this many targets the list collapses to "first N … and M more" with a
+// click-to-expand, so a grant over dozens of accounts stays one readable line.
+const MAX_INLINE_TARGETS = 5;
+
+// One inline system-event line (faded, timestamped). Owns the expand state for long
+// target lists, so it must be its own component (hooks can't live behind the parent's
+// early return).
+function SessionEventLine({
+  content,
+  createdAt,
+  compact,
+  showTimestamps,
+}: {
+  content: MessageContent;
+  createdAt: string;
+  compact: boolean;
+  showTimestamps: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const parts =
+    typeof content === 'object' && !Array.isArray(content) && content.type === 'session_event'
+      ? sessionEventParts(content)
+      : typeof content === 'string'
+        ? { lead: content, items: [] }
+        : null;
+  if (!parts || (!parts.lead && parts.items.length === 0)) return null;
+
+  const { lead, items } = parts;
+  const collapsible = items.length > MAX_INLINE_TARGETS;
+  const truncated = collapsible && !expanded;
+  const shown = truncated ? items.slice(0, MAX_INLINE_TARGETS) : items;
+
+  const toggle = (label: string) => (
+    <button
+      type="button"
+      onClick={() => setExpanded((v) => !v)}
+      className="underline decoration-dotted hover:text-gray-300"
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="flex justify-center">
+      <span
+        title={showTimestamps ? formatFullTimestamp(createdAt) : undefined}
+        className={cn('italic text-gray-500', TEXT_SIZE.label(compact))}
+      >
+        {showTimestamps && (
+          <>
+            <span className="not-italic tabular-nums opacity-80">
+              {formatTimestamp(createdAt)}
+            </span>
+            {' · '}
+          </>
+        )}
+        {lead}
+        {items.length > 0 && ' '}
+        {truncated ? (
+          <>
+            {shown.join(', ')} and {toggle(`${items.length - MAX_INLINE_TARGETS} more`)}
+          </>
+        ) : (
+          <>
+            {joinNatural(shown)}
+            {collapsible && <> {toggle('show less')}</>}
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
 export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
   const isUser = message.role === 'user';
   const hasError = message.status === 'error';
@@ -21,7 +139,21 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
   const [isRetrying, setIsRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
   const compact = useSettingsStore((s) => s.compactToolCards);
+  const showTimestamps = useSettingsStore((s) => s.showTimestamps);
   const currentSession = useSessionsStore((s) => s.currentSession);
+
+  // System events (e.g. connector access changes) are not chat turns: render them as a
+  // centered, faded, italic note in the stream rather than a user/assistant bubble.
+  if (message.role === 'system') {
+    return (
+      <SessionEventLine
+        content={message.content}
+        createdAt={message.created_at}
+        compact={compact}
+        showTimestamps={showTimestamps}
+      />
+    );
+  }
 
   const handleRetry = async () => {
     if (!message.is_retryable || isRetrying) return;
@@ -54,6 +186,8 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
     if (typeof message.content === 'string') {
       return <MarkdownContent content={message.content} />;
     }
+    // Only block-list content remains here (system-event objects return early above).
+    if (!Array.isArray(message.content)) return null;
 
     return message.content.map((block, index) => {
       if (block.type === 'text') {
@@ -112,6 +246,19 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
         )}
 
         {renderContent()}
+
+        {showTimestamps && message.created_at && (
+          <div
+            title={formatFullTimestamp(message.created_at)}
+            className={cn(
+              'mt-1 text-right',
+              TEXT_SIZE.label(compact),
+              isUser ? 'text-blue-200/60' : 'text-gray-400',
+            )}
+          >
+            {formatTimestamp(message.created_at)}
+          </div>
+        )}
 
         {canShare && (
           <div className="flex justify-end mt-1">
