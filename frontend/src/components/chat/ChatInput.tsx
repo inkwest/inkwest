@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, KeyboardEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, KeyboardEvent } from 'react';
 import { Send, Square } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
@@ -134,6 +134,21 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     return () => clearTimeout(timer);
   }, [initialPrompt, sessionId, setDraft]);
 
+  // Auto-grow the compact composer with its content, capped at ~15 lines (then it
+  // scrolls — see max-h on the textarea). The large start-screen composer keeps its
+  // fixed tall height. useLayoutEffect avoids a one-frame flash before the resize.
+  useLayoutEffect(() => {
+    if (large) return;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    // The textarea is border-box with a 2px border; scrollHeight excludes the
+    // border, so add it back or the box ends up a few px short (text clips, and
+    // a single line no longer matches the send button's height).
+    const borderY = ta.offsetHeight - ta.clientHeight;
+    ta.style.height = `${ta.scrollHeight + borderY}px`;
+  }, [message, large]);
+
   // Load templates once so the "/" autocomplete has data without opening the palette.
   useEffect(() => {
     fetchTemplates();
@@ -219,20 +234,31 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   const insertSkillFromPalette = (slug: string) =>
     applyEdit(insertAtCursor(message, cursor, `/${slug} `));
 
-  // Square corner button sizing for the large "start a conversation" composer.
-  const square = large ? 'h-12 w-12 px-0 shrink-0' : 'px-3';
+  // Square corner buttons anchored NW (skill) / SE (send) in both variants. The
+  // compact square (h-11 = leading-6 + py-2 + border) matches a single-line
+  // textarea so the row reads level.
+  const square = large ? 'h-12 w-12 px-0 shrink-0' : 'h-11 w-11 px-0 shrink-0';
   const iconSize = large ? 'h-5 w-5' : 'h-4 w-4';
 
   return (
-    <div className={large ? '' : 'border-t border-gray-700 p-4'}>
-      {/* Large variant anchors the skill library to the NW corner and submit to the
-          SE corner via top-/bottom-aligned side columns, with a tall textarea between. */}
-      <div className="flex items-stretch gap-2">
-        <div className={large ? 'flex flex-col justify-start' : 'contents'}>
+    <div className={large ? '' : 'px-4 pb-4'}>
+      {/* Compact composer floats as a rounded, shadowed card inset from the edges
+          (no full-width divider); large keeps the plain start-screen layout. */}
+      <div
+        className={
+          large
+            ? ''
+            : 'rounded-2xl border border-gray-700 bg-gray-800/90 p-2 shadow-xl shadow-black/40'
+        }
+      >
+        {/* Both variants anchor the skill library to the NW corner and submit to the SE
+            corner via top-/bottom-aligned side columns, with the textarea between. */}
+        <div className="flex items-stretch gap-2">
+        <div className="flex flex-col justify-start">
           <SkillPalette
             onSelect={insertSkillFromPalette}
             disabled={disabled}
-            className={large ? square : undefined}
+            className={square}
           />
         </div>
         <div className="relative flex-1">
@@ -262,12 +288,12 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
               'w-full bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 focus:shadow-[0_0_20px_3px_rgba(59,130,246,0.45)] disabled:opacity-50',
               shimmer && message.trim() && 'shimmer-border',
               inviteToPrompt && 'invite-border',
-              large ? 'text-base' : TEXT_SIZE.body(compact),
+              large ? 'text-base' : cn(TEXT_SIZE.body(compact), 'leading-6 max-h-[23.75rem] overflow-y-auto'),
             )}
             rows={large ? 6 : 1}
           />
         </div>
-        <div className={large ? 'flex flex-col justify-end' : 'contents'}>
+        <div className="flex flex-col justify-end">
           {isStreaming ? (
             <button
               onClick={onStop}
@@ -295,13 +321,14 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           )}
         </div>
       </div>
-      {activeSkill && !showSkills && (
-        <div className="mt-1 px-1 text-xs text-gray-500 truncate">
-          <span className="text-gray-400">/{activeSkill.slug}</span>
-          {` ${activeSkill.argument_hint ? formatArgs(activeSkill.argument_hint) : 'arguments libres'}`}
-          {activeSkill.description ? ` · ${activeSkill.description}` : ''}
-        </div>
-      )}
+        {activeSkill && !showSkills && (
+          <div className="mt-1 px-1 text-xs text-gray-500 truncate">
+            <span className="text-gray-400">/{activeSkill.slug}</span>
+            {` ${activeSkill.argument_hint ? formatArgs(activeSkill.argument_hint) : 'arguments libres'}`}
+            {activeSkill.description ? ` · ${activeSkill.description}` : ''}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
