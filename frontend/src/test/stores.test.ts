@@ -260,6 +260,7 @@ describe('settingsStore', () => {
   beforeEach(() => {
     useSettingsStore.setState({
       compactToolCards: true,
+      showTimestamps: false,
     })
   })
 
@@ -284,5 +285,34 @@ describe('settingsStore', () => {
 
     useSettingsStore.getState().toggleCompactToolCards()
     expect(useSettingsStore.getState().compactToolCards).toBe(true)
+  })
+
+  it('should hide timestamps by default', () => {
+    expect(useSettingsStore.getState().showTimestamps).toBe(false)
+  })
+
+  it('should set showTimestamps directly', () => {
+    useSettingsStore.getState().setShowTimestamps(true)
+    expect(useSettingsStore.getState().showTimestamps).toBe(true)
+
+    useSettingsStore.getState().setShowTimestamps(false)
+    expect(useSettingsStore.getState().showTimestamps).toBe(false)
+  })
+
+  it('should toggle showTimestamps', () => {
+    expect(useSettingsStore.getState().showTimestamps).toBe(false)
+
+    useSettingsStore.getState().toggleShowTimestamps()
+    expect(useSettingsStore.getState().showTimestamps).toBe(true)
+
+    useSettingsStore.getState().toggleShowTimestamps()
+    expect(useSettingsStore.getState().showTimestamps).toBe(false)
+  })
+
+  // Guards the persisted preference: showTimestamps must survive a reload via partialize.
+  it('should persist showTimestamps to storage', () => {
+    useSettingsStore.getState().setShowTimestamps(true)
+    const persisted = JSON.parse(localStorage.getItem('inkwest-settings') ?? '{}')
+    expect(persisted.state.showTimestamps).toBe(true)
   })
 })

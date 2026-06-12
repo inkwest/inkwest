@@ -24,7 +24,7 @@ export function Header() {
   // store intact so the chat restores as-is when navigating back.
   const storeSession = useSessionsStore((s) => s.currentSession);
   const currentSession = inAdminPanel ? null : storeSession;
-  const { compactToolCards, toggleCompactToolCards, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
+  const { compactToolCards, toggleCompactToolCards, showTimestamps, toggleShowTimestamps, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
   const { user, oidcEnabled, isAuthenticated, logout } = useAuthStore();
   const { config, fetchConfig } = useConfigStore();
   const [showMenu, setShowMenu] = useState(false);
@@ -120,6 +120,13 @@ export function Header() {
                 >
                   <span>Compact tool cards</span>
                   {compactToolCards && <Check className="h-4 w-4 text-green-400" />}
+                </button>
+                <button
+                  onClick={toggleShowTimestamps}
+                  className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
+                >
+                  <span>Show timestamps</span>
+                  {showTimestamps && <Check className="h-4 w-4 text-green-400" />}
                 </button>
 
                 <div className="px-3 py-2">

@@ -4,7 +4,7 @@ import { ToolCallCard } from './ToolCallCard';
 import { MarkdownContent } from './MarkdownContent';
 import { useSettingsStore } from '@/store/settings';
 import { useSessionsStore } from '@/store/sessions';
-import { cn, TEXT_SIZE } from '@/lib/utils';
+import { cn, TEXT_SIZE, formatTimestamp } from '@/lib/utils';
 import { AlertCircle, RefreshCw, Loader2, Link2, Check } from 'lucide-react';
 import * as api from '@/services/api';
 
@@ -21,6 +21,7 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
   const [isRetrying, setIsRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
   const compact = useSettingsStore((s) => s.compactToolCards);
+  const showTimestamps = useSettingsStore((s) => s.showTimestamps);
   const currentSession = useSessionsStore((s) => s.currentSession);
 
   const handleRetry = async () => {
@@ -112,6 +113,18 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
         )}
 
         {renderContent()}
+
+        {showTimestamps && message.created_at && (
+          <div
+            className={cn(
+              'mt-1 text-right',
+              TEXT_SIZE.label(compact),
+              isUser ? 'text-blue-200/60' : 'text-gray-400',
+            )}
+          >
+            {formatTimestamp(message.created_at)}
+          </div>
+        )}
 
         {canShare && (
           <div className="flex justify-end mt-1">

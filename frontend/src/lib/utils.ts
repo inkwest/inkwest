@@ -14,6 +14,14 @@ export function formatDate(date: string): string {
   });
 }
 
+/** Time-of-day only (HH:MM), for per-message timestamps within a conversation. */
+export function formatTimestamp(date: string): string {
+  return new Date(date).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 /** Compact mode font size classes (centralized to keep UI consistent) */
 export const TEXT_SIZE = {
   body: (compact: boolean) => compact ? 'text-[13px]' : 'text-sm',

@@ -1,7 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MessageBubble } from './MessageBubble';
 import type { Message } from '@/types/api';
+import { useSettingsStore } from '@/store/settings';
+import { formatTimestamp } from '@/lib/utils';
 
 vi.mock('./MarkdownContent', () => ({
   MarkdownContent: ({ content }: { content: string }) => <div data-testid="markdown">{content}</div>,
@@ -16,10 +18,14 @@ const baseMessage: Message = {
   session_id: 'sess-1',
   role: 'user',
   content: 'What pods are running?',
-  created_at: new Date().toISOString(),
+  created_at: '2026-06-11T14:30:00Z',
 };
 
 describe('MessageBubble', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({ showTimestamps: false });
+  });
+
   it('renders user message with text content', () => {
     render(<MessageBubble message={baseMessage} />);
     expect(screen.getByTestId('markdown')).toHaveTextContent('What pods are running?');
@@ -76,5 +82,19 @@ describe('MessageBubble', () => {
     };
     render(<MessageBubble message={msg} />);
     expect(screen.getByText(/retry/i)).toBeInTheDocument();
+  });
+
+  it('hides the timestamp when showTimestamps is disabled', () => {
+    useSettingsStore.setState({ showTimestamps: false });
+    render(<MessageBubble message={baseMessage} />);
+    expect(screen.queryByText(formatTimestamp(baseMessage.created_at))).not.toBeInTheDocument();
+  });
+
+  it('renders the timestamp in HH:MM format when showTimestamps is enabled', () => {
+    useSettingsStore.setState({ showTimestamps: true });
+    render(<MessageBubble message={baseMessage} />);
+    const expected = formatTimestamp(baseMessage.created_at);
+    expect(expected).toMatch(/^\d{2}:\d{2}/);
+    expect(screen.getByText(expected)).toBeInTheDocument();
   });
 });
