@@ -7,7 +7,6 @@ full ``api`` scope is never requested. Mints a short-lived access token (~2h) pl
 a refresh token, both held in RAM.
 """
 
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final
 
@@ -22,8 +21,6 @@ from app.services.connectors.base import (
     ConnState,
     MintedCredential,
 )
-
-logger = logging.getLogger(__name__)
 
 # Policy cap on how long a held refresh token may silently renew access tokens.
 # GitLab refresh tokens never expire provider-side; without a cap a RAM credential
@@ -88,20 +85,18 @@ class GitLabConnector(Connector):
         return _credential_from_token(token, s.gitlab_oauth_scopes)
 
     async def revoke(self, cred: MintedCredential) -> None:
-        s = get_settings()
-        access_token = cred.secret.get("access_token")
-        if not access_token:
-            return
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{s.gitlab_base_url.rstrip('/')}/oauth/revoke",
-                    data={"client_id": s.gitlab_oauth_client_id, "token": access_token},
-                    timeout=10.0,
-                )
-        except httpx.HTTPError:
-            # Best-effort: dropping the in-RAM credential is what actually matters.
-            logger.debug("gitlab token revoke failed (best-effort)")
+        # Per-session revoke is a no-op provider-side, mirroring the AWS connector:
+        # dropping the in-RAM session credential is the effective de-scoping. The
+        # short-lived access token (~2h) expires on its own.
+        #
+        # Do NOT POST to /oauth/revoke here. In GitLab (Doorkeeper) the access token
+        # and its refresh token share one grant row, so revoking the access token
+        # also revokes the refresh token — which is exactly the user's WARM master
+        # auth (see app.services.connectors.warm.store_gitlab_warm). That would brick
+        # silent re-grant within the 24h warm window and force a full OAuth replay on
+        # the very next grant. A future "disconnect platform" action is where the
+        # provider-side refresh-token revoke + warm-grant clear belongs.
+        return None
 
     def public_status(self, cred: MintedCredential | None) -> ConnectorStatus:
         if cred is None:
