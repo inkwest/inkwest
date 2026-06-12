@@ -9,6 +9,7 @@ import { ErrorBanner } from './ErrorBanner';
 import { FloatingTodoPanel } from './FloatingTodoPanel';
 import { EgressLog } from './EgressPanel';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
+import { ConnectorInlineNotice } from './ConnectorInlineNotice';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -103,6 +104,7 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
           onScroll={handleScroll}
           className="flex-1 overflow-y-auto overflow-x-hidden p-4 min-h-0"
         >
+          {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
           <MessageList messages={messages} />
           {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
           <div ref={bottomRef} />

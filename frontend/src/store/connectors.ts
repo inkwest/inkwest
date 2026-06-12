@@ -30,6 +30,10 @@ interface ConnectorsState {
   // True when a GitLab OAuth redirect is queued behind an in-progress AWS device
   // approval; fired once AWS completes (deferred so it doesn't abandon AWS).
   gitlabReauthPending: boolean;
+  // Connector whose grant is currently starting, shared across every surface
+  // (header panel + in-conversation notice) so the same grant can't be kicked off
+  // twice concurrently from two places.
+  grantBusy: ConnectorName | null;
 
   fetchStatus: (sessionId: string) => Promise<void>;
   fetchRenewable: (sessionId: string) => Promise<void>;
@@ -44,7 +48,9 @@ interface ConnectorsState {
   pollAwsDevice: (sessionId: string) => Promise<string>;
   openAwsVerification: () => void;
   clearAwsDevice: () => void;
+  requestAwsModal: () => void;
   clearAwsModalRequest: () => void;
+  setGrantBusy: (connector: ConnectorName | null) => void;
   selectAwsRoles: (
     sessionId: string,
     selections: { account_id: string; role_name: string }[]
@@ -103,12 +109,18 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
   renewable: [],
   awsAutoSelect: false,
   gitlabReauthPending: false,
+  grantBusy: null,
 
   fetchStatus: async (sessionId) => {
     set({ isLoading: true, error: null });
     try {
       const list = await api.getConnectorStatus(sessionId);
-      set({ statuses: indexByConnector(list), isLoading: false });
+      const statuses = indexByConnector(list);
+      // Clear a pending re-auth prompt once that connector is back to connected,
+      // so the in-conversation notice and header highlight resolve on a fresh grant.
+      const reauth = get().reauthRequired;
+      const resolved = reauth && statuses[reauth]?.state === 'connected';
+      set({ statuses, isLoading: false, ...(resolved ? { reauthRequired: null } : {}) });
     } catch (e) {
       set({ error: (e as Error).message, isLoading: false });
     }
@@ -289,11 +301,21 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
     }));
   },
 
+  // Ask the (always-mounted) ConnectorPanel to open the AWS account/role picker.
+  // Lets the in-conversation notice reuse the same picker without owning the modal.
+  requestAwsModal: () => set({ awsModalRequested: true }),
+
   clearAwsModalRequest: () => set({ awsModalRequested: false }),
+
+  setGrantBusy: (connector) => set({ grantBusy: connector }),
 
   selectAwsRoles: async (sessionId, selections) => {
     const status = await api.selectAwsRoles(sessionId, selections);
-    set((s) => ({ statuses: { ...s.statuses, aws: status } }));
+    set((s) => ({
+      statuses: { ...s.statuses, aws: status },
+      // A completed selection grants AWS — drop any pending re-auth prompt for it.
+      reauthRequired: s.reauthRequired === 'aws' ? null : s.reauthRequired,
+    }));
   },
 
   revoke: async (sessionId, connector) => {
@@ -316,5 +338,6 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
       renewable: [],
       awsAutoSelect: false,
       gitlabReauthPending: false,
+      grantBusy: null,
     }),
 }));
