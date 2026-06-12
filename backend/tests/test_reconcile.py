@@ -230,7 +230,14 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         app_main,
         "settings",
-        SimpleNamespace(oidc_enabled=False, connectors_enabled=False, sandbox_enabled=False),
+        SimpleNamespace(
+            oidc_enabled=False,
+            connectors_enabled=False,
+            sandbox_enabled=False,
+            version="test",
+            commit_hash="test",
+            build_timestamp="test",
+        ),
     )
     monkeypatch.setattr(app_main, "init_db", AsyncMock())
     monkeypatch.setattr(app_main, "async_session_maker", lambda: _DummySession())
@@ -259,7 +266,14 @@ async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         app_main,
         "settings",
-        SimpleNamespace(oidc_enabled=False, connectors_enabled=False, sandbox_enabled=False),
+        SimpleNamespace(
+            oidc_enabled=False,
+            connectors_enabled=False,
+            sandbox_enabled=False,
+            version="test",
+            commit_hash="test",
+            build_timestamp="test",
+        ),
     )
     monkeypatch.setattr(app_main, "init_db", AsyncMock())
     monkeypatch.setattr(app_main, "async_session_maker", lambda: _DummySession())

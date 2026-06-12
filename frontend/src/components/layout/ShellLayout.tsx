@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { Header } from './Header';
+import { UpdateBanner } from './UpdateBanner';
 import { useSettingsStore } from '@/store/settings';
 
 const DEFAULT_WIDTH = 256;
@@ -81,6 +82,7 @@ export function ShellLayout({ sidebar, mainClassName = 'flex-1 overflow-hidden m
 
       <div className="flex-1 flex flex-col min-w-0">
         <Header />
+        <UpdateBanner />
         <main className={mainClassName}>
           {children}
         </main>

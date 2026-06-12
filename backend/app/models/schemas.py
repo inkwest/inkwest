@@ -341,6 +341,13 @@ class ReadyResponse(BaseModel):
     database: str = "connected"
 
 
+class VersionResponse(BaseModel):
+    """Build metadata of the running backend, for client update detection."""
+
+    version: str
+    commit: str
+
+
 # =============================================================================
 # Error Schemas
 # =============================================================================

@@ -7,7 +7,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db
-from app.models.schemas import HealthResponse, ReadyResponse
+from app.core.config import get_settings
+from app.models.schemas import HealthResponse, ReadyResponse, VersionResponse
 
 router = APIRouter(tags=["health"])
 
@@ -38,3 +39,16 @@ async def ready(db: AsyncSession = Depends(get_db)) -> ReadyResponse:
             status_code=503,
             detail=f"Database not ready: {str(e)}",
         )
+
+
+@router.get("/version", response_model=VersionResponse)
+async def version() -> VersionResponse:
+    """
+    Running backend build metadata.
+
+    Unauthenticated and non-sensitive: the SPA polls this on every WebSocket
+    reconnect and compares it against the version captured at page load to
+    detect a newer deployment and prompt a reload.
+    """
+    settings = get_settings()
+    return VersionResponse(version=settings.version, commit=settings.commit_hash)

@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     kubeconfig_dir: str = "/etc/inkwest/kubeconfigs"
     kubectl_timeout: int = 30
 
+    # Build metadata, injected as env vars at image build time (see Dockerfile:
+    # VERSION / COMMIT_HASH). Surfaced read-only via /version so the SPA can detect
+    # a newer deployment and prompt a reload. Defaults are dev/local placeholders.
+    version: str = "dev"
+    commit_hash: str = "unknown"
+    build_timestamp: str = "unknown"
+
     # App
     app_env: Literal["development", "production"] = "development"
     frontend_url: str = "http://localhost:3000"

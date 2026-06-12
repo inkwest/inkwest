@@ -27,3 +27,21 @@ async def test_root_returns_api_info(client: AsyncClient) -> None:
     data = resp.json()
     assert data["name"] == "Inkwest API"
     assert "version" in data
+
+
+@pytest.mark.asyncio
+async def test_version_reflects_build_settings(client: AsyncClient) -> None:
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    resp = await client.get("/version")
+    assert resp.status_code == 200
+    assert resp.json() == {"version": settings.version, "commit": settings.commit_hash}
+
+
+@pytest.mark.asyncio
+async def test_version_is_unauthenticated(client: AsyncClient) -> None:
+    # No Authorization header: the SPA must reach it during a reconnect even if
+    # the session token is momentarily unavailable.
+    resp = await client.get("/version")
+    assert resp.status_code == 200

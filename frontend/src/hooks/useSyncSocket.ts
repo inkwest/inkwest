@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSessionsStore } from '@/store/sessions';
 import { useChatStore } from '@/store/chat';
-import { fetchWsTicket, wsBaseUrl } from '@/services/api';
+import { useUpdateStore } from '@/store/update';
+import { fetchWsTicket, getVersion, wsBaseUrl } from '@/services/api';
 
 const WS_URL = wsBaseUrl();
 const RECONNECT_DELAY = 3000;
@@ -68,6 +69,12 @@ export function useSyncSocket() {
 
       ws.onopen = () => {
         retries = 0;
+        // Baseline the build on first connect, compare on every reconnect: a
+        // deploy that dropped this socket bumps the backend version, so a
+        // differing reading surfaces the reload banner. Best-effort.
+        void getVersion()
+          .then(({ version }) => useUpdateStore.getState().recordVersion(version))
+          .catch(() => {});
         pingRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping' }));
