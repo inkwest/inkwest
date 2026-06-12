@@ -174,6 +174,44 @@ def test_gitlab_validation():
     assert validate_gitlab_api({"path": "/a/../../etc"})  # traversal
 
 
+async def test_gitlab_revoke_keeps_warm_grant_for_silent_regrant():
+    # Regression: per-session revoke must NOT touch the provider. The access token
+    # shares its Doorkeeper grant row with the refresh token, which is the user's
+    # warm master auth — a provider-side revoke would brick silent re-grant and
+    # force a full OAuth replay on the very next grant. This asserts the actual
+    # behaviour the user cares about: revoke → warm grant survives → re-grant from
+    # warm mints silently, no login flow.
+    from unittest.mock import AsyncMock
+
+    from app.services.connectors.gitlab import GitLabConnector
+    from app.services.connectors.warm import (
+        get_warm_store,
+        grant_gitlab_from_warm,
+        store_gitlab_warm,
+    )
+
+    uid = uuid.uuid4()
+    await store_gitlab_warm(uid, "REFRESH")
+    try:
+        cred = MintedCredential(
+            "gitlab", "read", datetime.now(UTC) + timedelta(hours=1), secret={"access_token": "AT"}
+        )
+        # 1. Revoke makes no provider call (the mechanism: no /oauth/revoke).
+        with patch("app.services.connectors.gitlab.httpx.AsyncClient") as client:
+            assert await GitLabConnector().revoke(cred) is None
+        client.assert_not_called()
+
+        # 2. The warm grant is untouched, so re-grant derives silently — no OAuth.
+        assert await get_warm_store().get(uid, "gitlab") is not None
+        fresh = {"access_token": "NEW", "refresh_token": "ROTATED", "expires_in": 7200}
+        with patch("app.services.connectors.gitlab._post_token", AsyncMock(return_value=fresh)):
+            regranted = await grant_gitlab_from_warm(uid)
+        assert regranted is not None
+        assert regranted.secret["access_token"] == "NEW"
+    finally:
+        await get_warm_store().delete(uid, "gitlab")
+
+
 # --------------------------------------------------------------------------- #
 # Connector executors: NEEDS_AUTH when no credential is held
 # --------------------------------------------------------------------------- #
