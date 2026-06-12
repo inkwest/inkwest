@@ -26,6 +26,7 @@ from app.services.events import (
 from app.services.messages import (
     clear_cli_session_id,
     ensure_session_title,
+    get_active_skills,
     get_cli_session_id,
     get_enabled_mcp_servers,
     save_message,
@@ -33,6 +34,7 @@ from app.services.messages import (
     update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
+from app.services.session_skills import apply_session_skills
 from app.tools.connector_exec import build_connector_env, connector_prompt_hint
 
 logger = logging.getLogger(__name__)
@@ -153,23 +155,25 @@ required.
 """
 
     # Persona/behavior comes from the managed system prompt (DB default or admin
-    # custom), layered onto Claude Code via --append-system-prompt. The user turn
-    # carries only the runtime operational context + the question.
+    # custom), layered onto Claude Code via --append-system-prompt. The runtime
+    # operational context (how to reach the cluster + which connectors are granted) goes
+    # into that appended system prompt too — NOT the user turn — so the user message is
+    # sent VERBATIM. That lets a "/skill" reference expand ANYWHERE in the message (Claude
+    # Code resolves it from the prompt string); wrapping it would bury the "/" and the
+    # surrounding text would be captured as the skill's $ARGUMENTS.
     base_prompt = await resolve_session_system_prompt(db, session_id)
     system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
+
+    runtime_context = (
+        f"{kube_section}\n"
+        "Investigate using the available tools and provide actionable insights. You are "
+        "NOT running on the target system — investigate via the tools and any external "
+        "access listed below."
+    )
 
     # Explicit model choice (session pick or admin default) is forwarded to the
     # CLI; None lets the in-toolbox claude use its own configured default.
     model_choice = await resolve_session_model_choice(db, session_id)
-
-    prompt = f"""{kube_section}
-User question: {user_message}
-
-Investigate using the available tools and provide actionable insights.
-
-IMPORTANT: You are NOT running on the target system. Investigate via the tools
-and any external access listed below."""
-
     if injected:
         logger.info(
             "Injecting connector credentials into CLI session",
@@ -177,7 +181,10 @@ and any external access listed below."""
         )
         # Tell the agent which connectors it can use (the shell equivalent of the
         # tool descriptions the API providers receive).
-        prompt += connector_prompt_hint(injected)
+        runtime_context += connector_prompt_hint(injected)
+    system_prompt = f"{system_prompt}\n\n{runtime_context}"
+
+    prompt = user_message
 
     try:
         # Where the agent works. In sandbox mode `claude` runs inside this
@@ -198,6 +205,12 @@ and any external access listed below."""
             # turn so it survives a sandbox rebuild that recreates an empty claude dir.
             enabled_mcp = await get_enabled_mcp_servers(db, session_id)
             apply_session_mcp_selection(session_id_str, enabled_mcp)
+            # Materialize the active skills as Claude skills in this
+            # conversation's sandbox (one SKILL.md per template). Like the MCP reconcile
+            # above, done every turn from the DB so template edits propagate on the next
+            # turn of each session and it survives a sandbox rebuild.
+            templates = await get_active_skills(db)
+            apply_session_skills(session_id_str, templates)
         else:
             work_dir = f"/tmp/inkwest-sessions/{session_id_str}"
             os.makedirs(work_dir, exist_ok=True)

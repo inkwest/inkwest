@@ -14,10 +14,14 @@ export interface ClusterSummary {
   display_name: string;
 }
 
-// Prompt template types
-export interface PromptTemplate {
+// Skill types
+export interface Skill {
   id: string;
   name: string;
+  // Server-derived `/<slug>` skill trigger (slugify of the name's base); see backend.
+  slug: string;
+  // Server-derived argument hint, parsed from a trailing "(...)" in the name.
+  argument_hint?: string | null;
   content: string;
   description?: string;
   is_active: boolean;

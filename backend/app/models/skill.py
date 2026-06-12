@@ -1,5 +1,5 @@
 """
-Prompt template model for reusable, user-editable chat prompts.
+Skill model for reusable, user-editable chat prompts.
 """
 
 import uuid
@@ -11,15 +11,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TimestampMixin
 
 
-class PromptTemplate(Base, TimestampMixin):
-    """Reusable prompt template surfaced as an editable palette in the chat.
+class Skill(Base, TimestampMixin):
+    """Reusable skill surfaced as an editable palette in the chat.
 
     Templates are global (shared across all users); content is plain text and
     may contain literal fill-in blanks (e.g. "__________") the user edits in the
     input before sending. No server-side templating or placeholder substitution.
     """
 
-    __tablename__ = "prompt_templates"
+    __tablename__ = "skills"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

@@ -392,27 +392,27 @@ export const useClusterStore = create<ClusterState>((set) => ({
 }));
 
 // ============================================================================
-// Prompt Template Store (admin CRUD)
+// Skill Store (admin CRUD)
 // ============================================================================
 
-interface PromptTemplateState {
-  templates: adminApi.AdminPromptTemplate[];
+interface SkillState {
+  templates: adminApi.AdminSkill[];
   isLoading: boolean;
   error: string | null;
 
   fetchTemplates: (activeOnly?: boolean) => Promise<void>;
   createTemplate: (
-    data: adminApi.CreatePromptTemplateRequest
-  ) => Promise<adminApi.AdminPromptTemplate>;
+    data: adminApi.CreateSkillRequest
+  ) => Promise<adminApi.AdminSkill>;
   updateTemplate: (
     id: string,
-    data: adminApi.UpdatePromptTemplateRequest
-  ) => Promise<adminApi.AdminPromptTemplate>;
+    data: adminApi.UpdateSkillRequest
+  ) => Promise<adminApi.AdminSkill>;
   deleteTemplate: (id: string) => Promise<void>;
   clearError: () => void;
 }
 
-export const usePromptTemplateStore = create<PromptTemplateState>((set) => ({
+export const useSkillStore = create<SkillState>((set) => ({
   templates: [],
   isLoading: false,
   error: null,
@@ -420,17 +420,17 @@ export const usePromptTemplateStore = create<PromptTemplateState>((set) => ({
   fetchTemplates: async (activeOnly = false) => {
     set({ isLoading: true, error: null });
     try {
-      const templates = await adminApi.getPromptTemplates(activeOnly);
+      const templates = await adminApi.getSkills(activeOnly);
       set({ templates: Array.isArray(templates) ? templates : [], isLoading: false });
     } catch (error) {
       set({ error: (error as Error).message, isLoading: false });
     }
   },
 
-  createTemplate: async (data: adminApi.CreatePromptTemplateRequest) => {
+  createTemplate: async (data: adminApi.CreateSkillRequest) => {
     set({ error: null });
     try {
-      const template = await adminApi.createPromptTemplate(data);
+      const template = await adminApi.createSkill(data);
       set((state) => ({ templates: [...state.templates, template] }));
       return template;
     } catch (error) {
@@ -439,10 +439,10 @@ export const usePromptTemplateStore = create<PromptTemplateState>((set) => ({
     }
   },
 
-  updateTemplate: async (id: string, data: adminApi.UpdatePromptTemplateRequest) => {
+  updateTemplate: async (id: string, data: adminApi.UpdateSkillRequest) => {
     set({ error: null });
     try {
-      const template = await adminApi.updatePromptTemplate(id, data);
+      const template = await adminApi.updateSkill(id, data);
       set((state) => ({
         templates: state.templates.map((t) => (t.id === id ? template : t)),
       }));
@@ -454,7 +454,7 @@ export const usePromptTemplateStore = create<PromptTemplateState>((set) => ({
   },
 
   deleteTemplate: async (id: string) => {
-    await adminApi.deletePromptTemplate(id);
+    await adminApi.deleteSkill(id);
     set((state) => ({
       templates: state.templates.filter((t) => t.id !== id),
     }));

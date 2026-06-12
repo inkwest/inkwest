@@ -10,7 +10,7 @@ import {
   AdminLayout,
   DashboardPage,
   ClustersPage,
-  PromptTemplatesPage,
+  SkillsPage,
   SystemPromptsPage,
   UsersPage,
   RoleMappingsPage,
@@ -105,7 +105,7 @@ function App() {
         <Route path="/admin" element={<AuthGuard><AdminLayout /></AuthGuard>}>
           <Route index element={<DashboardPage />} />
           <Route path="clusters" element={<ClustersPage />} />
-          <Route path="prompt-templates" element={<PromptTemplatesPage />} />
+          <Route path="skills" element={<SkillsPage />} />
           <Route path="system-prompts" element={<SystemPromptsPage />} />
 <Route path="users" element={<UsersPage />} />
           <Route path="roles" element={<RoleMappingsPage />} />
