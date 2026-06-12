@@ -1,11 +1,25 @@
 import { SessionList } from '@/components/session/SessionList';
 import { NewSessionButton } from '@/components/session/NewSessionButton';
+import { useUpdateStore } from '@/store/update';
 
 export function Sidebar() {
+  // The build the SPA loaded with (captured from /version on connect — ).
+  const version = useUpdateStore((s) => s.loadedVersion);
+
   return (
     <div className="w-full bg-gray-800 border-r border-gray-700 flex flex-col h-full">
       <div className="h-14 px-4 border-b border-gray-700 flex flex-col justify-center">
-        <h1 className="text-xl font-bold leading-tight">Inkwest</h1>
+        <div className="flex items-baseline gap-2 min-w-0">
+          <h1 className="text-xl font-bold leading-tight">Inkwest</h1>
+          {version && (
+            <span
+              className="font-mono text-[10px] text-gray-500 truncate"
+              title={`Version ${version}`}
+            >
+              {version}
+            </span>
+          )}
+        </div>
         <p className="text-xs text-gray-400 truncate">Secure infrastructure &amp; code assistant</p>
       </div>
       <div className="p-2">

@@ -24,6 +24,8 @@ describe('useUpdateStore', () => {
     expect(useUpdateStore.getState().updateAvailable).toBe(true);
     // Baseline stays put — it is what the browser is running.
     expect(useUpdateStore.getState().loadedVersion).toBe('v1');
+    // The newer version is captured for display in the banner.
+    expect(useUpdateStore.getState().availableVersion).toBe('v2');
   });
 
   it('keeps the baseline so dismiss can re-surface on the next differing reading', () => {

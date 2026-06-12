@@ -54,7 +54,8 @@ def test_dev_version_is_startup_stamped() -> None:
 
     from app.core.config import Settings
 
-    assert _re.fullmatch(r"0\.0\.0-dev-\d{8}-\d{6}", Settings(version="dev").version)
+    # Leading "v" matches the prod build convention (vX.Y.Z).
+    assert _re.fullmatch(r"v0\.0\.0-dev-\d{8}-\d{6}", Settings(version="dev").version)
 
 
 def test_injected_build_version_is_preserved() -> None:

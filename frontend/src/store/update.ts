@@ -12,9 +12,11 @@ interface UpdateState {
   loadedVersion: string | null;
   // A newer backend version was observed → offer a reload.
   updateAvailable: boolean;
+  // The newer version that triggered the offer (shown in the banner); null until then.
+  availableVersion: string | null;
 
   // Feed a freshly-read backend version: sets the baseline on the first call,
-  // flags an update on any later differing call.
+  // flags an update (and records the newer version) on any later differing call.
   recordVersion: (version: string) => void;
   // Hide the banner without forgetting the baseline; a later reconnect that
   // still sees a newer version re-surfaces it.
@@ -25,14 +27,15 @@ interface UpdateState {
 export const useUpdateStore = create<UpdateState>((set) => ({
   loadedVersion: null,
   updateAvailable: false,
+  availableVersion: null,
 
   recordVersion: (version) =>
     set((s) => {
       if (s.loadedVersion === null) return { loadedVersion: version };
-      if (version !== s.loadedVersion && !s.updateAvailable) return { updateAvailable: true };
+      if (version !== s.loadedVersion) return { updateAvailable: true, availableVersion: version };
       return {};
     }),
 
   dismiss: () => set({ updateAvailable: false }),
-  reset: () => set({ loadedVersion: null, updateAvailable: false }),
+  reset: () => set({ loadedVersion: null, updateAvailable: false, availableVersion: null }),
 }));

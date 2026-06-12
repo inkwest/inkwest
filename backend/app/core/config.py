@@ -14,7 +14,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # injected (the "dev" sentinel below), the backend reports this startup-stamped
 # version so every restart looks like a fresh deploy to the update-banner check
 # letting the banner be exercised locally without building an image.
-_DEV_VERSION = f"0.0.0-dev-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+# The leading "v" matches the prod build convention (Dockerfile VERSION=v…, git tags).
+_DEV_VERSION = f"v0.0.0-dev-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
 class Settings(BaseSettings):
