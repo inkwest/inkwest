@@ -18,13 +18,21 @@ logger = get_logger(__name__)
 
 CHANNEL = "session_changes"
 
-_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+# Each subscriber queue maps to the connection's user_id; None = receive every
+# event (dev single-user). Events are fanned out only to the matching user so one
+# user's activity never reaches another user's tabs.
+_subscribers: dict[asyncio.Queue[dict[str, Any]], str | None] = {}
 _listener_task: asyncio.Task[None] | None = None
 
 
-async def notify(payload: dict[str, Any]) -> None:
-    """Send a NOTIFY on the session_changes channel."""
-    raw = json.dumps(payload)
+async def notify(payload: dict[str, Any], *, user_id: str | None) -> None:
+    """Publish a session-change event on the channel, scoped to one user.
+
+    ``user_id`` is a REQUIRED keyword so a new call site cannot silently omit it
+    and re-open cross-user delivery (see ``_fan_out``). Pass ``None`` only for a
+    deliberate broadcast to every connection.
+    """
+    raw = json.dumps({**payload, "user_id": user_id})
     async with engine.connect() as conn:
         raw_conn = await conn.get_raw_connection()
         await raw_conn.driver_connection.execute(  # type: ignore[union-attr]
@@ -33,19 +41,32 @@ async def notify(payload: dict[str, Any]) -> None:
 
 
 @asynccontextmanager
-async def subscribe() -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
-    """Subscribe to session change events. Yields an asyncio.Queue."""
+async def subscribe(user_id: str | None = None) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
+    """Subscribe to session change events for one connection.
+
+    ``user_id`` scopes delivery: the queue only receives events whose payload
+    ``user_id`` matches (so a user's activity never reaches another user's tabs).
+    None receives everything — used in dev where there is a single user.
+    """
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
-    _subscribers.add(queue)
+    _subscribers[queue] = user_id
     try:
         yield queue
     finally:
-        _subscribers.discard(queue)
+        _subscribers.pop(queue, None)
 
 
 def _fan_out(payload: dict[str, Any]) -> None:
-    """Distribute a payload to all subscriber queues (non-blocking)."""
-    for q in list(_subscribers):
+    """Distribute a payload to the matching subscriber queues (non-blocking).
+
+    A queue receives the event when it is unscoped (None) or its user_id equals
+    the event's. An event with no ``user_id`` falls back to every subscriber, so a
+    missing field degrades to the old broadcast rather than silently dropping.
+    """
+    target = payload.get("user_id")
+    for q, uid in list(_subscribers.items()):
+        if target is not None and uid is not None and uid != target:
+            continue
         try:
             q.put_nowait(payload)
         except asyncio.QueueFull:

@@ -23,36 +23,44 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _authenticate_sync_ws(websocket: WebSocket, db: AsyncSession) -> bool:
-    """Authenticate sync WebSocket. Returns False on any failure (fail-closed)."""
+async def _authenticate_sync_ws(websocket: WebSocket, db: AsyncSession) -> tuple[bool, str | None]:
+    """Authenticate the sync WebSocket. Returns (ok, user_id), fail-closed.
+
+    ``user_id`` scopes which events this connection receives. In dev (OIDC off)
+    there is a single user, so it stays None (receive all); under OIDC it is the
+    authenticated user's id so events are isolated per user.
+    """
     try:
         settings = get_settings()
 
         if not settings.oidc_enabled:
-            return True
+            return True, None
 
         header = websocket.headers.get("sec-websocket-protocol", "")
         token = extract_ws_ticket(header)
         if not token:
-            return False
+            return False, None
 
         payload = verify_ws_ticket(token)
         if not payload:
-            return False
+            return False, None
 
         user_id = payload.get("sub")
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
-        return user is not None and user.is_active
+        if user is None or not user.is_active:
+            return False, None
+        return True, str(user.id)
     except Exception:
         logger.exception("sync_ws_auth_error")
-        return False
+        return False, None
 
 
 @router.websocket("/ws/sync")
 async def websocket_sync(websocket: WebSocket) -> None:
     async with async_session_maker() as db:
-        if not await _authenticate_sync_ws(websocket, db):
+        ok, user_id = await _authenticate_sync_ws(websocket, db)
+        if not ok:
             await websocket.close(code=4001)
             logger.warning("sync_ws_auth_rejected")
             return
@@ -60,7 +68,7 @@ async def websocket_sync(websocket: WebSocket) -> None:
     await websocket.accept(subprotocol="inkwest")
     logger.info("sync_ws_connected")
 
-    async with subscribe() as queue:
+    async with subscribe(user_id) as queue:
         try:
             while True:
                 recv_task = asyncio.create_task(websocket.receive_json())

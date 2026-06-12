@@ -196,14 +196,17 @@ async def test_reorder_sessions_assigns_positions_by_request_order(
     mock_db.commit = AsyncMock()
 
     # Request a new top-to-bottom order: s3, s1, s2.
-    resp = await authenticated_client.post(
-        "/api/sessions/reorder",
-        json={"session_ids": [str(s3.id), str(s1.id), str(s2.id)]},
-    )
+    with patch("app.api.routes.sessions.notify", return_value=None) as mock_notify:
+        resp = await authenticated_client.post(
+            "/api/sessions/reorder",
+            json={"session_ids": [str(s3.id), str(s1.id), str(s2.id)]},
+        )
 
     assert resp.status_code == 204
     assert (s3.position, s1.position, s2.position) == (0, 1, 2)
     mock_db.commit.assert_awaited_once()
+    # Other tabs are notified (scoped to this user) so they re-fetch the new order.
+    mock_notify.assert_awaited_once_with({"type": "session_reordered"}, user_id=str(mock_user.id))
 
 
 @pytest.mark.asyncio
@@ -223,10 +226,11 @@ async def test_reorder_sessions_ignores_unowned_ids(
     mock_db.commit = AsyncMock()
 
     foreign_id = uuid.uuid4()
-    resp = await authenticated_client.post(
-        "/api/sessions/reorder",
-        json={"session_ids": [str(foreign_id), str(owned.id)]},
-    )
+    with patch("app.api.routes.sessions.notify", return_value=None):
+        resp = await authenticated_client.post(
+            "/api/sessions/reorder",
+            json={"session_ids": [str(foreign_id), str(owned.id)]},
+        )
 
     assert resp.status_code == 204
     # Owned session takes position 0 (the foreign id at index 0 is skipped).
