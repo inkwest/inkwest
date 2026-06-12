@@ -96,6 +96,36 @@ describe('SessionList', () => {
     expect(screen.getByPlaceholderText(/search all sessions/i)).toBeInTheDocument();
   });
 
+  it('deep-links a matched message result to the conversation + message anchor', () => {
+    useSessionsStore.setState({
+      isLoading: false,
+      searchResults: {
+        query: 'po',
+        total: 1,
+        results: [
+          {
+            id: 'sess-1',
+            title: 'Debug',
+            cluster: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            title_match: false,
+            matched_messages: [
+              { id: 'msg-9', role: 'user', snippet: 'pod crashed', created_at: new Date().toISOString() },
+            ],
+          },
+        ],
+      },
+    });
+    const { container } = renderWithRouter();
+    // Two chars enters search mode (isInSearchMode); the stored results then render.
+    fireEvent.change(screen.getByPlaceholderText(/search all sessions/i), { target: { value: 'po' } });
+    // The message hit links to the conversation with the message anchor (?m=<id>),
+    // distinct from the session-title link which omits it.
+    expect(container.querySelector('a[href="/session/sess-1?m=msg-9"]')).toBeInTheDocument();
+    expect(container.querySelector('a[href="/session/sess-1"]')).toBeInTheDocument();
+  });
+
   describe('drag reorder', () => {
     const session = (id: string) => ({
       id,
