@@ -303,16 +303,24 @@ profiles do, so "which projects did conversation X touch" is answerable.
 
 Incremental, each step shippable, feature-flagged `CONNECTOR_HOT_AUTH_ENABLED`:
 
-1. **Bug fixes (independent of hot auth)**: keep evicted GitLab refresh tokens
-   usable, and keep the AWS SSO access token alongside STS profiles in the final
-   `MintedCredential`, re-minting STS from it silently while it lives (~8h instead of
-   ~1h between logins, still RAM-only). The eviction fix is a **contract change** to
-   `CredentialStore.get()` (`store.py:44-53` currently deletes expired creds and
-   returns `None`; callers rely on that): add `get(include_expired=True)` (or a
-   `peek()`) used only by the renew path, keep the default behavior for every other
-   call site. Note: `tests/test_connectors.py:50` *asserts the buggy eviction
-   behavior* — rewrite it alongside a new regression test "expired cred keeps its
-   refresh token usable for renew".
+1. **Bug fixes (independent of hot auth)** — ✅ **done** (`feat/connector-warm-token-reuse`):
+   keep evicted GitLab refresh tokens usable, and keep the AWS SSO access token
+   alongside STS profiles in the final `MintedCredential`, re-minting STS from it
+   silently while it lives (~8h instead of ~1h between logins, still RAM-only). The
+   eviction fix is a **contract change** to `CredentialStore.get()` (`store.py:44-53`
+   previously deleted expired creds and returned `None`; callers relied on that):
+   added `get(include_expired=True)` used only by the renew path, default behavior
+   kept for every other call site. `tests/test_connectors.py:50` *asserted the buggy
+   eviction behavior* — rewritten alongside a new regression test.
+1b. **Warm master auth (RAM-only)** — ✅ **done** (`feat/connector-warm-master-auth`):
+   per-`(user, platform)` warm store (`app/services/connectors/warm.py`) holding the
+   AWS SSO token / GitLab refresh token for a 24h policy-capped window, fed by the
+   device/OAuth flows; `POST /{sid}/{connector}/grant-from-warm` derives a
+   session-scoped credential (AWS → account picker, GitLab → connected) with no login
+   replay. This is steps 2–4 below but **without persistence** — same shape, RAM only,
+   so a backend restart still costs one fresh login per user per platform. Steps 2–5
+   replace the store with the durable vault; the derivation path and the frontend
+   warm-first click are already in place and only swap their backing store.
 2. **Vault + table**: add `TokenVault` (envelope encryption per
    `docs/credentials-at-rest-audit.md` Phase B, implemented in `app/core/crypto.py`,
    shared with the MCP OAuth design) + `inkwest.platform_grants` migration.

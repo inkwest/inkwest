@@ -35,6 +35,13 @@ from app.services.connectors.base import (
 from app.services.connectors.grants import aws_selections_from_grant, derive_prior_grants
 from app.services.connectors.registry import all_connectors, get_connector
 from app.services.connectors.store import get_credential_store
+from app.services.connectors.warm import (
+    grant_aws_provisional_from_warm,
+    grant_gitlab_from_warm,
+    store_aws_warm,
+    store_gitlab_warm,
+    update_aws_warm_options,
+)
 from app.services.eks_refresh import schedule_session_eks_refresh
 from app.tools.connector_exec import write_aws_profiles
 
@@ -328,6 +335,11 @@ async def callback(
             url=f"{frontend}#connector={row.connector}&status=error&reason={quote(str(e))}{sid_q}"
         )
 
+    if row.connector == "gitlab":
+        # The refresh token is user-scoped warm material: it moves to the warm
+        # store (rotation-safe, shared across the user's conversations) and never
+        # stays in the session credential.
+        await store_gitlab_warm(row.user_id, cred.secret.pop("refresh_token", None))
     await get_credential_store().put(row.user_id, row.session_id, cred)
     await _audit(
         db,
@@ -409,6 +421,9 @@ async def aws_device_poll(
     cred = await conn.provisional_from_token(
         token["access_token"], token["expires_in"], refresh_token=token.get("refresh_token")
     )
+    # The SSO token is user-scoped: keep it warm so the user's other conversations
+    # can grant access with just the account/role selection — no new device flow.
+    await store_aws_warm(current_user.id, cred)
     await get_credential_store().put(current_user.id, sid, cred)
     _aws_device_pending.pop(key, None)
     await _audit(
@@ -434,6 +449,38 @@ async def aws_options(
         accounts=cred.available_accounts or [],
         roles=cred.available_roles or [],
     )
+
+
+@router.post("/{session_id}/aws/options/refresh", response_model=AwsOptionsResponse)
+async def aws_options_refresh(
+    session_id: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> AwsOptionsResponse:
+    """Force a re-enumeration of the SSO accounts/roles, bypassing the warm cache.
+
+    Drives the picker's refresh button: re-queries the SSO portal with the live
+    token, updates the provisional credential and the warm-grant cache so later
+    opens see the fresh list too.
+    """
+    _require_enabled()
+    sid = await _verify_session_owner(db, session_id, current_user)
+    conn = _get_enabled_connector("aws")
+    cred = await get_credential_store().get(current_user.id, sid, "aws")
+    if cred is None or cred.selection is not None:
+        raise HTTPException(status_code=409, detail="No pending AWS authentication; re-initiate")
+    access_token = cred.secret.get("sso_access_token")
+    if not access_token:
+        raise HTTPException(status_code=409, detail="No SSO token; re-initiate")
+    try:
+        accounts, roles = await conn.enumerate_accounts_roles(access_token)
+    except Exception as e:  # noqa: BLE001 — boto raises varied client errors here
+        raise HTTPException(status_code=502, detail="AWS enumeration failed") from e
+    cred.available_accounts = accounts
+    cred.available_roles = roles
+    await get_credential_store().put(current_user.id, sid, cred)
+    await update_aws_warm_options(current_user.id, accounts, roles)
+    return AwsOptionsResponse(accounts=accounts, roles=roles)
 
 
 @router.post("/{session_id}/aws/select", response_model=ConnectorStatusResponse)
@@ -488,6 +535,47 @@ async def revoke(
     return ConnectorStatusResponse.from_status(conn.public_status(None))
 
 
+@router.post("/{session_id}/{connector}/grant-from-warm", response_model=ConnectorStatusResponse)
+async def grant_from_warm(
+    session_id: str,
+    connector: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> ConnectorStatusResponse:
+    """Grant this session from the user's warm platform auth — no login flow.
+
+    AWS: enumerates accounts/roles from the warm SSO token → ``needs_selection``
+    (the picker opens immediately). GitLab: mints a fresh access token from the
+    warm refresh token → ``connected``. 409 when the user has no live warm grant:
+    the frontend falls back to the regular login flow. The minted credential is
+    session-scoped and isolated like any other — only the *master* auth is shared.
+    """
+    _require_enabled()
+    sid = await _verify_session_owner(db, session_id, current_user)
+    conn = _get_enabled_connector(connector)
+    cred: MintedCredential | None = None
+    # Keyed by the ACTING user, not the session owner. Warm grants are per-user;
+    # the minted credential is stored under (current_user.id, sid) and read back
+    # under the same key at tool-exec time — so an admin acting on another user's
+    # session grants from *their own* warm auth and the owner's turns can't see it.
+    # Do not "fix" this to session.user_id: that would inject one user's master
+    # auth into another user's conversation. Same identity model as the device flow.
+    if connector == "aws":
+        cred = await grant_aws_provisional_from_warm(current_user.id)
+    elif connector == "gitlab":
+        cred = await grant_gitlab_from_warm(current_user.id)
+    if cred is None:
+        raise HTTPException(status_code=409, detail="No warm grant; run the login flow")
+    await get_credential_store().put(current_user.id, sid, cred)
+    await _audit(
+        db, user_id=current_user.id, session_id=sid, connector=connector, action="grant", cred=cred
+    )
+    logger.info(
+        "connector_granted_from_warm", extra={"connector": connector, "session_id": str(sid)}
+    )
+    return ConnectorStatusResponse.from_status(conn.public_status(cred))
+
+
 # --------------------------------------------------------------------------- #
 # Renew previously-granted connectors (re-grant the same set; never add new)
 # --------------------------------------------------------------------------- #
@@ -528,24 +616,20 @@ async def gitlab_renew(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> ConnectorStatusResponse:
-    """Silently renew GitLab from the held refresh token.
+    """Silently renew GitLab from the user's warm refresh token.
 
-    Works on a live OR expired credential — the refresh token survives access-token
-    expiry (bounded by the renewal window). 409 when none is held: the frontend
-    then falls back to the normal OAuth re-initiate.
+    The refresh token is user-scoped warm material, so this works for any of the
+    user's sessions — including past access-token expiry. 409 when no live warm
+    grant exists: the frontend then falls back to the normal OAuth re-initiate.
     """
     _require_enabled()
     sid = await _verify_session_owner(db, session_id, current_user)
     conn = _get_enabled_connector("gitlab")
-    cred = await get_credential_store().get(current_user.id, sid, "gitlab", include_expired=True)
-    if cred is None or not cred.secret.get("refresh_token"):
+    renewed = await grant_gitlab_from_warm(current_user.id)
+    if renewed is None:
         raise HTTPException(
             status_code=409, detail="GitLab cannot be renewed silently; re-initiate"
         )
-    try:
-        renewed = await conn.refresh(cred)
-    except ConnectorError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
     await get_credential_store().put(current_user.id, sid, renewed)
     await _audit(
         db,

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import * as api from '@/services/api';
@@ -24,24 +25,45 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    setLoading(true);
-    setError(null);
-    setSelected(new Set());
-    setQuery('');
-    api
-      .getAwsOptions(sessionId)
-      .then((opts) => {
+  // load(false): cached list (instant); load(true): force a fresh SSO enumeration.
+  const load = useCallback(
+    async (refresh: boolean) => {
+      if (refresh) setRefreshing(true);
+      else setLoading(true);
+      setError(null);
+      try {
+        const opts = refresh
+          ? await api.refreshAwsOptions(sessionId)
+          : await api.getAwsOptions(sessionId);
         setAccounts(opts.accounts);
         setRoles(opts.roles);
-      })
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false));
-  }, [isOpen, sessionId]);
+        if (refresh) {
+          // Drop checked roles that vanished from the fresh list (revoked AWS-side)
+          // — they'd otherwise stay invisibly selected and fail the backend's
+          // offered-pair check. Keep every still-present pick.
+          const live = new Set(opts.roles.map((r) => key(r.account_id, r.role_name)));
+          setSelected((prev) => new Set([...prev].filter((k) => live.has(k))));
+        }
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [sessionId]
+  );
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelected(new Set());
+    setQuery('');
+    void load(false);
+  }, [isOpen, sessionId, load]);
 
   const nameById = useMemo(
     () => Object.fromEntries(accounts.map((a) => [a.account_id, a.account_name])),
@@ -140,6 +162,16 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           <Button variant="secondary" size="sm" onClick={toggleAllVisible} disabled={visibleKeys.length === 0}>
             {allVisibleSelected ? 'Tout décocher' : 'Tout cocher'}
           </Button>
+          <button
+            type="button"
+            onClick={() => void load(true)}
+            disabled={loading || refreshing}
+            title="Rafraîchir la liste des rôles"
+            aria-label="Rafraîchir la liste des rôles"
+            className="p-2 rounded-md text-gray-400 hover:text-gray-100 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
+          </button>
         </div>
 
         {loading && <p className="text-gray-400 text-sm">Chargement des comptes…</p>}

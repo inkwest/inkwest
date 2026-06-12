@@ -70,20 +70,20 @@ async def test_gitlab_renew_success(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:
     _session_lookup(mock_db, mock_session_obj, mock_user.id)
-    held = MintedCredential(
-        "gitlab", "read", datetime.now(UTC) + timedelta(hours=1), secret={"refresh_token": "r"}
-    )
     renewed = MintedCredential(
-        "gitlab", "read", datetime.now(UTC) + timedelta(hours=2), secret={"refresh_token": "r2"}
+        "gitlab", "read", datetime.now(UTC) + timedelta(hours=2), secret={"access_token": "a2"}
     )
-    store = MagicMock(get=AsyncMock(return_value=held), put=AsyncMock())
-    conn = MagicMock(type="gitlab", refresh=AsyncMock(return_value=renewed))
+    store = MagicMock(put=AsyncMock())
+    conn = MagicMock(type="gitlab")
     conn.public_status.return_value = ConnectorStatus(connector="gitlab", state="connected")
 
     with (
         patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
         patch("app.api.routes.connectors.get_connector", return_value=conn),
         patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.grant_gitlab_from_warm", AsyncMock(return_value=renewed)
+        ) as warm_grant,
     ):
         resp = await authenticated_client.post(
             f"/api/connectors/{mock_session_obj.id}/gitlab/renew"
@@ -91,20 +91,19 @@ async def test_gitlab_renew_success(
 
     assert resp.status_code == 200
     assert resp.json()["state"] == "connected"
-    conn.refresh.assert_awaited_once_with(held)
+    warm_grant.assert_awaited_once_with(mock_user.id)
     store.put.assert_awaited_once()
 
 
-async def test_gitlab_renew_409_without_refresh_token(
+async def test_gitlab_renew_409_without_warm_grant(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:
     _session_lookup(mock_db, mock_session_obj, mock_user.id)
-    store = MagicMock(get=AsyncMock(return_value=None))  # nothing held (evicted)
     conn = MagicMock(type="gitlab")
     with (
         patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
         patch("app.api.routes.connectors.get_connector", return_value=conn),
-        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.api.routes.connectors.grant_gitlab_from_warm", AsyncMock(return_value=None)),
     ):
         resp = await authenticated_client.post(
             f"/api/connectors/{mock_session_obj.id}/gitlab/renew"
@@ -216,3 +215,121 @@ def test_prior_grant_response_has_no_secret_field() -> None:
     from app.api.routes.connectors import PriorGrantResponse
 
     assert "secret" not in PriorGrantResponse.model_fields
+
+
+# --------------------------------------------------------------------------- #
+# grant-from-warm: derive a session credential from the user's warm master auth
+# --------------------------------------------------------------------------- #
+async def test_grant_from_warm_aws_needs_selection(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    provisional = _aws_provisional()
+    store = MagicMock(put=AsyncMock())
+    conn = MagicMock(type="aws")
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="needs_selection")
+
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.grant_aws_provisional_from_warm",
+            AsyncMock(return_value=provisional),
+        ) as warm_aws,
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/grant-from-warm"
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "needs_selection"
+    # Keyed by the acting user, not the session owner.
+    warm_aws.assert_awaited_once_with(mock_user.id)
+    store.put.assert_awaited_once()
+
+
+async def test_grant_from_warm_gitlab_connected(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    cred = MintedCredential(
+        "gitlab", "read", datetime.now(UTC) + timedelta(hours=1), secret={"access_token": "a"}
+    )
+    store = MagicMock(put=AsyncMock())
+    conn = MagicMock(type="gitlab")
+    conn.public_status.return_value = ConnectorStatus(connector="gitlab", state="connected")
+
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.grant_gitlab_from_warm", AsyncMock(return_value=cred)
+        ) as warm_gl,
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/gitlab/grant-from-warm"
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "connected"
+    warm_gl.assert_awaited_once_with(mock_user.id)
+    store.put.assert_awaited_once()
+
+
+async def test_aws_options_refresh_reenumerates_and_updates_cache(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    provisional = _aws_provisional()
+    accounts = [{"account_id": "111", "account_name": "acme"}]
+    roles = [{"account_id": "111", "role_name": "ReadOnly"}]
+    store = MagicMock(get=AsyncMock(return_value=provisional), put=AsyncMock())
+    conn = MagicMock(type="aws", enumerate_accounts_roles=AsyncMock(return_value=(accounts, roles)))
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.api.routes.connectors.update_aws_warm_options", AsyncMock()) as upd,
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/options/refresh"
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"accounts": accounts, "roles": roles}
+    conn.enumerate_accounts_roles.assert_awaited_once()
+    store.put.assert_awaited_once()  # provisional cred re-stored with fresh lists
+    upd.assert_awaited_once_with(mock_user.id, accounts, roles)
+
+
+async def test_aws_options_refresh_409_when_no_provisional(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=None))
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=MagicMock(type="aws")),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/options/refresh"
+        )
+    assert resp.status_code == 409
+
+
+async def test_grant_from_warm_409_without_warm_grant(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    conn = MagicMock(type="gitlab")
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.grant_gitlab_from_warm", AsyncMock(return_value=None)),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/gitlab/grant-from-warm"
+        )
+    assert resp.status_code == 409

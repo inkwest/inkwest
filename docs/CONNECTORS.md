@@ -8,6 +8,20 @@ can investigate beyond the cluster. Access is granted by explicit per-session
 > No secret ever reaches the browser, the logs, or the model prompt. Credentials
 > live in process RAM, keyed by `(user_id, session_id, connector)`, and expire.
 
+> **Warm master auth (per user, RAM-only).** The *login* material — the AWS SSO
+> access token and the GitLab refresh token — is also held per `(user_id,
+> connector)` for a 24h policy-capped window, so a user logs in to each platform
+> roughly once a day rather than once per conversation. Granting a new
+> conversation then needs only the account/role (AWS) or is silent (GitLab) — no
+> login replay. The *granted permission* stays strictly per session: the warm
+> layer shares the master auth, never the minted session credential. Threat delta
+> vs. the pure per-session model: a refresh token now sits in RAM for up to 24h
+> (still never on disk, in logs, or in the DB; gone on restart). This is the
+> RAM-only precursor of the durable `platform_grants` layer in
+> [connector-hot-auth.md](connector-hot-auth.md); only a *fatal* provider answer
+> (`invalid_grant`, 401, dead SSO token) drops a warm grant — transient errors
+> (timeouts, 5xx, throttling) keep it.
+
 | Connector | Credential | Lifetime | Scope |
 |-----------|-----------|----------|-------|
 | **AWS** | STS creds via IAM Identity Center SSO | ~1h | capped by the user's SSO permission sets, read-only verbs only |

@@ -18,22 +18,35 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.connectors.aws import AwsConnector
 from app.services.connectors.base import ConnectorError, MintedCredential
-from app.services.connectors.gitlab import GitLabConnector, _credential_from_token
+from app.services.connectors.gitlab import _credential_from_token
 from app.services.connectors.renewal import get_or_renew_cred
 from app.services.connectors.store import CredentialStore, get_credential_store
+from app.services.connectors.warm import (
+    WarmGrant,
+    get_warm_store,
+    grant_aws_provisional_from_warm,
+    grant_gitlab_from_warm,
+    store_gitlab_warm,
+)
 
 _PAST = datetime.now(UTC) - timedelta(seconds=1)
 _FUTURE = datetime.now(UTC) + timedelta(hours=1)
 
 
 def _expired_renewable_gitlab() -> MintedCredential:
+    # Session credential: access token only — the refresh token is user-scoped
+    # warm material and never lives in a session credential.
     return MintedCredential(
         connector="gitlab",
         scope="read",
         expires_at=_PAST,
         renew_until=_FUTURE,
-        secret={"access_token": "OLD", "refresh_token": "REFRESH"},  # pragma: allowlist secret
+        secret={"access_token": "OLD"},  # pragma: allowlist secret
     )
+
+
+async def _seed_gitlab_warm(uid: uuid.UUID) -> None:
+    await store_gitlab_warm(uid, "REFRESH")
 
 
 # --------------------------------------------------------------------------- #
@@ -45,10 +58,10 @@ async def test_store_keeps_expired_renewable_cred():
     await store.put(uid, sid, _expired_renewable_gitlab())
     # Default read still reports "nothing usable"...
     assert await store.get(uid, sid, "gitlab") is None
-    # ...but the credential (and its refresh token) was NOT destroyed.
+    # ...but the credential was NOT destroyed (renewal paths can still see it).
     held = await store.get(uid, sid, "gitlab", include_expired=True)
     assert held is not None
-    assert held.secret["refresh_token"] == "REFRESH"  # pragma: allowlist secret
+    assert held.secret["access_token"] == "OLD"  # pragma: allowlist secret
 
 
 async def test_store_still_evicts_non_renewable_expired_cred():
@@ -91,16 +104,218 @@ def test_gitlab_credential_renew_window_only_with_refresh_token():
     assert without_rt.renew_until is None
 
 
-async def test_gitlab_refresh_does_not_slide_renew_window():
-    conn = GitLabConnector()
-    cred = _expired_renewable_gitlab()
+async def test_grant_gitlab_from_warm_rotates_and_strips_refresh_token():
+    uid = uuid.uuid4()
+    await _seed_gitlab_warm(uid)
     token = {"access_token": "NEW", "refresh_token": "ROTATED", "expires_in": 7200}
-    with patch("app.services.connectors.gitlab._post_token", AsyncMock(return_value=token)):
-        renewed = await conn.refresh(cred)
-    assert renewed.secret["access_token"] == "NEW"
-    assert renewed.secret["refresh_token"] == "ROTATED"  # pragma: allowlist secret
-    # Anchored to the original consent, not re-extended by the refresh.
-    assert renewed.renew_until == cred.renew_until
+    try:
+        with patch("app.services.connectors.gitlab._post_token", AsyncMock(return_value=token)):
+            cred = await grant_gitlab_from_warm(uid)
+        assert cred is not None and cred.secret["access_token"] == "NEW"
+        # Session credential never carries the refresh token...
+        assert "refresh_token" not in cred.secret
+        # ...the rotated one was persisted to the warm grant before use...
+        warm = await get_warm_store().get(uid, "gitlab")
+        assert warm is not None
+        assert warm.secret["refresh_token"] == "ROTATED"  # pragma: allowlist secret
+        # ...and the renewal window is anchored to the warm grant's consent cap.
+        assert cred.renew_until == warm.not_after
+    finally:
+        await get_warm_store().delete(uid, "gitlab")
+
+
+async def test_grant_gitlab_from_warm_drops_grant_on_dead_refresh_token():
+    uid = uuid.uuid4()
+    await _seed_gitlab_warm(uid)
+    try:
+        with patch(
+            "app.services.connectors.gitlab._post_token",
+            AsyncMock(side_effect=ConnectorError("invalid_grant", fatal=True)),
+        ):
+            assert await grant_gitlab_from_warm(uid) is None
+        # Dead token → warm grant dropped → next attempt falls back to OAuth.
+        assert await get_warm_store().get(uid, "gitlab") is None
+    finally:
+        await get_warm_store().delete(uid, "gitlab")
+
+
+async def test_grant_gitlab_from_warm_keeps_grant_on_transient_failure():
+    uid = uuid.uuid4()
+    await _seed_gitlab_warm(uid)
+    try:
+        with patch(
+            "app.services.connectors.gitlab._post_token",
+            AsyncMock(side_effect=ConnectorError("timeout", fatal=False)),
+        ):
+            assert await grant_gitlab_from_warm(uid) is None
+        # Provider blip must NOT destroy the 24h grant — next attempt can succeed.
+        assert await get_warm_store().get(uid, "gitlab") is not None
+    finally:
+        await get_warm_store().delete(uid, "gitlab")
+
+
+async def test_post_token_fatality_mapping():
+    import httpx
+
+    from app.services.connectors.gitlab import _post_token
+
+    real_client = httpx.AsyncClient  # patching gitlab.httpx.AsyncClient patches the module attr
+
+    def _client_factory(handler):
+        return lambda: real_client(transport=httpx.MockTransport(handler))
+
+    # 401 from the token endpoint = grant rejected → fatal.
+    with patch(
+        "app.services.connectors.gitlab.httpx.AsyncClient",
+        _client_factory(lambda req: httpx.Response(401, json={"error": "invalid_grant"})),
+    ):
+        try:
+            await _post_token("https://gitlab.com", {})
+            raise AssertionError("expected ConnectorError")
+        except ConnectorError as e:
+            assert e.fatal is True
+
+    # 503 = provider hiccup → transient.
+    with patch(
+        "app.services.connectors.gitlab.httpx.AsyncClient",
+        _client_factory(lambda req: httpx.Response(503)),
+    ):
+        try:
+            await _post_token("https://gitlab.com", {})
+            raise AssertionError("expected ConnectorError")
+        except ConnectorError as e:
+            assert e.fatal is False
+
+    # Network-level failure (timeout) → transient.
+    def _raise_timeout(req):
+        raise httpx.ConnectTimeout("boom")
+
+    with patch("app.services.connectors.gitlab.httpx.AsyncClient", _client_factory(_raise_timeout)):
+        try:
+            await _post_token("https://gitlab.com", {})
+            raise AssertionError("expected ConnectorError")
+        except ConnectorError as e:
+            assert e.fatal is False
+
+
+async def test_grant_aws_provisional_from_warm_enumerates_without_device_flow():
+    uid = uuid.uuid4()
+    await get_warm_store().put(
+        uid,
+        WarmGrant(platform="aws", secret={"sso_access_token": "SSO"}, not_after=_FUTURE),
+    )
+    accounts = [{"account_id": "111", "account_name": "acme"}]
+    roles = [{"account_id": "111", "role_name": "ReadOnly"}]
+    try:
+        with patch(
+            "app.services.connectors.aws._list_accounts_and_roles", return_value=(accounts, roles)
+        ):
+            cred = await grant_aws_provisional_from_warm(uid)
+        assert cred is not None
+        assert cred.selection is None  # needs_selection: straight to the picker
+        assert cred.available_roles == roles
+    finally:
+        await get_warm_store().delete(uid, "aws")
+
+
+async def test_grant_aws_provisional_from_warm_uses_cached_options():
+    uid = uuid.uuid4()
+    accounts = [{"account_id": "111", "account_name": "acme"}]
+    roles = [{"account_id": "111", "role_name": "ReadOnly"}]
+    await get_warm_store().put(
+        uid,
+        WarmGrant(
+            platform="aws",
+            secret={"sso_access_token": "SSO", "accounts": accounts, "roles": roles},
+            not_after=_FUTURE,
+        ),
+    )
+    try:
+        # Cached lists present → must NOT hit the SSO portal.
+        with patch(
+            "app.services.connectors.aws._list_accounts_and_roles",
+            side_effect=AssertionError("enumeration must be skipped when cached"),
+        ):
+            cred = await grant_aws_provisional_from_warm(uid)
+        assert cred is not None
+        assert cred.available_accounts == accounts
+        assert cred.available_roles == roles
+    finally:
+        await get_warm_store().delete(uid, "aws")
+
+
+async def test_store_aws_warm_caches_enumerated_options():
+    from app.services.connectors.warm import store_aws_warm, update_aws_warm_options
+
+    uid = uuid.uuid4()
+    accounts = [{"account_id": "111", "account_name": "acme"}]
+    roles = [{"account_id": "111", "role_name": "ReadOnly"}]
+    provisional = MintedCredential(
+        connector="aws",
+        scope="sso:account:access",
+        expires_at=_FUTURE,
+        secret={"sso_access_token": "SSO", "region": "eu-west-1"},
+        available_accounts=accounts,
+        available_roles=roles,
+    )
+    try:
+        await store_aws_warm(uid, provisional)
+        warm = await get_warm_store().get(uid, "aws")
+        assert warm is not None
+        assert warm.secret["accounts"] == accounts
+        assert warm.secret["roles"] == roles
+
+        # A forced refresh replaces the cache.
+        new_roles = [{"account_id": "111", "role_name": "Admin"}]
+        await update_aws_warm_options(uid, accounts, new_roles)
+        warm = await get_warm_store().get(uid, "aws")
+        assert warm is not None and warm.secret["roles"] == new_roles
+    finally:
+        await get_warm_store().delete(uid, "aws")
+
+
+async def test_grant_aws_provisional_from_warm_drops_grant_on_dead_sso_token():
+    from botocore.exceptions import ClientError
+
+    uid = uuid.uuid4()
+    await get_warm_store().put(
+        uid,
+        WarmGrant(platform="aws", secret={"sso_access_token": "SSO"}, not_after=_FUTURE),
+    )
+    dead = ClientError({"Error": {"Code": "UnauthorizedException"}}, "ListAccounts")
+    try:
+        with patch("app.services.connectors.aws._list_accounts_and_roles", side_effect=dead):
+            assert await grant_aws_provisional_from_warm(uid) is None
+        # Dead SSO token → grant dropped → fallback to the device flow.
+        assert await get_warm_store().get(uid, "aws") is None
+    finally:
+        await get_warm_store().delete(uid, "aws")
+
+
+async def test_grant_aws_provisional_from_warm_keeps_grant_on_transient_failure():
+    from botocore.exceptions import ClientError
+
+    uid = uuid.uuid4()
+    await get_warm_store().put(
+        uid,
+        WarmGrant(platform="aws", secret={"sso_access_token": "SSO"}, not_after=_FUTURE),
+    )
+    throttled = ClientError({"Error": {"Code": "TooManyRequestsException"}}, "ListAccounts")
+    try:
+        with patch("app.services.connectors.aws._list_accounts_and_roles", side_effect=throttled):
+            assert await grant_aws_provisional_from_warm(uid) is None
+        # Throttling/timeouts must NOT destroy the ~8h SSO grant.
+        assert await get_warm_store().get(uid, "aws") is not None
+    finally:
+        await get_warm_store().delete(uid, "aws")
+
+
+async def test_warm_grant_expires_at_policy_cap():
+    uid = uuid.uuid4()
+    await get_warm_store().put(
+        uid, WarmGrant(platform="gitlab", secret={"refresh_token": "R"}, not_after=_PAST)
+    )
+    assert await get_warm_store().get(uid, "gitlab") is None  # lazily evicted
 
 
 # --------------------------------------------------------------------------- #
@@ -188,30 +403,32 @@ async def test_remint_profiles_refuses_dead_sso_session():
 # --------------------------------------------------------------------------- #
 # get_or_renew_cred: renew-on-read, single-flight, graceful failure
 # --------------------------------------------------------------------------- #
-async def test_get_or_renew_renews_expired_gitlab():
+async def test_get_or_renew_renews_expired_gitlab_from_warm():
     uid, sid = uuid.uuid4(), uuid.uuid4()
     store = get_credential_store()
     await store.put(uid, sid, _expired_renewable_gitlab())
+    await _seed_gitlab_warm(uid)
     token = {"access_token": "NEW", "refresh_token": "ROTATED", "expires_in": 7200}
     try:
         with (
-            patch("app.services.connectors.renewal.get_connector", return_value=GitLabConnector()),
+            patch("app.services.connectors.renewal.get_connector", return_value=MagicMock()),
             patch("app.services.connectors.gitlab._post_token", AsyncMock(return_value=token)),
         ):
             cred = await get_or_renew_cred(uid, sid, "gitlab")
         assert cred is not None and cred.secret["access_token"] == "NEW"
-        # The rotated refresh token was persisted back to the store before use.
+        # The fresh session credential was persisted (and carries no refresh token).
         held = await store.get(uid, sid, "gitlab")
-        assert held is not None
-        assert held.secret["refresh_token"] == "ROTATED"  # pragma: allowlist secret
+        assert held is not None and "refresh_token" not in held.secret
     finally:
         await store.revoke_session(uid, sid)
+        await get_warm_store().delete(uid, "gitlab")
 
 
 async def test_get_or_renew_is_single_flight():
     uid, sid = uuid.uuid4(), uuid.uuid4()
     store = get_credential_store()
     await store.put(uid, sid, _expired_renewable_gitlab())
+    await _seed_gitlab_warm(uid)
     calls = 0
 
     async def _slow_post_token(*args, **kwargs):
@@ -222,7 +439,7 @@ async def test_get_or_renew_is_single_flight():
 
     try:
         with (
-            patch("app.services.connectors.renewal.get_connector", return_value=GitLabConnector()),
+            patch("app.services.connectors.renewal.get_connector", return_value=MagicMock()),
             patch("app.services.connectors.gitlab._post_token", side_effect=_slow_post_token),
         ):
             results = await asyncio.gather(
@@ -232,6 +449,7 @@ async def test_get_or_renew_is_single_flight():
         assert all(r is not None and r.secret["access_token"] == "NEW" for r in results)
     finally:
         await store.revoke_session(uid, sid)
+        await get_warm_store().delete(uid, "gitlab")
 
 
 async def test_get_or_renew_renews_expired_aws_and_refreshes_projections():
@@ -262,9 +480,10 @@ async def test_get_or_renew_failure_degrades_to_none():
     uid, sid = uuid.uuid4(), uuid.uuid4()
     store = get_credential_store()
     await store.put(uid, sid, _expired_renewable_gitlab())
+    await _seed_gitlab_warm(uid)
     try:
         with (
-            patch("app.services.connectors.renewal.get_connector", return_value=GitLabConnector()),
+            patch("app.services.connectors.renewal.get_connector", return_value=MagicMock()),
             patch(
                 "app.services.connectors.gitlab._post_token",
                 AsyncMock(side_effect=ConnectorError("invalid_grant")),
@@ -273,6 +492,7 @@ async def test_get_or_renew_failure_degrades_to_none():
             assert await get_or_renew_cred(uid, sid, "gitlab") is None
     finally:
         await store.revoke_session(uid, sid)
+        await get_warm_store().delete(uid, "gitlab")
 
 
 async def test_get_or_renew_none_when_nothing_held():

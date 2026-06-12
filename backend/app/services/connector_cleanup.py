@@ -15,6 +15,7 @@ from app.core.database import async_session_maker
 from app.core.logging import get_logger
 from app.models.connector_pending_state import ConnectorPendingState
 from app.services.connectors.store import get_credential_store
+from app.services.connectors.warm import get_warm_store
 
 logger = get_logger(__name__)
 
@@ -31,6 +32,9 @@ async def _cleanup_loop() -> None:
             removed = await store.sweep()
             if removed:
                 logger.info("connector_cred_sweep", removed=removed)
+            removed_warm = await get_warm_store().sweep()
+            if removed_warm:
+                logger.info("connector_warm_sweep", removed=removed_warm)
             cutoff = datetime.now(UTC) - timedelta(seconds=CONNECTOR_STATE_TTL_SECONDS)
             async with async_session_maker() as db:
                 result = await db.execute(
