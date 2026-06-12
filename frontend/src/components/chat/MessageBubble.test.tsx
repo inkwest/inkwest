@@ -39,6 +39,18 @@ describe('MessageBubble', () => {
     expect(screen.getByTestId('markdown')).toHaveTextContent('Here are your pods.');
   });
 
+  it('exposes a message anchor id for search deep-linking', () => {
+    const { container } = render(<MessageBubble message={baseMessage} />);
+    expect(container.querySelector('#message-msg-1')).toBeInTheDocument();
+  });
+
+  it('applies the highlight ring only when highlighted', () => {
+    const { container, rerender } = render(<MessageBubble message={baseMessage} />);
+    expect(container.querySelector('.ring-2')).toBeNull();
+    rerender(<MessageBubble message={baseMessage} highlighted />);
+    expect(container.querySelector('.ring-2')).toBeInTheDocument();
+  });
+
   it('renders content blocks with tool use', () => {
     const msg: Message = {
       ...baseMessage,

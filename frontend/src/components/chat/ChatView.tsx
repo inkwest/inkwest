@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useChatStore } from '@/store/chat';
 import { useSettingsStore } from '@/store/settings';
 import { useEgressSocket, isBlocked } from '@/hooks/useEgressSocket';
@@ -28,6 +29,13 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
   const bottomRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
 
+  // Deep-link from a search hit: `?m=<messageId>` scrolls that message into view and
+  // highlights it briefly. The param is consumed (cleared) once handled so new messages
+  // or re-renders don't re-trigger the jump.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const targetMessageId = searchParams.get('m');
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+
   // Live network-egress audit (sandbox only). The WS stays subscribed regardless of the
   // active tab so the counter keeps updating while the user is on the Conversation tab.
   const egress = useEgressSocket(sessionId);
@@ -49,12 +57,40 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
     isAtBottomRef.current = checkIfAtBottom();
   }, [checkIfAtBottom]);
 
-  // Auto-scroll only if user was at bottom
+  // Auto-scroll only if user was at bottom — but never while a deep-link jump is pending
+  // (it would fight the scroll-to-message below).
   useEffect(() => {
+    if (targetMessageId) return;
     if (isAtBottomRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, streamingMessage, streamingBlocks, currentTodos]);
+  }, [messages, streamingMessage, streamingBlocks, currentTodos, targetMessageId]);
+
+  // Scroll to and highlight a search-linked message once the conversation has loaded (it
+  // loads asynchronously for a cold-opened session). The `m` param is consumed as soon as
+  // messages are present — whether or not the target is found — so a deleted/absent target
+  // can't leave a stale `?m=` in the URL and permanently suppress the bottom auto-scroll.
+  useEffect(() => {
+    if (!targetMessageId) return;
+    if (messages.length === 0) return; // not loaded yet — keep waiting
+    const el = document.getElementById(`message-${targetMessageId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      isAtBottomRef.current = false;
+      setHighlightId(targetMessageId);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('m');
+    setSearchParams(next, { replace: true });
+  }, [targetMessageId, messages, searchParams, setSearchParams]);
+
+  // Clear the highlight after it has had time to show; kept separate so consuming the
+  // `m` param (which flips targetMessageId to null) doesn't cancel the timer.
+  useEffect(() => {
+    if (!highlightId) return;
+    const t = setTimeout(() => setHighlightId(null), 1600);
+    return () => clearTimeout(t);
+  }, [highlightId]);
 
   // Always scroll to bottom when streaming starts
   useEffect(() => {
@@ -105,7 +141,7 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
           className="flex-1 overflow-y-auto overflow-x-hidden p-4 min-h-0"
         >
           {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
-          <MessageList messages={messages} />
+          <MessageList messages={messages} highlightedId={highlightId} />
           {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
           <div ref={bottomRef} />
         </div>

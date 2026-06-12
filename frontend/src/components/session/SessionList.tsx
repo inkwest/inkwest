@@ -48,7 +48,7 @@ function SearchResultItem({ hit, query, onClick }: { hit: SearchSessionHit; quer
           {hit.matched_messages.map((msg) => (
             <Link
               key={msg.id}
-              to={`/session/${hit.id}`}
+              to={`/session/${hit.id}?m=${msg.id}`}
               className="block px-2 py-1 rounded text-xs text-gray-400 hover:bg-gray-700/30 transition-colors"
               onClick={onClick}
             >

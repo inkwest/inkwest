@@ -23,6 +23,8 @@ interface Props {
   message: Message;
   isFirstUserMessage?: boolean;
   onRetry?: (message: Message) => void;
+  // Transiently emphasized when deep-linked from a search hit (see ChatView).
+  highlighted?: boolean;
 }
 
 // Display labels for session-event subjects; falls back to the raw key so a new
@@ -143,7 +145,7 @@ function SessionEventLine({
   );
 }
 
-export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
+export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighted }: Props) {
   const isUser = message.role === 'user';
   const hasError = message.status === 'error';
   const isPending = message.status === 'pending';
@@ -305,6 +307,7 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
 
   return (
     <div
+      id={`message-${message.id}`}
       className={cn(
         'flex',
         isUser ? 'justify-end' : 'justify-start'
@@ -371,10 +374,13 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
 
         <div
           className={cn(
-            'rounded-lg overflow-hidden',
+            'rounded-lg overflow-hidden transition-shadow duration-700',
             compact ? 'px-3 py-1.5' : 'px-4 py-2',
             isUser ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-100',
             hasError && 'border-2 border-red-500 bg-red-900/20',
+            // Deep-linked from search: fade in a ring, then it transitions out when the
+            // highlight flag clears (~1.5s later, in ChatView).
+            highlighted && 'ring-2 ring-amber-400',
           )}
         >
         {isPending && (

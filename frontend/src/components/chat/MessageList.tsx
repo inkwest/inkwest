@@ -5,9 +5,11 @@ import { cn } from '@/lib/utils';
 
 interface Props {
   messages: Message[];
+  // Id of the message to transiently highlight (deep-linked from a search hit).
+  highlightedId?: string | null;
 }
 
-export function MessageList({ messages }: Props) {
+export function MessageList({ messages, highlightedId }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
   const firstUserIdx = messages.findIndex((m) => m.role === 'user');
 
@@ -18,6 +20,7 @@ export function MessageList({ messages }: Props) {
           key={message.id}
           message={message}
           isFirstUserMessage={i === firstUserIdx}
+          highlighted={message.id === highlightedId}
         />
       ))}
     </div>
