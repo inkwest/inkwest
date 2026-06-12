@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import AdminUser, CurrentUser, get_db
+from app.core.skill_md import ParsedSkill, parse_skill_md
 from app.models.schemas import (
     SkillCreate,
     SkillList,
@@ -21,6 +22,14 @@ from app.models.schemas import (
 from app.models.skill import Skill
 
 router = APIRouter(prefix="/skills", tags=["skills"])
+
+
+def _parse_or_422(content: str) -> ParsedSkill:
+    """Parse a SKILL.md, surfacing a malformed frontmatter as a 422 to the client."""
+    try:
+        return parse_skill_md(content)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)) from e
 
 
 @router.get("", response_model=SkillList)
@@ -50,14 +59,15 @@ async def create_skill(
     admin: AdminUser,
     db: AsyncSession = Depends(get_db),
 ) -> SkillResponse:
-    existing = await db.execute(select(Skill).where(Skill.name == template_data.name))
+    parsed = _parse_or_422(template_data.content)
+    existing = await db.execute(select(Skill).where(Skill.name == parsed.slug))
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Skill with name '{template_data.name}' already exists",
+            detail=f"Skill '{parsed.slug}' already exists",
         )
 
-    template = Skill(**template_data.model_dump())
+    template = Skill(name=parsed.slug, content=parsed.content, description=parsed.description)
     db.add(template)
     await db.flush()
     await db.refresh(template)
@@ -101,18 +111,22 @@ async def update_skill(
 
     update_data = template_data.model_dump(exclude_unset=True)
 
-    # Name is editable, so a rename must not collide with another template.
-    new_name = update_data.get("name")
-    if new_name and new_name != template.name:
-        existing = await db.execute(select(Skill).where(Skill.name == new_name))
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Skill with name '{new_name}' already exists",
-            )
+    if "content" in update_data:
+        parsed = _parse_or_422(update_data["content"])
+        # The frontmatter name drives the slug; a rename must not collide.
+        if parsed.slug != template.name:
+            existing = await db.execute(select(Skill).where(Skill.name == parsed.slug))
+            if existing.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Skill '{parsed.slug}' already exists",
+                )
+        template.name = parsed.slug
+        template.content = parsed.content
+        template.description = parsed.description
 
-    for field, value in update_data.items():
-        setattr(template, field, value)
+    if "is_active" in update_data:
+        template.is_active = update_data["is_active"]
 
     await db.flush()
     await db.refresh(template)

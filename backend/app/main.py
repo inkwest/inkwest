@@ -43,6 +43,7 @@ from app.services.model_catalog import refresh_catalog
 from app.services.prompts import ensure_default_system_prompt
 from app.services.pubsub import start_listener, stop_listener
 from app.services.sandbox import reap_orphans, start_sandbox_reaper, stop_sandbox_reaper
+from app.services.session_skills import ensure_skills_frontmatter
 
 # Set up structured logging
 setup_logging()
@@ -63,6 +64,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with async_session_maker() as db:
         await ensure_default_system_prompt(db)
         logger.info("default_system_prompt_ensured")
+        # Migrate any legacy skill (content without a frontmatter) to the SKILL.md format.
+        # Never block startup on it: a failure degrades the skills feature, not the whole
+        # app. Roll back so the shared session is usable for the steps below.
+        try:
+            await ensure_skills_frontmatter(db)
+            logger.info("skills_frontmatter_ensured")
+        except Exception:
+            logger.exception("skills_frontmatter_migration_failed")
+            await db.rollback()
         # Apply the admin model configuration persisted in app_settings.
         await load_model_settings(db)
         # Fetch the provider's live model catalog (best-effort, static fallback).

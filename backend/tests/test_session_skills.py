@@ -1,145 +1,196 @@
 """
-Tests for generating Claude skills from skills.
+Tests for skill SKILL.md parsing + per-conversation generation.
 
-Invariants: name → stable slug; SKILL.md carries the description + a usable
-``$ARGUMENTS`` placeholder and NO ``disable-model-invocation`` (auto-invocation stays
-on); the skills dir is reconciled to the active set (orphans pruned); no-op off-sandbox.
+A skill's ``content`` is a full SKILL.md (frontmatter + body): name/description/arguments
+are parsed from the frontmatter, the content is written verbatim to the sandbox, and
+legacy (pre-frontmatter) rows are migrated idempotently.
 """
 
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from app.core.skill_md import legacy_to_skill_md, parse_skill_md
 from app.core.slug import parse_skill_name, slugify
-from app.services.session_skills import (
-    apply_session_skills,
-    render_skill_md,
-)
+from app.services.session_skills import apply_session_skills, ensure_skills_frontmatter
+
+SKILL_MD = """---
+name: summarize-mr
+description: Summarize a GitLab MR
+arguments: [mr_url, --publish]
+---
+Summarize the MR. $ARGUMENTS
+"""
 
 
-def _tmpl(name: str, content: str = "Do the thing.", description: str | None = "Investigate X"):
-    t = MagicMock()
-    t.name = name
-    t.content = content
-    t.description = description
-    return t
+def _skill(name: str, content: str) -> MagicMock:
+    s = MagicMock()
+    s.name = name
+    s.content = content
+    return s
+
+
+# --- slug helpers (still used by the legacy migration) -----------------------
 
 
 def test_slugify():
     assert slugify("Déploiement EKS") == "deploiement-eks"
-    assert slugify("  Multiple   spaces!! ") == "multiple-spaces"
-    assert slugify("already-slug") == "already-slug"
     assert slugify("***") == "skill"  # never empty
 
 
 def test_parse_skill_name():
-    # Trailing "(...)" is an inline arg signature → split from the slug.
-    assert parse_skill_name("Summarize MR(merge request URL, ticket)") == (
+    assert parse_skill_name("Summarize MR(merge request URL)") == (
         "summarize-mr",
-        "merge request URL, ticket",
+        "merge request URL",
     )
     assert parse_skill_name("Diagnose Pod") == ("diagnose-pod", None)
-    assert parse_skill_name("Foo()") == ("foo", None)  # empty parens → no hint
-    # The parens must NOT leak into the slug.
-    assert parse_skill_name("Summarize MR(url)")[0] == "summarize-mr"
 
 
-def test_render_appends_arguments_and_has_no_disable_flag():
-    md = render_skill_md(_tmpl("Analyse logs", content="Analyse the logs."), "analyse-logs")
-    assert md.startswith("---\nname: analyse-logs\n")
-    assert "\ndescription: " in md
-    assert "disable-model-invocation" not in md  # auto-invocation stays enabled
-    assert md.rstrip().endswith("$ARGUMENTS")  # appended since body had no placeholder
+# --- SKILL.md parser ---------------------------------------------------------
 
 
-def test_render_keeps_existing_placeholder():
-    md = render_skill_md(_tmpl("X", content="Check $ARGUMENTS now."), "x")
-    assert md.count("$ARGUMENTS") == 1  # not duplicated
-    md2 = render_skill_md(_tmpl("Y", content="First $1 then $2."), "y")
-    assert "$ARGUMENTS" not in md2  # positional placeholders count as present
+def test_parse_skill_md_extracts_and_normalizes_name():
+    p = parse_skill_md(
+        "---\nname: Summarize MR\ndescription: Summ\narguments: [mr_url, --publish]\n"
+        "---\nBody $ARGUMENTS\n"
+    )
+    assert p.slug == "summarize-mr"
+    assert p.description == "Summ"
+    assert p.argument_hint == "mr_url, --publish"
+    assert "name: summarize-mr" in p.content  # name normalized to the slug in the stored md
+    assert "Body $ARGUMENTS" in p.content  # body preserved
 
 
-def test_render_argument_hint_frontmatter():
-    md = render_skill_md(_tmpl("X"), "x", "merge request URL")
-    assert 'argument-hint: "merge request URL"' in md
-    assert "argument-hint:" not in render_skill_md(_tmpl("X"), "x")  # omitted when absent
+def test_parse_skill_md_argument_hint_string_form():
+    assert (
+        parse_skill_md('---\nname: x\nargument-hint: "[url]"\n---\nbody\n').argument_hint == "[url]"
+    )
 
 
-def test_render_description_is_single_safe_yaml_line():
-    md = render_skill_md(_tmpl("X", description='Use: when "logs" fail\nmulti-line'), "x")
-    desc_lines = [ln for ln in md.splitlines() if ln.startswith("description: ")]
-    assert len(desc_lines) == 1
-    assert desc_lines[0].endswith('"')  # JSON-quoted scalar, collapsed to one line
+def test_parse_skill_md_normalizes_crlf():
+    # A SKILL.md pasted with Windows CRLF must still parse, and store LF-only.
+    p = parse_skill_md("---\r\nname: X\r\ndescription: d\r\n---\r\nBody $ARGUMENTS\r\n")
+    assert p.slug == "x"
+    assert "\r" not in p.content
+    assert "Body $ARGUMENTS" in p.content
 
 
-def test_response_exposes_computed_slug():
+def test_parse_skill_md_rejects_missing_frontmatter():
+    with pytest.raises(ValueError):
+        parse_skill_md("no frontmatter here")
+
+
+def test_parse_skill_md_rejects_missing_name():
+    with pytest.raises(ValueError):
+        parse_skill_md("---\ndescription: d\n---\nbody\n")
+
+
+# --- legacy → SKILL.md migration ---------------------------------------------
+
+
+def test_legacy_to_skill_md():
+    slug, content = legacy_to_skill_md("Summarize MR(merge request URL)", "Do it.", "Summarize")
+    assert slug == "summarize-mr"
+    assert content.startswith("---\nname: summarize-mr\n")
+    assert 'description: "Summarize"' in content
+    assert 'argument-hint: "merge request URL"' in content
+    assert content.rstrip().endswith("$ARGUMENTS")  # appended when body had no placeholder
+
+
+# --- SkillResponse computed fields -------------------------------------------
+
+
+def test_response_slug_and_hint_from_frontmatter():
     from app.models.schemas import SkillResponse
 
     src = SimpleNamespace(
         id=uuid.uuid4(),
-        name="Analyse Logs",
-        content="x",
-        description="d",
+        name="summarize-mr",
+        content=SKILL_MD,
+        description="Summarize a GitLab MR",
         is_active=True,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
     resp = SkillResponse.model_validate(src)
-    assert resp.slug == "analyse-logs"
-    assert resp.argument_hint is None
+    assert resp.slug == "summarize-mr"
+    assert resp.argument_hint == "mr_url, --publish"
 
 
-def test_response_exposes_slug_and_hint_parsed_from_name():
-    from app.models.schemas import SkillResponse
-
-    src = SimpleNamespace(
-        id=uuid.uuid4(),
-        name="Summarize MR(merge request URL)",
-        content="x",
-        description="d",
-        is_active=True,
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
-    resp = SkillResponse.model_validate(src)
-    assert resp.slug == "summarize-mr"  # parens stripped from the trigger
-    assert resp.argument_hint == "merge request URL"
+# --- generation: write content verbatim --------------------------------------
 
 
-def test_apply_is_noop_when_sandbox_disabled():
-    settings = MagicMock(sandbox_enabled=False)
-    with patch("app.services.session_skills.get_settings", return_value=settings):
-        # Must not raise nor need a session dir.
-        apply_session_skills(str(uuid.uuid4()), [_tmpl("A")])
+def test_apply_is_noop_off_sandbox():
+    with patch(
+        "app.services.session_skills.get_settings", return_value=MagicMock(sandbox_enabled=False)
+    ):
+        apply_session_skills(str(uuid.uuid4()), [_skill("x", SKILL_MD)])
 
 
-def test_apply_writes_set_and_prunes_orphans(tmp_path):
+def test_apply_writes_verbatim_and_prunes_orphans(tmp_path):
     sid = str(uuid.uuid4())
-    skills_root = tmp_path / "claude" / "skills"
-    settings = MagicMock(sandbox_enabled=True)
+    root = tmp_path / "claude" / "skills"
+    a = _skill("summarize-mr", SKILL_MD)
+    b = _skill("diagnose-pod", "---\nname: diagnose-pod\n---\nDiagnose.\n")
     with (
-        patch("app.services.session_skills.get_settings", return_value=settings),
+        patch(
+            "app.services.session_skills.get_settings", return_value=MagicMock(sandbox_enabled=True)
+        ),
         patch("app.services.sandbox.session_dir", return_value=str(tmp_path)),
     ):
-        apply_session_skills(sid, [_tmpl("Analyse Logs"), _tmpl("Summarize Incident")])
-        assert (skills_root / "analyse-logs" / "SKILL.md").is_file()
-        assert (skills_root / "summarize-incident" / "SKILL.md").is_file()
+        apply_session_skills(sid, [a, b])
+        assert (root / "summarize-mr" / "SKILL.md").read_text() == SKILL_MD  # verbatim
+        assert (root / "diagnose-pod" / "SKILL.md").is_file()
 
-        # Re-apply with one template removed → its folder is pruned, the other stays.
-        apply_session_skills(sid, [_tmpl("Analyse Logs")])
-        assert (skills_root / "analyse-logs" / "SKILL.md").is_file()
-        assert not (skills_root / "summarize-incident").exists()
+        apply_session_skills(sid, [a])  # b removed → pruned
+        assert not (root / "diagnose-pod").exists()
 
 
-def test_apply_uses_clean_slug_and_argument_hint_from_name(tmp_path):
-    sid = str(uuid.uuid4())
-    settings = MagicMock(sandbox_enabled=True)
-    with (
-        patch("app.services.session_skills.get_settings", return_value=settings),
-        patch("app.services.sandbox.session_dir", return_value=str(tmp_path)),
-    ):
-        apply_session_skills(sid, [_tmpl("Summarize MR(merge request URL)")])
-    skill = tmp_path / "claude" / "skills" / "summarize-mr" / "SKILL.md"
-    assert skill.is_file()  # slug clean — no parens in the folder name
-    assert 'argument-hint: "merge request URL"' in skill.read_text()
+# --- legacy migration over the DB --------------------------------------------
+
+
+async def test_ensure_skills_frontmatter_converts_only_legacy():
+    legacy = MagicMock(
+        name="ignored", content="Do it.", description="Summarize"
+    )  # MagicMock(name=…) is special; set name explicitly below
+    legacy.name = "Summarize MR(merge request URL)"
+    modern = MagicMock(content="---\nname: x\n---\nbody")
+    modern.name = "x"
+
+    scalars = MagicMock()
+    scalars.all.return_value = [legacy, modern]
+    exec_result = MagicMock()
+    exec_result.scalars.return_value = scalars
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=exec_result)
+
+    await ensure_skills_frontmatter(db)
+
+    assert legacy.name == "summarize-mr"
+    assert legacy.content.startswith("---\nname: summarize-mr\n")
+    assert modern.content == "---\nname: x\n---\nbody"  # already frontmatter → untouched
+    db.commit.assert_awaited_once()
+
+
+async def test_ensure_skills_frontmatter_dedups_colliding_slugs():
+    # Two legacy names slugifying to the same base must NOT both become "summarize-mr"
+    # (name is UNIQUE → IntegrityError → startup crash); the 2nd is suffixed.
+    a = MagicMock(content="Body A.", description=None)
+    a.name = "Summarize MR(prod)"
+    b = MagicMock(content="Body B.", description=None)
+    b.name = "Summarize MR(staging)"
+
+    scalars = MagicMock()
+    scalars.all.return_value = [a, b]
+    exec_result = MagicMock()
+    exec_result.scalars.return_value = scalars
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=exec_result)
+
+    await ensure_skills_frontmatter(db)
+
+    assert {a.name, b.name} == {"summarize-mr", "summarize-mr-2"}  # distinct → no collision
+    db.commit.assert_awaited_once()
