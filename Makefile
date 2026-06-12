@@ -9,6 +9,7 @@ dev:
 
 up:
 	docker compose up -d
+	@echo "Inkwest is up → http://localhost:3000/"
 
 down:
 	docker compose down

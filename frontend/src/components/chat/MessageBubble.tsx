@@ -1,12 +1,23 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Message, MessageContent, SessionEventContent, SessionEventTarget } from '@/types/api';
 import { ToolCallCard } from './ToolCallCard';
 import { MarkdownContent } from './MarkdownContent';
 import { useSettingsStore } from '@/store/settings';
 import { useSessionsStore } from '@/store/sessions';
+import { useAuthStore } from '@/store/admin';
+import { useConfigStore } from '@/store/config';
 import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils';
-import { AlertCircle, RefreshCw, Loader2, Link2, Check } from 'lucide-react';
+import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal } from 'lucide-react';
 import * as api from '@/services/api';
+import {
+  messageContentToMarkdown,
+  buildExportMarkdown,
+  buildExportHtml,
+  buildExportHtmlTeams,
+  copyRich,
+  copyToClipboard,
+  type ExportFooterMeta,
+} from '@/lib/messageExport';
 
 interface Props {
   message: Message;
@@ -138,9 +149,32 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
   const isPending = message.status === 'pending';
   const [isRetrying, setIsRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedKind, setCopiedKind] = useState<'rich' | 'teams' | 'md' | null>(null);
+  const [copyMenuOpen, setCopyMenuOpen] = useState(false);
+  const copyMenuRef = useRef<HTMLDivElement>(null);
   const compact = useSettingsStore((s) => s.compactToolCards);
   const showTimestamps = useSettingsStore((s) => s.showTimestamps);
   const currentSession = useSessionsStore((s) => s.currentSession);
+  const user = useAuthStore((s) => s.user);
+  const config = useConfigStore((s) => s.config);
+
+  // Close the copy menu on an outside click or Escape. Declared before any early
+  // return so the hook order stays stable across renders (rules of hooks).
+  useEffect(() => {
+    if (!copyMenuOpen) return;
+    const onPointer = (e: MouseEvent) => {
+      if (copyMenuRef.current && !copyMenuRef.current.contains(e.target as Node)) setCopyMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCopyMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [copyMenuOpen]);
 
   // System events (e.g. connector access changes) are not chat turns: render them as a
   // centered, faded, italic note in the stream rather than a user/assistant bubble.
@@ -181,6 +215,57 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
   };
 
   const canShare = isFirstUserMessage && isUser && typeof message.content === 'string' && currentSession?.cluster;
+
+  // Copy-as-Markdown is offered on assistant answers only, and only when there is
+  // actual text to copy (a tool-only turn has no Markdown body).
+  const markdownBody = message.role === 'assistant' ? messageContentToMarkdown(message.content) : '';
+  const canCopyMarkdown = markdownBody.trim().length > 0;
+
+  const exportMeta = (): ExportFooterMeta => {
+    // Prefer the model stored on the turn itself (exact); fall back to the session's
+    // currently-resolved choice for older messages saved before per-turn model capture.
+    const modelId = message.model ?? currentSession?.model ?? config?.model;
+    return {
+      conversationName: user?.display_name,
+      model: modelId && config ? api.modelLabel(config.available_models, modelId) : modelId ?? null,
+      date: message.created_at,
+      sessionId: message.session_id,
+      messageId: message.id,
+    };
+  };
+
+  const flashCopied = (kind: 'rich' | 'teams' | 'md') => {
+    setCopiedKind(kind);
+    setTimeout(() => setCopiedKind(null), 2000);
+  };
+
+  // Primary: rich text + Markdown fallback in one write — paste keeps formatting in
+  // Docs/Outlook/Slack, or lands as raw Markdown in a plain editor.
+  const handleCopyRich = async () => {
+    const meta = exportMeta();
+    const html = await buildExportHtml(markdownBody, meta);
+    if (await copyRich(html, buildExportMarkdown(markdownBody, meta))) {
+      flashCopied('rich');
+    }
+  };
+
+  // Teams-specific rich variant (no <pre>, monospace via <code>, <br> line breaks).
+  const handleCopyTeams = async () => {
+    setCopyMenuOpen(false);
+    const meta = exportMeta();
+    const html = await buildExportHtmlTeams(markdownBody, meta);
+    if (await copyRich(html, buildExportMarkdown(markdownBody, meta))) {
+      flashCopied('teams');
+    }
+  };
+
+  // Raw Markdown only (e.g. pasting the source into a rich editor).
+  const handleCopyMarkdown = async () => {
+    setCopyMenuOpen(false);
+    if (await copyToClipboard(buildExportMarkdown(markdownBody, exportMeta()))) {
+      flashCopied('md');
+    }
+  };
 
   const renderContent = () => {
     if (typeof message.content === 'string') {
@@ -225,16 +310,73 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
         isUser ? 'justify-end' : 'justify-start'
       )}
     >
-      <div
-        className={cn(
-          'max-w-[80%] rounded-lg overflow-hidden min-w-0',
-          compact ? 'px-3 py-1.5' : 'px-4 py-2',
-          isUser
-            ? 'bg-blue-600 text-white'
-            : 'bg-gray-700 text-gray-100',
-          hasError && 'border-2 border-red-500 bg-red-900/20'
+      {/* Non-clipping wrapper so the copy menu can overflow the bubble (which is
+          overflow-hidden to clip content to its rounded corners). */}
+      <div className="group relative max-w-[80%] min-w-0">
+        {canCopyMarkdown && (
+          <div
+            ref={copyMenuRef}
+            className={cn(
+              'absolute top-1 right-1 z-20 flex items-center gap-0.5',
+              // Keep visible while the menu is open, even if the pointer leaves the bubble.
+              copyMenuOpen
+                ? 'opacity-100'
+                : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100',
+              'transition-opacity',
+            )}
+          >
+            <button
+              onClick={handleCopyRich}
+              aria-label="Copy formatted"
+              title="Copy — formatted (paste into Docs, Outlook, Slack)"
+              className="rounded p-1 text-gray-300 bg-gray-700/80 hover:bg-gray-600 hover:text-white"
+            >
+              {copiedKind ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
+            <div className="relative">
+              <button
+                onClick={() => setCopyMenuOpen((o) => !o)}
+                aria-label="More copy options"
+                aria-haspopup="menu"
+                aria-expanded={copyMenuOpen}
+                title="More copy options"
+                className="rounded p-1 text-gray-300 bg-gray-700/80 hover:bg-gray-600 hover:text-white"
+              >
+                <MoreHorizontal className="w-3.5 h-3.5" />
+              </button>
+              {copyMenuOpen && (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full mt-1 min-w-[150px] overflow-hidden rounded-md border border-gray-600 bg-gray-800 py-1 shadow-lg"
+                >
+                  <button
+                    role="menuitem"
+                    onClick={handleCopyTeams}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-700"
+                  >
+                    Copy for Teams
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={handleCopyMarkdown}
+                    className="block w-full px-3 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-700"
+                  >
+                    Copy as Markdown
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         )}
-      >
+
+        <div
+          className={cn(
+            'rounded-lg overflow-hidden',
+            compact ? 'px-3 py-1.5' : 'px-4 py-2',
+            isUser ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-100',
+            hasError && 'border-2 border-red-500 bg-red-900/20',
+          )}
+        >
         {isPending && (
           <div className={cn(
             'flex items-center gap-2 text-yellow-400 mb-2',
@@ -314,6 +456,7 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry }: Props) {
             )}
           </div>
         )}
+        </div>
       </div>
     </div>
   );

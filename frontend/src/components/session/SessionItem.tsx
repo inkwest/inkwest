@@ -18,9 +18,14 @@ interface Props {
   // Wired by SessionList to make only the grip a drag source (so the row stays
   // clickable). Absent in contexts that don't support reordering.
   dragHandleProps?: DragHandleProps;
+  // True while this row is the one being dragged. Keeps the grip (the drag
+  // source) mounted even after the pointer leaves the row: Firefox fires no
+  // dragend at all if the source node is removed mid-drag, which would leave
+  // the row stuck in its dimmed "moving" state.
+  isDragging?: boolean;
 }
 
-export function SessionItem({ session, dragHandleProps }: Props) {
+export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const isActive = sessionId === session.id;
@@ -156,7 +161,7 @@ export function SessionItem({ session, dragHandleProps }: Props) {
             </div>
           </div>
 
-          {isHovered && (
+          {(isHovered || isDragging) && (
             <div className="flex items-center gap-1 shrink-0">
               {dragHandleProps && (
                 <span
