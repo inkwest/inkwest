@@ -24,7 +24,9 @@ class ConnectorAuditLog(Base):
         default=uuid.uuid4,
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # Nullable: MCP OAuth grants are user-level (no conversation) and audit with a NULL
+    # session_id (see migration 20260612140000_mcp_oauth). Connector grants always set it.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     connector: Mapped[str] = mapped_column(String(32), nullable=False)
     # grant | select | revoke | expire
     action: Mapped[str] = mapped_column(String(32), nullable=False)

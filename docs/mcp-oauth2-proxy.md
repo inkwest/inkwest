@@ -1,5 +1,21 @@
 # MCP OAuth2 Proxy — Implementation Plan
 
+> **STATUS — Increment 1 (connect flow) shipped; this plan diverged on three points.**
+> Read this box before the rest of the document, which still describes the original design.
+> - **Separate env var.** OAuth entries live in a new `MCP_CATALOG_OAUTH2`
+>   (`app/services/mcp_oauth_catalog.py`), **not** mixed into `MCP_CATALOG` / `parse_catalog`.
+>   The static catalog is untouched.
+> - **Browser-fractioned key custody (audit-doc Phase C), not KMS/sealed.** Per-user tokens
+>   are AES-256-GCM under a per-user DEK whose wrapped form lives in a new `mcp_user_keys`
+>   table; the DEK is supplied by the browser over the chat WS and held in RAM only while
+>   connected (`app/core/crypto.py`, `app/services/mcp_dek_store.py`, `mcp_dek_handshake.py`).
+>   There are **no** `token_vault_*` / KMS settings. Phase B (KMS/sealed) is not used here.
+> - **`oauth_flow.py` was NOT extracted** from the GitLab connector (only `generate_pkce` is
+>   reused). The OAuth client is self-contained in `app/services/mcp_oauth.py`.
+> - **Deferred to Increment 2** (gated on transport validation, rollout step 0): the reverse
+>   **proxy** (`mcp_proxy.py`), the internal **JWT** (`mcp_proxy_token.py`), and `.claude.json`
+>   **injection**. Until then stored tokens are inert — the CLI cannot yet reach them.
+
 **TL;DR**: Extend the static MCP catalog with `auth: oauth2` entries. Backend brokers the
 OAuth 2.1 flow (browser redirect through the frontend), stores per-user tokens as encrypted
 blobs behind the shared `TokenVault` interface (envelope encryption — see

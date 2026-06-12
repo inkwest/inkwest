@@ -223,6 +223,19 @@ class Settings(BaseSettings):
     # ==========================================================================
     mcp_catalog: str = ""
 
+    # ==========================================================================
+    # OAuth2 MCP catalog — remote MCP servers that authenticate via the MCP
+    # Authorization spec (OAuth 2.1). Same outer shape as MCP_CATALOG
+    # ({"<key>": "<base64(server-def-json)>"}) but each decoded def is the oauth
+    # kind: {"type":"http","url":"https://…/mcp","scopes":[…],"client_id?":…}.
+    # Kept separate from MCP_CATALOG so static entries (Coralogix, …) are never
+    # entangled with the brokered-OAuth flow. Parsed by app.services.mcp_oauth_catalog.
+    # ==========================================================================
+    mcp_catalog_oauth2: str = ""
+    # Fixed base for the OAuth2 MCP callback (must match what is registered at the
+    # AS / sent in DCR). Falls back to frontend_url, mirroring connector_redirect_base.
+    mcp_oauth_redirect_base: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

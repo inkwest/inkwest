@@ -77,3 +77,13 @@ CONNECTOR_STATE_TTL_SECONDS = 600
 
 # Default timeout for connector tool execution (seconds)
 CONNECTOR_TOOL_TIMEOUT = 30
+
+# =============================================================================
+# OAuth2 MCP brokering
+# =============================================================================
+
+# TTL for a pending OAuth2 MCP handshake (state + PKCE verifier)
+MCP_OAUTH_STATE_TTL_SECONDS = 600
+
+# Timeout for every outbound OAuth call (discovery, token, DCR, revoke)
+MCP_OAUTH_HTTP_TIMEOUT = 10.0

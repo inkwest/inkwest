@@ -1,9 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Plug } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
-import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
+import {
+  disconnectMcpAuth,
+  getMcpCatalog,
+  getSessionMcp,
+  setSessionMcp,
+  startMcpAuth,
+  type McpServerEntry,
+} from '@/services/api';
 import { useSessionsStore } from '@/store/sessions';
 
 function expiryLabel(expiresAt?: string | null): string | null {
@@ -49,12 +56,21 @@ export function McpPanel({
   showWhenEmpty = false,
 }: Props) {
   const [catalog, setCatalog] = useState<string[]>([]);
+  const [oauthServers, setOauthServers] = useState<McpServerEntry[]>([]);
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [draftEnabled, setDraftEnabled] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState(autoOpen);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  // Active connect-poll intervals, tracked so they're always cleared on unmount (otherwise a
+  // popup left open would poll the catalog forever and setState on an unmounted component).
+  const pollTimers = useRef<Set<number>>(new Set());
+
+  useEffect(() => {
+    const timers = pollTimers.current;
+    return () => timers.forEach((t) => window.clearInterval(t));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +79,7 @@ export function McpPanel({
         const cat = await getMcpCatalog();
         if (cancelled) return;
         setCatalog(cat.keys);
+        setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
 
         if (!sessionId) {
           setEnabled(new Set());
@@ -122,12 +139,64 @@ export function McpPanel({
     }
   };
 
+  const refreshOauth = async (): Promise<McpServerEntry[]> => {
+    try {
+      const cat = await getMcpCatalog();
+      const oauth = cat.servers.filter((s) => s.kind === 'oauth2');
+      setOauthServers(oauth);
+      return oauth;
+    } catch {
+      /* transient; the panel keeps the last known statuses */
+      return [];
+    }
+  };
+
+  const connectOauth = (key: string) => {
+    // Open the popup synchronously in the click handler — opening it after the await
+    // below would trip popup blockers.
+    const popup = window.open('about:blank', 'mcp-oauth', 'width=520,height=720');
+    void (async () => {
+      try {
+        const { authorize_url } = await startMcpAuth(key);
+        if (popup) popup.location.href = authorize_url;
+      } catch {
+        popup?.close();
+        setError('Failed to start MCP authorization');
+        return;
+      }
+      // Poll the catalog while connecting; stop as soon as the grant lands ("connected"), the
+      // popup closes, or a hard deadline elapses — so an abandoned popup can't poll forever.
+      // The timer is tracked in pollTimers so unmount cleanup always clears it.
+      const startedAt = Date.now();
+      const POLL_DEADLINE_MS = 5 * 60 * 1000;
+      const timer = window.setInterval(async () => {
+        const servers = await refreshOauth();
+        const connected = servers.find((s) => s.key === key)?.auth_status === 'connected';
+        if (connected || !popup || popup.closed || Date.now() - startedAt > POLL_DEADLINE_MS) {
+          window.clearInterval(timer);
+          pollTimers.current.delete(timer);
+        }
+      }, 2000);
+      pollTimers.current.add(timer);
+    })();
+  };
+
+  const disconnectOauth = async (key: string) => {
+    try {
+      const cat = await disconnectMcpAuth(key);
+      setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
+    } catch {
+      setError('Failed to disconnect MCP server');
+    }
+  };
+
   // In-conversation bar: no catalog configured -> render nothing. On the start
   // screen the row remains visible before and after lazy session creation, so a
   // click on Configure never makes the MCP affordance vanish.
-  if (catalog.length === 0 && !onBeforeOpen && !showWhenEmpty) return null;
+  if (catalog.length === 0 && oauthServers.length === 0 && !onBeforeOpen && !showWhenEmpty)
+    return null;
 
-  const hasCatalog = catalog.length > 0;
+  const hasCatalog = catalog.length > 0 || oauthServers.length > 0;
   const enabledKeys = catalog.filter((key) => enabled.has(key));
   const count = enabledKeys.length;
   const anyOn = count > 0;
@@ -208,6 +277,51 @@ export function McpPanel({
             );
           })}
         </div>
+
+        {oauthServers.length > 0 && (
+          <div className="mt-4 border-t border-gray-700 pt-3">
+            <div className="mb-2 text-xs font-medium text-gray-400">
+              OAuth servers (connect once per account)
+            </div>
+            <div className="space-y-1">
+              {oauthServers.map((s) => {
+                const connected = s.auth_status === 'connected';
+                const needsAuth = s.auth_status === 'needs_auth';
+                const unavailable = s.auth_status === 'unavailable';
+                return (
+                  <div
+                    key={s.key}
+                    className="flex items-center justify-between gap-3 px-2 py-2 rounded hover:bg-gray-800"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-200">{s.key}</span>
+                      {connected && <Badge variant="success">connected</Badge>}
+                      {needsAuth && <Badge variant="default">needs auth</Badge>}
+                      {unavailable && <Badge variant="default">unavailable</Badge>}
+                    </div>
+                    {unavailable ? (
+                      <span className="text-xs text-gray-500">sandbox required</span>
+                    ) : connected ? (
+                      <button
+                        onClick={() => void disconnectOauth(s.key)}
+                        className="text-xs text-red-400 hover:text-red-300"
+                      >
+                        Disconnect
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => connectOauth(s.key)}
+                        className="text-xs text-blue-400 hover:text-blue-300"
+                      >
+                        {needsAuth ? 'Reconnect' : 'Connect'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
         {error ? (
           <p className="text-sm text-red-400 mt-3">{error}</p>
         ) : (

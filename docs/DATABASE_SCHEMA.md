@@ -330,6 +330,64 @@ CREATE UNIQUE INDEX idx_model_registry_default ON inkwest.model_registry (is_def
 CREATE INDEX idx_model_registry_enabled ON inkwest.model_registry (enabled) WHERE enabled;
 ```
 
+### OAuth2 MCP brokering
+
+See `docs/MCP.md` and `docs/mcp-oauth2-proxy.md`. Token MATERIAL is never stored in these
+tables: per-user tokens are AES-256-GCM ciphertext (`mcp_user_tokens.blob`/`blob_iv`) under a
+per-user DEK whose **browser-wrapped** form is the only key-related data at rest
+(`mcp_user_keys.wrapped_dek`) — the unwrapping key never leaves the browser.
+
+```sql
+-- DCR results + discovered endpoints, one row per oauth catalog key
+CREATE TABLE inkwest.mcp_oauth_clients (
+    mcp_key             VARCHAR(255) PRIMARY KEY,
+    issuer              TEXT NOT NULL,
+    token_endpoint      TEXT NOT NULL,
+    revocation_endpoint TEXT,
+    client_id           TEXT NOT NULL,
+    client_secret_ref   TEXT,           -- nullable (public/PKCE client)
+    client_expires_at   TIMESTAMPTZ,
+    registered_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- per-user grant (status: active | expired | revoked); blob = encrypted token bundle
+CREATE TABLE inkwest.mcp_user_tokens (
+    user_id    UUID NOT NULL REFERENCES inkwest.users(id) ON DELETE CASCADE,
+    mcp_key    VARCHAR(255) NOT NULL,
+    vault_ref  TEXT NOT NULL,
+    blob       BYTEA,
+    blob_iv    BYTEA,
+    expires_at TIMESTAMPTZ,
+    scopes     TEXT,
+    status     VARCHAR(20) NOT NULL DEFAULT 'active',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, mcp_key)
+);
+
+-- single-use OAuth handshake states (mirrors connector_pending_states)
+CREATE TABLE inkwest.mcp_oauth_pending_states (
+    id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    state         VARCHAR(255) NOT NULL UNIQUE,
+    code_verifier VARCHAR(128) NOT NULL,
+    mcp_key       VARCHAR(255) NOT NULL,
+    user_id       UUID NOT NULL REFERENCES inkwest.users(id) ON DELETE CASCADE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_mcp_oauth_pending_created ON inkwest.mcp_oauth_pending_states(created_at);
+
+-- browser-wrapped per-user DEK (audit-doc Phase C key custody)
+CREATE TABLE inkwest.mcp_user_keys (
+    user_id     UUID PRIMARY KEY REFERENCES inkwest.users(id) ON DELETE CASCADE,
+    wrapped_dek BYTEA NOT NULL,
+    wrap_alg    VARCHAR(32) NOT NULL,
+    wrap_iv     BYTEA,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- MCP grant events are user-level (no conversation): session_id relaxed to nullable.
+ALTER TABLE inkwest.connector_audit_log ALTER COLUMN session_id DROP NOT NULL;
+```
+
 ## JSONB Content Examples
 
 ### User Message Content
@@ -402,6 +460,7 @@ docker compose exec backend python db_migrate.py
 | `20260130000002_add_hourly_budget_period.sql` | Hourly budget period support |
 | `20260205000001_oidc_pending_states.sql` | DB-backed OIDC login state storage |
 | _… intervening migrations (connectors, skills, system prompts, app_settings, session model) — see `backend/migrations/`_ | |
+| `20260612140000_mcp_oauth.sql` | OAuth2 MCP brokering: `mcp_oauth_clients`, `mcp_user_tokens`, `mcp_oauth_pending_states`, `mcp_user_keys`; relaxes `connector_audit_log.session_id` to nullable (user-level MCP grant events). **Down-path deletes all `session_id IS NULL` audit rows** |
 | `20260619000000_model_registry.sql` | Admin-managed model registry (replaces the model keys in app_settings) |
 
 ## Key Indexes

@@ -2,6 +2,7 @@
 Inkwest Backend - FastAPI Application
 """
 
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,6 +41,7 @@ from app.core.telemetry import shutdown_telemetry
 from app.services.app_settings import load_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
+from app.services.mcp_oauth_catalog import oauth_catalog_keys
 from app.services.messages import purge_empty_sessions, reconcile_interrupted_turns
 from app.services.model_catalog import refresh_catalog
 from app.services.model_registry import load_registry
@@ -115,13 +117,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("pubsub_listener_started")
     if settings.oidc_enabled:
         await start_state_cleanup()
-    if settings.connectors_enabled:
+    # OAuth2 MCP entries reach the CLI only via the per-conversation .claude.json, which
+    # exists only in sandbox mode. Warn loudly rather than fail: the rest of the app is fine.
+    oauth_keys = oauth_catalog_keys()
+    # The connector cleanup loop also sweeps MCP OAuth pending states, so run it whenever
+    # either subsystem is active (not only when connectors are enabled).
+    if settings.connectors_enabled or oauth_keys:
         await start_connector_cleanup()
     if settings.sandbox_enabled:
         # Clear container/network orphans left by a prior (crashed) backend, then run
         # the idle reaper. Durable per-conversation dirs are kept so turns can resume.
         await reap_orphans()
         start_sandbox_reaper()
+    if oauth_keys and not settings.sandbox_enabled:
+        logger.warning("mcp_oauth_catalog_present_but_sandbox_disabled", keys=len(oauth_keys))
+    elif oauth_keys:
+        # OAuth2 MCP holds the per-user DEK and the in-flight token in THIS process's RAM
+        # (browser-fractioned custody, see app.services.mcp_dek_store). A second worker/replica
+        # would handle the OAuth callback without the DEK and brick in-flight connects. Fail
+        # fast on the one multi-process case we can detect here (uvicorn/gunicorn workers);
+        # cross-host replicas can't be detected from app code and need session affinity (the
+        # constraint is shared with the connector RAM stores — see docs/MCP.md).
+        workers = int(os.environ.get("WEB_CONCURRENCY", "1") or "1")
+        if workers > 1:
+            raise RuntimeError(
+                f"OAuth2 MCP requires a single worker (WEB_CONCURRENCY={workers}); the per-user "
+                "key and in-flight token live in process RAM. Run single-worker with session "
+                "affinity, or disable MCP_CATALOG_OAUTH2."
+            )
+        logger.info("mcp_oauth_catalog_loaded", keys=len(oauth_keys))
     yield
     # Shutdown
     logger.info("shutting_down_api")

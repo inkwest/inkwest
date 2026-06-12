@@ -351,8 +351,39 @@ interface SessionMcpSelection {
   expires_at?: string | null;
 }
 
-export async function getMcpCatalog(): Promise<{ keys: string[] }> {
+// auth_status: static | unavailable | not_connected | connected | needs_auth
+export type McpAuthStatus =
+  | 'static'
+  | 'unavailable'
+  | 'not_connected'
+  | 'connected'
+  | 'needs_auth';
+
+export interface McpServerEntry {
+  key: string;
+  kind: 'static' | 'oauth2';
+  auth_status: McpAuthStatus;
+}
+
+export interface McpCatalog {
+  // `keys` keeps the pre-OAuth contract (static, injectable keys). `servers` is the
+  // OAuth-aware superset with per-key auth status.
+  keys: string[];
+  servers: McpServerEntry[];
+}
+
+export async function getMcpCatalog(): Promise<McpCatalog> {
   return fetchAPI('/api/mcp/catalog');
+}
+
+/** Begin an OAuth2 MCP connect: returns the authorization-server URL for the popup. */
+export async function startMcpAuth(key: string): Promise<{ authorize_url: string }> {
+  return fetchAPI(`/api/mcp/${encodeURIComponent(key)}/auth/start`, { method: 'POST' });
+}
+
+/** Revoke the current user's grant for an OAuth2 MCP server. Returns the refreshed catalog. */
+export async function disconnectMcpAuth(key: string): Promise<McpCatalog> {
+  return fetchAPI(`/api/mcp/${encodeURIComponent(key)}/auth`, { method: 'DELETE' });
 }
 
 export async function getSessionMcp(sessionId: string): Promise<SessionMcpSelection> {
