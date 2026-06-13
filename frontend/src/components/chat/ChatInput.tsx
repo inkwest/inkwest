@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef, KeyboardEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, KeyboardEvent } from 'react';
 import { Send, Square } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
@@ -134,20 +134,54 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     return () => clearTimeout(timer);
   }, [initialPrompt, sessionId, setDraft]);
 
-  // Auto-grow the compact composer with its content, capped at ~15 lines (then it
-  // scrolls — see max-h on the textarea). The large start-screen composer keeps its
-  // fixed tall height. useLayoutEffect avoids a one-frame flash before the resize.
-  useLayoutEffect(() => {
-    if (large) return;
+  // Auto-grow the composer with its content, capped at ~15 lines (then it scrolls —
+  // see max-h on the textarea). Applies to both variants: the large start-screen box
+  // keeps its tall 6-row floor (min-h) but grows from there.
+  //
+  // `allowShrink` does the 'auto' remeasure that lets the box get *shorter*. We gate it
+  // because resetting to 'auto' collapses the textarea to its 1-row floor, and since the
+  // textarea is a flex sibling of the message list, that momentary collapse grows the
+  // list's viewport — the browser then clamps the viewport's scrollTop to the smaller max
+  // and never restores it, a visible upward scroll jump. On the common forward-typing
+  // path scrollHeight already reflects the (overflowing) content, so we size to it without
+  // collapsing. A real net shrink still fires ChatView's ResizeObserver, which re-pins.
+  const resize = useCallback((allowShrink: boolean) => {
     const ta = textareaRef.current;
     if (!ta) return;
-    ta.style.height = 'auto';
+    if (allowShrink) ta.style.height = 'auto';
     // The textarea is border-box with a 2px border; scrollHeight excludes the
     // border, so add it back or the box ends up a few px short (text clips, and
     // a single line no longer matches the send button's height).
     const borderY = ta.offsetHeight - ta.clientHeight;
     ta.style.height = `${ta.scrollHeight + borderY}px`;
-  }, [message, large]);
+  }, []);
+
+  // Re-size on content change. Only allow shrink when the text actually got shorter
+  // (deletion); typing forward keeps the box from collapsing. useLayoutEffect resizes
+  // before paint so there's no one-frame flash.
+  const prevLenRef = useRef(0);
+  useLayoutEffect(() => {
+    resize(message.length < prevLenRef.current);
+    prevLenRef.current = message.length;
+  }, [message, large, resize]);
+
+  // Re-size on width change (sidebar drag, window resize): the content-change effect
+  // doesn't fire then, so the box would keep a stale pixel height and re-wrapped text
+  // would clip/scroll. Width changes are rare, so always allow shrink here. Guarding on
+  // the observed width ignores the resize our own height writes trigger (no loop).
+  const prevWidthRef = useRef(0);
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const width = entries[0].contentRect.width;
+      if (width === prevWidthRef.current) return; // our own height write, not a width change
+      prevWidthRef.current = width;
+      resize(true);
+    });
+    ro.observe(ta);
+    return () => ro.disconnect();
+  }, [resize]);
 
   // Load templates once so the "/" autocomplete has data without opening the palette.
   useEffect(() => {
@@ -288,7 +322,11 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
               'w-full bg-gray-700 border-2 border-gray-600 rounded-lg px-4 py-2 resize-none focus:outline-none focus:border-blue-500 focus:shadow-[0_0_20px_3px_rgba(59,130,246,0.45)] disabled:opacity-50',
               shimmer && message.trim() && 'shimmer-border',
               inviteToPrompt && 'invite-border',
-              large ? 'text-base' : cn(TEXT_SIZE.body(compact), 'leading-6 max-h-[23.75rem] overflow-y-auto'),
+              // 6-row floor (min-h) growing to a ~15-row cap (max-h, then scrolls).
+              // leading-6 = 1.5rem lines: 6·1.5 + py-2 + border-2 ≈ 10.25rem; 15 ≈ 23.75rem.
+              large
+                ? 'text-base leading-6 min-h-[10.25rem] max-h-[23.75rem] overflow-y-auto'
+                : cn(TEXT_SIZE.body(compact), 'leading-6 max-h-[23.75rem] overflow-y-auto'),
             )}
             rows={large ? 6 : 1}
           />
