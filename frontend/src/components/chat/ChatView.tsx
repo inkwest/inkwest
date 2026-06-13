@@ -26,7 +26,7 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
   const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks, currentTodos } = useChatStore();
   const compact = useSettingsStore((s) => s.compactToolCards);
   const containerRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
 
   // Deep-link from a search hit: `?m=<messageId>` scrolls that message into view and
@@ -57,14 +57,23 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
     isAtBottomRef.current = checkIfAtBottom();
   }, [checkIfAtBottom]);
 
+  // Scroll the message viewport (and only it) to the bottom. We set the container's own
+  // scrollTop instead of calling bottomRef.scrollIntoView() because scrollIntoView walks
+  // up and scrolls *every* scrollable ancestor — with the composer's auto-grow firing a
+  // resize on each keystroke, that yanked the whole chat panel into an outer scrollport.
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const c = containerRef.current;
+    if (c) c.scrollTo({ top: c.scrollHeight, behavior });
+  }, []);
+
   // Auto-scroll only if user was at bottom — but never while a deep-link jump is pending
   // (it would fight the scroll-to-message below).
   useEffect(() => {
     if (targetMessageId) return;
     if (isAtBottomRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      scrollToBottom('smooth');
     }
-  }, [messages, streamingMessage, streamingBlocks, currentTodos, targetMessageId]);
+  }, [messages, streamingMessage, streamingBlocks, currentTodos, targetMessageId, scrollToBottom]);
 
   // Scroll to and highlight a search-linked message once the conversation has loaded (it
   // loads asynchronously for a cold-opened session). The `m` param is consumed as soon as
@@ -92,13 +101,34 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
     return () => clearTimeout(t);
   }, [highlightId]);
 
+  // Re-pin the list to the bottom on any late layout shift, but only when the user was
+  // already there. Two sources, both off the `messages` dependency so the bottom
+  // auto-scroll above never fires for them:
+  //   - the viewport shrinks: the composer auto-grows with its content, or the connector
+  //     header gains a row once its status resolves ~1s after a cold session open (the
+  //     drift users saw on load). Both are flex siblings of the viewport, so its own box
+  //     resizing catches them.
+  //   - the content grows in flow: a connector notice appears, code blocks finish
+  //     highlighting, images load — scrollHeight grows without resizing the viewport.
+  // Instant (not smooth) so it tracks tightly and doesn't fight a still-settling layout.
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (targetMessageId) return; // don't fight a pending deep-link jump
+      if (isAtBottomRef.current) scrollToBottom('auto');
+    });
+    if (containerRef.current) ro.observe(containerRef.current);
+    if (contentRef.current) ro.observe(contentRef.current);
+    return () => ro.disconnect();
+  }, [targetMessageId, scrollToBottom]);
+
   // Always scroll to bottom when streaming starts
   useEffect(() => {
     if (isStreaming) {
       isAtBottomRef.current = true;
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      scrollToBottom('smooth');
     }
-  }, [isStreaming]);
+  }, [isStreaming, scrollToBottom]);
 
   const tabClass = (active: boolean) =>
     cn(
@@ -110,27 +140,39 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
     <div className="flex-1 flex flex-col h-full relative min-h-0 overflow-hidden">
       <ErrorBanner />
 
-      {egressAvailable && (
-        <div className="flex shrink-0 border-b border-gray-800 bg-gray-900/40 text-sm">
-          <button onClick={() => setTab('chat')} className={tabClass(tab === 'chat')}>
-            Conversation
-          </button>
-          <button
-            onClick={() => setTab('egress')}
-            className={cn(tabClass(tab === 'egress'), 'flex items-center gap-1.5')}
-          >
-            Network
-            <span className="text-[10px] px-1 rounded bg-gray-700 text-gray-300">
-              {egress.events.length}
-            </span>
-            {blockedCount > 0 && (
-              <span className="text-[10px] px-1 rounded bg-red-900/50 text-red-400">
-                {blockedCount} blocked
+      {/* Always render the bar so its height is stable from first paint — the egress
+          socket connects a beat after load (ws-ticket fetch + handshake), so gating the
+          bar on it made the tabs pop in and shoved the conversation down. The Network
+          tab stays disabled until egress is actually available. */}
+      <div className="flex shrink-0 border-b border-gray-800 bg-gray-900/40 text-sm">
+        <button onClick={() => setTab('chat')} className={tabClass(tab === 'chat')}>
+          Conversation
+        </button>
+        <button
+          onClick={() => egressAvailable && setTab('egress')}
+          disabled={!egressAvailable}
+          title={egressAvailable ? undefined : 'Network activity appears once the session sandbox is active'}
+          className={cn(
+            tabClass(tab === 'egress'),
+            'flex items-center gap-1.5',
+            !egressAvailable && 'opacity-50 cursor-not-allowed hover:text-gray-400',
+          )}
+        >
+          Network
+          {egressAvailable && (
+            <>
+              <span className="text-[10px] px-1 rounded bg-gray-700 text-gray-300">
+                {egress.events.length}
               </span>
-            )}
-          </button>
-        </div>
-      )}
+              {blockedCount > 0 && (
+                <span className="text-[10px] px-1 rounded bg-red-900/50 text-red-400">
+                  {blockedCount} blocked
+                </span>
+              )}
+            </>
+          )}
+        </button>
+      </div>
 
       {/* Chat stays mounted (just hidden) when viewing egress, to preserve scroll + state. */}
       <div className={cn('flex-1 flex flex-col min-h-0', showEgress && 'hidden')}>
@@ -140,10 +182,11 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
           onScroll={handleScroll}
           className="flex-1 overflow-y-auto overflow-x-hidden p-4 min-h-0"
         >
-          {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
-          <MessageList messages={messages} highlightedId={highlightId} />
-          {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
-          <div ref={bottomRef} />
+          <div ref={contentRef}>
+            {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
+            <MessageList messages={messages} highlightedId={highlightId} />
+            {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
+          </div>
         </div>
         <ChatInput onSend={onSendMessage} onStop={onStopStreaming} disabled={!isConnected} isStreaming={isStreaming} initialPrompt={initialPrompt} autoSubmit={autoSubmit} sessionId={sessionId} />
       </div>

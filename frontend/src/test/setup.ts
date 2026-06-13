@@ -52,8 +52,9 @@ Object.defineProperty(window, 'matchMedia', {
   disconnect() {}
 } as unknown as typeof ResizeObserver
 
-// Mock scrollIntoView
+// Mock scrollIntoView / scrollTo (jsdom implements neither)
 Element.prototype.scrollIntoView = () => {}
+Element.prototype.scrollTo = () => {}
 
 // Mock localStorage / sessionStorage with a full in-memory Storage API. jsdom's
 // implementation here lacks the setItem/getItem methods zustand's `persist`
