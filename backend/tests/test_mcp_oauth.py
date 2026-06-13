@@ -71,11 +71,11 @@ def _use_transport(handler) -> None:
 )
 def test_ssrf_guard_rejects(url: str) -> None:
     with pytest.raises(McpOauthError):
-        mcp_oauth._assert_public_https(url)
+        mcp_oauth.assert_public_https(url)
 
 
 def test_ssrf_guard_allows_public_https() -> None:
-    mcp_oauth._assert_public_https("https://mcp.example.com/mcp")  # no raise
+    mcp_oauth.assert_public_https("https://mcp.example.com/mcp")  # no raise
 
 
 # --------------------------------------------------------------------------- #
@@ -410,12 +410,14 @@ async def test_get_fresh_token_refreshes_and_reseals(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_fresh_token_no_dek_raises() -> None:
+async def test_get_fresh_token_no_dek_is_transient_not_dead() -> None:
+    """A missing DEK (browser WS dropped) is a transient broker condition → McpOauthError
+    (proxy maps to 503 "try again"), NOT GrantDeadError (401 "reconnect a valid grant")."""
     from app.services.mcp_dek_store import get_dek_store
 
     await get_dek_store().delete(_USER)  # ensure absent
     db = AsyncMock()
-    with pytest.raises(GrantDeadError):
+    with pytest.raises(McpOauthError, match="encryption key"):
         await mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion")
 
 
@@ -454,6 +456,93 @@ async def test_exchange_code_state_expired() -> None:
 # revoke_grant
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+async def test_refresh_single_flight_rotates_once_under_concurrency(monkeypatch) -> None:
+    """Two concurrent refreshes on the same (user,key) → exactly ONE token-endpoint rotation
+    (single-flight + post-lock reuse). OAuth 2.1 ASes rotate refresh tokens on use, so a
+    double rotation would brick the grant."""
+    import asyncio
+
+    monkeypatch.setattr(mcp_oauth, "get_oauth_server", lambda key: _server())
+    mcp_oauth._refresh_failed_at.clear()
+    dek = generate_dek()
+    blob, iv = seal(dek, json.dumps({"access_token": "old", "refresh_token": "RT"}).encode())
+    token = McpUserToken(user_id=_USER, mcp_key="notion", vault_ref="r", status="active")
+    token.blob, token.blob_iv = blob, iv
+    token.expires_at = datetime.now(UTC) - timedelta(minutes=1)  # expired → both want refresh
+    client = McpOauthClient(
+        mcp_key="notion",
+        issuer="https://as.example.com",
+        token_endpoint="https://as.example.com/token",
+        client_id="cid-123",
+    )
+
+    async def _get(model, pk):
+        return token if model is McpUserToken else client
+
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=_get)
+    db.refresh = AsyncMock()
+    db.commit = AsyncMock()
+    db.add = MagicMock()
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"access_token": "new-AT", "refresh_token": "RT2"})
+
+    _use_transport(handler)
+    results = await asyncio.gather(
+        mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=dek),
+        mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=dek),
+    )
+    assert calls["n"] == 1  # only one rotation despite two concurrent callers
+    assert results == ["new-AT", "new-AT"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_negative_cache_fails_fast(monkeypatch) -> None:
+    """A recent AS failure short-circuits before the lock/network (no retry storm)."""
+    import time
+
+    monkeypatch.setattr(mcp_oauth, "get_oauth_server", lambda key: _server())
+    dek = generate_dek()
+    blob, iv = seal(dek, json.dumps({"access_token": "old", "refresh_token": "RT"}).encode())
+    token = McpUserToken(user_id=_USER, mcp_key="notion", vault_ref="r", status="active")
+    token.blob, token.blob_iv = blob, iv
+    token.expires_at = datetime.now(UTC) - timedelta(minutes=1)  # expiring → would refresh
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=token)
+    # Seed the negative cache as if a refresh just failed.
+    mcp_oauth._refresh_failed_at[(str(_USER), "notion")] = time.monotonic()
+    try:
+        # No transport set: if it reached the token endpoint it would fail differently.
+        with pytest.raises(McpOauthError, match="backing off"):
+            await mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=dek)
+    finally:
+        mcp_oauth._refresh_failed_at.clear()
+
+
+@pytest.mark.asyncio
+async def test_refresh_reuses_recently_rotated_token(monkeypatch) -> None:
+    """force=True but a competitor rotated <30s ago → reuse it, don't rotate again."""
+    monkeypatch.setattr(mcp_oauth, "get_oauth_server", lambda key: _server())
+    dek = generate_dek()
+    blob, iv = seal(dek, json.dumps({"access_token": "fresh-AT", "refresh_token": "RT"}).encode())
+    token = McpUserToken(user_id=_USER, mcp_key="notion", vault_ref="r", status="active")
+    token.blob, token.blob_iv = blob, iv
+    token.expires_at = datetime.now(UTC) + timedelta(hours=1)  # not expiring
+    token.updated_at = datetime.now(UTC)  # just refreshed
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=token)
+    db.refresh = AsyncMock()
+    mcp_oauth._refresh_failed_at.clear()
+    # No transport set: proves no token-endpoint call happens.
+    out = await mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=dek, force=True)
+    assert out == "fresh-AT"
+
+
+@pytest.mark.asyncio
 async def test_revoke_grant_nulls_blob_and_swallows_upstream_error() -> None:
     dek = generate_dek()
     blob, iv = seal(dek, json.dumps({"access_token": "AT"}).encode())
@@ -481,3 +570,119 @@ async def test_revoke_grant_nulls_blob_and_swallows_upstream_error() -> None:
     await mcp_oauth.revoke_grant(db, user_id=_USER, mcp_key="notion", dek=dek)
     assert token.status == "revoked"
     assert token.blob is None and token.blob_iv is None
+
+
+# --------------------------------------------------------------------------- #
+# SSRF allow-list (is_global) — special-purpose ranges a deny-list would admit
+# --------------------------------------------------------------------------- #
+def test_ssrf_guard_rejects_cgnat() -> None:
+    """RFC 6598 CGNAT 100.64.0.0/10 is not globally routable — an allow-list rejects it
+    where the old private/loopback/link-local deny-list would have let it through."""
+    mcp_oauth._resolve_ips = lambda host: ["100.64.1.1"]
+    with pytest.raises(McpOauthError, match="non-public"):
+        mcp_oauth.assert_public_https("https://sneaky.example.com/mcp")
+
+
+# --------------------------------------------------------------------------- #
+# pin_url — the DNS-rebinding mitigation (validate, then pin to the validated IP)
+# --------------------------------------------------------------------------- #
+def test_pin_url_pins_validated_ip_and_preserves_host_and_sni() -> None:
+    """pin_url must connect to the *validated* IP while keeping the original Host header and
+    TLS SNI — a refactor that drops the pin or the SNI must fail here, not pass silently."""
+    pinned, host_header, extensions = mcp_oauth.pin_url("https://mcp.example.com/mcp?a=1")
+    assert pinned == "https://93.184.216.34/mcp?a=1"  # authority swapped to the resolved IP
+    assert host_header == "mcp.example.com"  # Host header preserved
+    assert extensions == {"sni_hostname": "mcp.example.com"}  # TLS SNI preserved
+
+
+def test_pin_url_rejects_non_public() -> None:
+    mcp_oauth._resolve_ips = lambda host: ["10.0.0.5"]
+    with pytest.raises(McpOauthError):
+        mcp_oauth.pin_url("https://internal.example.com/x")
+
+
+# --------------------------------------------------------------------------- #
+# _http — response-size cap and transport-fault mapping
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_http_caps_oversized_response(monkeypatch) -> None:
+    """A body over the cap is rejected (recoverable McpOauthError), not buffered to OOM."""
+    monkeypatch.setattr(mcp_oauth, "MCP_OAUTH_MAX_RESPONSE_BYTES", 16)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 1024)
+
+    _use_transport(handler)
+    with pytest.raises(McpOauthError, match="exceeds"):
+        await mcp_oauth._http("GET", "https://mcp.example.com/big")
+
+
+@pytest.mark.asyncio
+async def test_http_transport_fault_is_recoverable() -> None:
+    """A connect/read fault surfaces as McpOauthError (recoverable), never an uncaught error —
+    so in the refresh path a transient blip can't be mistaken for a dead grant."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    _use_transport(handler)
+    with pytest.raises(McpOauthError, match="failed"):
+        await mcp_oauth._http("GET", "https://mcp.example.com/x")
+
+
+# --------------------------------------------------------------------------- #
+# _token_request — 503-vs-401 contract (transient vs terminal)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_token_request_500_is_recoverable() -> None:
+    """A 5xx from the token endpoint is a transient broker fault → McpOauthError (→503),
+    distinct from a 400/401 grant rejection → GrantDeadError (→401)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "server_error"})
+
+    _use_transport(handler)
+    with pytest.raises(McpOauthError):
+        await mcp_oauth._token_request("https://as.example.com/token", {"grant_type": "x"}, None)
+
+
+@pytest.mark.asyncio
+async def test_token_request_400_is_terminal() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    _use_transport(handler)
+    with pytest.raises(GrantDeadError):
+        await mcp_oauth._token_request("https://as.example.com/token", {"grant_type": "x"}, None)
+
+
+# --------------------------------------------------------------------------- #
+# exchange_code ordering — the DEK is checked BEFORE the single-use state is consumed
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_exchange_code_no_dek_does_not_consume_state(monkeypatch) -> None:
+    """Connecting with no DEK (browser not yet handshaked) must NOT delete the pending state
+    or call the token endpoint — the auth code stays spendable for a retry."""
+    from app.services.mcp_dek_store import get_dek_store
+
+    await get_dek_store().delete(_USER)
+    monkeypatch.setattr(mcp_oauth, "get_oauth_server", lambda key: _server())
+
+    pending = MagicMock()
+    pending.user_id = _USER
+    pending.created_at = datetime.now(UTC)
+    executed: list = []
+
+    async def _execute(stmt):
+        executed.append(stmt)
+        return MagicMock(first=lambda: pending)
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=_execute)
+    db.commit = AsyncMock()
+
+    # No transport set → reaching the token endpoint would raise a different error.
+    with pytest.raises(McpOauthError, match="encryption key"):
+        await mcp_oauth.exchange_code(db, state="s", code="c", redirect_uri="x")  # dek=None
+    # Exactly one execute (the peek SELECT); the DELETE-RETURNING never ran.
+    assert len(executed) == 1

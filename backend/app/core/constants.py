@@ -87,3 +87,14 @@ MCP_OAUTH_STATE_TTL_SECONDS = 600
 
 # Timeout for every outbound OAuth call (discovery, token, DCR, revoke)
 MCP_OAUTH_HTTP_TIMEOUT = 10.0
+
+# Max bytes read from an OAuth discovery/DCR/token response. The endpoints are URLs the
+# remote server hands us (resource metadata, issuer); without a byte cap a malicious or
+# compromised AS could stream a multi-GB body and OOM the single worker (the timeout bounds
+# time, not size). Real metadata/token docs are a few KB; 2 MiB is generous headroom.
+MCP_OAUTH_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+# Max request-body bytes the MCP reverse proxy will buffer. The body is buffered in RAM so
+# it can be replayed on the 401-refresh retry; without a cap a large/streamed tool-call
+# payload (or many concurrent ones) is an unbounded-memory blast radius on the single worker.
+MCP_PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024

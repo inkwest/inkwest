@@ -235,6 +235,11 @@ class Settings(BaseSettings):
     # Fixed base for the OAuth2 MCP callback (must match what is registered at the
     # AS / sent in DCR). Falls back to frontend_url, mirroring connector_redirect_base.
     mcp_oauth_redirect_base: str | None = None
+    # Base URL the sandboxed CLI uses to reach the in-app MCP reverse proxy
+    # (app.api.routes.mcp_proxy). MUST be a host the per-conversation squid allowlists and
+    # can route to the backend (Docker host-gateway alias) — NOT 127.0.0.1 (that is the
+    # toolbox itself). Empty disables oauth-entry injection into .claude.json (Increment 2).
+    mcp_proxy_base_url: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

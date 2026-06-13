@@ -107,6 +107,26 @@ async def test_auth_start_returns_authorize_url(
 
 
 @pytest.mark.asyncio
+async def test_auth_start_rate_limited_when_too_many_pending(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """At/over the per-user in-flight cap, auth/start returns 429 and never runs discovery."""
+    from app.api.routes.mcp import _MAX_PENDING_PER_USER
+
+    mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one=lambda: _MAX_PENDING_PER_USER))
+    build = AsyncMock(return_value="https://as.example.com/authorize?x=1")
+    with (
+        patch("app.api.routes.mcp.get_oauth_server", return_value=MagicMock()),
+        patch("app.api.routes.mcp.get_settings") as settings,
+        patch("app.api.routes.mcp.mcp_oauth.build_authorize_url", new=build),
+    ):
+        settings.return_value.sandbox_enabled = True
+        resp = await authenticated_client.post("/api/mcp/notion/auth/start")
+    assert resp.status_code == 429
+    build.assert_not_awaited()  # rejected before any outbound discovery
+
+
+@pytest.mark.asyncio
 async def test_callback_success_audits_and_closes(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
@@ -198,7 +218,10 @@ async def test_set_session_mcp_persists_valid_keys(
 
     with (
         patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix", "gitlab"]),
-        patch("app.services.mcp_config.apply_session_mcp_selection") as apply,
+        patch(
+            "app.services.mcp_config.apply_session_mcp_selection",
+            new=AsyncMock(return_value=[]),
+        ) as apply,
     ):
         resp = await authenticated_client.put(
             f"/api/sessions/{mock_session_obj.id}/mcp",
@@ -208,7 +231,10 @@ async def test_set_session_mcp_persists_valid_keys(
     assert resp.status_code == 200
     assert resp.json() == {"enabled": ["coralogix"]}
     assert mock_session_obj.enabled_mcp_servers == ["coralogix"]
-    apply.assert_called_once_with(str(mock_session_obj.id), ["coralogix"])
+    apply.assert_awaited_once()
+    args, kwargs = apply.await_args
+    assert args == (str(mock_session_obj.id), ["coralogix"])
+    assert "user_id" in kwargs and "db" in kwargs  # now user-aware + async
 
 
 @pytest.mark.asyncio

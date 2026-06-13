@@ -33,6 +33,7 @@ import os
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -271,6 +272,15 @@ async def provision(session_id: str) -> Sandbox:
             proxy_run += ["-v", f"{settings.sandbox_squid_confd}:/conf.d:ro"]
         if settings.sandbox_proxy_dns:
             proxy_run += ["--dns", settings.sandbox_proxy_dns]
+        if settings.mcp_proxy_base_url:
+            # OAuth2 MCP reachability: let squid reach the backend's MCP proxy on the Docker
+            # host via host-gateway. The toolbox egresses only through squid, so the CLI's
+            # MCP calls to mcp_proxy_base_url traverse squid → host → backend. The host must
+            # ALSO be allowlisted in squid.conf (see docs/MCP.md). Never attach the backend to
+            # the per-conversation networks instead — that wedges network teardown.
+            proxy_host = urlparse(settings.mcp_proxy_base_url).hostname
+            if proxy_host:
+                proxy_run += ["--add-host", f"{proxy_host}:host-gateway"]
         proxy_run += [settings.sandbox_squid_image]
         await _docker(*proxy_run, timeout=settings.sandbox_provision_timeout)
         # Dual-home the proxy so it can resolve + egress to the internet.

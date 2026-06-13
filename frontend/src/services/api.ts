@@ -348,7 +348,6 @@ export async function pollAwsDevice(
 // MCP catalog + per-conversation selection
 interface SessionMcpSelection {
   enabled: string[];
-  expires_at?: string | null;
 }
 
 // auth_status: static | unavailable | not_connected | connected | needs_auth

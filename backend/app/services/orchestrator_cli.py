@@ -22,6 +22,7 @@ from app.services.events import (
     ChatEvent,
     done_event,
     error_event,
+    mcp_auth_required_event,
 )
 from app.services.messages import (
     clear_cli_session_id,
@@ -222,7 +223,13 @@ required.
             # before the CLI starts (the CLI reads its config at launch). Done every
             # turn so it survives a sandbox rebuild that recreates an empty claude dir.
             enabled_mcp = await get_enabled_mcp_servers(db, session_id)
-            apply_session_mcp_selection(session_id_str, enabled_mcp)
+            mcp_dead = await apply_session_mcp_selection(
+                session_id_str, enabled_mcp, user_id=user_id, db=db
+            )
+            # An enabled OAuth2 MCP server with no active grant is skipped — tell the user to
+            # reconnect instead of letting its tools silently vanish.
+            for dead_key in mcp_dead:
+                yield mcp_auth_required_event(dead_key, session_id_str)
             # Materialize the active skills as Claude skills in this
             # conversation's sandbox (one SKILL.md per template). Like the MCP reconcile
             # above, done every turn from the DB so template edits propagate on the next

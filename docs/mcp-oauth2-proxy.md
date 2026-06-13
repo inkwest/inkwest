@@ -1,7 +1,8 @@
 # MCP OAuth2 Proxy — Implementation Plan
 
-> **STATUS — Increment 1 (connect flow) shipped; this plan diverged on three points.**
-> Read this box before the rest of the document, which still describes the original design.
+> **STATUS — Increments 1 (connect flow) + 2 (proxy) shipped; this plan diverged on the
+> points below.** Read this box before the rest of the document, which still describes the
+> original design.
 > - **Separate env var.** OAuth entries live in a new `MCP_CATALOG_OAUTH2`
 >   (`app/services/mcp_oauth_catalog.py`), **not** mixed into `MCP_CATALOG` / `parse_catalog`.
 >   The static catalog is untouched.
@@ -12,9 +13,15 @@
 >   There are **no** `token_vault_*` / KMS settings. Phase B (KMS/sealed) is not used here.
 > - **`oauth_flow.py` was NOT extracted** from the GitLab connector (only `generate_pkce` is
 >   reused). The OAuth client is self-contained in `app/services/mcp_oauth.py`.
-> - **Deferred to Increment 2** (gated on transport validation, rollout step 0): the reverse
->   **proxy** (`mcp_proxy.py`), the internal **JWT** (`mcp_proxy_token.py`), and `.claude.json`
->   **injection**. Until then stored tokens are inert — the CLI cannot yet reach them.
+> - **Increment 2 (shipped):** the reverse **proxy** (`app/api/routes/mcp_proxy.py`), the
+>   internal **JWT** (`app/services/mcp_proxy_token.py`), `.claude.json` **injection**
+>   (`mcp_config._oauth_proxy_servers`), the refresh hot path, the `mcp_auth_required` event +
+>   reconnect banner, and squid host-gateway reachability (`MCP_PROXY_BASE_URL`). Upstream
+>   fetches are IP-pinned; requires single-worker / session affinity. **Still pending: rollout
+>   step 0** — the live end-to-end check that the headless CLI honours `HTTP_PROXY` through
+>   squid (needs the real toolbox/squid; manual acceptance gate, not unit-testable).
+> - The body sections below predate both increments; treat the four bullets above as the
+>   source of truth where they conflict.
 
 **TL;DR**: Extend the static MCP catalog with `auth: oauth2` entries. Backend brokers the
 OAuth 2.1 flow (browser redirect through the frontend), stores per-user tokens as encrypted
@@ -311,7 +318,9 @@ only route out is the per-conversation squid proxy with a domain allowlist
   there. The proxy URL must use a hostname routed through squid.
 - New setting `Settings.mcp_proxy_base_url` (e.g.
   `http://host-gateway-alias:8000`) — the hostname the CLI uses. No localhost default;
-  startup fails fast if oauth entries exist and it is unset.
+  when unset, oauth MCP injection into `.claude.json` is **silently skipped** (logged at
+  debug in `mcp_config.py:_oauth_proxy_servers`), not a startup error — the feature is simply
+  not wired. Startup fails fast only on `WEB_CONCURRENCY > 1` (`main.py`).
 - Reachability mechanism: **use the Docker host-gateway** (`--add-host
   <alias>:host-gateway` on the squid container, backend port published on the host or on
   the docker bridge). Do **not** attach the backend container to the per-conversation

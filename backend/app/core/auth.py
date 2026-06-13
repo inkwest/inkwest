@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 WS_TICKET_EXPIRATION_SECONDS = 10
+# Token classes signed with settings.secret_key on JWT_ALGORITHM: "session" + "ws" (this
+# module) and "mcp-proxy" (app.services.mcp_proxy_token). All verifiers MUST enforce both
+# `aud` and `type` so the classes can't be substituted on the shared key.
 
 # Session cookie. The session JWT is delivered to the browser as an HttpOnly
 # cookie (never readable by JS) instead of a bearer token in localStorage, so an

@@ -93,18 +93,6 @@ describe('McpPanel', () => {
     expect(screen.queryByText('prometheus')).not.toBeInTheDocument();
   });
 
-  it('adds time left to the selected count when the MCP selection has an expiry', async () => {
-    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab', 'prometheus']));
-    mockGetSession.mockResolvedValue({
-      enabled: ['coralogix'],
-      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-    });
-
-    render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
-
-    expect(await screen.findByText(/1\/3 enabled · .* left/)).toBeInTheDocument();
-  });
-
   it('shows selected/total and green styling when servers are enabled', async () => {
     mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
     mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
@@ -188,6 +176,21 @@ describe('McpPanel', () => {
     await waitFor(() => expect(mockStartAuth).toHaveBeenCalledWith('notion'));
     await waitFor(() => expect(popup.location.href).toBe('https://as.example.com/authorize?x=1'));
     openSpy.mockRestore();
+  });
+
+  it('enables a connected oauth server into the conversation selection on OK', async () => {
+    mockSetSession.mockResolvedValue({ enabled: ['notion'] });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
+    const checkbox = await screen.findByRole('checkbox'); // only the oauth row has one here
+    expect(checkbox).not.toBeChecked();
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+    await waitFor(() => expect(mockSetSession).toHaveBeenCalledWith('s1', ['notion']));
+  });
+
+  it('disables the enable checkbox until the oauth server is connected', async () => {
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    expect(await screen.findByRole('checkbox')).toBeDisabled();
   });
 
   it('shows a needs-auth badge and a Reconnect button for an expired grant', async () => {

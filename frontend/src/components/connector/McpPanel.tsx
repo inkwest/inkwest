@@ -8,18 +8,10 @@ import {
   getMcpCatalog,
   getSessionMcp,
   setSessionMcp,
-  startMcpAuth,
   type McpServerEntry,
 } from '@/services/api';
+import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useSessionsStore } from '@/store/sessions';
-
-function expiryLabel(expiresAt?: string | null): string | null {
-  if (!expiresAt) return null;
-  const ms = new Date(expiresAt).getTime() - Date.now();
-  if (ms <= 0) return 'expired';
-  const mins = Math.round(ms / 60000);
-  return mins >= 60 ? `${Math.floor(mins / 60)}h${mins % 60}m left` : `${mins}m left`;
-}
 
 interface Props {
   sessionId: string;
@@ -62,7 +54,6 @@ export function McpPanel({
   const [open, setOpen] = useState(autoOpen);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expiresAt, setExpiresAt] = useState<string | null>(null);
   // Active connect-poll intervals, tracked so they're always cleared on unmount (otherwise a
   // popup left open would poll the catalog forever and setState on an unmounted component).
   const pollTimers = useRef<Set<number>>(new Set());
@@ -84,7 +75,6 @@ export function McpPanel({
         if (!sessionId) {
           setEnabled(new Set());
           setDraftEnabled(new Set());
-          setExpiresAt(null);
           return;
         }
 
@@ -93,7 +83,6 @@ export function McpPanel({
           const next = new Set(sel.enabled);
           setEnabled(next);
           setDraftEnabled(next);
-          setExpiresAt(sel.expires_at ?? null);
         }
       } catch {
         if (!cancelled) setError('Failed to load MCP servers');
@@ -127,7 +116,6 @@ export function McpPanel({
       const next = new Set(res.enabled);
       setEnabled(next);
       setDraftEnabled(next);
-      setExpiresAt(res.expires_at ?? null);
       setOpen(false);
       // Per-server connect/disconnect events were persisted server-side — reload the
       // conversation so they appear inline (flicker-free for the already-open session).
@@ -152,39 +140,36 @@ export function McpPanel({
   };
 
   const connectOauth = (key: string) => {
-    // Open the popup synchronously in the click handler — opening it after the await
-    // below would trip popup blockers.
-    const popup = window.open('about:blank', 'mcp-oauth', 'width=520,height=720');
-    void (async () => {
-      try {
-        const { authorize_url } = await startMcpAuth(key);
-        if (popup) popup.location.href = authorize_url;
-      } catch {
-        popup?.close();
-        setError('Failed to start MCP authorization');
-        return;
+    const popup = openMcpAuthPopup(key, () => setError('Failed to start MCP authorization'));
+    // Poll the catalog while connecting; stop as soon as the grant lands ("connected"), the
+    // popup closes, or a hard deadline elapses — so an abandoned popup can't poll forever.
+    // The timer is tracked in pollTimers so unmount cleanup always clears it.
+    const startedAt = Date.now();
+    const POLL_DEADLINE_MS = 5 * 60 * 1000;
+    const timer = window.setInterval(async () => {
+      const servers = await refreshOauth();
+      const connected = servers.find((s) => s.key === key)?.auth_status === 'connected';
+      if (connected || !popup || popup.closed || Date.now() - startedAt > POLL_DEADLINE_MS) {
+        window.clearInterval(timer);
+        pollTimers.current.delete(timer);
       }
-      // Poll the catalog while connecting; stop as soon as the grant lands ("connected"), the
-      // popup closes, or a hard deadline elapses — so an abandoned popup can't poll forever.
-      // The timer is tracked in pollTimers so unmount cleanup always clears it.
-      const startedAt = Date.now();
-      const POLL_DEADLINE_MS = 5 * 60 * 1000;
-      const timer = window.setInterval(async () => {
-        const servers = await refreshOauth();
-        const connected = servers.find((s) => s.key === key)?.auth_status === 'connected';
-        if (connected || !popup || popup.closed || Date.now() - startedAt > POLL_DEADLINE_MS) {
-          window.clearInterval(timer);
-          pollTimers.current.delete(timer);
-        }
-      }, 2000);
-      pollTimers.current.add(timer);
-    })();
+    }, 2000);
+    pollTimers.current.add(timer);
   };
 
   const disconnectOauth = async (key: string) => {
     try {
       const cat = await disconnectMcpAuth(key);
       setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
+      // Disconnect means "stop using it here" — also drop it from the conversation selection
+      // so the next turn doesn't re-flag a server the user deliberately disconnected.
+      if (sessionId && enabled.has(key)) {
+        const next = [...enabled].filter((k) => k !== key);
+        const res = await setSessionMcp(sessionId, next);
+        const set = new Set(res.enabled);
+        setEnabled(set);
+        setDraftEnabled(set);
+      }
     } catch {
       setError('Failed to disconnect MCP server');
     }
@@ -197,11 +182,13 @@ export function McpPanel({
     return null;
 
   const hasCatalog = catalog.length > 0 || oauthServers.length > 0;
-  const enabledKeys = catalog.filter((key) => enabled.has(key));
+  // Count both static and connected oauth selections; the badge denominator is all selectable
+  // keys, not just the static catalog (enabled oauth keys are persisted in `enabled` too).
+  const allKeys = [...catalog, ...oauthServers.map((s) => s.key)];
+  const enabledKeys = allKeys.filter((key) => enabled.has(key));
   const count = enabledKeys.length;
   const anyOn = count > 0;
-  const exp = expiryLabel(expiresAt);
-  const badgeText = exp ? `${count}/${catalog.length} enabled · ${exp}` : `${count}/${catalog.length} enabled`;
+  const badgeText = `${count}/${allKeys.length} enabled`;
 
   const handleOpen = async () => {
     if (!hasCatalog) return;
@@ -293,12 +280,22 @@ export function McpPanel({
                     key={s.key}
                     className="flex items-center justify-between gap-3 px-2 py-2 rounded hover:bg-gray-800"
                   >
-                    <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      {/* Enable this conversation to use the server — only once connected.
+                          Persisted with the static selection on OK; the backend injects the
+                          proxy entry into .claude.json for enabled + connected oauth keys. */}
+                      <input
+                        type="checkbox"
+                        checked={draftEnabled.has(s.key)}
+                        disabled={saving || !connected}
+                        onChange={() => toggleDraft(s.key)}
+                        className="h-4 w-4 accent-green-600 disabled:opacity-40"
+                      />
                       <span className="text-sm text-gray-200">{s.key}</span>
                       {connected && <Badge variant="success">connected</Badge>}
                       {needsAuth && <Badge variant="default">needs auth</Badge>}
                       {unavailable && <Badge variant="default">unavailable</Badge>}
-                    </div>
+                    </label>
                     {unavailable ? (
                       <span className="text-xs text-gray-500">sandbox required</span>
                     ) : connected ? (
@@ -329,7 +326,7 @@ export function McpPanel({
         )}
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-700 pt-3">
           <span className="text-xs text-gray-500">
-            {catalog.filter((key) => draftEnabled.has(key)).length}/{catalog.length} selected
+            {allKeys.filter((key) => draftEnabled.has(key)).length}/{allKeys.length} selected
           </span>
           <Button size="sm" onClick={applySelection} disabled={!sessionId} isLoading={saving}>
             OK

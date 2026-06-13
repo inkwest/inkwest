@@ -15,6 +15,7 @@ from app.core.database import async_session_maker
 from app.core.logging import get_logger
 from app.models.connector_pending_state import ConnectorPendingState
 from app.models.mcp_oauth_pending_state import McpOauthPendingState
+from app.services import mcp_oauth
 from app.services.connectors.store import get_credential_store
 from app.services.connectors.warm import get_warm_store
 
@@ -36,6 +37,10 @@ async def _cleanup_loop() -> None:
             removed_warm = await get_warm_store().sweep()
             if removed_warm:
                 logger.info("connector_warm_sweep", removed=removed_warm)
+            # Bound the OAuth2 MCP refresh negative-cache dict (process-local, single worker).
+            swept = mcp_oauth.sweep_refresh_state()
+            if swept:
+                logger.info("mcp_oauth_negcache_sweep", removed=swept)
             cutoff = datetime.now(UTC) - timedelta(seconds=CONNECTOR_STATE_TTL_SECONDS)
             mcp_cutoff = datetime.now(UTC) - timedelta(seconds=MCP_OAUTH_STATE_TTL_SECONDS)
             async with async_session_maker() as db:

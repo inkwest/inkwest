@@ -74,6 +74,7 @@ skipped — it never crashes startup, it just yields fewer selectable servers
 | POST | `/api/mcp/{key}/auth/start` | Begin an OAuth2 connect — returns `{authorize_url}` for a popup |
 | GET | `/api/mcp/oauth/callback` | OAuth redirect target (**unauthenticated**; bound to the user by the single-use pending state). Closes the popup |
 | DELETE | `/api/mcp/{key}/auth` | Revoke the user's grant (best-effort upstream RFC 7009); returns the refreshed catalog |
+| GET/POST/DELETE | `/api/mcp-proxy/{key}/{path}` | Reverse proxy the sandboxed CLI calls. Auth is the internal proxy JWT (no `get_current_user`); injects the real upstream token per request |
 
 `auth_status` (per oauth key, per user): `static` (non-oauth, always usable) ·
 `unavailable` (oauth but sandbox disabled) · `not_connected` (no grant → "Connect") ·
@@ -91,23 +92,42 @@ kind:
  "client_id": "optional — omit for Dynamic Client Registration"}
 ```
 
-Flow (Increment 1 — connect only; the proxy that injects tokens into the CLI is Increment 2):
+Flow:
 
-1. The backend brokers OAuth 2.1: discovery (RFC 9728 protected-resource metadata → RFC 8414
-   AS metadata, with SSRF guards + IP-pinning) → optional DCR (RFC 7591) → auth-code + PKCE
-   (S256) + `resource` (RFC 8707). Discovered token/revocation endpoints are persisted so
-   refresh never re-discovers.
+1. **Connect.** The backend brokers OAuth 2.1: discovery (RFC 9728 protected-resource metadata
+   → RFC 8414 AS metadata, with SSRF guards + IP-pinning) → optional DCR (RFC 7591) →
+   auth-code + PKCE (S256) + `resource` (RFC 8707). Discovered token/revocation endpoints are
+   persisted so refresh never re-discovers.
 2. **Token custody is browser-fractioned (no server-side key).** Each user's tokens are
    sealed (AES-256-GCM) under a per-user DEK; the DEK is wrapped by a non-extractable
    WebCrypto key in the browser's IndexedDB (shared across same-profile tabs). On WS connect
    the browser supplies the unwrapped DEK; the server holds it in RAM only while connected
    (refcount-evicted on the last disconnect). A DB+disk+env dump taken with nobody connected
    yields no plaintext. A different browser profile reconnects OAuth.
-3. Lifecycle events are audited in `connector_audit_log` (`connector="mcp"`,
-   `action=grant|revoke`, `session_id` NULL — user-level).
+3. **Enable + inject.** A connected oauth server is enabled per-conversation (the panel
+   checkbox → `enabled_mcp_servers`, like a static server). Each turn,
+   `apply_session_mcp_selection` injects into `.claude.json`, for every enabled oauth grant
+   that is `active`, a proxy entry `{type:http, url:<MCP_PROXY_BASE_URL>/api/mcp-proxy/<key>/,
+   headers:{Authorization: Bearer <internal JWT>}}`. The **real upstream token never touches
+   sandbox disk** — only the short-lived internal JWT does (mint-stable, so an unchanged
+   selection is a no-op write).
+4. **Proxy.** The CLI's MCP calls hit `/api/mcp-proxy/{key}/` through the per-conversation
+   squid; the proxy verifies the internal JWT, refreshes the upstream token if needed
+   (single-flight per user+key), swaps the `Authorization` header, and streams the response.
+   Reachability: the CLI egresses only via squid, so `MCP_PROXY_BASE_URL`'s host must be
+   squid-allowlisted (`sandbox/squid.conf`) and routed to the backend over the Docker
+   host-gateway (added automatically as `--add-host` on the squid container).
+5. **Reconnect.** An enabled oauth grant that is missing/expired/revoked is skipped at
+   injection and emits an `mcp_auth_required` event, surfacing an in-conversation **Reconnect**
+   banner (`McpInlineNotice`) instead of the tools silently vanishing.
+
+Lifecycle events are audited in `connector_audit_log` (`connector="mcp"`,
+`action=grant|revoke`, `session_id` NULL — user-level).
 
 `MCP_OAUTH_REDIRECT_BASE` fixes the callback base (defaults to `FRONTEND_URL`); it must match
-what is registered at the AS / sent in DCR.
+what is registered at the AS / sent in DCR. `MCP_PROXY_BASE_URL` is the host the sandboxed CLI
+uses to reach the proxy — squid-allowlisted + host-gateway-routable, **not** `127.0.0.1`;
+unset disables oauth injection.
 
 > **Single-replica / session affinity required (operational).** The per-user DEK and the
 > in-flight token live in the serving process's RAM (browser-fractioned custody), and the
