@@ -1,0 +1,5 @@
+# Local, host-specific startup hooks live here and stay OUT of git — only the
+# generic mechanism (this dir, this ignore rule, the README) is committed.
+*
+!.gitignore
+!README.md

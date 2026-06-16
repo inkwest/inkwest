@@ -1,0 +1,4 @@
+# Local/site-specific squid ACL fragments stay OUT of git. The committed mechanism is the
+# placeholder (00-defaults.conf), this file, and the README; everything else here is local.
+*.conf
+!00-defaults.conf

@@ -23,6 +23,7 @@ def _settings(tmp_path):
         sandbox_squid_image="squid:latest",
         sandbox_squid_conf="",
         sandbox_squid_errors="",
+        sandbox_squid_confd="",
         sandbox_proxy_dns="",
         sandbox_env_file="",
         sandbox_sessions_root=str(tmp_path),
@@ -220,6 +221,36 @@ async def test_provision_binds_shared_creds_volume(tmp_path):
     # Source dirs exist and are traversable by the toolbox's (differing) uid.
     assert os.path.isdir(aws_src) and (os.stat(aws_src).st_mode & 0o777) == 0o755
     assert os.path.isdir(kube_src)
+
+
+@pytest.mark.asyncio
+async def test_provision_mounts_squid_confd_only_when_set(tmp_path):
+    """The proxy bind-mounts the conf.d drop-in dir read-only at /conf.d (so squid.conf's
+    `include /conf.d/*.conf` resolves to local ACL fragments) ONLY when sandbox_squid_confd
+    is configured — a dedicated path, never the image's /etc/squid/conf.d."""
+    settings = _settings(tmp_path)
+    proxy_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        # Capture the proxy's `docker run` (identified by the squid image); ignore the
+        # conversation container's run.
+        if args[0] == "run" and settings.sandbox_squid_image in args:
+            proxy_run.clear()
+            proxy_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+    ):
+        settings.sandbox_squid_confd = "/etc/inkwest/conf.d"
+        await sandbox.provision("sid")
+        assert "/etc/inkwest/conf.d:/conf.d:ro" in proxy_run
+
+        settings.sandbox_squid_confd = ""
+        await sandbox.provision("sid2")
+        assert not any(a.endswith(":/conf.d:ro") for a in proxy_run)
 
 
 @pytest.mark.asyncio

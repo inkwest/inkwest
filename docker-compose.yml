@@ -128,6 +128,7 @@ services:
       - SANDBOX_ENV_FILE=/app/sandbox.env  # --env-file read by the docker client here
       - SANDBOX_SQUID_CONF=/etc/inkwest/squid.conf  # -v source resolved by dind (mounted there)
       - SANDBOX_SQUID_ERRORS=/etc/inkwest/errors  # custom error pages, sibling of the conf
+      - SANDBOX_SQUID_CONFD=/etc/inkwest/conf.d  # conf.d drop-in for local ACL fragments (sibling)
       - SANDBOX_SESSIONS_ROOT=/sandbox/sessions  # the shared named volume
       - SANDBOX_CREDS_ROOT=/sandbox/creds  # RAM (tmpfs) creds volume, shared with dind
     volumes:

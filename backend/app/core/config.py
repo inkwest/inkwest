@@ -159,6 +159,14 @@ class Settings(BaseSettings):
     # The checked-in squid.conf sets error_directory, so set this whenever
     # sandbox_squid_conf points at it. Empty = squid's stock pages.
     sandbox_squid_errors: str = ""
+    # Optional host path bind-mounted read-only at a DEDICATED /conf.d in the proxy: the
+    # checked-in squid.conf `include`s /conf.d/*.conf, so local/site-specific ACL fragments
+    # (e.g. extra allowed_domains for a VPN) can extend the policy without editing the
+    # tracked squid.conf. A dedicated dir (not the image's /etc/squid/conf.d) avoids pulling
+    # in the stock image's `http_access allow localnet` and fails CLOSED when unmounted. A
+    # committed placeholder keeps the glob non-empty (squid FATALs on a zero-match include).
+    # Empty = not mounted (squid.conf's include then FATALs — set this for the proxy to run).
+    sandbox_squid_confd: str = ""
     # Optional resolver for the proxy container (`docker run --dns`). The stock squid
     # image often can't resolve public names via the host's stub resolver — set this
     # (e.g. 1.1.1.1, as in the POC) when egress fails with DNS errors. Empty = default.
