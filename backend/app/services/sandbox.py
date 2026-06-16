@@ -262,6 +262,12 @@ async def provision(session_id: str) -> Sandbox:
             proxy_run += ["-v", f"{settings.sandbox_squid_conf}:/etc/squid/squid.conf:ro"]
         if settings.sandbox_squid_errors:
             proxy_run += ["-v", f"{settings.sandbox_squid_errors}:/etc/squid/errors:ro"]
+        if settings.sandbox_squid_confd:
+            # conf.d drop-in for local ACL fragments. Mounted at a DEDICATED /conf.d (NOT
+            # the image's /etc/squid/conf.d, which ships `http_access allow localnet`):
+            # squid.conf `include`s /conf.d/*.conf, so the stock image's open rule is never
+            # in scope and an absent mount fails closed (FATAL) instead of wide-open.
+            proxy_run += ["-v", f"{settings.sandbox_squid_confd}:/conf.d:ro"]
         if settings.sandbox_proxy_dns:
             proxy_run += ["--dns", settings.sandbox_proxy_dns]
         proxy_run += [settings.sandbox_squid_image]
