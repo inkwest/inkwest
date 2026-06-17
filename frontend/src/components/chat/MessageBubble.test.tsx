@@ -5,6 +5,7 @@ import type { Message } from '@/types/api';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
+import { useComposerStore } from '@/store/composer';
 import { formatTimestamp, formatFullTimestamp } from '@/lib/utils';
 
 vi.mock('./MarkdownContent', () => ({
@@ -325,6 +326,47 @@ describe('MessageBubble', () => {
       };
       render(<MessageBubble message={msg} />);
       expect(screen.queryByRole('button', { name: /copy formatted/i })).not.toBeInTheDocument();
+    });
+  });
+
+  describe('reuse prompt', () => {
+    beforeEach(() => {
+      useComposerStore.setState({ pending: null, nonce: 0 });
+    });
+
+    it('offers an Edit button on a non-empty string user message', () => {
+      render(<MessageBubble message={baseMessage} />);
+      expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument();
+    });
+
+    it('injects the raw prompt into the composer channel on click', () => {
+      const msg: Message = { ...baseMessage, content: '  list pods\nin kube-system  ' };
+      render(<MessageBubble message={msg} />);
+      fireEvent.click(screen.getByRole('button', { name: /edit/i }));
+      // Verbatim — internal newlines and surrounding whitespace preserved.
+      expect(useComposerStore.getState().pending).toBe('  list pods\nin kube-system  ');
+      expect(useComposerStore.getState().nonce).toBe(1);
+    });
+
+    it('offers no Edit button on assistant messages', () => {
+      const msg: Message = { ...baseMessage, role: 'assistant', content: 'Here are your pods.' };
+      render(<MessageBubble message={msg} />);
+      expect(screen.queryByRole('button', { name: /edit/i })).not.toBeInTheDocument();
+    });
+
+    it('offers no Edit button on a whitespace-only user message', () => {
+      const msg: Message = { ...baseMessage, content: '   ' };
+      render(<MessageBubble message={msg} />);
+      expect(screen.queryByRole('button', { name: /edit/i })).not.toBeInTheDocument();
+    });
+
+    it('offers no Edit button on a non-string (tool/block) user message', () => {
+      const msg: Message = {
+        ...baseMessage,
+        content: [{ type: 'text', text: 'block content' }],
+      };
+      render(<MessageBubble message={msg} />);
+      expect(screen.queryByRole('button', { name: /edit/i })).not.toBeInTheDocument();
     });
   });
 

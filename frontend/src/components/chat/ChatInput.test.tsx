@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatInput } from './ChatInput';
 import { useDraftsStore } from '@/store/drafts';
+import { useComposerStore } from '@/store/composer';
 import { useChatStore } from '@/store/chat';
 import { useSkillsStore } from '@/store/skills';
 import { Message, Skill } from '@/types/api';
@@ -13,6 +14,7 @@ describe('ChatInput', () => {
   beforeEach(() => {
     onSend.mockClear();
     useDraftsStore.setState({ drafts: {} });
+    useComposerStore.setState({ pending: null, nonce: 0 });
     useChatStore.setState({ messages: [] });
     // Stub the templates store so the on-mount fetch is a no-op (no real network) and
     // the "/" autocomplete starts empty unless a test populates it.
@@ -301,6 +303,57 @@ describe('ChatInput', () => {
       await user.type(getTextarea(), '/summarize{enter}'); // -> "/summarize-incident "
       expect(screen.getByText(/\[merge request URL\]/)).toBeInTheDocument(); // bracketed
       expect(screen.queryByText(/arguments libres/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('composer inject (reuse prompt)', () => {
+    const getTextarea = () =>
+      screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
+
+    it('loads injected text into an empty composer without confirming', () => {
+      const confirmSpy = vi.spyOn(window, 'confirm');
+      render(<ChatInput onSend={onSend} />);
+      act(() => useComposerStore.getState().inject('reuse this prompt'));
+      expect(getTextarea().value).toBe('reuse this prompt');
+      expect(confirmSpy).not.toHaveBeenCalled();
+      // Channel is consumed so a remount can't re-inject.
+      expect(useComposerStore.getState().pending).toBeNull();
+      confirmSpy.mockRestore();
+    });
+
+    it('overwrites non-empty composer text after the user confirms', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), 'half-typed draft');
+      act(() => useComposerStore.getState().inject('reused'));
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(getTextarea().value).toBe('reused');
+      confirmSpy.mockRestore();
+    });
+
+    it('keeps the existing draft when the user cancels the overwrite', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), 'half-typed draft');
+      act(() => useComposerStore.getState().inject('reused'));
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(getTextarea().value).toBe('half-typed draft');
+      // Channel is consumed regardless, so the cancelled prompt won't linger.
+      expect(useComposerStore.getState().pending).toBeNull();
+      confirmSpy.mockRestore();
+    });
+
+    it('does not confirm when the injected text matches the current draft', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm');
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), 'same text');
+      act(() => useComposerStore.getState().inject('same text'));
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(getTextarea().value).toBe('same text');
+      confirmSpy.mockRestore();
     });
   });
 });
