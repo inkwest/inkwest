@@ -2,6 +2,7 @@ import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, typ
 import { Send, Square } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
+import { useComposerStore } from '@/store/composer';
 import { useChatStore } from '@/store/chat';
 import { useSkillsStore } from '@/store/skills';
 import { Skill } from '@/types/api';
@@ -66,6 +67,8 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   const compact = useSettingsStore((s) => s.compactToolCards);
   const setDraft = useDraftsStore((s) => s.setDraft);
   const clearDraft = useDraftsStore((s) => s.clearDraft);
+  const composerNonce = useComposerStore((s) => s.nonce);
+  const consumeComposer = useComposerStore((s) => s.consume);
   // Seed once from the persisted per-session draft so switching sessions (which
   // unmounts this component behind the "Loading session..." guard) and coming
   // back restores what the user had typed.
@@ -73,6 +76,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     sessionId ? useDraftsStore.getState().drafts[sessionId] ?? '' : ''
   );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Mirrors the latest `message` for effects that run on a non-`message` dep
+  // (the inject effect) and must read the current value without a stale closure.
+  const messageRef = useRef(message);
+  messageRef.current = message;
   const initialPromptApplied = useRef(false);
   const [shimmer, setShimmer] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -282,6 +289,25 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   // Palette pick: insert "/<slug> " at the cursor (no token to replace).
   const insertSkillFromPalette = (slug: string) =>
     applyEdit(insertAtCursor(message, cursor, `/${slug} `));
+
+  // External inject (e.g. "reuse this prompt" on a past user message): load the
+  // text into the composer with the caret at the end, then clear the channel.
+  // Keyed on `nonce` so re-injecting identical text still applies. If the composer
+  // already holds different unsent text, confirm first — injecting otherwise
+  // silently destroys the in-progress message (and its persisted draft).
+  useEffect(() => {
+    const { pending } = useComposerStore.getState();
+    if (pending == null) return;
+    const current = messageRef.current.trim();
+    if (current && current !== pending.trim() &&
+        !confirm('Replace the text in the composer with this prompt?')) {
+      consumeComposer();
+      return;
+    }
+    applyEdit({ text: pending, cursor: pending.length });
+    consumeComposer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [composerNonce]);
 
   // Square corner buttons anchored NW (skill) / SE (send) in both variants. The
   // compact square (h-11 = leading-6 + py-2 + border) matches a single-line

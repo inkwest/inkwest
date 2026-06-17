@@ -7,7 +7,8 @@ import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils';
-import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal } from 'lucide-react';
+import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal, PencilLine } from 'lucide-react';
+import { useComposerStore } from '@/store/composer';
 import * as api from '@/services/api';
 import {
   messageContentToMarkdown,
@@ -223,6 +224,13 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
 
   const canShare = isFirstUserMessage && isUser && typeof message.content === 'string' && currentSession?.cluster;
 
+  // "Reuse prompt": load a past user prompt back into the composer to edit & resend.
+  // String content only; the raw text (including internal newlines) is injected verbatim.
+  const canReusePrompt = isUser && typeof message.content === 'string' && message.content.trim().length > 0;
+  const handleReusePrompt = () => {
+    if (typeof message.content === 'string') useComposerStore.getState().inject(message.content);
+  };
+
   // Copy-as-Markdown is offered on assistant answers only, and only when there is
   // actual text to copy (a tool-only turn has no Markdown body).
   const markdownBody = message.role === 'assistant' ? messageContentToMarkdown(message.content) : '';
@@ -400,16 +408,27 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
 
         {renderContent()}
 
-        {showTimestamps && message.created_at && (
-          <div
-            title={formatFullTimestamp(message.created_at)}
-            className={cn(
-              'mt-1 text-right',
-              TEXT_SIZE.label(compact),
-              isUser ? 'text-blue-200/60' : 'text-gray-400',
+        {((showTimestamps && message.created_at) || canReusePrompt) && (
+          <div className={cn('mt-1 flex items-center justify-end gap-2', TEXT_SIZE.label(compact))}>
+            {canReusePrompt && (
+              <button
+                type="button"
+                onClick={handleReusePrompt}
+                title="Edit & resend — load this prompt into the composer"
+                className="flex items-center gap-1 text-blue-200/60 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 hover:text-white"
+              >
+                <PencilLine className="w-3 h-3" />
+                Edit
+              </button>
             )}
-          >
-            {formatTimestamp(message.created_at)}
+            {showTimestamps && message.created_at && (
+              <span
+                title={formatFullTimestamp(message.created_at)}
+                className={isUser ? 'text-blue-200/60' : 'text-gray-400'}
+              >
+                {formatTimestamp(message.created_at)}
+              </span>
+            )}
           </div>
         )}
 
