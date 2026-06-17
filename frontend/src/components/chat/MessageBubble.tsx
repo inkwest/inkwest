@@ -168,7 +168,12 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
       if (copyMenuRef.current && !copyMenuRef.current.contains(e.target as Node)) setCopyMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setCopyMenuOpen(false);
+      // Consume Escape here so the topmost overlay wins — otherwise it bubbles to the
+      // global Escape-to-stop listener (ChatInput) and would also abort a live stream.
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setCopyMenuOpen(false);
+      }
     };
     document.addEventListener('mousedown', onPointer);
     document.addEventListener('keydown', onKey);

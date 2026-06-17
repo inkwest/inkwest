@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, KeyboardEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Send, Square } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
@@ -219,7 +219,22 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSubmit, disabled, isStreaming, message, initialPrompt]);
 
-  const handleKeyDown = (e: KeyboardEvent) => {
+  // Escape stops an in-flight response from anywhere on the page, not only when the
+  // composer is focused (the user is usually watching the stream, not the input).
+  // Skipped while the "/" skill dropdown is open — there Escape dismisses the dropdown
+  // (handled in handleKeyDown) rather than stopping.
+  useEffect(() => {
+    if (!isStreaming) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || showSkills) return;
+      e.preventDefault();
+      onStop?.();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isStreaming, showSkills, onStop]);
+
+  const handleKeyDown = (e: ReactKeyboardEvent) => {
     if (showSkills) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();

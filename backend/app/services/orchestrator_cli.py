@@ -250,13 +250,16 @@ required.
                     container=container,
                     docker_path=settings.sandbox_docker_path,
                     model=model_choice,
+                    cancel_event=cancel_event,
                 )
 
                 async for event in parse_cli_response(output_stream):
-                    if cancel_event and cancel_event.is_set():
-                        logger.info("CLI chat cancelled by user")
-                        yield done_event(stopped=True)
-                        return
+                    # NB: cancellation is handled authoritatively inside execute_claude_cli
+                    # (it races each read against the stop, kills the agent, then ends the
+                    # stream) — NOT by returning here. Returning mid-stream would abandon the
+                    # CLI generator before its kill ran (async-gen cleanup is GC-timed), so
+                    # the in-container agent could outlive the stop. We let the stream end and
+                    # emit the stopped marker once, below.
 
                     if event.type == "session_info" and event.metadata.get("cli_session_id"):
                         # init/metadata only — NOT client-visible output, so it must not
@@ -308,6 +311,13 @@ required.
                         yield event
                     else:
                         yield event
+
+                # The stream ends naturally once execute_claude_cli has stopped the agent
+                # on an explicit cancel; surface that to the client as a stopped turn.
+                if cancel_event and cancel_event.is_set():
+                    logger.info("CLI chat cancelled by user")
+                    yield done_event(stopped=True)
+                    return
                 break  # turn completed
             except RuntimeError as e:
                 # Stale --resume target (sandbox rebuilt -> transcript gone): the CLI fails

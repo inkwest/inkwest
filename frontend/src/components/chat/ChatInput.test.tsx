@@ -136,6 +136,21 @@ describe('ChatInput', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it('stops a streaming response on Escape from anywhere on the page', () => {
+    const onStop = vi.fn();
+    render(<ChatInput onSend={onSend} onStop={onStop} isStreaming />);
+    // Dispatched on document (not the composer) — the listener is global.
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not stop on Escape when no response is streaming', () => {
+    const onStop = vi.fn();
+    render(<ChatInput onSend={onSend} onStop={onStop} />);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
   describe('invite-to-prompt border', () => {
     const existingMessage: Message = {
       id: 'm1',
