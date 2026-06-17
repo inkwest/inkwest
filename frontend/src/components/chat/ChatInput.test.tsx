@@ -208,6 +208,136 @@ describe('ChatInput', () => {
     });
   });
 
+  describe('prompt history recall (ArrowUp/ArrowDown)', () => {
+    const mkUser = (id: string, content: string): Message => ({
+      id,
+      session_id: 's1',
+      role: 'user',
+      content,
+      created_at: '2026-01-01T00:00:00Z',
+    });
+    const getTextarea = () =>
+      screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
+
+    it('recalls the newest prompt on ArrowUp from an empty composer', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'first'), mkUser('m2', 'second')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('second');
+    });
+
+    it('walks older then back to newer through history', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'first'), mkUser('m2', 'second')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // second
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // first
+      expect(ta.value).toBe('first');
+      fireEvent.keyDown(ta, { key: 'ArrowDown' }); // second
+      expect(ta.value).toBe('second');
+    });
+
+    it('stays on the oldest prompt past the top', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'only')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('only');
+    });
+
+    it('restores the live draft when stepping past the newest prompt', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'draft' } });
+      ta.setSelectionRange(0, 0); // caret at start so ArrowUp enters history
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('past');
+      fireEvent.keyDown(ta, { key: 'ArrowDown' });
+      expect(ta.value).toBe('draft');
+    });
+
+    it('does not enter history when the caret is not at the start', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'multi\nline' } });
+      ta.setSelectionRange(7, 7); // somewhere on the second line
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('multi\nline');
+    });
+
+    it('ignores ArrowDown when not navigating history', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'typed' } });
+      fireEvent.keyDown(ta, { key: 'ArrowDown' });
+      expect(ta.value).toBe('typed');
+    });
+
+    it('does nothing on ArrowUp with no past prompts', () => {
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('');
+    });
+
+    it('moves the caret within a multi-line recalled prompt before walking older', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'older'), mkUser('m2', 'line1\nline2')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // recall newest multi-line prompt
+      expect(ta.value).toBe('line1\nline2');
+      // Caret on the last line: ArrowUp moves within the prompt, does not walk older.
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('line1\nline2');
+      // Caret on the first line: now ArrowUp walks to the older prompt.
+      ta.setSelectionRange(0, 0);
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('older');
+    });
+
+    it('collapses consecutive duplicate prompts', () => {
+      useChatStore.setState({
+        messages: [mkUser('m1', 'dup'), mkUser('m2', 'dup'), mkUser('m3', 'other')],
+      });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // newest: 'other'
+      expect(ta.value).toBe('other');
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // 'dup' once, not twice
+      expect(ta.value).toBe('dup');
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // already oldest
+      expect(ta.value).toBe('dup');
+    });
+
+    it('recalls from caret 0 even when the draft begins with a newline', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: '\nleading newline' } });
+      ta.setSelectionRange(0, 0); // caret on the empty first line
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('past');
+    });
+
+    it('keeps the persisted draft intact while recalling (only the textarea changes)', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} sessionId="s1" />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'mydraft' } });
+      ta.setSelectionRange(0, 0);
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('past');
+      // The recall must not clobber the user's own draft in the store.
+      expect(useDraftsStore.getState().drafts['s1']).toBe('mydraft');
+    });
+  });
+
   describe('skill autocomplete ("/")', () => {
     const templates: Skill[] = [
       {
