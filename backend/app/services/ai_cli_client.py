@@ -10,12 +10,134 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from app.services.events import ChatEvent
 
 logger = logging.getLogger(__name__)
+
+# Grace period between SIGTERM and SIGKILL when stopping the agent on an explicit
+# cancel: let it shut down cleanly, but don't wait forever if it ignores the signal.
+_STOP_GRACE_SECONDS = 5.0
+
+
+def _terminate_quiet(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+
+
+def _kill_quiet(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+
+async def _container_signal(docker_path: str, container: str, pid_file: str, sig: str) -> bool:
+    """Send `sig` to the in-container agent via its recorded PID (best-effort).
+
+    Uses `sh`'s builtin `kill` so it works without procps in the toolbox image. Never
+    raises — stopping is best-effort; a missing pid file / already-dead process is fine.
+
+    Returns True if a PID was present to signal, False if the pid file was missing/empty
+    (the kill itself is still best-effort and not reflected in the result), so the caller
+    can flag a stop that had nothing to target.
+    """
+    pf = shlex.quote(pid_file)
+    # exit 3 distinguishes "no PID recorded" from a kill that simply found the process
+    # already gone — only the former means the stop signal hit nothing.
+    script = (
+        f'p=$(cat {pf} 2>/dev/null); [ -n "$p" ] || exit 3; kill -{sig} "$p" 2>/dev/null; exit 0'
+    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            docker_path,
+            "exec",
+            container,
+            "sh",
+            "-c",
+            script,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await asyncio.wait_for(proc.wait(), timeout=10) != 3
+    except Exception:
+        logger.warning("Failed to signal in-container agent (%s)", sig, exc_info=True)
+        return False
+
+
+async def _container_alive(docker_path: str, container: str, pid_file: str) -> bool:
+    """True if the in-container agent PID is still alive (`kill -0`)."""
+    pf = shlex.quote(pid_file)
+    script = f'p=$(cat {pf} 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null'
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            docker_path,
+            "exec",
+            container,
+            "sh",
+            "-c",
+            script,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await asyncio.wait_for(proc.wait(), timeout=10) == 0
+    except Exception:
+        return False
+
+
+async def _stop_agent(
+    process: asyncio.subprocess.Process,
+    *,
+    container: str | None,
+    docker_path: str,
+    pid_file: str | None,
+) -> None:
+    """Stop the running agent: SIGTERM, then SIGKILL after a grace period.
+
+    In sandbox mode the agent runs INSIDE the container; `docker exec` does not forward
+    signals to it, so it's signaled directly by its recorded PID (the local client is
+    just torn down alongside). In local mode `process` IS the agent, so it's signaled
+    directly.
+    """
+    if container and pid_file:
+        signaled = await _container_signal(docker_path, container, pid_file, "TERM")
+        if not signaled:
+            # No PID recorded inside the container (e.g. the launch wrapper couldn't
+            # write the pid file). The agent may still be running and we can't target
+            # it — surface it instead of silently regressing to "stop does nothing".
+            logger.warning(
+                "In-container stop found no agent PID to signal (container=%s); "
+                "the agent may still be running",
+                container,
+            )
+        _terminate_quiet(process)  # drop the local docker-exec client too
+        waited = 0.0
+        while waited < _STOP_GRACE_SECONDS:
+            if not await _container_alive(docker_path, container, pid_file):
+                break
+            await asyncio.sleep(0.5)
+            waited += 0.5
+        else:
+            await _container_signal(docker_path, container, pid_file, "KILL")
+    else:
+        _terminate_quiet(process)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_STOP_GRACE_SECONDS)
+        except TimeoutError:
+            _kill_quiet(process)
+    # Reap the local client so no handle/zombie lingers.
+    _kill_quiet(process)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=_STOP_GRACE_SECONDS)
+    except TimeoutError:
+        pass
 
 
 @dataclass
@@ -40,6 +162,7 @@ async def execute_claude_cli(
     container: str | None = None,
     docker_path: str = "docker",
     model: str | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> AsyncIterator[str]:
     """
     Execute Claude CLI and stream output.
@@ -68,6 +191,9 @@ async def execute_claude_cli(
         docker_path: Path to the `docker` CLI used for the `docker exec` wrapper.
         model: Explicit model for this turn (`claude --model`). None = let the
             CLI use its own configured default.
+        cancel_event: Set by an explicit user stop. When it fires, the agent is
+            stopped promptly (SIGTERM then SIGKILL after a grace period) instead of
+            waiting for its next output line.
 
     Yields:
         Lines of JSON output from the CLI
@@ -107,6 +233,10 @@ async def execute_claude_cli(
     # process-globally, so conversations stay isolated.
     proc_env = {**os.environ, **extra_env} if extra_env else None
 
+    # PID file (container mode only) lets an explicit stop signal the agent directly:
+    # `docker exec` does NOT forward signals to the in-container process, so killing the
+    # local client alone would leave the agent running and burning tokens.
+    pid_file: str | None = None
     if container:
         # Run `claude` inside the per-conversation toolbox container. Each cred is
         # passed as a value-less `-e KEY`: docker reads the value from this client's
@@ -114,9 +244,17 @@ async def execute_claude_cli(
         # local path. `-w` sets the dir inside the container (don't chdir the client).
         env_flags = [flag for key in (extra_env or {}) for flag in ("-e", key)]
         workdir_flags = ["-w", cwd] if cwd else []
+        # Record the agent's own PID before handing off: `exec "$@"` replaces the shell
+        # with `claude`, so the `$$` written here is claude's PID inside the container —
+        # the target an explicit stop signals (see _stop_agent). The file is overwritten
+        # at each turn start; one turn per session (turn_runner) means no concurrent
+        # writers, and Stop is only reachable once streaming has begun — by which point
+        # this write has long completed — so a stop can't race ahead of the PID record.
+        pid_file = f"/tmp/inkwest-agent-{session_id}.pid"
+        launch = ["sh", "-c", f'echo $$ > {shlex.quote(pid_file)}; exec "$@"', "sh", *inner]
         # No `-i`: `claude -p` reads the prompt from argv, not stdin; attaching stdin is
         # unnecessary surface. stdout is still streamed back to us as the inner process runs.
-        cmd = [docker_path, "exec", *env_flags, *workdir_flags, container, *inner]
+        cmd = [docker_path, "exec", *env_flags, *workdir_flags, container, *launch]
         run_cwd: str | None = None
     else:
         cmd = inner
@@ -139,25 +277,50 @@ async def execute_claude_cli(
     )
 
     try:
-        # Create a task to handle the timeout
+        # Read stdout line by line, but race each read against an explicit stop so a
+        # cancel is honored within milliseconds instead of blocking until the agent's
+        # next line (it may be mid-tool or mid-thought, emitting nothing for a while).
         async def read_stdout() -> AsyncIterator[str]:
-            """Read stdout line by line."""
+            """Read stdout line by line; stop the agent promptly on cancel."""
             assert process.stdout is not None
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
-                decoded = line.decode().strip()
-                if decoded:
-                    yield decoded
+            cancel_task = asyncio.ensure_future(cancel_event.wait()) if cancel_event else None
+            try:
+                while True:
+                    read_task = asyncio.ensure_future(process.stdout.readline())
+                    waiters = {read_task} | ({cancel_task} if cancel_task else set())
+                    done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                    if cancel_task is not None and cancel_task in done:
+                        read_task.cancel()
+                        await asyncio.gather(read_task, return_exceptions=True)
+                        logger.info("CLI stream cancelled — stopping agent")
+                        await _stop_agent(
+                            process,
+                            container=container,
+                            docker_path=docker_path,
+                            pid_file=pid_file,
+                        )
+                        return
+                    line = read_task.result()
+                    if not line:
+                        break
+                    decoded = line.decode().strip()
+                    if decoded:
+                        yield decoded
+            finally:
+                if cancel_task is not None and not cancel_task.done():
+                    cancel_task.cancel()
 
-        # Stream stdout line by line with timeout
         try:
             async for line in read_stdout():
                 yield line
         except asyncio.CancelledError:
             logger.warning("CLI stream cancelled")
             raise
+
+        # _stop_agent already terminated and reaped the process above; don't fall through
+        # to the returncode check, which would mis-report the kill as a CLI failure.
+        if cancel_event and cancel_event.is_set():
+            return
 
         # Wait for process to complete
         try:

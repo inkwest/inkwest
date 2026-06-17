@@ -19,7 +19,12 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
   ({ className, isOpen, onClose, title, size = 'md', align = 'center', children, ...props }, ref) => {
     useEffect(() => {
       const handleEscape = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') onClose();
+        // Consume Escape here so the topmost overlay wins — otherwise it bubbles to the
+        // global Escape-to-stop listener (ChatInput) and would also abort a live stream.
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          onClose();
+        }
       };
 
       if (isOpen) {
