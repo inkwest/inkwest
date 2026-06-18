@@ -54,7 +54,8 @@ class Sandbox:
     proxy: str  # inkwest_proxy_<tag> — its squid proxy container
     int_net: str  # inkwest_intnet_<tag>
     ext_net: str  # inkwest_extnet_<tag>
-    last_used: float  # event-loop clock; refreshed by ensure()
+    last_used: float  # event-loop clock; refreshed by ensure()/release()
+    in_use: int = 0  # live turns holding this pair; reaper never touches in_use > 0
 
 
 @dataclass(frozen=True)
@@ -332,11 +333,16 @@ async def provision(session_id: str) -> Sandbox:
 
 
 async def ensure(session_id: str) -> str:
-    """Return the conversation container name, provisioning the pair if needed.
+    """Acquire the conversation container for a turn, provisioning the pair if needed.
 
     Reuses a live pair across turns (refreshing its idle clock). A pair that died
     out-of-band (OOM kill, proxy crash) is torn down and rebuilt so the turn still
     runs against a working sandbox.
+
+    Bumps an in-use refcount the caller MUST drop with :func:`release` when the turn
+    ends (use a ``finally``). ``last_used`` only marks turn *start*; a turn outliving
+    the idle TTL would otherwise be reaped mid-``docker exec``. The refcount, not the
+    clock, is what makes the reaper skip a sandbox with a turn in flight.
     """
     async with _locks[session_id]:
         sb = _sandboxes.get(session_id)
@@ -348,8 +354,29 @@ async def ensure(session_id: str) -> str:
             sb = await provision(session_id)
             _sandboxes[session_id] = sb
             logger.info("sandbox_provisioned", session_id=session_id, conv=sb.conv)
+        # Refcount, not a bool: correct only because turn_runner enforces one active
+        # turn per session, so ensure()/release() pair 1:1 (in_use is 0 or 1). The
+        # stale-rebuild above resets a fresh pair to in_use=0 — safe under that invariant
+        # (no other turn holds a lease). If per-session concurrency is ever allowed, a
+        # doomed turn's release() would then under-count and the reaper could kill a live one.
+        sb.in_use += 1
         sb.last_used = _now()
         return sb.conv
+
+
+async def release(session_id: str) -> None:
+    """Drop the in-use refcount taken by :func:`ensure` and restart the idle clock.
+
+    Restarting ``last_used`` here means the idle TTL is measured from turn *end*, which
+    is what "no input in the session" actually means. A no-op if the sandbox is already
+    gone (e.g. an explicit session delete tore it down mid-turn)."""
+    async with _locks[session_id]:
+        sb = _sandboxes.get(session_id)
+        if sb is None:
+            return
+        if sb.in_use > 0:
+            sb.in_use -= 1
+        sb.last_used = _now()
 
 
 async def _teardown_unlocked(session_id: str, *, remove_dir: bool) -> None:
@@ -403,18 +430,23 @@ async def _reap_idle() -> None:
     """One reaping sweep: soft-teardown sandboxes idle beyond the TTL.
 
     Snapshot the idle candidates, then re-validate each UNDER its per-session lock
-    before tearing down. ensure() refreshes ``last_used`` under the same lock, so a turn
-    that started (or began provisioning) between the snapshot and the teardown is seen
-    here and skipped — without the lock the reaper could ``docker rm -f`` a container a
-    live ``docker exec`` turn just acquired.
+    before tearing down. ensure()/release() touch ``in_use`` and ``last_used`` under the
+    same lock, so a turn that started (or began provisioning) between the snapshot and
+    the teardown is seen here and skipped — without this the reaper could ``docker rm -f``
+    a container with a live ``docker exec`` turn in flight (one that outran the idle TTL,
+    since ``last_used`` only marks the turn's start).
     """
     ttl = get_settings().sandbox_idle_ttl
-    candidates = [sid for sid, sb in list(_sandboxes.items()) if _now() - sb.last_used > ttl]
+    candidates = [
+        sid
+        for sid, sb in list(_sandboxes.items())
+        if sb.in_use == 0 and _now() - sb.last_used > ttl
+    ]
     for session_id in candidates:
         async with _locks[session_id]:
             sb = _sandboxes.get(session_id)
-            if sb is None or _now() - sb.last_used <= ttl:
-                continue  # already gone, or a turn refreshed it after the snapshot
+            if sb is None or sb.in_use > 0 or _now() - sb.last_used <= ttl:
+                continue  # gone, busy with a turn, or refreshed after the snapshot
             logger.info("sandbox_reap_idle", session_id=session_id)
             # Keep the durable dir so a later turn can resume the conversation.
             await _teardown_unlocked(session_id, remove_dir=False)  # already holding the lock
