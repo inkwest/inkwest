@@ -19,6 +19,7 @@ STS credentials — are capped by the user's own SSO assignments.
 import asyncio
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any, ClassVar
@@ -291,38 +292,80 @@ class AwsConnector(Connector):
         )
 
 
+# Each pick is an independent SSO ``GetRoleCredentials`` call, so they mint
+# concurrently rather than serially (a "tout cocher" over dozens of accounts was
+# N sequential round-trips). A *dedicated* pool — not the shared default
+# ``asyncio.to_thread`` executor — caps total in-flight STS calls process-wide
+# (8), so a burst of grants can't starve unrelated blocking work (kubectl exec,
+# other connectors); the pool size is the de-facto concurrency bound. Sized small
+# because GetRoleCredentials is fast and we'd rather not poke SSO throttling.
+_STS_MINT_CONCURRENCY = 8
+_STS_EXECUTOR = ThreadPoolExecutor(max_workers=_STS_MINT_CONCURRENCY, thread_name_prefix="sts-mint")
+
+
+def _build_sso_client(region: str | None) -> Any:
+    """Construct one SSO client (sync; off the event loop).
+
+    boto3 *client creation* on the shared default session is not guaranteed
+    thread-safe, so we build a single client per mint batch and share it across
+    the concurrent calls (the low-level client's *methods* are thread-safe — same
+    pattern as ``_list_accounts_and_roles``).
+    """
+    import boto3
+
+    return boto3.client("sso", region_name=region)
+
+
 async def _mint_sts_profiles(
     access_token: str, picks: list[dict[str, str]], region: str | None
 ) -> tuple[list[dict[str, Any]], float | None]:
     """Mint one STS profile per account/role pick. Returns (profiles, min expiration).
 
+    Picks are minted concurrently (bounded by ``_STS_EXECUTOR``); the returned
+    profile list preserves the input order. All-or-nothing: if *any* pick fails the
+    whole batch raises (no partial grant) — matching the original serial behaviour.
     Authorization is the caller's concern: ``select_account_roles`` validates picks
     against the offered list; ``remint_profiles`` replays an already-validated
     selection.
     """
-    profiles: list[dict[str, Any]] = []
-    min_expiration: float | None = None
-    for pick in picks:
+    loop = asyncio.get_running_loop()
+    sso = await loop.run_in_executor(_STS_EXECUTOR, _build_sso_client, region)
+
+    async def mint(pick: dict[str, str]) -> dict[str, Any]:
         account_id = pick["account_id"]
         role_name = pick["role_name"]
-        creds = await asyncio.to_thread(
-            _get_role_credentials, access_token, account_id, role_name, region
+        creds = await loop.run_in_executor(
+            _STS_EXECUTOR, _get_role_credentials, sso, access_token, account_id, role_name
         )
         account_name = pick.get("account_name", account_id)
-        profiles.append(
-            {
-                "name": _profile_name(account_name, role_name),
-                "account_id": account_id,
-                "account_name": account_name,
-                "role_name": role_name,
-                "access_key_id": creds["accessKeyId"],
-                "secret_access_key": creds["secretAccessKey"],
-                "session_token": creds["sessionToken"],
-                "region": region,
-            }
-        )
-        exp = creds["expiration"] / 1000
+        return {
+            "name": _profile_name(account_name, role_name),
+            "account_id": account_id,
+            "account_name": account_name,
+            "role_name": role_name,
+            "access_key_id": creds["accessKeyId"],
+            "secret_access_key": creds["secretAccessKey"],
+            "session_token": creds["sessionToken"],
+            "region": region,
+            "expiration": creds["expiration"] / 1000,
+        }
+
+    # return_exceptions=True so one failing pick doesn't leave its siblings as
+    # orphaned "exception never retrieved" tasks; we then fail the whole batch.
+    minted = await asyncio.gather(*(mint(p) for p in picks), return_exceptions=True)
+    errors = [r for r in minted if isinstance(r, BaseException)]
+    if errors:
+        raise ConnectorError(
+            f"Failed to mint {len(errors)}/{len(picks)} STS credential(s): {errors[0]}"
+        ) from errors[0]
+
+    min_expiration: float | None = None
+    profiles: list[dict[str, Any]] = []
+    for p in minted:
+        assert isinstance(p, dict)  # narrows: errors were raised above
+        exp = p.pop("expiration")
         min_expiration = exp if min_expiration is None else min(min_expiration, exp)
+        profiles.append(p)
     return profiles, min_expiration
 
 
@@ -427,12 +470,13 @@ def _list_accounts_and_roles(
 
 
 def _get_role_credentials(
-    access_token: str, account_id: str, role_name: str, region: str | None
+    sso: Any, access_token: str, account_id: str, role_name: str
 ) -> dict[str, Any]:
-    """Mint temporary STS credentials for an account/role (sync; run in a thread)."""
-    import boto3
+    """Mint temporary STS credentials for an account/role (sync; run in a thread).
 
-    sso: Any = boto3.client("sso", region_name=region)
+    Takes a pre-built SSO client so a batch shares one client across threads
+    (see ``_build_sso_client`` — client *creation* isn't thread-safe).
+    """
     resp = sso.get_role_credentials(
         accessToken=access_token, accountId=account_id, roleName=role_name
     )
