@@ -403,3 +403,12 @@ required.
     except Exception as e:
         logger.exception("Unexpected error in CLI orchestration")
         yield error_event(f"Unexpected error: {str(e)}")
+
+    finally:
+        # Drop the in-use lease ensure() took so the idle reaper can reclaim this sandbox
+        # once it goes quiet. Held for the whole turn (not just ensure()) so a turn longer
+        # than SANDBOX_IDLE_TTL isn't torn down mid-exec.
+        if settings.sandbox_enabled and container is not None:
+            from app.services import sandbox
+
+            await sandbox.release(session_id_str)
