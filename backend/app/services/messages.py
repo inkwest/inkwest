@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import Select, and_, delete, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -297,6 +297,75 @@ async def reconcile_interrupted_turns(db: AsyncSession) -> int:
     # execute() is typed Result, but a DML statement yields a CursorResult.
     # The caller (lifespan) logs the count as a structured event.
     return cast("CursorResult[Any]", result).rowcount or 0
+
+
+def _newest_retryable_query(session_id: uuid.UUID) -> Select[tuple[Message]]:
+    """SELECT for the newest retryable ``user`` message in a session (or None)."""
+    return (
+        select(Message)
+        .where(
+            Message.session_id == session_id,
+            Message.role == "user",
+            Message.status == "error",
+            Message.is_retryable == True,  # noqa: E712
+        )
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+
+
+async def get_retryable_message(db: AsyncSession, session_id: str | uuid.UUID) -> str | None:
+    """Return the content of the session's newest retryable ``user`` message.
+
+    Read-only: the error flag is cleared separately via :func:`clear_retry_state`,
+    and only *after* the retry turn is confirmed to start — otherwise a turn that
+    never starts (e.g. one already in progress) would leave the message a
+    non-retryable success with no reply and no way to retry again.
+
+    Usually this row is the trailing (interrupted) turn — see
+    :func:`reconcile_interrupted_turns`. It need not be: a turn interrupted, then
+    talked past, then reconciled on a later restart can leave a non-trailing
+    retryable row; retrying it replays the whole history and appends the reply at
+    the end (a documented limitation, not corruption).
+
+    Returns ``None`` when nothing is retryable.
+    """
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+
+    message = (await db.execute(_newest_retryable_query(session_id))).scalars().first()
+    if message is None:
+        return None
+    if not isinstance(message.content, str):
+        # User messages are always stored as plain strings; a structured payload
+        # here would replay as a Python repr, so refuse rather than feed garbage.
+        logger.warning(
+            "retryable_message_non_string_content",
+            extra={"session_id": str(session_id), "message_id": str(message.id)},
+        )
+        return None
+    return message.content
+
+
+async def clear_retry_state(db: AsyncSession, session_id: str | uuid.UUID) -> None:
+    """Clear the error flag on the newest retryable ``user`` message and bump its
+    retry count. Call only once the retry turn has actually started (see
+    :func:`get_retryable_message`). No-op if nothing is retryable.
+
+    Reusing the row (vs. inserting a new turn) means a page reload after a
+    successful retry won't re-show the stale error bubble.
+    """
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+
+    message = (await db.execute(_newest_retryable_query(session_id))).scalars().first()
+    if message is None:
+        return
+    message.status = "success"
+    message.error_message = None
+    message.is_retryable = False
+    message.retry_count += 1
+    await db.commit()
 
 
 # A session row is created as soon as a chat is opened (e.g. to attach MCP or

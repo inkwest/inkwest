@@ -58,6 +58,50 @@ class TestOrchestrateChat:
         assert text_events[0].content == "Here's a summary of your cluster."
 
     @pytest.mark.asyncio
+    async def test_retry_replays_trailing_user_message_without_persisting(
+        self,
+        mock_db,
+        session_id,
+        cluster_context,
+        simple_text_response,
+        mock_save_message,
+        mock_ensure_title,
+    ):
+        """On retry (persist_user_message=False) the user message is already the
+        trailing history row: it must not be re-saved or duplicated in the payload."""
+        from app.services.orchestrator import orchestrate_chat
+
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=simple_text_response)
+
+        history = [{"role": "user", "content": "analyze the cluster"}]
+        with (
+            patch("app.services.orchestrator.get_ai_client", return_value=mock_client),
+            patch(
+                "app.services.orchestrator.get_session_messages",
+                AsyncMock(return_value=history),
+            ),
+        ):
+            async for _ in orchestrate_chat(
+                db=mock_db,
+                session_id=session_id,
+                user_message="analyze the cluster",
+                persist_user_message=False,
+                **cluster_context,
+            ):
+                pass
+
+        # No user-role save (the assistant reply is still persisted).
+        user_saves = [
+            c for c in mock_save_message.call_args_list if len(c.args) >= 3 and c.args[2] == "user"
+        ]
+        assert user_saves == []
+
+        # The API payload replays the existing history — user message appears once.
+        sent = mock_client.messages.create.call_args.kwargs["messages"]
+        assert [m for m in sent if m["role"] == "user"] == history
+
+    @pytest.mark.asyncio
     async def test_single_tool_call(
         self,
         mock_db,

@@ -8,7 +8,6 @@ import {
   getSession,
   deleteSession,
   updateSession,
-  retryMessage,
   getFailedMessages,
   searchGlobal,
 } from './api';
@@ -127,16 +126,6 @@ describe('updateSession', () => {
       expect.stringContaining('/api/sessions/s1'),
       expect.objectContaining({ method: 'PATCH' }),
     );
-  });
-});
-
-describe('retryMessage', () => {
-  it('sends POST to retry endpoint', async () => {
-    const msg = { id: 'm1', status: 'pending' };
-    mockFetch.mockReturnValue(jsonResponse(msg));
-
-    const result = await retryMessage('s1', 'm1');
-    expect(result).toEqual(msg);
   });
 });
 

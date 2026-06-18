@@ -50,6 +50,7 @@ async def orchestrate_chat_cli(
     namespaces: list[str] | None = None,
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
+    persist_user_message: bool = True,
 ) -> AsyncIterator[ChatEvent]:
     """
     Orchestrate chat using Claude CLI.
@@ -78,22 +79,27 @@ async def orchestrate_chat_cli(
 
     settings = get_settings()
 
-    # Save user message
-    try:
-        await save_message(db, session_id, "user", user_message)
-    except Exception as e:
-        logger.error(f"Failed to save user message: {e}")
-        yield error_event(f"Failed to save message: {str(e)}")
-        return
+    # Save user message (skipped on retry — the errored row is reused). NOTE: the
+    # CLI keeps its own --resume history; if the interrupted attempt already
+    # recorded this user turn there, re-sending the prompt below can duplicate it
+    # CLI-side. Accepted: the CLI provider is local-dev only (the API providers,
+    # which replay DB history, are used in prod).
+    if persist_user_message:
+        try:
+            await save_message(db, session_id, "user", user_message)
+        except Exception as e:
+            logger.error(f"Failed to save user message: {e}")
+            yield error_event(f"Failed to save message: {str(e)}")
+            return
 
-    # Auto-generate session title for first message
-    try:
-        title = await ensure_session_title(db, session_id, user_message)
-        if title:
-            logger.debug(f"Generated session title: {title}")
-    except Exception as e:
-        logger.warning(f"Failed to set session title: {e}")
-        # Non-critical, continue
+        # Auto-generate session title for first message
+        try:
+            title = await ensure_session_title(db, session_id, user_message)
+            if title:
+                logger.debug(f"Generated session title: {title}")
+        except Exception as e:
+            logger.warning(f"Failed to set session title: {e}")
+            # Non-critical, continue
 
     # Get stored CLI session ID for --resume (if any)
     cli_session_id = await get_cli_session_id(db, session_id)

@@ -23,7 +23,7 @@ import {
 interface Props {
   message: Message;
   isFirstUserMessage?: boolean;
-  onRetry?: (message: Message) => void;
+  onRetry?: (messageId: string) => void;
   // Transiently emphasized when deep-linked from a search hit (see ChatView).
   highlighted?: boolean;
 }
@@ -150,7 +150,6 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
   const isUser = message.role === 'user';
   const hasError = message.status === 'error';
   const isPending = message.status === 'pending';
-  const [isRetrying, setIsRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copiedKind, setCopiedKind] = useState<'rich' | 'teams' | 'md' | null>(null);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
@@ -197,18 +196,12 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
     );
   }
 
-  const handleRetry = async () => {
-    if (!message.is_retryable || isRetrying) return;
-
-    setIsRetrying(true);
-    try {
-      const updated = await api.retryMessage(message.session_id, message.id);
-      onRetry?.(updated);
-    } catch (error) {
-      console.error('Failed to retry message:', error);
-    } finally {
-      setIsRetrying(false);
-    }
+  // Fire-and-forget over the chat WS: the backend replays the interrupted turn in
+  // place and onRetry optimistically clears this bubble's error UI, so there's no
+  // local pending state to track here.
+  const handleRetry = () => {
+    if (!message.is_retryable) return;
+    onRetry?.(message.id);
   };
 
   const handleShare = () => {
@@ -462,26 +455,15 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
             {message.is_retryable && (
               <button
                 onClick={handleRetry}
-                disabled={isRetrying}
                 className={cn(
                   'mt-2 flex items-center gap-1.5 rounded',
                   compact ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm',
-                  'bg-red-600 hover:bg-red-700 text-white transition-colors',
-                  'disabled:opacity-50 disabled:cursor-not-allowed'
+                  'bg-red-600 hover:bg-red-700 text-white transition-colors'
                 )}
               >
-                {isRetrying ? (
-                  <>
-                    <Loader2 className={cn(compact ? 'w-3 h-3' : 'w-4 h-4', 'animate-spin')} />
-                    Retrying...
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw className={cn(compact ? 'w-3 h-3' : 'w-4 h-4')} />
-                    Retry
-                    {message.retry_count ? ` (${message.retry_count})` : ''}
-                  </>
-                )}
+                <RefreshCw className={cn(compact ? 'w-3 h-3' : 'w-4 h-4')} />
+                Retry
+                {message.retry_count ? ` (${message.retry_count})` : ''}
               </button>
             )}
           </div>

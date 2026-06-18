@@ -476,10 +476,11 @@ async def get_failed_messages(
 
     # KNOWN LIMITATION: a reconciled (interrupted) user message stays
     # error+retryable even if the user later continued the conversation past it,
-    # so this can return a stale, no-longer-trailing message. Harmless while the
-    # retry UX is unwired; when it is wired, scope this to the session's *latest*
-    # message (or clear the flag once a later reply is persisted). The producer
-    # is reconcile_interrupted_turns(); both should move to an explicit per-turn
+    # so this can return a stale, no-longer-trailing message. The retry path
+    # (get_retryable_message, over the chat WS) acts on the *newest* such row;
+    # when it is not the trailing turn the regenerated reply lands at the end of
+    # history rather than after the retried message. The producer is
+    # reconcile_interrupted_turns(); both should move to an explicit per-turn
     # terminal status together.
     result = await db.execute(
         select(Message)
@@ -493,52 +494,6 @@ async def get_failed_messages(
     messages = result.scalars().all()
 
     return [MessageResponse.model_validate(m) for m in messages]
-
-
-@router.post("/{session_id}/messages/{message_id}/retry", response_model=MessageResponse)
-async def retry_message(
-    session_id: UUID,
-    message_id: UUID,
-    current_user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-) -> MessageResponse:
-    session_result = await db.execute(select(Session).where(Session.id == session_id))
-    session = session_result.scalar_one_or_none()
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session with ID '{session_id}' not found",
-        )
-
-    await check_session_access(session, current_user)
-
-    result = await db.execute(
-        select(Message).where(
-            Message.id == message_id,
-            Message.session_id == session_id,
-        )
-    )
-    message = result.scalar_one_or_none()
-
-    if not message:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Message with ID '{message_id}' not found in session",
-        )
-
-    if not message.is_retryable:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This message cannot be retried",
-        )
-
-    message.status = "pending"
-    message.error_message = None
-    message.retry_count += 1
-    await db.flush()
-    await db.refresh(message)
-
-    return MessageResponse.model_validate(message)
 
 
 # ---------------------------------------------------------------------------

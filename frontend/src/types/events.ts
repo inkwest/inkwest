@@ -17,6 +17,6 @@ export interface ChatEvent {
 }
 
 export interface SendMessage {
-  type: 'message' | 'ping' | 'stop';
+  type: 'message' | 'ping' | 'stop' | 'retry';
   content?: string;
 }

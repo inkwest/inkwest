@@ -83,6 +83,8 @@ interface ChatState {
   setIsConnected: (connected: boolean) => void;
   setError: (error: string | null) => void;
   addMessage: (message: Message) => void;
+  // Optimistically drop a failed message's error UI when its turn is retried.
+  clearMessageError: (messageId: string) => void;
   // New actions for inline streaming
   clearStreamingBlocks: () => void;
   // Todo actions
@@ -187,6 +189,14 @@ export const useChatStore = create<ChatState>((set) => ({
   setError: (error) => set({ error }),
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
+  clearMessageError: (messageId) =>
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === messageId
+          ? { ...m, status: 'success', is_retryable: false, error_message: undefined }
+          : m
+      ),
+    })),
   clearStreamingBlocks: () => set({ streamingBlocks: [] }),
   setTodos: (todos) => set({ currentTodos: todos }),
   clearTodos: () => set({ currentTodos: [] }),

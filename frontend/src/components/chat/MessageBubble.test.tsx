@@ -99,6 +99,19 @@ describe('MessageBubble', () => {
     expect(screen.getByText(/retry/i)).toBeInTheDocument();
   });
 
+  it('fires onRetry with the message id when the retry button is clicked', () => {
+    const onRetry = vi.fn();
+    const msg: Message = {
+      ...baseMessage,
+      status: 'error',
+      error_message: 'Failed',
+      is_retryable: true,
+    };
+    render(<MessageBubble message={msg} onRetry={onRetry} />);
+    fireEvent.click(screen.getByText(/retry/i));
+    expect(onRetry).toHaveBeenCalledWith('msg-1');
+  });
+
   it('hides the timestamp when showTimestamps is disabled', () => {
     useSettingsStore.setState({ showTimestamps: false });
     render(<MessageBubble message={baseMessage} />);
