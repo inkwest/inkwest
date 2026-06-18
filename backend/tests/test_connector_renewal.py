@@ -371,6 +371,40 @@ async def test_select_account_roles_keeps_sso_token_for_remint():
     assert cred.renew_until == provisional.expires_at
 
 
+async def test_select_account_roles_is_all_or_nothing_on_partial_failure():
+    """One failing pick fails the whole batch — concurrent minting is atomic, no
+    partial grant (matches the original serial fail-fast behaviour)."""
+    provisional = MintedCredential(
+        connector="aws",
+        scope="sso:account:access",
+        expires_at=datetime.now(UTC) + timedelta(hours=8),
+        secret={"sso_access_token": "SSO", "sso_refresh_token": None, "region": "eu-west-1"},
+        available_accounts=[{"account_id": "111", "account_name": "acme"}],
+        available_roles=[
+            {"account_id": "111", "role_name": "ReadOnly"},
+            {"account_id": "111", "role_name": "Admin"},
+        ],
+    )
+
+    def _flaky(sso, access_token, account_id, role_name):
+        if role_name == "Admin":
+            raise RuntimeError("STS denied")
+        return _sts_response()
+
+    with patch("app.services.connectors.aws._get_role_credentials", side_effect=_flaky):
+        try:
+            await AwsConnector().select_account_roles(
+                provisional,
+                selections=[
+                    {"account_id": "111", "role_name": "ReadOnly"},
+                    {"account_id": "111", "role_name": "Admin"},
+                ],
+            )
+            raise AssertionError("expected ConnectorError")
+        except ConnectorError:
+            pass
+
+
 async def test_remint_profiles_reuses_saved_selection():
     with patch("app.services.connectors.aws._get_role_credentials", return_value=_sts_response()):
         cred = await AwsConnector().select_account_roles(

@@ -146,9 +146,17 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     }
   };
 
+  // Block dismissal while a grant is in flight — the Modal closes on Escape/backdrop
+  // (and its ✕) unconditionally, so guarding only the Cancel button would be a false
+  // lock that lets the user unmount mid-mint. STS minting is short and atomic.
+  const handleClose = () => {
+    if (submitting) return;
+    onClose();
+  };
+
   // align="top": keeps the modal anchored while the filtered list resizes.
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Sélection des comptes & rôles AWS" size="lg" align="top">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Sélection des comptes & rôles AWS" size="lg" align="top">
       <div className="flex flex-col" style={{ maxHeight: '80vh' }}>
         {/* Search + global check-all */}
         <div className="flex items-center gap-2 mb-3">
@@ -157,15 +165,16 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Rechercher un compte ou un rôle…"
-            className="flex-1 bg-gray-800 text-gray-100 text-sm rounded-md px-3 py-2 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            disabled={submitting}
+            className="flex-1 bg-gray-800 text-gray-100 text-sm rounded-md px-3 py-2 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
           />
-          <Button variant="secondary" size="sm" onClick={toggleAllVisible} disabled={visibleKeys.length === 0}>
+          <Button variant="secondary" size="sm" onClick={toggleAllVisible} disabled={visibleKeys.length === 0 || submitting}>
             {allVisibleSelected ? 'Tout décocher' : 'Tout cocher'}
           </Button>
           <button
             type="button"
             onClick={() => void load(true)}
-            disabled={loading || refreshing}
+            disabled={loading || refreshing || submitting}
             title="Rafraîchir la liste des rôles"
             aria-label="Rafraîchir la liste des rôles"
             className="p-2 rounded-md text-gray-400 hover:text-gray-100 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -189,7 +198,8 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
               <div key={account.account_id} className="rounded-md bg-gray-800/60">
                 <button
                   onClick={() => toggleAccount(account.account_id, accountRoles)}
-                  className="w-full flex items-center justify-between px-3 py-2 text-left"
+                  disabled={submitting}
+                  className="w-full flex items-center justify-between px-3 py-2 text-left disabled:opacity-50"
                 >
                   <span className="text-sm font-medium text-gray-100">
                     {account.account_name}{' '}
@@ -210,7 +220,8 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
                           type="checkbox"
                           checked={checked}
                           onChange={() => toggle(account.account_id, r)}
-                          className="accent-blue-600"
+                          disabled={submitting}
+                          className="accent-blue-600 disabled:opacity-50"
                         />
                         {r}
                       </label>
@@ -223,9 +234,13 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
         </div>
 
         <div className="flex items-center justify-between gap-2 pt-3 border-t border-gray-800 mt-2">
-          <span className="text-xs text-gray-500">{selected.size} sélectionné(s)</span>
+          <span className="text-xs text-gray-500">
+            {submitting
+              ? `Création de ${selected.size} accès en cours…`
+              : `${selected.size} sélectionné(s)`}
+          </span>
           <div className="flex gap-2">
-            <Button variant="ghost" onClick={onClose}>
+            <Button variant="ghost" onClick={handleClose} disabled={submitting}>
               Annuler
             </Button>
             <Button onClick={handleConfirm} disabled={selected.size === 0} isLoading={submitting}>
