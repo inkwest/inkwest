@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CodeBlock } from './CodeBlock';
+import { MermaidDiagram } from './MermaidDiagram';
 import { useSettingsStore } from '@/store/settings';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 import type { Components } from 'react-markdown';
@@ -19,6 +20,12 @@ export function MarkdownContent({ content }: Props) {
       const codeString = String(children).replace(/\n$/, '');
       // Check if inline by seeing if parent is pre (block) or not
       const isInline = node?.position?.start.line === node?.position?.end.line && !className;
+
+      // Render fenced ```mermaid blocks as graphical diagrams (falls back to
+      // source while streaming / on invalid syntax).
+      if (!isInline && language === 'mermaid') {
+        return <MermaidDiagram code={codeString} compact={compact} />;
+      }
 
       return (
         <CodeBlock
