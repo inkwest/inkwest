@@ -47,6 +47,14 @@ class Message(Base):
         String(255),
         nullable=True,
     )
+    # Files attached to a user turn: a JSON list of descriptors
+    # ({filename, original_name, content_type, size}). The files live in the
+    # conversation's /workdir; this lets the chat re-render thumbnails on reload.
+    # NULL for messages without attachments.
+    attachments: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
     # The model that produced this (assistant) turn, captured at generation time.
     # Per-turn cost is model-dependent and the session model can change mid-chat,
     # so this is the only reliable source for accurate cost attribution. NULL for

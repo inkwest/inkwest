@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Message, MessageContent, SessionEventContent, SessionEventTarget } from '@/types/api';
 import { ToolCallCard } from './ToolCallCard';
 import { MarkdownContent } from './MarkdownContent';
+import { MessageAttachments } from './Attachments';
 import { useSettingsStore } from '@/store/settings';
 import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore } from '@/store/admin';
@@ -394,6 +395,10 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
         )}
 
         {renderContent()}
+
+        {isUser && message.attachments && message.attachments.length > 0 && (
+          <MessageAttachments sessionId={message.session_id} attachments={message.attachments} />
+        )}
 
         {showTimestamps && message.created_at && (
           <div

@@ -50,6 +50,7 @@ async def orchestrate_chat_cli(
     namespaces: list[str] | None = None,
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
+    attachments: list[dict] | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """
     Orchestrate chat using Claude CLI.
@@ -65,6 +66,8 @@ async def orchestrate_chat_cli(
         context_name: Optional kubectl context name
         user_message: The user's message to process
         namespaces: Optional list of namespaces for context
+        attachments: Files uploaded to this turn's /workdir, referenced to the
+            agent as @/workdir/<file> (sandbox only)
 
     Yields:
         ChatEvent objects for each step of the orchestration
@@ -78,9 +81,9 @@ async def orchestrate_chat_cli(
 
     settings = get_settings()
 
-    # Save user message
+    # Save user message (with its attachment descriptors, for history thumbnails)
     try:
-        await save_message(db, session_id, "user", user_message)
+        await save_message(db, session_id, "user", user_message, attachments=attachments)
     except Exception as e:
         logger.error(f"Failed to save user message: {e}")
         yield error_event(f"Failed to save message: {str(e)}")
@@ -185,6 +188,14 @@ required.
     system_prompt = f"{system_prompt}\n\n{runtime_context}"
 
     prompt = user_message
+    # Attached files live in this conversation's /workdir; append @/workdir/<file>
+    # references so Claude Code opens them. Sandbox only — that's the only mode with a
+    # /workdir mount (the local fallback dir holds no uploads). Appended AFTER the
+    # verbatim user message so a leading "/skill" still resolves (see system-prompt note).
+    if attachments and settings.sandbox_enabled:
+        refs = " ".join(f"@/workdir/{a['filename']}" for a in attachments if a.get("filename"))
+        if refs:
+            prompt = f"{user_message}\n\n{refs}" if user_message else refs
 
     try:
         # Where the agent works. In sandbox mode `claude` runs inside this

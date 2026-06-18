@@ -32,17 +32,23 @@ class AppConfigResponse(BaseModel):
     model: str
     # Admin-enabled models users may pick per session.
     available_models: list[ModelInfo]
+    # Whether file attachments are usable: requires the per-conversation sandbox
+    # (claude-cli), the only orchestrator with a /workdir + @-file syntax. The UI
+    # hides the attach affordances when false.
+    attachments_enabled: bool
 
 
 @router.get("", response_model=AppConfigResponse)
 async def get_app_config(user: CurrentUser) -> AppConfigResponse:
     """Get the AI provider, default model, and per-session selectable models."""
     await refresh_catalog()  # TTL-aware; no-op while fresh
+    settings = get_settings()
     return AppConfigResponse(
-        provider=get_settings().ai_provider,
+        provider=settings.ai_provider,
         model=default_model(),
         available_models=[
             ModelInfo(id=m, label=model_label(m), legacy=is_legacy_model(m))
             for m in selectable_models()
         ],
+        attachments_enabled=settings.sandbox_enabled and settings.ai_provider == "claude-cli",
     )

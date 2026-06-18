@@ -11,10 +11,11 @@ import { FloatingTodoPanel } from './FloatingTodoPanel';
 import { EgressLog } from './EgressPanel';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
 import { ConnectorInlineNotice } from './ConnectorInlineNotice';
+import { Attachment } from '@/types/api';
 import { cn } from '@/lib/utils';
 
 interface Props {
-  onSendMessage: (content: string) => void;
+  onSendMessage: (content: string, attachments?: Attachment[]) => void;
   onStopStreaming?: () => void;
   initialPrompt?: string | null;
   // Auto-submit initialPrompt once the composer is enabled (WS connected).

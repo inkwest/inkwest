@@ -44,7 +44,7 @@ describe('ChatInput', () => {
     await user.type(textarea, 'list pods');
     await user.click(screen.getByRole('button', { name: /send message/i }));
 
-    expect(onSend).toHaveBeenCalledWith('list pods');
+    expect(onSend).toHaveBeenCalledWith('list pods', undefined);
   });
 
   it('calls onSend on Enter key', async () => {
@@ -54,7 +54,7 @@ describe('ChatInput', () => {
     const textarea = screen.getByPlaceholderText(/investigate or analyse/i);
     await user.type(textarea, 'get nodes{enter}');
 
-    expect(onSend).toHaveBeenCalledWith('get nodes');
+    expect(onSend).toHaveBeenCalledWith('get nodes', undefined);
   });
 
   it('does not send on Shift+Enter', async () => {
@@ -122,7 +122,7 @@ describe('ChatInput', () => {
     const user = userEvent.setup();
     const { unmount } = render(<ChatInput onSend={onSend} sessionId="s1" />);
     await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'send me{enter}');
-    expect(onSend).toHaveBeenCalledWith('send me');
+    expect(onSend).toHaveBeenCalledWith('send me', undefined);
     unmount();
 
     render(<ChatInput onSend={onSend} sessionId="s1" />);

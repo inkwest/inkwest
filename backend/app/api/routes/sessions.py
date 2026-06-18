@@ -4,7 +4,8 @@ Session management routes.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +31,7 @@ from app.models.schemas import (
 )
 from app.models.session import Session
 from app.models.system_prompt import SystemPrompt
+from app.services import attachments
 from app.services.model_catalog import selectable_models
 from app.services.pubsub import notify
 
@@ -379,6 +381,101 @@ async def set_session_mcp(
         await save_session_event(db, session_id, "mcp", "disconnected", targets=removed)
 
     return SessionMcpResponse(enabled=enabled)
+
+
+# ---------------------------------------------------------------------------
+# Attachments — files uploaded into the conversation's /workdir so the claude-cli
+# agent can read them via @/workdir/<file>. Sandbox/claude-cli only.
+# ---------------------------------------------------------------------------
+
+
+class AttachmentDescriptor(BaseModel):
+    """A stored attachment, as returned to the client and persisted on the message."""
+
+    filename: str  # on-disk basename in the workdir (slugified, deduped)
+    original_name: str
+    content_type: str
+    size: int
+
+
+def _require_attachments_enabled() -> None:
+    """Guard write endpoints: attachments need the sandbox (claude-cli) workdir."""
+    settings = get_settings()
+    if not (settings.sandbox_enabled and settings.ai_provider == "claude-cli"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="File attachments require the sandbox (claude-cli) to be enabled",
+        )
+
+
+@router.post("/{session_id}/attachments", response_model=list[AttachmentDescriptor])
+async def upload_attachments(
+    session_id: UUID,
+    current_user: CurrentUser,
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+) -> list[AttachmentDescriptor]:
+    """Store one or more files in the conversation's workdir, returning descriptors."""
+    _require_attachments_enabled()
+    await _load_owned_session(session_id, current_user, db)
+
+    max_per = get_settings().attachment_max_per_message
+    if len(files) > max_per:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"At most {max_per} files per message",
+        )
+
+    descriptors: list[AttachmentDescriptor] = []
+    for upload in files:
+        data = await upload.read()
+        try:
+            desc = attachments.write_attachment(
+                str(session_id),
+                upload.filename or "file",
+                data,
+                upload.content_type or "",
+            )
+        except attachments.AttachmentError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+        descriptors.append(AttachmentDescriptor.model_validate(desc))
+    return descriptors
+
+
+@router.delete("/{session_id}/attachments/{filename}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_attachment(
+    session_id: UUID,
+    filename: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Remove a not-yet-sent attachment (e.g. the user cleared a chip)."""
+    _require_attachments_enabled()
+    await _load_owned_session(session_id, current_user, db)
+    try:
+        attachments.delete_attachment(str(session_id), filename)
+    except attachments.AttachmentError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+
+
+@router.get("/{session_id}/attachments/{filename}")
+async def get_attachment(
+    session_id: UUID,
+    filename: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    """Stream a stored attachment back (thumbnail re-render on history reload).
+
+    Not gated on the sandbox flag: previously-uploaded files in a conversation's
+    history must stay viewable even if the feature is later turned off.
+    """
+    await _load_owned_session(session_id, current_user, db)
+    try:
+        path = attachments.resolve_existing(str(session_id), filename)
+    except attachments.AttachmentError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    return FileResponse(path)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

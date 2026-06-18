@@ -48,6 +48,47 @@ export async function fetchAPI<T>(
   return response.json();
 }
 
+// ---------------------------------------------------------------------------
+// Attachments — multipart upload + blob fetch can't go through fetchAPI (it
+// forces application/json and parses JSON). The browser sets the multipart
+// boundary itself, so we must NOT set Content-Type on the upload.
+// ---------------------------------------------------------------------------
+
+export async function uploadAttachments(
+  sessionId: string,
+  files: File[],
+): Promise<import('@/types/api').Attachment[]> {
+  const form = new FormData();
+  for (const f of files) form.append('files', f);
+  const response = await fetch(`${API_URL}/api/sessions/${sessionId}/attachments`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: form,
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body?.detail || `Upload failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function deleteAttachment(sessionId: string, filename: string): Promise<void> {
+  await fetchAPI(`/api/sessions/${sessionId}/attachments/${encodeURIComponent(filename)}`, {
+    method: 'DELETE',
+  });
+}
+
+// Fetch an attachment's bytes with auth (an <img src> can't carry the bearer
+// token), so callers turn the blob into an object URL for thumbnails.
+export async function fetchAttachmentBlob(sessionId: string, filename: string): Promise<Blob> {
+  const response = await fetch(
+    `${API_URL}/api/sessions/${sessionId}/attachments/${encodeURIComponent(filename)}`,
+    { headers: getAuthHeaders() },
+  );
+  if (!response.ok) throw new Error(`Failed to load attachment: ${response.status}`);
+  return response.blob();
+}
+
 // App config
 export interface ModelInfo {
   /** Internal model ID, e.g. "claude-opus-4-8". */
@@ -64,6 +105,8 @@ export interface AppConfig {
   model: string;
   /** Admin-enabled models users may pick per session. */
   available_models: ModelInfo[];
+  /** File attachments usable (requires the sandbox/claude-cli). Gates the attach UI. */
+  attachments_enabled: boolean;
 }
 
 /** Display name for a model ID; falls back to the raw ID when unknown. */

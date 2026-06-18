@@ -120,6 +120,7 @@ async def save_message(
     thinking_content: str | None = None,
     latency_ms: int | None = None,
     model: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> Message:
     """
     Save a message to the database.
@@ -131,6 +132,7 @@ async def save_message(
         content: Message content (string, list, or dict)
         tool_calls: List of tool calls made in this message
         tool_call_id: ID of the tool call this message responds to
+        attachments: Files attached to a user turn (descriptor dicts)
         token_count: Number of tokens in the message (deprecated, use output_tokens)
         input_tokens: Number of input tokens for this API call
         output_tokens: Number of output tokens for this API call
@@ -166,6 +168,7 @@ async def save_message(
         thinking_content=thinking_content,
         latency_ms=latency_ms,
         model=model,
+        attachments=attachments,
     )
     db.add(message)
     await db.commit()

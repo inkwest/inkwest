@@ -109,6 +109,7 @@ describe('Header', () => {
           { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true },
           { id: 'claude-opus-4-20250514', label: 'Opus 4.0', legacy: true },
         ],
+        attachments_enabled: false,
       },
     });
     renderHeader();
@@ -131,6 +132,7 @@ describe('Header', () => {
         available_models: [
           { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true },
         ],
+        attachments_enabled: false,
       },
     });
     useSessionsStore.setState({
