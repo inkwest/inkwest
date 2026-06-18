@@ -16,13 +16,14 @@ import { cn } from '@/lib/utils';
 interface Props {
   onSendMessage: (content: string) => void;
   onStopStreaming?: () => void;
+  onRetryMessage?: (messageId: string) => void;
   initialPrompt?: string | null;
   // Auto-submit initialPrompt once the composer is enabled (WS connected).
   autoSubmit?: boolean;
   sessionId?: string;
 }
 
-export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSubmit, sessionId }: Props) {
+export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initialPrompt, autoSubmit, sessionId }: Props) {
   const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks, currentTodos } = useChatStore();
   const compact = useSettingsStore((s) => s.compactToolCards);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -184,7 +185,7 @@ export function ChatView({ onSendMessage, onStopStreaming, initialPrompt, autoSu
         >
           <div ref={contentRef}>
             {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
-            <MessageList messages={messages} highlightedId={highlightId} />
+            <MessageList messages={messages} highlightedId={highlightId} onRetry={onRetryMessage} />
             {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
           </div>
         </div>

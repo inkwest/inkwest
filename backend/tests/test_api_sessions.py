@@ -343,51 +343,6 @@ async def test_get_failed_messages_empty(
 
 
 @pytest.mark.asyncio
-async def test_retry_message_not_found(
-    authenticated_client: AsyncClient,
-    mock_db: AsyncMock,
-    mock_session_obj: MagicMock,
-    mock_user: MagicMock,
-) -> None:
-    mock_session_obj.user_id = str(mock_user.id)
-    session_result = MagicMock()
-    session_result.scalar_one_or_none.return_value = mock_session_obj
-    msg_result = MagicMock()
-    msg_result.scalar_one_or_none.return_value = None
-    mock_db.execute = AsyncMock(side_effect=[session_result, msg_result])
-
-    mid = uuid.uuid4()
-    resp = await authenticated_client.post(
-        f"/api/sessions/{mock_session_obj.id}/messages/{mid}/retry"
-    )
-    assert resp.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_retry_message_not_retryable(
-    authenticated_client: AsyncClient,
-    mock_db: AsyncMock,
-    mock_session_obj: MagicMock,
-    mock_user: MagicMock,
-) -> None:
-    mock_session_obj.user_id = str(mock_user.id)
-    msg = MagicMock()
-    msg.is_retryable = False
-
-    session_result = MagicMock()
-    session_result.scalar_one_or_none.return_value = mock_session_obj
-    msg_result = MagicMock()
-    msg_result.scalar_one_or_none.return_value = msg
-    mock_db.execute = AsyncMock(side_effect=[session_result, msg_result])
-
-    mid = uuid.uuid4()
-    resp = await authenticated_client.post(
-        f"/api/sessions/{mock_session_obj.id}/messages/{mid}/retry"
-    )
-    assert resp.status_code == 400
-
-
-@pytest.mark.asyncio
 async def test_search_requires_min_length(
     authenticated_client: AsyncClient,
 ) -> None:

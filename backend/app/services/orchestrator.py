@@ -110,6 +110,7 @@ async def orchestrate_chat(
     namespaces: list[str] | None = None,
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
+    persist_user_message: bool = True,
 ) -> AsyncIterator[ChatEvent]:
     """
     Main orchestration loop.
@@ -125,6 +126,8 @@ async def orchestrate_chat(
         user_message: The user's message to process
         namespaces: Optional list of namespaces for context
         cancel_event: Optional event to signal cancellation
+        persist_user_message: When False (retry), the user message is already the
+            trailing row in history — don't append/re-save it or it would duplicate.
 
     Yields:
         ChatEvent objects for each step of the orchestration
@@ -153,25 +156,26 @@ async def orchestrate_chat(
         yield error_event(f"Failed to load conversation history: {str(e)}")
         return
 
-    # Add new user message
-    messages.append({"role": "user", "content": user_message})
+    # Add new user message (skipped on retry — already the trailing history row)
+    if persist_user_message:
+        messages.append({"role": "user", "content": user_message})
 
-    # Save user message to database
-    try:
-        await save_message(db, session_id, "user", user_message)
-    except Exception as e:
-        logger.error(f"Failed to save user message: {e}")
-        yield error_event(f"Failed to save message: {str(e)}")
-        return
-
-    # Auto-generate session title from first message
-    if len(messages) == 1:
+        # Save user message to database
         try:
-            title = await ensure_session_title(db, session_id, user_message)
-            if title:
-                logger.debug(f"Generated session title: {title}")
+            await save_message(db, session_id, "user", user_message)
         except Exception as e:
-            logger.warning(f"Failed to set session title: {e}")
+            logger.error(f"Failed to save user message: {e}")
+            yield error_event(f"Failed to save message: {str(e)}")
+            return
+
+        # Auto-generate session title from first message
+        if len(messages) == 1:
+            try:
+                title = await ensure_session_title(db, session_id, user_message)
+                if title:
+                    logger.debug(f"Generated session title: {title}")
+            except Exception as e:
+                logger.warning(f"Failed to set session title: {e}")
             # Non-critical, continue
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
@@ -448,6 +452,7 @@ async def orchestrate_chat_streaming(
     namespaces: list[str] | None = None,
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
+    persist_user_message: bool = True,
 ) -> AsyncIterator[ChatEvent]:
     """
     Streaming variant of orchestrate_chat.
@@ -464,6 +469,8 @@ async def orchestrate_chat_streaming(
         user_message: The user's message to process
         namespaces: Optional list of namespaces for context
         cancel_event: Optional event to signal cancellation
+        persist_user_message: When False (retry), the user message is already the
+            trailing row in history — don't append/re-save it or it would duplicate.
 
     Yields:
         ChatEvent objects for each token/event
@@ -491,23 +498,24 @@ async def orchestrate_chat_streaming(
         yield error_event(f"Failed to load conversation history: {str(e)}")
         return
 
-    # Add new user message
-    messages.append({"role": "user", "content": user_message})
+    # Add new user message (skipped on retry — already the trailing history row)
+    if persist_user_message:
+        messages.append({"role": "user", "content": user_message})
 
-    # Save user message
-    try:
-        await save_message(db, session_id, "user", user_message)
-    except Exception as e:
-        logger.error(f"Failed to save user message: {e}")
-        yield error_event(f"Failed to save message: {str(e)}")
-        return
-
-    # Auto-generate session title
-    if len(messages) == 1:
+        # Save user message
         try:
-            await ensure_session_title(db, session_id, user_message)
+            await save_message(db, session_id, "user", user_message)
         except Exception as e:
-            logger.warning(f"Failed to set session title: {e}")
+            logger.error(f"Failed to save user message: {e}")
+            yield error_event(f"Failed to save message: {str(e)}")
+            return
+
+        # Auto-generate session title
+        if len(messages) == 1:
+            try:
+                await ensure_session_title(db, session_id, user_message)
+            except Exception as e:
+                logger.warning(f"Failed to set session title: {e}")
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
     system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
