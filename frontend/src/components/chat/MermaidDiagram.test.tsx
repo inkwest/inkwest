@@ -50,4 +50,23 @@ describe('MermaidDiagram', () => {
 
     await waitFor(() => expect(container.querySelector('svg#from-markdown')).not.toBeNull());
   });
+
+  // Regression: a parent re-render (e.g. clicking copy / the menu in MessageBubble)
+  // must not remount the diagram and flash the raw source. Guards the memoized
+  // `components` object in MarkdownContent that keeps the renderer identities stable.
+  it('keeps the rendered diagram across a parent re-render (no flash to source)', async () => {
+    parse.mockResolvedValue(true);
+    renderDiagram.mockResolvedValue({ svg: '<svg id="stable"></svg>' });
+
+    const md = ['```mermaid', 'graph TD; A-->B', '```'].join('\n');
+    const { container, rerender } = render(<MarkdownContent content={md} />);
+    await waitFor(() => expect(container.querySelector('svg#stable')).not.toBeNull());
+
+    renderDiagram.mockClear();
+    rerender(<MarkdownContent content={md} />);
+
+    // SVG still present synchronously (instance preserved), and mermaid is not re-run.
+    expect(container.querySelector('svg#stable')).not.toBeNull();
+    expect(renderDiagram).not.toHaveBeenCalled();
+  });
 });
