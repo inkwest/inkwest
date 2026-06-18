@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CodeBlock } from './CodeBlock';
@@ -10,10 +11,18 @@ interface Props {
   content: string;
 }
 
+// Hoisted so its identity is stable across renders (react-markdown reprocesses
+// when the plugin array changes).
+const remarkPlugins = [remarkGfm];
+
 export function MarkdownContent({ content }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
 
-  const components: Components = {
+  // Memoize so the custom-renderer function identities stay stable across
+  // re-renders. react-markdown uses these as element *types*; a fresh object
+  // every render would remount the whole subtree — resetting MermaidDiagram's
+  // rendered-SVG state and flashing the raw source (e.g. on copy / menu clicks).
+  const components: Components = useMemo(() => ({
     code({ className, children, node }) {
       const match = /language-(\w+)/.exec(className || '');
       const language = match ? match[1] : undefined;
@@ -77,7 +86,7 @@ export function MarkdownContent({ content }: Props) {
         </td>
       );
     },
-  };
+  }), [compact]);
 
   return (
     <div className={cn(
@@ -86,7 +95,7 @@ export function MarkdownContent({ content }: Props) {
       '[&_.contains-task-list]:list-none [&_.contains-task-list]:pl-0',
       TEXT_SIZE.body(compact), compact && 'leading-relaxed'
     )}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={remarkPlugins} components={components}>
         {content}
       </ReactMarkdown>
     </div>
