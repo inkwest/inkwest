@@ -36,7 +36,13 @@ def make_bedrock_client(
 
     Explicit credentials when given; otherwise boto3's default chain (the
     sandbox projects per-session creds onto tmpfs/env, so the chain resolves
-    them without the portal ever handing them in argv)."""
+    them without the portal ever handing them in argv).
+
+    Egress is proxy-only: botocore honors the container's ``HTTPS_PROXY`` (set at
+    sandbox provision) and the ``--internal`` network leaves no other route, so this
+    client reaches Bedrock only through the per-conversation squid allowlist (P1.5).
+    We deliberately do not set ``proxies`` on the Config — the env is the single source,
+    matching the claude-cli path."""
     kwargs: dict[str, Any] = {"region_name": region, "config": _BEDROCK_CONFIG}
     if access_key and secret_key:
         kwargs["aws_access_key_id"] = access_key
