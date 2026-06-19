@@ -9,6 +9,17 @@ repos:
       - id: ruff-format
         files: ^backend/
 
+  # uv — fail if backend/uv.lock drifts from pyproject.toml. The prod image is built
+  # from the FROZEN lock (root Dockerfile: `uv export --frozen`), so a stale lock
+  # silently ships an image missing a dependency — exactly what broke OIDC RS256
+  # (pyproject had PyJWT[crypto] but the lock didn't). --check is read-only (no rewrite).
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.8.22
+    hooks:
+      - id: uv-lock
+        args: [--check, --project, backend]
+        files: ^backend/(uv\.lock|pyproject\.toml)$
+
   # Standard pre-commit hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
