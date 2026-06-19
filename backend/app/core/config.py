@@ -154,6 +154,9 @@ class Settings(BaseSettings):
     sandbox_enabled: bool = False
     sandbox_docker_path: str = "docker"
     sandbox_toolbox_image: str = ""  # claude-toolbox image (claude + kubectl + aws)
+    # Image the broker spawns the inkwest-agent worker in (P1.3). Empty = reuse
+    # sandbox_toolbox_image (the toolbox bakes the agent in — see backend/Dockerfile.agent); set this to point at a dedicated agent image later (decision #6).
+    sandbox_agent_image: str = ""
     # The sandbox container's HOME. Claude Code state (durable, for --resume) and the creds
     # tmpfs are anchored here, and CLAUDE_CONFIG_DIR is set to <home>/.claude so it works
     # regardless of the image's own HOME env. Set this to your image's home directory.
@@ -225,6 +228,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
+
+    @property
+    def agent_image(self) -> str:
+        """Image to spawn the inkwest-agent worker in: the dedicated image if set,
+        else the toolbox image (which bakes the agent in)."""
+        return self.sandbox_agent_image or self.sandbox_toolbox_image
 
     @property
     def agentic_engines_list(self) -> list[str]:

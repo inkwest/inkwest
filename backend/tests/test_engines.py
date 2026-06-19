@@ -28,6 +28,14 @@ def test_default_is_claude_cli_only():
     assert Settings().agentic_engines_list == ["claude-cli"]
 
 
+def test_agent_image_falls_back_to_toolbox():
+    # Empty agent image → reuse the toolbox image (it bakes the agent in).
+    assert Settings(sandbox_toolbox_image="claude-tools:1").agent_image == "claude-tools:1"
+    # A dedicated agent image wins when set.
+    s = Settings(sandbox_toolbox_image="claude-tools:1", sandbox_agent_image="agent:2")
+    assert s.agent_image == "agent:2"
+
+
 def test_inkwest_agent_enabled_reflects_list():
     with patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")):
         assert engines.inkwest_agent_enabled() is False
