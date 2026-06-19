@@ -10,8 +10,8 @@ from pydantic import BaseModel
 
 from app.api.dependencies import CurrentUser
 from app.core.config import get_settings
-from app.services.model_catalog import default_model, refresh_catalog, selectable_models
-from app.services.pricing import is_legacy_model, model_label
+from app.services.model_catalog import refresh_catalog
+from app.services.model_registry import default_model, merged_entries, selectable_models
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -43,12 +43,14 @@ async def get_app_config(user: CurrentUser) -> AppConfigResponse:
     """Get the AI provider, default model, and per-session selectable models."""
     await refresh_catalog()  # TTL-aware; no-op while fresh
     settings = get_settings()
+    selectable = set(selectable_models())
     return AppConfigResponse(
         provider=settings.ai_provider,
         model=default_model(),
         available_models=[
-            ModelInfo(id=m, label=model_label(m), legacy=is_legacy_model(m))
-            for m in selectable_models()
+            ModelInfo(id=e.model_id, label=e.label, legacy=e.legacy)
+            for e in merged_entries()
+            if e.model_id in selectable
         ],
         attachments_enabled=settings.sandbox_enabled and settings.ai_provider == "claude-cli",
     )

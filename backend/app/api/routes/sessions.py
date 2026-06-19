@@ -32,7 +32,7 @@ from app.models.schemas import (
 from app.models.session import Session
 from app.models.system_prompt import SystemPrompt
 from app.services import attachments
-from app.services.model_catalog import selectable_models
+from app.services.model_registry import selectable_models
 from app.services.pubsub import notify
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -283,7 +283,7 @@ async def update_session(
     # complete, self-contained record. Other field edits aren't surfaced.
     if model_changed:
         from app.services.messages import save_session_event
-        from app.services.model_catalog import default_model
+        from app.services.model_registry import default_model
 
         effective_model = new_model or default_model()
         await save_session_event(

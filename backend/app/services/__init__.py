@@ -52,14 +52,12 @@ from app.services.prompts import (
 _LAZY_ORCHESTRATOR: dict[str, str] = {
     "call_claude_with_retry": "orchestrator",
     "orchestrate_chat": "orchestrator",
-    "orchestrate_chat_streaming": "orchestrator",
 }
 
 if TYPE_CHECKING:  # static analysers still see the full surface
     from app.services.orchestrator import (
         call_claude_with_retry,
         orchestrate_chat,
-        orchestrate_chat_streaming,
     )
 
 
@@ -107,7 +105,6 @@ __all__ = [
     "update_session_summary",
     # Orchestrator
     "orchestrate_chat",
-    "orchestrate_chat_streaming",
     "call_claude_with_retry",
     # Constants (re-exported for backward compatibility)
     "MAX_ORCHESTRATION_ITERATIONS",

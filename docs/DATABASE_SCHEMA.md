@@ -289,6 +289,47 @@ CREATE TABLE inkwest.oidc_pending_states (
 CREATE INDEX idx_oidc_pending_states_created ON inkwest.oidc_pending_states(created_at);
 ```
 
+### app_settings
+
+Runtime-tunable scalar settings managed from the admin console (e.g. `bedrock_include_open`). Simple key/value store; loaded into memory at startup and refreshed on write. See `app.services.app_settings`.
+
+```sql
+CREATE TABLE inkwest.app_settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+### model_registry
+
+Admin-managed catalog of selectable models: which models users may pick, the default, per-model metadata (endpoint/arn/options), and pricing overrides. Discovered provider models are upserted as `source='discovered'`; operators add `source='custom'` rows for models the discovery filter doesn't surface (e.g. open-weight Bedrock models). Replaces the former `anthropic_model` / `enabled_models` keys in `app_settings`. See `app.services.model_registry`.
+
+```sql
+CREATE TABLE inkwest.model_registry (
+    model_id VARCHAR(512) PRIMARY KEY,
+    provider VARCHAR(32) NOT NULL,           -- anthropic | bedrock | bedrock-open | claude-cli
+    display_name VARCHAR(255),               -- NULL = derived from the ID
+    endpoint VARCHAR(1024),                  -- optional custom inference base URL
+    arn VARCHAR(1024),                       -- optional Bedrock inference-profile / imported-model ARN
+    options JSONB NOT NULL DEFAULT '{}'::jsonb,
+    input_price NUMERIC(12, 4),              -- per-Mtok override; NULL = fall back to the pricing table
+    output_price NUMERIC(12, 4),
+    enabled BOOLEAN NOT NULL DEFAULT false,
+    is_default BOOLEAN NOT NULL DEFAULT false,
+    source VARCHAR(16) NOT NULL DEFAULT 'discovered',  -- discovered | custom
+    legacy BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT model_registry_source_check CHECK (source IN ('discovered', 'custom')),
+    CONSTRAINT model_registry_price_pair CHECK ((input_price IS NULL) = (output_price IS NULL))
+);
+-- At most one default at a time; fast lookup of the enabled subset.
+CREATE UNIQUE INDEX idx_model_registry_default ON inkwest.model_registry (is_default) WHERE is_default;
+CREATE INDEX idx_model_registry_enabled ON inkwest.model_registry (enabled) WHERE enabled;
+```
+
 ## JSONB Content Examples
 
 ### User Message Content
@@ -344,6 +385,10 @@ cd backend && python db_migrate.py
 docker compose exec backend python db_migrate.py
 ```
 
+> The list below is illustrative and partly historical (some early filenames were
+> renamed/reorganized). The authoritative, ordered set is the contents of
+> `backend/migrations/`.
+
 | Migration | Purpose |
 |-----------|---------|
 | `20260127000001_initial_schema.sql` | Base tables: clusters, sessions, messages |
@@ -356,6 +401,8 @@ docker compose exec backend python db_migrate.py
 | `20260130000001_align_constraints.sql` | Constraint tightening, wider kubeconfig_path |
 | `20260130000002_add_hourly_budget_period.sql` | Hourly budget period support |
 | `20260205000001_oidc_pending_states.sql` | DB-backed OIDC login state storage |
+| _… intervening migrations (connectors, skills, system prompts, app_settings, session model) — see `backend/migrations/`_ | |
+| `20260619000000_model_registry.sql` | Admin-managed model registry (replaces the model keys in app_settings) |
 
 ## Key Indexes
 

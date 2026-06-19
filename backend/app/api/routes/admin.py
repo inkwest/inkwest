@@ -6,14 +6,17 @@ Requires admin role via OIDC.
 """
 
 import datetime as dt
+import ipaddress
 import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from decimal import Decimal
+from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,17 +27,12 @@ from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import Session
 from app.models.user import User
-from app.services.app_settings import set_model_settings
+from app.services import model_registry
+from app.services.app_settings import BEDROCK_INCLUDE_OPEN_KEY, get_bool_setting, set_setting
 from app.services.budget_service import (
     get_period_start,
 )
-from app.services.model_catalog import (
-    available_models,
-    default_model,
-    refresh_catalog,
-    selectable_models,
-)
-from app.services.pricing import has_pricing, is_legacy_model, model_label
+from app.services.model_catalog import catalog_status, refresh_catalog
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -176,14 +174,34 @@ class UsageSummaryResponse(BaseModel):
 
 
 class ModelInfo(BaseModel):
-    """A model: internal ID, human-friendly display name, lifecycle flags."""
+    """A registry model as the admin console sees it: identity + config + pricing."""
 
     id: str
     label: str
+    provider: str
+    enabled: bool
+    is_default: bool
+    # discovered (from the live provider catalog) | custom (operator-added).
+    source: str
     legacy: bool
-    # False = no pricing entry; cost tracking falls back to a conservative
-    # default estimate for this model.
+    # False = no real pricing (no override and not in the static table); cost
+    # tracking falls back to a conservative default — surfaced "unpriced" in UI.
     priced: bool
+    endpoint: str | None
+    arn: str | None
+    options: dict[str, Any]
+    # Effective per-million-token prices, null when unpriced.
+    input_price: float | None
+    output_price: float | None
+
+
+class CatalogStatus(BaseModel):
+    """Live-discovery status surfaced next to the Refresh control."""
+
+    last_refreshed_at: str | None
+    source: str  # live | static
+    last_fetch_failed: bool
+    count: int
 
 
 class ModelSettingsResponse(BaseModel):
@@ -193,16 +211,102 @@ class ModelSettingsResponse(BaseModel):
     default_model: str
     # Model IDs users may pick per session (admin-enabled subset).
     enabled_models: list[str]
-    # Full catalog the admin can enable from (live provider list when
-    # available, static pricing-table fallback otherwise).
-    available_models: list[ModelInfo]
+    # Whether open-weight Bedrock models are surfaced in the catalog.
+    include_open: bool
+    catalog: CatalogStatus
+    # The full merged registry: discovered models + custom rows.
+    models: list[ModelInfo]
 
 
 class UpdateModelSettingsRequest(BaseModel):
-    """Schema for updating the model configuration."""
+    """Bulk save: the enabled subset and the default model."""
 
-    default_model: str = Field(..., min_length=1, max_length=255)
+    default_model: str = Field(..., min_length=1, max_length=512)
     enabled_models: list[str] = Field(..., min_length=1)
+
+
+class RefreshModelsRequest(BaseModel):
+    """Force a catalog refresh, optionally flipping the open-models flag first."""
+
+    include_open: bool | None = None
+
+
+# The provider tags the registry understands (drives chat routing + UI grouping).
+ModelProvider = Literal["anthropic", "bedrock", "bedrock-open", "claude-cli"]
+
+# Hostnames that must never be reachable via an operator-supplied endpoint.
+_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
+
+
+def _require_safe_endpoint(value: str | None) -> str | None:
+    """Validate the operator-supplied custom endpoint.
+
+    The field is stored metadata today, but a future server-side consumer must
+    not be steerable to internal/SSRF targets — so enforce http(s) AND reject
+    loopback/private/link-local/reserved IP literals and known-internal hosts at
+    write time. (DNS-rebind via a hostname that resolves internally can't be
+    caught here; a consumer that dials this must re-validate the resolved IP.)
+    """
+    if not value or not value.strip():
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("endpoint must be an http(s) URL")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("endpoint must include a host")
+    if host.lower() in _BLOCKED_HOSTS:
+        raise ValueError("endpoint host is not allowed")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None  # a hostname, not an IP literal
+    if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved):
+        raise ValueError("endpoint must not point at an internal address")
+    return value
+
+
+def _require_arn(value: str | None) -> str | None:
+    """A Bedrock ARN, when set, must look like one (it becomes the invoke target)."""
+    if value and value.strip() and not value.startswith("arn:"):
+        raise ValueError("arn must start with 'arn:'")
+    return value
+
+
+class AddModelRequest(BaseModel):
+    """Add an operator-defined model the discovery filter does not surface."""
+
+    model_config = {"protected_namespaces": ()}
+
+    id: str = Field(..., min_length=1, max_length=512)
+    provider: ModelProvider
+    display_name: str | None = Field(None, max_length=255)
+    endpoint: str | None = Field(None, max_length=1024)
+    arn: str | None = Field(None, max_length=1024)
+    options: dict[str, Any] = Field(default_factory=dict)
+    input_price: float | None = Field(None, ge=0)
+    output_price: float | None = Field(None, ge=0)
+    enabled: bool = False
+    legacy: bool = False
+
+    _check_endpoint = field_validator("endpoint")(_require_safe_endpoint)
+    _check_arn = field_validator("arn")(_require_arn)
+
+
+class UpdateModelRequest(BaseModel):
+    """Patch a model's metadata; omitted fields are left unchanged."""
+
+    display_name: str | None = None
+    endpoint: str | None = None
+    arn: str | None = None
+    options: dict[str, Any] | None = None
+    input_price: float | None = Field(None, ge=0)
+    output_price: float | None = Field(None, ge=0)
+    legacy: bool | None = None
+    enabled: bool | None = None
+
+    _check_endpoint = field_validator("endpoint")(_require_safe_endpoint)
+    _check_arn = field_validator("arn")(_require_arn)
 
 
 # =============================================================================
@@ -805,22 +909,43 @@ async def get_usage_timeseries(
 # =============================================================================
 
 
-def _model_settings_response() -> ModelSettingsResponse:
-    settings = get_settings()
-    return ModelSettingsResponse(
-        provider=settings.ai_provider,
-        default_model=default_model(),
-        enabled_models=selectable_models(),
-        available_models=[
-            ModelInfo(id=m, label=model_label(m), legacy=is_legacy_model(m), priced=has_pricing(m))
-            for m in available_models()
-        ],
+def _model_info(entry: model_registry.ModelEntry) -> ModelInfo:
+    return ModelInfo(
+        id=entry.model_id,
+        label=entry.label,
+        provider=entry.provider,
+        enabled=entry.enabled,
+        is_default=entry.is_default,
+        source=entry.source,
+        legacy=entry.legacy,
+        priced=entry.priced,
+        endpoint=entry.endpoint,
+        arn=entry.arn,
+        options=entry.options,
+        input_price=float(entry.input_price) if entry.input_price is not None else None,
+        output_price=float(entry.output_price) if entry.output_price is not None else None,
     )
+
+
+def _model_settings_response() -> ModelSettingsResponse:
+    return ModelSettingsResponse(
+        provider=get_settings().ai_provider,
+        default_model=model_registry.default_model(),
+        enabled_models=model_registry.selectable_models(),
+        include_open=get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY),
+        catalog=CatalogStatus(**catalog_status()),
+        models=[_model_info(e) for e in model_registry.merged_entries()],
+    )
+
+
+def _price(value: float | None) -> Decimal | None:
+    # str() keeps the decimal the admin typed exact (Decimal(0.1) would not).
+    return Decimal(str(value)) if value is not None else None
 
 
 @router.get("/settings/model", response_model=ModelSettingsResponse)
 async def get_model_settings(admin: AdminUser) -> ModelSettingsResponse:
-    """Get the model configuration: default, enabled subset, full catalog."""
+    """Get the model configuration: default, enabled subset, full merged catalog."""
     await refresh_catalog()  # TTL-aware; no-op while fresh
     return _model_settings_response()
 
@@ -831,25 +956,104 @@ async def update_model_settings(
     admin: AdminUser,
     db: AsyncSession = Depends(get_db),
 ) -> ModelSettingsResponse:
-    """Set the enabled models and the default model."""
+    """Bulk-set the enabled models and the default model."""
     await refresh_catalog()  # validate against a current view of the provider catalog
 
-    available = set(available_models())
+    available = {e.model_id for e in model_registry.merged_entries()}
     unknown = [m for m in body.enabled_models if m not in available]
     if unknown:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown models: {', '.join(unknown)}",
         )
-    if body.default_model not in body.enabled_models:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The default model must be one of the enabled models",
-        )
-
-    await set_model_settings(db, body.default_model, body.enabled_models)
+    try:
+        await model_registry.set_model_settings(db, body.default_model, body.enabled_models)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     logger.info(
         f"Model settings changed by {admin.email}: "
         f"default={body.default_model}, enabled={body.enabled_models}"
     )
+    return _model_settings_response()
+
+
+@router.post("/settings/model/refresh", response_model=ModelSettingsResponse)
+async def refresh_model_catalog(
+    body: RefreshModelsRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> ModelSettingsResponse:
+    """Force a live catalog refresh; optionally flip the open-models flag first."""
+    if body.include_open is not None:
+        await set_setting(db, BEDROCK_INCLUDE_OPEN_KEY, "true" if body.include_open else "false")
+    await refresh_catalog(force=True)
+    logger.info(
+        f"Model catalog refreshed by {admin.email}"
+        + (f" (include_open={body.include_open})" if body.include_open is not None else "")
+    )
+    return _model_settings_response()
+
+
+@router.post("/models", response_model=ModelSettingsResponse, status_code=status.HTTP_201_CREATED)
+async def add_model(
+    body: AddModelRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> ModelSettingsResponse:
+    """Add an operator-defined custom model."""
+    try:
+        await model_registry.add_custom_model(
+            db,
+            model_id=body.id,
+            provider=body.provider,
+            display_name=body.display_name,
+            endpoint=body.endpoint,
+            arn=body.arn,
+            options=body.options,
+            input_price=_price(body.input_price),
+            output_price=_price(body.output_price),
+            enabled=body.enabled,
+            legacy=body.legacy,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    logger.info(f"Custom model added by {admin.email}: {body.id}")
+    return _model_settings_response()
+
+
+@router.put("/models/{model_id}", response_model=ModelSettingsResponse)
+async def update_model(
+    model_id: str,
+    body: UpdateModelRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> ModelSettingsResponse:
+    """Patch a single model's metadata / pricing / enabled flag."""
+    fields = body.model_dump(exclude_unset=True)
+    if "input_price" in fields:
+        fields["input_price"] = _price(fields["input_price"])
+    if "output_price" in fields:
+        fields["output_price"] = _price(fields["output_price"])
+    if not fields:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
+    try:
+        await model_registry.update_model(db, model_id, **fields)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    logger.info(f"Model {model_id} updated by {admin.email}: {', '.join(fields)}")
+    return _model_settings_response()
+
+
+@router.delete("/models/{model_id}", response_model=ModelSettingsResponse)
+async def delete_model(
+    model_id: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> ModelSettingsResponse:
+    """Delete a custom model. Discovered models can only be disabled."""
+    try:
+        await model_registry.delete_model(db, model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    logger.info(f"Custom model deleted by {admin.email}: {model_id}")
     return _model_settings_response()

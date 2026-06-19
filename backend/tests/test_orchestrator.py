@@ -148,6 +148,58 @@ class TestOrchestrateChat:
         assert tool_result.is_error is False
 
     @pytest.mark.asyncio
+    async def test_cancel_during_tool_loop_stops_turn(
+        self,
+        mock_db,
+        session_id,
+        cluster_context,
+        single_tool_response,
+        mock_messages_empty,
+        mock_save_message,
+        mock_ensure_title,
+        mock_kubectl_success,
+    ):
+        """Anthropic-side wiring of the shared execute_tool_calls cancel path:
+        cancel firing inside the tool loop ends the turn with a stopped done-event."""
+        from app.services.orchestrator import orchestrate_chat
+
+        tool_response, final_response = single_tool_response
+
+        class _CancelOnNth:
+            """is_set() returns True only from the (n+1)-th call onward."""
+
+            def __init__(self, n):
+                self.calls = 0
+                self.n = n
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls > self.n
+
+        # Checks before the tool loop: while-top, after-api, before-tools (3);
+        # the 4th check is the per-tool one inside execute_tool_calls.
+        cancel = _CancelOnNth(3)
+
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(side_effect=[tool_response, final_response])
+
+        with patch("app.services.orchestrator.get_ai_client", return_value=mock_client):
+            events = []
+            async for event in orchestrate_chat(
+                db=mock_db,
+                session_id=session_id,
+                user_message="Show me the pods",
+                cancel_event=cancel,
+                **cluster_context,
+            ):
+                events.append(event)
+
+        assert events[-1].type == "done"
+        assert events[-1].metadata.get("stopped") is True
+        # Cancel tripped before the tool ran and before the second API call.
+        assert mock_client.messages.create.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_multi_tool_sequence(
         self,
         mock_db,
