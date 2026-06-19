@@ -422,6 +422,51 @@ async def test_fetch_bedrock_models_default_excludes_open():
     assert "--by-provider" in foundation_call and "anthropic" in foundation_call
 
 
+@pytest.mark.asyncio
+async def test_fetch_bedrock_models_engine_gate_forces_claude_only():
+    """Even with the admin flag set, no engine that can run open models → Claude-only.
+
+    The engine gate (inkwest-agent ∉ AGENTIC_ENGINES) wins over the flag, so the
+    foundation list is still narrowed to anthropic."""
+    captured_args = []
+
+    async def fake_aws_json(args, extra_env=None):
+        captured_args.append(args)
+        return {"inferenceProfileSummaries": [], "modelSummaries": []}
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+        patch.object(model_catalog, "get_bool_setting", return_value=True),
+        patch.object(model_catalog, "inkwest_agent_enabled", return_value=False),
+    ):
+        await model_catalog._fetch_bedrock_models()
+
+    foundation_call = next(a for a in captured_args if a[1] == "list-foundation-models")
+    assert "--by-provider" in foundation_call and "anthropic" in foundation_call
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_models_engine_enabled_and_flag_surfaces_open():
+    """inkwest-agent enabled AND the admin flag set → open models are fetched."""
+    captured_args = []
+
+    async def fake_aws_json(args, extra_env=None):
+        captured_args.append(args)
+        return {"inferenceProfileSummaries": [], "modelSummaries": []}
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+        patch.object(model_catalog, "get_bool_setting", return_value=True),
+        patch.object(model_catalog, "inkwest_agent_enabled", return_value=True),
+    ):
+        await model_catalog._fetch_bedrock_models()
+
+    foundation_call = next(a for a in captured_args if a[1] == "list-foundation-models")
+    assert "--by-provider" not in foundation_call
+
+
 def test_catalog_status_reports_static_when_no_live_models():
     model_catalog._live_models = None
     with patch.object(model_catalog, "get_settings", return_value=_settings()):

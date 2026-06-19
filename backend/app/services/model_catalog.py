@@ -32,6 +32,7 @@ from anthropic import AsyncAnthropic
 
 from app.core.config import get_settings
 from app.services.app_settings import BEDROCK_INCLUDE_OPEN_KEY, get_bool_setting
+from app.services.engines import inkwest_agent_enabled
 from app.services.pricing import MODEL_PRICING, model_label
 
 logger = logging.getLogger(__name__)
@@ -171,7 +172,11 @@ async def _fetch_bedrock_models(
     if not region:
         return None
     if include_open is None:
-        include_open = get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY)
+        # Engine-aware gate: non-Claude (open-weight) Bedrock models are loaded
+        # only when an engine that can run them is enabled (inkwest-agent) AND the
+        # admin opted in. Under claude-cli only, the engine gate forces Claude-only
+        # regardless of the flag — they'd be unusable in the picker.
+        include_open = inkwest_agent_enabled() and get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY)
     region_args = ["--region", region]
     # Cross-region inference profiles (eu.anthropic..., us.anthropic...) are the
     # recommended way to invoke recent models; on-demand foundation models cover
