@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.model_registry import ModelRegistry
-from app.services.model_catalog import available_models, is_anthropic_model
+from app.services.model_catalog import available_models, bedrock_vendor
 from app.services.pricing import (
     DEFAULT_PRICING,
     ModelPricing,
@@ -89,10 +89,15 @@ class ModelEntry:
 
 
 def _derive_provider(model_id: str) -> str:
-    """Provider tag for a discovered model ID (no explicit row)."""
+    """Provider tag for a discovered model ID (no explicit row).
+
+    On Bedrock the tag is the per-vendor namespace (``anthropic``, ``meta``,
+    ``mistral``...) so the admin UI can group by vendor; off Bedrock it is the
+    configured provider (``anthropic`` / ``claude-cli``).
+    """
     provider = get_settings().ai_provider
     if provider == "bedrock":
-        return "bedrock" if is_anthropic_model(model_id) else "bedrock-open"
+        return bedrock_vendor(model_id)
     return provider
 
 

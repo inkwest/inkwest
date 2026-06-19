@@ -181,7 +181,7 @@ def get_orchestrator():
         # Bedrock serves both Claude (Anthropic Messages protocol via the SDK) and
         # open-weight models (Bedrock Converse API). The target isn't known until
         # the session's model is resolved, so dispatch per turn.
-        from app.services.model_catalog import is_anthropic_model
+        from app.services.model_catalog import is_anthropic_model, provider_speaks_messages
         from app.services.orchestrator import orchestrate_chat
         from app.services.orchestrator_converse import orchestrate_chat_converse
 
@@ -196,7 +196,11 @@ def get_orchestrator():
             # (e.g. a gateway alias whose ID would fool the substring heuristic).
             # Fall back to the ID heuristic for anything not in the catalog.
             entry = get_entry(model)
-            is_open = entry.provider == "bedrock-open" if entry else not is_anthropic_model(model)
+            is_open = (
+                not provider_speaks_messages(entry.provider)
+                if entry
+                else not is_anthropic_model(model)
+            )
             orchestrate = orchestrate_chat_converse if is_open else orchestrate_chat
             logger.info(f"Bedrock turn via {'Converse' if is_open else 'Anthropic'}: {model}")
             async for event in orchestrate(db=db, session_id=session_id, **kwargs):

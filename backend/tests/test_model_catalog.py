@@ -422,6 +422,43 @@ async def test_fetch_bedrock_models_default_excludes_open():
     assert "--by-provider" in foundation_call and "anthropic" in foundation_call
 
 
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic"),
+        ("eu.anthropic.claude-opus-4-8", "anthropic"),
+        ("meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("us.meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("mistral.mistral-large-2407-v1:0", "mistral"),
+        ("amazon.nova-pro-v1:0", "amazon"),
+        ("cohere.command-r-v1:0", "cohere"),
+        ("ai21.jamba-1-5-large-v1:0", "ai21"),
+        ("deepseek.r1-v1:0", "deepseek"),
+        ("stability.stable-image-core-v1:0", "stability"),
+        ("newvendor.some-model-v1:0", "bedrock"),  # unknown namespace → fallback
+        ("no-dot-id", "bedrock"),  # no namespace at all → fallback
+    ],
+)
+def test_bedrock_vendor(model_id, expected):
+    assert model_catalog.bedrock_vendor(model_id) == expected
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("anthropic", True),
+        ("bedrock", True),  # legacy Claude-on-Bedrock tag
+        ("meta", False),
+        ("mistral", False),
+        ("amazon", False),
+        ("bedrock-open", False),  # legacy open tag
+        ("claude-cli", False),
+    ],
+)
+def test_provider_speaks_messages(provider, expected):
+    assert model_catalog.provider_speaks_messages(provider) is expected
+
+
 @pytest.mark.asyncio
 async def test_fetch_bedrock_models_engine_gate_forces_claude_only():
     """Even with the admin flag set, no engine that can run open models → Claude-only.

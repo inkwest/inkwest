@@ -216,8 +216,10 @@ export interface ModelSettings {
   default_model: string;
   /** Model IDs users may pick per session (admin-enabled subset). */
   enabled_models: string[];
-  /** Whether open-weight Bedrock models are surfaced in the catalog. */
-  include_open: boolean;
+  /** Whether all Bedrock vendors (not just Anthropic) are surfaced. */
+  include_all_vendors: boolean;
+  /** Whether the custom (inkwest-agent) engine is enabled — gates the toggle. */
+  inkwest_agent_enabled: boolean;
   catalog: CatalogStatus;
   /** The full merged registry: discovered models + custom rows. */
   models: ModelInfo[];
@@ -265,11 +267,13 @@ export async function updateModelSettings(
   });
 }
 
-/** Force a live catalog refresh; optionally flip the open-models flag first. */
-export async function refreshModels(includeOpen?: boolean): Promise<ModelSettings> {
+/** Force a live catalog refresh; optionally flip the all-vendors flag first. */
+export async function refreshModels(includeAllVendors?: boolean): Promise<ModelSettings> {
   return fetchAPI('/api/admin/settings/model/refresh', {
     method: 'POST',
-    body: JSON.stringify(includeOpen === undefined ? {} : { include_open: includeOpen }),
+    body: JSON.stringify(
+      includeAllVendors === undefined ? {} : { include_all_vendors: includeAllVendors }
+    ),
   });
 }
 

@@ -717,3 +717,12 @@ async def test_routing_honors_registry_provider_over_id_heuristic():
     # ID contains 'claude' (would fool the heuristic) but the admin tagged it open.
     entry = SimpleNamespace(provider="bedrock-open")
     assert await _route_for("my-claude-gateway-alias", entry=entry) == "converse"
+
+
+@pytest.mark.asyncio
+async def test_routing_per_vendor_provider_tag():
+    # Per-vendor tags: a non-Anthropic vendor routes via Converse...
+    assert await _route_for("x", entry=SimpleNamespace(provider="meta")) == "converse"
+    assert await _route_for("x", entry=SimpleNamespace(provider="mistral")) == "converse"
+    # ...while the anthropic vendor tag stays on the Messages path.
+    assert await _route_for("x", entry=SimpleNamespace(provider="anthropic")) == "anthropic"

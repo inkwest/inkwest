@@ -107,8 +107,19 @@ def test_default_model_falls_back_to_newest_enabled():
     [
         ("anthropic", "claude-opus-4-8", "anthropic"),
         ("claude-cli", "claude-opus-4-8", "claude-cli"),
-        ("bedrock", "eu.anthropic.claude-opus-4-8", "bedrock"),
-        ("bedrock", "meta.llama3-1-70b-instruct-v1:0", "bedrock-open"),
+        # Bedrock: per-vendor tag derived from the (region-stripped) namespace.
+        ("bedrock", "eu.anthropic.claude-opus-4-8", "anthropic"),
+        ("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic"),
+        ("bedrock", "meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("bedrock", "us.meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("bedrock", "mistral.mistral-large-2407-v1:0", "mistral"),
+        ("bedrock", "amazon.nova-pro-v1:0", "amazon"),
+        ("bedrock", "cohere.command-r-v1:0", "cohere"),
+        ("bedrock", "ai21.jamba-1-5-large-v1:0", "ai21"),
+        ("bedrock", "deepseek.r1-v1:0", "deepseek"),
+        ("bedrock", "stability.stable-image-core-v1:0", "stability"),
+        # Unknown namespace → generic bedrock fallback.
+        ("bedrock", "newvendor.some-model-v1:0", "bedrock"),
     ],
 )
 def test_derive_provider(provider, model_id, expected):

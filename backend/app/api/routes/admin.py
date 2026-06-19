@@ -32,6 +32,7 @@ from app.services.app_settings import BEDROCK_INCLUDE_OPEN_KEY, get_bool_setting
 from app.services.budget_service import (
     get_period_start,
 )
+from app.services.engines import inkwest_agent_enabled
 from app.services.model_catalog import catalog_status, refresh_catalog
 
 logger = logging.getLogger(__name__)
@@ -211,8 +212,11 @@ class ModelSettingsResponse(BaseModel):
     default_model: str
     # Model IDs users may pick per session (admin-enabled subset).
     enabled_models: list[str]
-    # Whether open-weight Bedrock models are surfaced in the catalog.
-    include_open: bool
+    # Whether all Bedrock vendors (not just Anthropic) are surfaced in the catalog.
+    include_all_vendors: bool
+    # Whether the custom (inkwest-agent) engine is enabled — gates the
+    # all-vendors toggle, which is only useful when an engine can run them.
+    inkwest_agent_enabled: bool
     catalog: CatalogStatus
     # The full merged registry: discovered models + custom rows.
     models: list[ModelInfo]
@@ -226,13 +230,28 @@ class UpdateModelSettingsRequest(BaseModel):
 
 
 class RefreshModelsRequest(BaseModel):
-    """Force a catalog refresh, optionally flipping the open-models flag first."""
+    """Force a catalog refresh, optionally flipping the all-vendors flag first."""
 
-    include_open: bool | None = None
+    include_all_vendors: bool | None = None
 
 
-# The provider tags the registry understands (drives chat routing + UI grouping).
-ModelProvider = Literal["anthropic", "bedrock", "bedrock-open", "claude-cli"]
+# The provider tags the registry understands (drives chat routing + UI grouping):
+# per-vendor Bedrock namespaces + the off-Bedrock providers, plus the legacy
+# ``bedrock``/``bedrock-open`` tags kept so rows written before per-vendor tagging
+# still validate and route. Only ``anthropic``/``bedrock`` speak Messages.
+ModelProvider = Literal[
+    "anthropic",
+    "amazon",
+    "meta",
+    "mistral",
+    "cohere",
+    "ai21",
+    "deepseek",
+    "stability",
+    "claude-cli",
+    "bedrock",
+    "bedrock-open",
+]
 
 # Hostnames that must never be reachable via an operator-supplied endpoint.
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
@@ -932,7 +951,8 @@ def _model_settings_response() -> ModelSettingsResponse:
         provider=get_settings().ai_provider,
         default_model=model_registry.default_model(),
         enabled_models=model_registry.selectable_models(),
-        include_open=get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY),
+        include_all_vendors=get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY),
+        inkwest_agent_enabled=inkwest_agent_enabled(),
         catalog=CatalogStatus(**catalog_status()),
         models=[_model_info(e) for e in model_registry.merged_entries()],
     )
@@ -983,13 +1003,19 @@ async def refresh_model_catalog(
     admin: AdminUser,
     db: AsyncSession = Depends(get_db),
 ) -> ModelSettingsResponse:
-    """Force a live catalog refresh; optionally flip the open-models flag first."""
-    if body.include_open is not None:
-        await set_setting(db, BEDROCK_INCLUDE_OPEN_KEY, "true" if body.include_open else "false")
+    """Force a live catalog refresh; optionally flip the all-vendors flag first."""
+    if body.include_all_vendors is not None:
+        await set_setting(
+            db, BEDROCK_INCLUDE_OPEN_KEY, "true" if body.include_all_vendors else "false"
+        )
     await refresh_catalog(force=True)
     logger.info(
         f"Model catalog refreshed by {admin.email}"
-        + (f" (include_open={body.include_open})" if body.include_open is not None else "")
+        + (
+            f" (include_all_vendors={body.include_all_vendors})"
+            if body.include_all_vendors is not None
+            else ""
+        )
     )
     return _model_settings_response()
 

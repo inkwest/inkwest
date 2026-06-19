@@ -135,6 +135,41 @@ def is_anthropic_model(model_id: str) -> bool:
     return "anthropic" in lowered or "claude" in lowered
 
 
+# Bedrock model IDs are namespaced by vendor (``<vendor>.<model>``, optionally
+# behind a regional routing prefix). These are the vendors Bedrock serves; the
+# tag drives admin-UI grouping and chat routing (only ``anthropic`` speaks the
+# Messages protocol — see ``provider_speaks_messages``).
+BEDROCK_VENDORS = frozenset(
+    {"anthropic", "amazon", "meta", "mistral", "cohere", "ai21", "deepseek", "stability"}
+)
+# Provider tags whose models speak the Anthropic Messages protocol (Claude).
+# ``bedrock`` is the legacy pre-vendor tag for Claude-on-Bedrock, kept so rows
+# persisted before per-vendor tagging still route correctly.
+_MESSAGES_PROVIDERS = frozenset({"anthropic", "bedrock"})
+
+
+def bedrock_vendor(model_id: str) -> str:
+    """The Bedrock vendor tag for a model ID (``meta``, ``anthropic``, ...).
+
+    Strips any regional routing prefix (``us.``/``eu.``...) then takes the
+    leading namespace. An unrecognized namespace falls back to the generic
+    ``bedrock`` tag (still groupable, routed as non-Claude unless it is
+    ``anthropic``).
+    """
+    base = _BEDROCK_ROUTE_PREFIX.sub("", model_id)
+    vendor = base.split(".", 1)[0] if "." in base else ""
+    return vendor if vendor in BEDROCK_VENDORS else "bedrock"
+
+
+def provider_speaks_messages(provider: str) -> bool:
+    """Whether a provider/vendor tag uses the Anthropic Messages protocol.
+
+    Everything else (open-vendor Bedrock tags + the legacy ``bedrock-open``) is
+    routed through the Converse API — see app.services.orchestrator_converse.
+    """
+    return provider in _MESSAGES_PROVIDERS
+
+
 def _model_sort_key(model_id: str) -> tuple:
     """Newest version first, then family tier, then label for stability."""
     label = model_label(model_id)

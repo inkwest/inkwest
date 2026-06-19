@@ -27,11 +27,31 @@ import { useConfigStore } from '@/store/config';
 import { ModelFormModal } from './ModelFormModal';
 
 // Group order in the list; unknown providers fall after the known ones.
-const PROVIDER_ORDER = ['anthropic', 'bedrock', 'bedrock-open', 'claude-cli'];
+// Anthropic first, then the other Bedrock vendors, then legacy/off-Bedrock tags.
+const PROVIDER_ORDER = [
+  'anthropic',
+  'amazon',
+  'meta',
+  'mistral',
+  'cohere',
+  'ai21',
+  'deepseek',
+  'stability',
+  'bedrock',
+  'bedrock-open',
+  'claude-cli',
+];
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: 'Anthropic',
+  amazon: 'Amazon',
+  meta: 'Meta',
+  mistral: 'Mistral',
+  cohere: 'Cohere',
+  ai21: 'AI21',
+  deepseek: 'DeepSeek',
+  stability: 'Stability',
   bedrock: 'Bedrock (Claude)',
-  'bedrock-open': 'Bedrock (open-weight)',
+  'bedrock-open': 'Bedrock (other vendors)',
   'claude-cli': 'Claude CLI',
 };
 
@@ -238,21 +258,20 @@ export function ModelSettingsPage() {
                 </div>
               </div>
 
-              {/* Show this toggle only when it's actually useful — i.e. an engine
-                  that can run open-weight models is in play. Today's proxy is the
-                  Bedrock provider (open models run via the Converse path); under
-                  claude-cli the CLI can't drive them, so the toggle is hidden.
-                  P0 (AGENTIC_ENGINES) switches this gate to "inkwest-agent enabled". */}
-              {settings.provider === 'bedrock' && (
+              {/* Show this toggle only when it's actually useful — i.e. the
+                  inkwest-agent engine (custom Converse loop) is enabled and can
+                  run non-Anthropic Bedrock models. Under claude-cli only, the CLI
+                  can't drive them, so the toggle is hidden (catalog stays Claude-only). */}
+              {settings.inkwest_agent_enabled && (
                 <label className="flex items-center gap-3 text-sm text-gray-300 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={settings.include_open}
+                    checked={settings.include_all_vendors}
                     disabled={isRefreshing}
                     onChange={(e) => handleRefresh(e.target.checked)}
                     className="h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500"
                   />
-                  Include open-weight Bedrock models (Llama, Mistral, Nova…). Toggling refreshes
+                  Include all Bedrock vendors (Amazon, Meta, Mistral, Cohere…). Toggling refreshes
                   the catalog.
                 </label>
               )}

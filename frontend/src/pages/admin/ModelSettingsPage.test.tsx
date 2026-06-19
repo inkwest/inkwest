@@ -10,7 +10,8 @@ const SETTINGS: adminApi.ModelSettings = {
   provider: 'bedrock',
   default_model: 'eu.anthropic.claude-opus-4-8',
   enabled_models: ['eu.anthropic.claude-opus-4-8'],
-  include_open: false,
+  include_all_vendors: false,
+  inkwest_agent_enabled: true,
   catalog: {
     last_refreshed_at: '2026-06-19T10:00:00+00:00',
     source: 'live',
@@ -21,7 +22,7 @@ const SETTINGS: adminApi.ModelSettings = {
     {
       id: 'eu.anthropic.claude-opus-4-8',
       label: 'Opus 4.8',
-      provider: 'bedrock',
+      provider: 'anthropic',
       enabled: true,
       is_default: true,
       source: 'discovered',
@@ -36,7 +37,7 @@ const SETTINGS: adminApi.ModelSettings = {
     {
       id: 'eu.anthropic.claude-haiku-4-5',
       label: 'Haiku 4.5',
-      provider: 'bedrock',
+      provider: 'anthropic',
       enabled: false,
       is_default: false,
       source: 'discovered',
@@ -51,7 +52,7 @@ const SETTINGS: adminApi.ModelSettings = {
     {
       id: 'meta.llama3-1-70b-instruct-v1:0',
       label: 'Llama3 1 70B Instruct',
-      provider: 'bedrock-open',
+      provider: 'meta',
       enabled: false,
       is_default: false,
       source: 'custom',
@@ -89,9 +90,9 @@ describe('ModelSettingsPage', () => {
     render(<ModelSettingsPage />);
     await screen.findByLabelText('Enable Opus 4.8');
 
-    expect(screen.getByText('Bedrock (Claude)')).toBeInTheDocument();
-    expect(screen.getByText('Bedrock (open-weight)')).toBeInTheDocument();
-    // The custom open-weight model has no pricing -> "unpriced" + "custom" badges
+    expect(screen.getByText('Anthropic')).toBeInTheDocument();
+    expect(screen.getByText('Meta')).toBeInTheDocument();
+    // The custom non-Anthropic model has no pricing -> "unpriced" + "custom" badges
     expect(screen.getByText('unpriced')).toBeInTheDocument();
     expect(screen.getByText('custom')).toBeInTheDocument();
   });
@@ -170,12 +171,12 @@ describe('ModelSettingsPage', () => {
     );
   });
 
-  it('refreshes the catalog when toggling open-weight models', async () => {
+  it('refreshes the catalog when toggling all-vendor models', async () => {
     render(<ModelSettingsPage />);
     await screen.findByLabelText('Enable Opus 4.8');
     const user = userEvent.setup();
 
-    await user.click(screen.getByLabelText(/Include open-weight/));
+    await user.click(screen.getByLabelText(/Include all Bedrock vendors/));
 
     await waitFor(() => expect(mockedApi.refreshModels).toHaveBeenCalledWith(true));
   });
@@ -231,14 +232,14 @@ describe('ModelSettingsPage', () => {
     );
   });
 
-  it('hides the open-weight toggle when the provider is not Bedrock', async () => {
+  it('hides the all-vendors toggle when the inkwest-agent engine is disabled', async () => {
     mockedApi.getModelSettings.mockResolvedValue({
       ...structuredClone(SETTINGS),
-      provider: 'anthropic',
+      inkwest_agent_enabled: false,
     });
     render(<ModelSettingsPage />);
     await screen.findByLabelText('Enable Opus 4.8');
 
-    expect(screen.queryByLabelText(/Include open-weight/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Include all Bedrock vendors/)).not.toBeInTheDocument();
   });
 });

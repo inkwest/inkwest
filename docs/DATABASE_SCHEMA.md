@@ -304,12 +304,12 @@ CREATE TABLE inkwest.app_settings (
 
 ### model_registry
 
-Admin-managed catalog of selectable models: which models users may pick, the default, per-model metadata (endpoint/arn/options), and pricing overrides. Discovered provider models are upserted as `source='discovered'`; operators add `source='custom'` rows for models the discovery filter doesn't surface (e.g. open-weight Bedrock models). Replaces the former `anthropic_model` / `enabled_models` keys in `app_settings`. See `app.services.model_registry`.
+Admin-managed catalog of selectable models: which models users may pick, the default, per-model metadata (endpoint/arn/options), and pricing overrides. Discovered provider models are upserted as `source='discovered'`; operators add `source='custom'` rows for models the discovery filter doesn't surface (e.g. non-Anthropic Bedrock vendor models). Replaces the former `anthropic_model` / `enabled_models` keys in `app_settings`. See `app.services.model_registry`.
 
 ```sql
 CREATE TABLE inkwest.model_registry (
     model_id VARCHAR(512) PRIMARY KEY,
-    provider VARCHAR(32) NOT NULL,           -- anthropic | bedrock | bedrock-open | claude-cli
+    provider VARCHAR(32) NOT NULL,           -- per-vendor: anthropic|amazon|meta|mistral|cohere|ai21|deepseek|stability|claude-cli (+ legacy bedrock|bedrock-open)
     display_name VARCHAR(255),               -- NULL = derived from the ID
     endpoint VARCHAR(1024),                  -- optional custom inference base URL
     arn VARCHAR(1024),                       -- optional Bedrock inference-profile / imported-model ARN
