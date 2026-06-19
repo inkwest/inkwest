@@ -65,6 +65,38 @@ describe('SessionList', () => {
     expect(screen.getByText('No sessions yet')).toBeInTheDocument();
   });
 
+  it('highlights every query token in any order (word-independent search)', () => {
+    const { container } = renderWithRouter();
+    // Type a multi-word query; the matched title has the words in reverse order
+    // and non-contiguous — a single-substring highlighter would mark nothing.
+    act(() => {
+      fireEvent.change(screen.getByPlaceholderText('Search all sessions...'), {
+        target: { value: 'pod crash' },
+      });
+      useSessionsStore.setState({
+        isSearching: false,
+        searchResults: {
+          query: 'pod crash',
+          total: 1,
+          results: [
+            {
+              id: 's1',
+              title: 'crash loop on the pod',
+              cluster: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              matched_messages: [],
+              title_match: true,
+            },
+          ],
+        },
+      });
+    });
+    const marks = Array.from(container.querySelectorAll('mark')).map((m) => m.textContent);
+    expect(marks).toContain('crash');
+    expect(marks).toContain('pod');
+  });
+
   it('renders session list', () => {
     useSessionsStore.setState({
       isLoading: false,

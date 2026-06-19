@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import ColumnElement, String, and_, cast, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -104,13 +104,12 @@ async def list_sessions(
     if not include_archived:
         query = query.where(Session.is_archived == False)  # noqa: E712
     if search:
-        search_filter = f"%{search}%"
-        query = query.where(
-            or_(
-                Session.title.ilike(search_filter),
-                Session.summary.ilike(search_filter),
-            )
-        )
+        # Same word-independent semantics as global search (see _search_tokens):
+        # every token must appear in title or summary, any order, escaped literally.
+        # A non-empty search yielding no tokens (e.g. whitespace) matches nothing,
+        # mirroring global search — never silently fall back to "all sessions".
+        patterns = [f"%{_escape_like(tok)}%" for tok in _search_tokens(search)]
+        query = query.where(_title_summary_match(patterns) if patterns else false())
 
     count_query = select(func.count()).select_from(query.subquery())
     total_result = await db.execute(count_query)
@@ -631,11 +630,63 @@ search_router = APIRouter(prefix="/search", tags=["search"])
 MAX_SESSION_RESULTS = 20
 MAX_MESSAGE_HITS_PER_SESSION = 3
 SNIPPET_LENGTH = 150
+# Cap tokens per query: each token becomes an AND-ed, unindexed ILIKE full-scan, so an
+# unbounded word count would let one search amplify into arbitrarily many scans.
+MAX_SEARCH_TOKENS = 10
 
 
-def _make_snippet(text: str, query: str) -> str:
+def _escape_like(token: str) -> str:
+    # Escape LIKE metacharacters so user input matches literally, not as a pattern
+    # (prevents '%'/'_' acting as wildcards and backslash from corrupting the escape).
+    return token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _search_tokens(query: str) -> list[str]:
+    """Split a query into distinct search tokens (word-independent search).
+
+    Whitespace-separated (order and contiguity irrelevant), case-insensitively
+    de-duplicated (ILIKE ignores case, so repeats only add cost), and capped at
+    MAX_SEARCH_TOKENS to bound the number of full-scan ILIKE predicates one query
+    can generate. Returns raw tokens; callers escape for SQL via _escape_like.
+    """
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for token in query.split():
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tokens.append(token)
+        if len(tokens) >= MAX_SEARCH_TOKENS:
+            break
+    return tokens
+
+
+def _title_summary_match(patterns: list[str]) -> ColumnElement[bool]:
+    """AND of per-token (title OR summary) escaped-ILIKE predicates.
+
+    Caller must pass a non-empty list (an empty and_() matches everything).
+    """
+    return and_(
+        *(
+            or_(
+                Session.title.ilike(pattern, escape="\\"),
+                Session.summary.ilike(pattern, escape="\\"),
+            )
+            for pattern in patterns
+        )
+    )
+
+
+def _make_snippet(text: str, tokens: list[str]) -> str:
     lower = text.lower()
-    idx = lower.find(query.lower())
+    # Anchor the snippet on the earliest-matching token (word-independent search:
+    # tokens may appear in any order, so the first hit isn't necessarily tokens[0]).
+    idx = -1
+    for token in tokens:
+        pos = lower.find(token.lower())
+        if pos != -1 and (idx == -1 or pos < idx):
+            idx = pos
     if idx == -1:
         return text[:SNIPPET_LENGTH]
     start = max(0, idx - SNIPPET_LENGTH // 3)
@@ -654,7 +705,12 @@ async def search_global(
     q: str = Query(..., min_length=2),
     db: AsyncSession = Depends(get_db),
 ) -> SearchResponse:
-    pattern = f"%{q}%"
+    # Word-independent search: split on whitespace, AND a predicate per token so a
+    # multi-word query matches regardless of word order or contiguity (space = AND).
+    tokens = _search_tokens(q)
+    if not tokens:
+        return SearchResponse(query=q, results=[], total=0)
+    patterns = [f"%{_escape_like(tok)}%" for tok in tokens]
 
     # Sessions matching by title/summary
     session_query = (
@@ -666,9 +722,8 @@ async def search_global(
         )
     )
 
-    title_match_query = session_query.where(
-        or_(Session.title.ilike(pattern), Session.summary.ilike(pattern))
-    )
+    # Each token must appear in title OR summary; all tokens must be present.
+    title_match_query = session_query.where(_title_summary_match(patterns))
     title_result = await db.execute(
         title_match_query.order_by(Session.updated_at.desc()).limit(MAX_SESSION_RESULTS)
     )
@@ -677,13 +732,19 @@ async def search_global(
     # Messages matching by content (cast JSONB to text). Exclude 'system' event
     # messages: their structured JSON would match on metadata (e.g. "connected",
     # account names) — noise — and could surface sessions the sidebar's empty filter hides.
+    # Perf note: this is an unindexed sequential scan (cast(content)->text ILIKE); the
+    # MAX_SEARCH_TOKENS cap bounds per-row predicates but not the scan. Fuzzy/indexed
+    # search (pg_trgm + GIN) is intentionally out of scope here — to be handled in a
+    # dedicated follow-up ticket.
     msg_query = (
         select(Message)
         .join(Session, Message.session_id == Session.id)
         .where(
             Session.is_archived == False,  # noqa: E712
             Message.role != "system",
-            cast(Message.content, String).ilike(pattern),
+            and_(
+                *(cast(Message.content, String).ilike(pattern, escape="\\") for pattern in patterns)
+            ),
         )
     )
     msg_query = msg_query.where(Session.user_id == str(current_user.id))
@@ -733,15 +794,16 @@ async def search_global(
                 id=m.id,
                 role=m.role,
                 snippet=_make_snippet(
-                    m.content if isinstance(m.content, str) else str(m.content), q
+                    m.content if isinstance(m.content, str) else str(m.content), tokens
                 ),
                 created_at=m.created_at,
             )
             for m in msg_by_session.get(sid, [])
         ]
-        is_title_match = (session.title and q.lower() in session.title.lower()) or (
-            session.summary and q.lower() in session.summary.lower()
-        )
+        # Title hit = every token present in title or summary (word-independent).
+        title_l = (session.title or "").lower()
+        summary_l = (session.summary or "").lower()
+        is_title_match = all(tok.lower() in title_l or tok.lower() in summary_l for tok in tokens)
         cluster_summary = (
             ClusterSummary.model_validate(session.cluster) if session.cluster else None
         )
