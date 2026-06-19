@@ -46,6 +46,7 @@ backend/app/services/       # Orchestrators, AI client, tools, budget
 backend/app/models/         # SQLAlchemy models
 backend/app/core/           # Config, auth, database, logging
 backend/app/tools/          # kubectl definitions, executor, validation
+backend/inkwest_agent/      # standalone agent worker (P1.1): DB-free Converse loop + stdin turn-spec -> stdout NDJSON ChatEvent (`python -m inkwest_agent`)
 frontend/src/components/    # React components (chat/, session/, layout/)
 frontend/src/store/         # Zustand stores (chat, sessions, settings)
 frontend/src/services/      # API client, WebSocket service
