@@ -1,45 +1,32 @@
-"""Tests for the DB-persisted runtime settings (startup load + parsing)."""
+"""Tests for the generic DB-persisted runtime settings (KV store)."""
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.services import app_settings
-from app.services.app_settings import _parse_enabled_models, load_model_settings
+from app.services.app_settings import (
+    get_bool_setting,
+    get_setting,
+    load_settings,
+    set_setting,
+)
 
 
 @pytest.fixture(autouse=True)
 def reset_state():
     yield
-    app_settings._model_override = None
-    app_settings._enabled_models = None
+    app_settings._settings = {}
 
 
-class TestParseEnabledModels:
-    def test_valid_list(self):
-        assert _parse_enabled_models('["a", "b"]') == ["a", "b"]
-
-    def test_none_means_unset(self):
-        assert _parse_enabled_models(None) is None
-
-    def test_malformed_json_ignored(self):
-        assert _parse_enabled_models("{not json") is None
-
-    def test_non_list_ignored(self):
-        assert _parse_enabled_models('{"a": 1}') is None
-
-    def test_non_string_items_ignored(self):
-        assert _parse_enabled_models('["a", 1]') is None
-
-
-def _db_returning(rows_by_key: dict) -> AsyncMock:
-    """Mock db whose execute returns the AppSetting row for the queried key."""
+def _rows(**pairs: str) -> AsyncMock:
+    """Mock db whose execute returns key/value rows for load_settings()."""
     db = AsyncMock()
-    calls = iter(rows_by_key.values())
+    rows = [MagicMock(key=k, value=v) for k, v in pairs.items()]
 
     async def execute(_query):
         result = MagicMock()
-        result.scalar_one_or_none.return_value = next(calls)
+        result.__iter__ = lambda self: iter(rows)
         return result
 
     db.execute = AsyncMock(side_effect=execute)
@@ -47,35 +34,56 @@ def _db_returning(rows_by_key: dict) -> AsyncMock:
 
 
 @pytest.mark.asyncio
-async def test_load_model_settings_populates_memory():
-    model_row = MagicMock(value="claude-opus-4-8")
-    enabled_row = MagicMock(value='["claude-opus-4-8", "claude-haiku-4-5"]')
-    db = _db_returning({"anthropic_model": model_row, "enabled_models": enabled_row})
-
-    await load_model_settings(db)
-
-    assert app_settings.get_model_override() == "claude-opus-4-8"
-    assert app_settings.get_enabled_models() == ["claude-opus-4-8", "claude-haiku-4-5"]
+async def test_load_settings_populates_memory():
+    db = _rows(bedrock_include_open="true", other="x")
+    await load_settings(db)
+    assert get_setting("bedrock_include_open") == "true"
+    assert get_setting("other") == "x"
 
 
 @pytest.mark.asyncio
-async def test_load_model_settings_survives_corrupted_row():
-    """A corrupted enabled_models row must not break startup — it parses to unset."""
-    model_row = MagicMock(value="claude-opus-4-8")
-    corrupted = MagicMock(value="{corrupted!!")
-    db = _db_returning({"anthropic_model": model_row, "enabled_models": corrupted})
+async def test_load_settings_empty_db():
+    db = _rows()
+    await load_settings(db)
+    assert get_setting("anything") is None
 
-    await load_model_settings(db)
 
-    assert app_settings.get_model_override() == "claude-opus-4-8"
-    assert app_settings.get_enabled_models() is None
+def test_get_setting_unset_is_none():
+    assert get_setting("missing") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("true", True),
+        ("1", True),
+        ("yes", True),
+        ("on", True),
+        ("TRUE", True),
+        ("false", False),
+        ("0", False),
+        ("", False),
+        ("nope", False),
+    ],
+)
+def test_get_bool_setting(raw, expected):
+    app_settings._settings = {"flag": raw}
+    assert get_bool_setting("flag") is expected
+
+
+def test_get_bool_setting_default_when_unset():
+    assert get_bool_setting("missing", default=True) is True
+    assert get_bool_setting("missing") is False
 
 
 @pytest.mark.asyncio
-async def test_load_model_settings_empty_db():
-    db = _db_returning({"anthropic_model": None, "enabled_models": None})
+async def test_set_setting_upserts_and_updates_memory():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock())
+    db.commit = AsyncMock()
 
-    await load_model_settings(db)
+    await set_setting(db, "bedrock_include_open", "true")
 
-    assert app_settings.get_model_override() is None
-    assert app_settings.get_enabled_models() is None
+    db.execute.assert_awaited_once()  # single ON CONFLICT upsert
+    db.commit.assert_awaited_once()
+    assert get_setting("bedrock_include_open") == "true"

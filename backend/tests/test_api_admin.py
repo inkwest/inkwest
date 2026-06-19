@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -281,12 +281,12 @@ async def test_usage_by_model(admin_client: AsyncClient, mock_db: AsyncMock) -> 
 
 @pytest.fixture
 def reset_model_settings():
-    """Restore the in-memory model settings mutated by PUT tests."""
-    from app.services import app_settings
+    """Restore the in-memory registry + settings mutated by write tests."""
+    from app.services import app_settings, model_registry
 
     yield
-    app_settings._model_override = None
-    app_settings._enabled_models = None
+    model_registry._rows = {}
+    app_settings._settings = {}
 
 
 @pytest.mark.asyncio
@@ -304,19 +304,23 @@ async def test_get_model_settings(admin_client: AsyncClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["default_model"] in data["enabled_models"]
-    available_ids = [m["id"] for m in data["available_models"]]
-    # Nothing configured yet: all available models are enabled
+    assert "include_open" in data
+    assert data["catalog"]["source"] in ("live", "static")
+    available_ids = [m["id"] for m in data["models"]]
+    # Nothing configured yet: all available models are selectable
     assert data["enabled_models"] == available_ids
-    # Bedrock model IDs must not be offered
+    # Bedrock model IDs must not be offered (anthropic provider, static fallback)
     assert not any(m.startswith("anthropic.") for m in available_ids)
     # Human-friendly labels, not internal IDs
-    labels = {m["id"]: m["label"] for m in data["available_models"]}
+    labels = {m["id"]: m["label"] for m in data["models"]}
     assert labels["claude-sonnet-4-20250514"] == "Sonnet 4.0"
     assert labels["claude-3-5-sonnet-20241022"] == "Sonnet 3.5"
     # Older generations carry the legacy flag, current ones don't
-    legacy = {m["id"]: m["legacy"] for m in data["available_models"]}
+    legacy = {m["id"]: m["legacy"] for m in data["models"]}
     assert legacy["claude-opus-4-8"] is False
     assert legacy["claude-sonnet-4-20250514"] is True
+    # Provider tagging is present for grouping
+    assert all(m["provider"] for m in data["models"])
 
 
 @pytest.mark.asyncio
@@ -334,8 +338,7 @@ async def test_update_model_settings(
     assert resp.status_code == 200
     data = resp.json()
     assert data["default_model"] == "claude-opus-4-20250514"
-    assert data["enabled_models"] == enabled
-    assert mock_db.execute.await_count == 2  # one ON CONFLICT upsert per settings key
+    assert set(data["enabled_models"]) == set(enabled)
     mock_db.commit.assert_awaited()
 
 
@@ -377,3 +380,174 @@ async def test_update_model_settings_empty_enabled_list(
     )
     assert resp.status_code == 422  # rejected by schema (min_length=1)
     mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refresh_model_catalog_sets_open_flag(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+    with patch("app.api.routes.admin.refresh_catalog", new=AsyncMock()) as refresh:
+        resp = await admin_client.post(
+            "/api/admin/settings/model/refresh", json={"include_open": True}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["include_open"] is True
+    refresh.assert_awaited_once_with(force=True)
+    mock_db.commit.assert_awaited()  # set_setting persisted the flag
+
+
+@pytest.mark.asyncio
+async def test_add_custom_model(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+    resp = await admin_client.post(
+        "/api/admin/models",
+        json={
+            "id": "meta.llama3-1-70b-instruct-v1:0",
+            "provider": "bedrock-open",
+            "display_name": "Llama 3.1 70B",
+            "arn": "arn:aws:bedrock:eu-west-1::foundation-model/meta.llama3",
+            "input_price": 0.72,
+            "output_price": 0.72,
+            "enabled": True,
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    added = next(m for m in data["models"] if m["id"] == "meta.llama3-1-70b-instruct-v1:0")
+    assert added["source"] == "custom"
+    assert added["provider"] == "bedrock-open"
+    assert added["priced"] is True
+    assert added["input_price"] == 0.72
+
+
+@pytest.mark.asyncio
+async def test_add_custom_model_rejects_lone_price(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    resp = await admin_client.post(
+        "/api/admin/models",
+        json={"id": "x", "provider": "bedrock-open", "input_price": 1.0},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_add_custom_model_rejects_non_http_endpoint(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    resp = await admin_client.post(
+        "/api/admin/models",
+        json={"id": "x", "provider": "bedrock-open", "endpoint": "file:///etc/passwd"},
+    )
+    assert resp.status_code == 422  # rejected by the endpoint URL validator
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["http://169.254.169.254/latest/meta-data", "http://localhost:8080", "http://10.0.0.5"],
+)
+@pytest.mark.asyncio
+async def test_add_custom_model_rejects_internal_endpoint(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None, endpoint: str
+) -> None:
+    resp = await admin_client.post(
+        "/api/admin/models",
+        json={"id": "x", "provider": "bedrock-open", "endpoint": endpoint},
+    )
+    assert resp.status_code == 422  # SSRF guard rejects internal/metadata targets
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_custom_model_rejects_unknown_provider(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    resp = await admin_client.post("/api/admin/models", json={"id": "x", "provider": "gpt"})
+    assert resp.status_code == 422  # provider must be one of the known tags
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_custom_model_rejects_malformed_arn(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    resp = await admin_client.post(
+        "/api/admin/models",
+        json={"id": "x", "provider": "bedrock-open", "arn": "not-an-arn"},
+    )
+    assert resp.status_code == 422
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_custom_model_metadata(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+    resp = await admin_client.put(
+        "/api/admin/models/claude-opus-4-8",
+        json={"display_name": "House Opus"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    edited = next(m for m in data["models"] if m["id"] == "claude-opus-4-8")
+    assert edited["label"] == "House Opus"
+
+
+@pytest.mark.asyncio
+async def test_delete_custom_model(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    from app.services import model_registry
+
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+    model_registry._rows = {
+        "meta.llama3": {
+            "model_id": "meta.llama3",
+            "provider": "bedrock-open",
+            "display_name": None,
+            "endpoint": None,
+            "arn": None,
+            "options": {},
+            "input_price": None,
+            "output_price": None,
+            "enabled": False,
+            "is_default": False,
+            "source": "custom",
+            "legacy": False,
+        }
+    }
+    resp = await admin_client.request("DELETE", "/api/admin/models/meta.llama3")
+    assert resp.status_code == 200
+    assert "meta.llama3" not in [m["id"] for m in resp.json()["models"]]
+
+
+@pytest.mark.asyncio
+async def test_delete_discovered_model_rejected(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
+) -> None:
+    from app.services import model_registry
+
+    model_registry._rows = {
+        "claude-opus-4-8": {
+            "model_id": "claude-opus-4-8",
+            "provider": "anthropic",
+            "display_name": None,
+            "endpoint": None,
+            "arn": None,
+            "options": {},
+            "input_price": None,
+            "output_price": None,
+            "enabled": True,
+            "is_default": False,
+            "source": "discovered",
+            "legacy": False,
+        }
+    }
+    resp = await admin_client.request("DELETE", "/api/admin/models/claude-opus-4-8")
+    assert resp.status_code == 400
+    assert "cannot be deleted" in resp.json()["detail"].lower()

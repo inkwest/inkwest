@@ -81,10 +81,12 @@ def _frozen_model_catalog():
 
     model_catalog._live_models = None
     model_catalog._fetched_at = time.monotonic()
+    model_catalog._fetched_wall = None
     model_catalog._last_fetch_failed = False
     yield
     model_catalog._live_models = None
     model_catalog._fetched_at = 0.0
+    model_catalog._fetched_wall = None
     model_catalog._last_fetch_failed = False
 
 

@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import FileResponse, Response
@@ -35,11 +36,12 @@ from app.core.config import get_settings
 from app.core.database import async_session_maker, close_db, init_db
 from app.core.logging import AccessLogMiddleware, access_log_config, get_logger, setup_logging
 from app.core.telemetry import shutdown_telemetry
-from app.services.app_settings import load_model_settings
+from app.services.app_settings import load_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
 from app.services.messages import purge_empty_sessions, reconcile_interrupted_turns
 from app.services.model_catalog import refresh_catalog
+from app.services.model_registry import load_registry
 from app.services.prompts import ensure_default_system_prompt
 from app.services.pubsub import start_listener, stop_listener
 from app.services.sandbox import reap_orphans, start_sandbox_reaper, stop_sandbox_reaper
@@ -78,10 +80,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("skills_frontmatter_migration_failed")
             await db.rollback()
-        # Apply the admin model configuration persisted in app_settings.
-        await load_model_settings(db)
-        # Fetch the provider's live model catalog (best-effort, static fallback).
-        await refresh_catalog()
+        # Model config load is best-effort against DB failures: a Postgres blip
+        # here must degrade the model picker (empty registry -> "offer everything
+        # available"), not take down the whole API at boot. Only DB-layer errors
+        # are swallowed — a programming error must still crash-loop visibly rather
+        # than boot green with a silently-empty registry. refresh_catalog self-guards.
+        try:
+            # Scalar feature flags (e.g. bedrock_include_open) before the fetch reads them.
+            await load_settings(db)
+            await refresh_catalog()  # live provider catalog (best-effort, static fallback)
+            await load_registry(db)  # admin registry: enabled subset, default, overrides
+        except SQLAlchemyError:
+            logger.exception("model_config_load_failed")
+            await db.rollback()
         # Recover turns killed mid-flight by the previous shutdown (restart,
         # rolling deploy, crash): no turn is in flight yet, so any session ending
         # on an unanswered user message is an interrupted turn — mark it retryable.

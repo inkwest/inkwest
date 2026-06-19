@@ -95,43 +95,11 @@ class TestGetAIClient:
 
 
 class TestGetModelName:
-    """Tests for get_model_name (delegates to model_catalog.default_model)."""
+    """get_model_name delegates to model_registry.default_model (covered there)."""
 
-    def test_returns_admin_default_when_valid(self):
-        from app.services import model_catalog
-
-        model_catalog._live_models = ["claude-fable-5", "claude-opus-4-8"]
-        try:
-            with patch(
-                "app.services.model_catalog.get_model_override",
-                return_value="claude-opus-4-8",
-            ):
-                assert get_model_name() == "claude-opus-4-8"
-        finally:
-            model_catalog._live_models = None
-
-    def test_falls_back_to_newest_catalog_model(self):
-        from app.services import model_catalog
-
-        model_catalog._live_models = ["claude-fable-5", "claude-opus-4-8"]
-        try:
-            with patch("app.services.model_catalog.get_model_override", return_value=None):
-                assert get_model_name() == "claude-fable-5"
-        finally:
-            model_catalog._live_models = None
-
-    def test_ignores_override_absent_from_catalog(self):
-        from app.services import model_catalog
-
-        model_catalog._live_models = ["anthropic.claude-x"]
-        try:
-            with patch(
-                "app.services.model_catalog.get_model_override",
-                return_value="claude-opus-4-8",
-            ):
-                assert get_model_name() == "anthropic.claude-x"
-        finally:
-            model_catalog._live_models = None
+    def test_delegates_to_registry_default(self):
+        with patch("app.services.ai_client.default_model", return_value="claude-opus-4-8"):
+            assert get_model_name() == "claude-opus-4-8"
 
 
 class TestGetOrchestrator:
@@ -146,14 +114,14 @@ class TestGetOrchestrator:
             orchestrator = get_orchestrator()
             assert orchestrator.__name__ == "orchestrate_chat"
 
-    def test_bedrock_returns_api_orchestrator(self):
-        """Should return API orchestrator for Bedrock provider."""
+    def test_bedrock_returns_dispatcher(self):
+        """Bedrock returns a per-turn dispatcher (Claude vs Converse by model)."""
         mock_settings = MagicMock()
         mock_settings.ai_provider = "bedrock"
 
         with patch("app.services.ai_client.get_settings", return_value=mock_settings):
             orchestrator = get_orchestrator()
-            assert orchestrator.__name__ == "orchestrate_chat"
+            assert orchestrator.__name__ == "_dispatch_bedrock"
 
     def test_claude_cli_returns_cli_orchestrator(self):
         """Should return CLI orchestrator for claude-cli provider."""
@@ -192,7 +160,7 @@ class TestResolveSessionModelChoice:
                 "app.services.ai_client.selectable_models",
                 return_value=["claude-haiku-4-5"],
             ),
-            patch("app.services.ai_client.get_model_override", return_value=None),
+            patch("app.services.ai_client.configured_default_id", return_value=None),
         ):
             assert await resolve_session_model_choice(db, "s1") is None
 
@@ -208,7 +176,7 @@ class TestResolveSessionModelChoice:
                 return_value=["claude-haiku-4-5"],
             ),
             patch(
-                "app.services.ai_client.get_model_override",
+                "app.services.ai_client.configured_default_id",
                 return_value="claude-fable-5",
             ),
         ):

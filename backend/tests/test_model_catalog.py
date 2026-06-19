@@ -8,9 +8,9 @@ import pytest
 from app.services import model_catalog
 from app.services.model_catalog import (
     available_models,
-    default_model,
+    catalog_status,
+    is_anthropic_model,
     refresh_catalog,
-    selectable_models,
     static_catalog,
 )
 
@@ -250,47 +250,6 @@ async def test_fetch_bedrock_models_parses_profiles_and_on_demand():
     ]
 
 
-def test_selectable_models_intersects_with_catalog():
-    model_catalog._live_models = ["claude-a", "claude-b", "claude-c"]
-    with patch.object(model_catalog, "get_enabled_models", return_value=["claude-c", "claude-a"]):
-        assert selectable_models() == ["claude-a", "claude-c"]
-
-
-def test_selectable_models_stale_enabled_falls_back_to_default_only():
-    """Provider switch: a stale enabled list must NOT re-expose the full
-    catalog (least privilege) — only the default model is offered."""
-    model_catalog._live_models = ["anthropic.claude-x", "anthropic.claude-y"]
-    with (
-        patch.object(model_catalog, "get_enabled_models", return_value=["claude-opus-4-8"]),
-        patch.object(model_catalog, "get_model_override", return_value=None),
-    ):
-        assert selectable_models() == ["anthropic.claude-x"]
-
-
-def test_default_model_honors_valid_override():
-    model_catalog._live_models = ["claude-opus-4-7", "claude-opus-4-8"]
-    with patch.object(model_catalog, "get_model_override", return_value="claude-opus-4-7"):
-        assert default_model() == "claude-opus-4-7"
-
-
-def test_default_model_ignores_stale_override():
-    """Provider switch: an anthropic-ID override must not be sent to Bedrock —
-    the newest catalog model applies instead."""
-    model_catalog._live_models = ["anthropic.claude-3-5-sonnet-20241022-v2:0"]
-    with patch.object(model_catalog, "get_model_override", return_value="claude-opus-4-8"):
-        assert default_model() == "anthropic.claude-3-5-sonnet-20241022-v2:0"
-
-
-def test_default_model_unset_is_newest_catalog_model():
-    """Zero-config: no DB row, no env var — the newest catalog model wins."""
-    model_catalog._live_models = None  # static fallback (pricing table, newest first)
-    with (
-        patch.object(model_catalog, "get_settings", return_value=_settings()),
-        patch.object(model_catalog, "get_model_override", return_value=None),
-    ):
-        assert default_model() == "claude-fable-5"
-
-
 def test_static_catalog_claude_cli_declared_models():
     """CLAUDE_CLI_MODELS declares what the CLI's backend serves."""
     with patch.object(
@@ -379,12 +338,94 @@ async def test_fetch_anthropic_models_sorts_newest_first():
     assert models == ["claude-fable-5", "claude-opus-4-8", "claude-haiku-4-5"]
 
 
-def test_default_model_fallback_stays_within_enabled_subset():
-    """A retired saved default must fall back to the newest ENABLED model,
-    not the newest catalog model (which the admin may have disabled)."""
-    model_catalog._live_models = ["claude-fable-5", "claude-opus-4-8", "claude-haiku-4-5"]
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("claude-opus-4-8", True),
+        ("eu.anthropic.claude-opus-4-8", True),
+        ("anthropic.claude-3-opus-20240229-v1:0", True),
+        ("meta.llama3-1-70b-instruct-v1:0", False),
+        ("mistral.mistral-large-2407-v1:0", False),
+        ("amazon.nova-pro-v1:0", False),
+    ],
+)
+def test_is_anthropic_model(model_id, expected):
+    assert is_anthropic_model(model_id) is expected
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_models_include_open_surfaces_non_anthropic():
+    """With include_open, open-weight (TEXT) models join the catalog; the
+    foundation list is fetched without the --by-provider anthropic narrowing."""
+    captured_args = []
+
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                {"inferenceProfileId": "eu.anthropic.claude-opus-4-8"},
+                {"inferenceProfileId": "us.meta.llama3-1-70b-instruct-v1:0"},
+            ]
+        },
+        "list-foundation-models": {
+            "modelSummaries": [
+                {
+                    "modelId": "mistral.mistral-large-2407-v1:0",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "outputModalities": ["TEXT"],
+                },
+                {
+                    "modelId": "amazon.titan-embed-text-v2:0",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "outputModalities": ["EMBEDDING"],  # filtered out — not chat
+                },
+            ]
+        },
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        captured_args.append(args)
+        return responses[args[1]]
+
     with (
-        patch.object(model_catalog, "get_model_override", return_value="claude-gone-9"),
-        patch.object(model_catalog, "get_enabled_models", return_value=["claude-haiku-4-5"]),
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
-        assert default_model() == "claude-haiku-4-5"
+        models = await model_catalog._fetch_bedrock_models(include_open=True)
+
+    # Open inference profile + open TEXT foundation model surface; embedding does not.
+    assert "us.meta.llama3-1-70b-instruct-v1:0" in models
+    assert "mistral.mistral-large-2407-v1:0" in models
+    assert "eu.anthropic.claude-opus-4-8" in models
+    assert not any("titan-embed" in m for m in models)
+    # No --by-provider narrowing when open models are requested.
+    foundation_call = next(a for a in captured_args if a[1] == "list-foundation-models")
+    assert "--by-provider" not in foundation_call
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_models_default_excludes_open():
+    """Without the flag, only Anthropic models are requested (--by-provider)."""
+    captured_args = []
+
+    async def fake_aws_json(args, extra_env=None):
+        captured_args.append(args)
+        return {"inferenceProfileSummaries": [], "modelSummaries": []}
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+        patch.object(model_catalog, "get_bool_setting", return_value=False),
+    ):
+        await model_catalog._fetch_bedrock_models()
+
+    foundation_call = next(a for a in captured_args if a[1] == "list-foundation-models")
+    assert "--by-provider" in foundation_call and "anthropic" in foundation_call
+
+
+def test_catalog_status_reports_static_when_no_live_models():
+    model_catalog._live_models = None
+    with patch.object(model_catalog, "get_settings", return_value=_settings()):
+        status = catalog_status()
+    assert status["source"] == "static"
+    assert status["last_refreshed_at"] is None
+    assert status["count"] > 0

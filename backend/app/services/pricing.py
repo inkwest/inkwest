@@ -131,16 +131,6 @@ def is_legacy_model(model_id: str) -> bool:
     return pricing.legacy if pricing else False
 
 
-def has_pricing(model_id: str) -> bool:
-    """Whether cost tracking has real pricing for this model.
-
-    False means `get_model_pricing` would fall back to the conservative
-    DEFAULT_PRICING estimate — surfaced in the admin UI so unpriced
-    live-discovered models are visible.
-    """
-    return get_model_pricing(model_id) is not DEFAULT_PRICING
-
-
 _ROUTE_PREFIX_RE = re.compile(r"^(?:us|eu|apac|us-gov|global)\.")
 
 

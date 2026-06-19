@@ -24,13 +24,36 @@ async def test_get_app_config(authenticated_client: AsyncClient) -> None:
 async def test_app_config_reflects_model_settings(
     authenticated_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.services import app_settings
+    from app.services import model_catalog, model_registry
 
-    monkeypatch.setattr(app_settings, "_model_override", "claude-opus-4-20250514")
+    def _row(model_id: str, **over):
+        base = {
+            "model_id": model_id,
+            "provider": "anthropic",
+            "display_name": None,
+            "endpoint": None,
+            "arn": None,
+            "options": {},
+            "input_price": None,
+            "output_price": None,
+            "enabled": True,
+            "is_default": False,
+            "source": "discovered",
+            "legacy": False,
+        }
+        base.update(over)
+        return base
+
     monkeypatch.setattr(
-        app_settings,
-        "_enabled_models",
-        ["claude-opus-4-20250514", "claude-sonnet-4-20250514"],
+        model_catalog, "_live_models", ["claude-opus-4-20250514", "claude-sonnet-4-20250514"]
+    )
+    monkeypatch.setattr(
+        model_registry,
+        "_rows",
+        {
+            "claude-opus-4-20250514": _row("claude-opus-4-20250514", is_default=True),
+            "claude-sonnet-4-20250514": _row("claude-sonnet-4-20250514"),
+        },
     )
 
     resp = await authenticated_client.get("/api/config")

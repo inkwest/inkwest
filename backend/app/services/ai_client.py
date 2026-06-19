@@ -7,8 +7,9 @@ Supports two AI provider families:
 """
 
 import logging
+from collections.abc import AsyncIterator
 from functools import lru_cache
-from typing import TypeAlias
+from typing import Any, TypeAlias
 from uuid import UUID
 
 from anthropic import AsyncAnthropic, AsyncAnthropicBedrock
@@ -17,8 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.session import Session
-from app.services.app_settings import get_model_override
-from app.services.model_catalog import default_model, selectable_models
+from app.services.model_registry import (
+    configured_default_id,
+    default_model,
+    get_entry,
+    selectable_models,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +147,7 @@ async def resolve_session_model_choice(db: AsyncSession, session_id: "str | UUID
             f"Session {session_id} pinned to model {session_model} which is no longer "
             "enabled/available; using the default"
         )
-    override = get_model_override()
+    override = configured_default_id()
     if override and override in selectable:
         return override
     return None
@@ -172,8 +177,34 @@ def get_orchestrator():
         logger.info("Using Claude CLI orchestrator")
         return orchestrate_chat_cli
 
-    else:
+    if settings.ai_provider == "bedrock":
+        # Bedrock serves both Claude (Anthropic Messages protocol via the SDK) and
+        # open-weight models (Bedrock Converse API). The target isn't known until
+        # the session's model is resolved, so dispatch per turn.
+        from app.services.model_catalog import is_anthropic_model
         from app.services.orchestrator import orchestrate_chat
+        from app.services.orchestrator_converse import orchestrate_chat_converse
 
-        logger.info(f"Using Anthropic orchestrator with provider: {settings.ai_provider}")
-        return orchestrate_chat
+        async def _dispatch_bedrock(
+            db: AsyncSession, session_id: "str | UUID", **kwargs: Any
+        ) -> AsyncIterator[Any]:
+            # Resolved again inside the chosen orchestrator — cheap (in-memory
+            # selection + one indexed scalar), and keeps both paths standalone.
+            model = await resolve_session_model(db, session_id)
+            # Route by the registry's provider tag when the model has an entry —
+            # this honors an admin's explicit provider choice on a custom model
+            # (e.g. a gateway alias whose ID would fool the substring heuristic).
+            # Fall back to the ID heuristic for anything not in the catalog.
+            entry = get_entry(model)
+            is_open = entry.provider == "bedrock-open" if entry else not is_anthropic_model(model)
+            orchestrate = orchestrate_chat_converse if is_open else orchestrate_chat
+            logger.info(f"Bedrock turn via {'Converse' if is_open else 'Anthropic'}: {model}")
+            async for event in orchestrate(db=db, session_id=session_id, **kwargs):
+                yield event
+
+        return _dispatch_bedrock
+
+    from app.services.orchestrator import orchestrate_chat
+
+    logger.info(f"Using Anthropic orchestrator with provider: {settings.ai_provider}")
+    return orchestrate_chat

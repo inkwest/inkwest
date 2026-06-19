@@ -1,20 +1,23 @@
 """
-Provider-aware model catalog.
+Provider-aware model discovery.
 
 Resolves the list of models available on the configured AI provider:
 - anthropic: live `GET /v1/models` via the SDK
 - bedrock: live `aws bedrock list-inference-profiles` + `list-foundation-models`
-  (the backend already shells out to the aws CLI for connectors)
+  (the backend already shells out to the aws CLI for connectors); when the
+  ``bedrock_include_open`` admin flag is set, non-Anthropic (open-weight) models
+  are surfaced too
 - claude-cli: discovered from the backend the CLI itself talks to (its env —
   sandbox_env_file or the process env — configures Bedrock or the Anthropic
   API); CLAUDE_CLI_MODELS overrides, undetectable backends fall back to static
 
 The live list is cached in memory with a TTL and refreshed lazily by
-`ensure_catalog()`; any fetch failure falls back to the static catalog derived
+``refresh_catalog()``; any fetch failure falls back to the static catalog derived
 from the pricing table, so the app never depends on provider availability.
-This module also owns the user-facing selection logic (enabled subset, default
-model) since both must be validated against the *current* provider's catalog —
-that is what makes switching AI_PROVIDER safe despite persisted choices.
+
+This module is pure discovery — which model IDs exist on the provider. The
+admin-facing selection (enabled subset, default, per-model metadata, pricing
+overrides) lives in app.services.model_registry, which consumes this catalog.
 """
 
 import asyncio
@@ -23,11 +26,12 @@ import logging
 import os
 import re
 import time
+from datetime import UTC, datetime
 
 from anthropic import AsyncAnthropic
 
 from app.core.config import get_settings
-from app.services.app_settings import get_enabled_models, get_model_override
+from app.services.app_settings import BEDROCK_INCLUDE_OPEN_KEY, get_bool_setting
 from app.services.pricing import MODEL_PRICING, model_label
 
 logger = logging.getLogger(__name__)
@@ -40,6 +44,7 @@ _AWS_CLI_TIMEOUT = 15
 
 _live_models: list[str] | None = None
 _fetched_at: float = 0.0
+_fetched_wall: datetime | None = None
 _last_fetch_failed: bool = False
 _refresh_lock = asyncio.Lock()
 
@@ -119,6 +124,16 @@ _BEDROCK_ROUTE_RANK = {"us": 0, "eu": 0, "apac": 0, "us-gov": 0, "global": 1, No
 _FAMILY_RANK = {"fable": 0, "opus": 1, "sonnet": 2, "haiku": 3}
 
 
+def is_anthropic_model(model_id: str) -> bool:
+    """Whether a model speaks the Anthropic Messages protocol (a Claude model).
+
+    Non-Anthropic Bedrock models (Llama, Mistral, Nova, DeepSeek...) are reached
+    through the Bedrock Converse API instead — see orchestrator_converse.
+    """
+    lowered = model_id.lower()
+    return "anthropic" in lowered or "claude" in lowered
+
+
 def _model_sort_key(model_id: str) -> tuple:
     """Newest version first, then family tier, then label for stability."""
     label = model_label(model_id)
@@ -148,29 +163,39 @@ def _dedupe_bedrock_models(models: list[str]) -> list[str]:
 
 
 async def _fetch_bedrock_models(
-    region: str | None = None, extra_env: dict[str, str] | None = None
+    region: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    include_open: bool | None = None,
 ) -> list[str] | None:
     region = region or get_settings().aws_region
     if not region:
         return None
+    if include_open is None:
+        include_open = get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY)
     region_args = ["--region", region]
     # Cross-region inference profiles (eu.anthropic..., us.anthropic...) are the
     # recommended way to invoke recent models; on-demand foundation models cover
     # the rest. Both lists are needed for a complete picture.
     profiles = await _aws_json(["bedrock", "list-inference-profiles", *region_args], extra_env)
-    foundation = await _aws_json(
-        ["bedrock", "list-foundation-models", "--by-provider", "anthropic", *region_args],
-        extra_env,
-    )
+    # --by-provider narrows the foundation list to Anthropic unless the admin
+    # opted into open-weight models, in which case every provider is listed.
+    foundation_args = ["bedrock", "list-foundation-models", *region_args]
+    if not include_open:
+        foundation_args += ["--by-provider", "anthropic"]
+    foundation = await _aws_json(foundation_args, extra_env)
     models = [
         p["inferenceProfileId"]
         for p in profiles.get("inferenceProfileSummaries", [])
-        if ".anthropic." in p.get("inferenceProfileId", "")
+        if include_open or ".anthropic." in p.get("inferenceProfileId", "")
     ]
     models += [
         m["modelId"]
         for m in foundation.get("modelSummaries", [])
         if "ON_DEMAND" in (m.get("inferenceTypesSupported") or [])
+        # Open-weight providers ship embedding/image models too; keep only
+        # text-generation ones (Converse is a text API). Anthropic-only listings
+        # are all chat models, so the modality filter is skipped there.
+        and (not include_open or "TEXT" in (m.get("outputModalities") or []))
     ]
     return sorted(_dedupe_bedrock_models(models), key=_model_sort_key) or None
 
@@ -251,7 +276,7 @@ async def refresh_catalog(force: bool = False) -> None:
     pays the fetch latency inline (worst case ~30s — two aws CLI calls at the
     15s cap). Fine at hourly cadence; move to a background task if it bites.
     """
-    global _live_models, _fetched_at, _last_fetch_failed
+    global _live_models, _fetched_at, _fetched_wall, _last_fetch_failed
     if not force and _cache_is_fresh():
         return
     if _refresh_lock.locked() and not force:
@@ -280,6 +305,7 @@ async def refresh_catalog(force: bool = False) -> None:
         _last_fetch_failed = failed
         if fetched:
             _live_models = fetched
+            _fetched_wall = datetime.now(UTC)
             logger.info(f"Model catalog refreshed: {len(fetched)} models ({settings.ai_provider})")
 
 
@@ -288,49 +314,11 @@ def available_models() -> list[str]:
     return list(_live_models) if _live_models else static_catalog()
 
 
-def selectable_models() -> list[str]:
-    """Model IDs users may pick per session: the admin-enabled subset.
-
-    Unset (admin never saved) means all available models. Intersect with the
-    current catalog so a stale persisted entry — e.g. after a provider switch —
-    can't be offered. An empty intersection falls back to the default model
-    only: silently re-exposing the full catalog would undo the admin's
-    restriction (least privilege beats convenience here).
-    """
-    available = available_models()
-    enabled = get_enabled_models()
-    if enabled is None:
-        return available
-    selectable = [model for model in available if model in enabled]
-    if selectable:
-        return selectable
-    logger.warning(
-        f"Enabled models {enabled} have no intersection with the current catalog; "
-        "offering the default model only — review the admin model settings"
-    )
-    return [default_model()]
-
-
-def default_model() -> str:
-    """The model applied when a session has no explicit choice.
-
-    The admin-set default (database) wins while it is still enabled on the
-    current provider's catalog (a leftover from another provider must not be
-    sent to this one); otherwise the newest *enabled* model applies — the
-    catalog is ordered newest-first, so a fresh deployment defaults to the
-    latest model until an admin saves a choice.
-
-    Deliberately does NOT call selectable_models(): its empty-intersection
-    fallback calls back here, which would recurse.
-    """
-    available = available_models()
-    enabled = get_enabled_models()
-    candidates = [m for m in available if m in enabled] if enabled is not None else available
-    if not candidates:
-        # Nothing enabled matches the catalog (e.g. provider switch) —
-        # selectable_models() logs this state; degrade to the catalog default.
-        candidates = available
-    override = get_model_override()
-    if override and override in candidates:
-        return override
-    return candidates[0]
+def catalog_status() -> dict:
+    """Discovery status for the admin UI: freshness, source, last error state."""
+    return {
+        "last_refreshed_at": _fetched_wall.isoformat() if _fetched_wall else None,
+        "source": "live" if _live_models else "static",
+        "last_fetch_failed": _last_fetch_failed,
+        "count": len(available_models()),
+    }

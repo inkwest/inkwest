@@ -6,6 +6,7 @@ from app.models.cluster import Cluster
 from app.models.connector_audit import ConnectorAuditLog
 from app.models.connector_pending_state import ConnectorPendingState
 from app.models.message import Message
+from app.models.model_registry import ModelRegistry
 from app.models.oidc_pending_state import OidcPendingState
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import ConfirmationMode, Session
@@ -20,6 +21,7 @@ __all__ = [
     "Session",
     "ConfirmationMode",
     "Message",
+    "ModelRegistry",
     "User",
     "RoleKubeconfigMapping",
     "Budget",

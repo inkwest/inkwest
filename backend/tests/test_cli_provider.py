@@ -861,7 +861,7 @@ class TestGetOrchestrator:
             assert orchestrator == orchestrate_chat
 
     def test_get_orchestrator_bedrock(self):
-        """Test getting API orchestrator for bedrock."""
+        """Bedrock returns a per-turn dispatcher (Claude vs Converse by model)."""
         with patch("app.services.ai_client.get_settings") as mock_settings:
             mock_settings.return_value.ai_provider = "bedrock"
 
@@ -869,9 +869,7 @@ class TestGetOrchestrator:
 
             orchestrator = get_orchestrator()
 
-            from app.services.orchestrator import orchestrate_chat
-
-            assert orchestrator == orchestrate_chat
+            assert orchestrator.__name__ == "_dispatch_bedrock"
 
 
 class TestOrchestratorContentOrder:

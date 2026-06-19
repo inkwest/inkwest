@@ -64,6 +64,8 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
 
           <div
             ref={ref}
+            role="dialog"
+            aria-modal="true"
             className={clsx(
               'relative w-full bg-gray-800 text-white rounded-lg shadow-xl',
               // flex column + capped height so tall content scrolls inside the

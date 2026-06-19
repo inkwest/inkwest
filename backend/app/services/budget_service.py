@@ -15,8 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
-from app.services.model_catalog import default_model
-from app.services.pricing import calculate_cost
+from app.services.model_registry import calculate_cost, default_model
 
 logger = logging.getLogger(__name__)
 

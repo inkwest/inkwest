@@ -186,18 +186,70 @@ export async function getUsageTimeseries(
 // Model Settings API
 // ============================================================================
 
+/** A registry model as the admin console sees it. */
+export interface ModelInfo {
+  id: string;
+  label: string;
+  provider: string;
+  enabled: boolean;
+  is_default: boolean;
+  source: 'discovered' | 'custom';
+  legacy: boolean;
+  /** False = no real pricing; cost tracking uses a conservative default. */
+  priced: boolean;
+  endpoint: string | null;
+  arn: string | null;
+  options: Record<string, unknown>;
+  input_price: number | null;
+  output_price: number | null;
+}
+
+export interface CatalogStatus {
+  last_refreshed_at: string | null;
+  source: 'live' | 'static';
+  last_fetch_failed: boolean;
+  count: number;
+}
+
 export interface ModelSettings {
   provider: string;
   default_model: string;
   /** Model IDs users may pick per session (admin-enabled subset). */
   enabled_models: string[];
-  /** Full catalog the admin can enable from (live provider list when available). */
-  available_models: { id: string; label: string; legacy: boolean; priced: boolean }[];
+  /** Whether open-weight Bedrock models are surfaced in the catalog. */
+  include_open: boolean;
+  catalog: CatalogStatus;
+  /** The full merged registry: discovered models + custom rows. */
+  models: ModelInfo[];
 }
 
 export interface UpdateModelSettingsRequest {
   default_model: string;
   enabled_models: string[];
+}
+
+export interface AddModelRequest {
+  id: string;
+  provider: string;
+  display_name?: string | null;
+  endpoint?: string | null;
+  arn?: string | null;
+  options?: Record<string, unknown>;
+  input_price?: number | null;
+  output_price?: number | null;
+  enabled?: boolean;
+  legacy?: boolean;
+}
+
+export interface UpdateModelRequest {
+  display_name?: string | null;
+  endpoint?: string | null;
+  arn?: string | null;
+  options?: Record<string, unknown>;
+  input_price?: number | null;
+  output_price?: number | null;
+  legacy?: boolean;
+  enabled?: boolean;
 }
 
 export async function getModelSettings(): Promise<ModelSettings> {
@@ -210,6 +262,37 @@ export async function updateModelSettings(
   return fetchAPI('/api/admin/settings/model', {
     method: 'PUT',
     body: JSON.stringify(data),
+  });
+}
+
+/** Force a live catalog refresh; optionally flip the open-models flag first. */
+export async function refreshModels(includeOpen?: boolean): Promise<ModelSettings> {
+  return fetchAPI('/api/admin/settings/model/refresh', {
+    method: 'POST',
+    body: JSON.stringify(includeOpen === undefined ? {} : { include_open: includeOpen }),
+  });
+}
+
+export async function addModel(data: AddModelRequest): Promise<ModelSettings> {
+  return fetchAPI('/api/admin/models', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateModel(
+  modelId: string,
+  data: UpdateModelRequest
+): Promise<ModelSettings> {
+  return fetchAPI(`/api/admin/models/${encodeURIComponent(modelId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteModel(modelId: string): Promise<ModelSettings> {
+  return fetchAPI(`/api/admin/models/${encodeURIComponent(modelId)}`, {
+    method: 'DELETE',
   });
 }
 
