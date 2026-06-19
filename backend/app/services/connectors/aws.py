@@ -38,6 +38,29 @@ logger = logging.getLogger(__name__)
 # Scope required to enumerate accounts/roles and mint role credentials.
 _SSO_SCOPE = "sso:account:access"
 
+# AWS SSO throttles ListAccountRoles aggressively: a burst of per-account calls
+# (one round-trip each) trips 429 TooManyRequestsException, and at high fan-out
+# boto3's default 10-connection pool also starts discarding connections. Cap the
+# enumeration fan-out and let botocore's *adaptive* retry mode client-side
+# rate-limit so a user with many accounts doesn't fail the whole grant.
+_SSO_ENUM_CONCURRENCY = 8
+
+
+def _sso_boto_config(max_pool: int) -> Any:
+    """boto3 ``Config`` tuned for bursty SSO calls.
+
+    ``adaptive`` retry mode adds client-side rate limiting that backs off on 429
+    throttling (vs. the default ``standard`` mode, which just retries a few times
+    and then surfaces the error). ``max_pool_connections`` is sized to the fan-out
+    so concurrent calls reuse the pool instead of discarding connections.
+    """
+    from botocore.config import Config
+
+    return Config(
+        retries={"max_attempts": 10, "mode": "adaptive"},
+        max_pool_connections=max(10, max_pool),
+    )
+
 
 def _profile_name(account_name: str, role_name: str) -> str:
     """Build a safe AWS profile name from an account + role (e.g. acme-prod-ReadOnly)."""
@@ -313,7 +336,7 @@ def _build_sso_client(region: str | None) -> Any:
     """
     import boto3
 
-    return boto3.client("sso", region_name=region)
+    return boto3.client("sso", region_name=region, config=_sso_boto_config(_STS_MINT_CONCURRENCY))
 
 
 async def _mint_sts_profiles(
@@ -375,7 +398,7 @@ def _start_device_authorization(
     """Start the device authorization (sync; run in a thread)."""
     import boto3
 
-    oidc: Any = boto3.client("sso-oidc", region_name=region)
+    oidc: Any = boto3.client("sso-oidc", region_name=region, config=_sso_boto_config(10))
     resp = oidc.start_device_authorization(
         clientId=client_id, clientSecret=client_secret, startUrl=start_url
     )
@@ -404,7 +427,7 @@ def _create_token_device(
     import boto3
     from botocore.exceptions import ClientError
 
-    oidc: Any = boto3.client("sso-oidc", region_name=region)
+    oidc: Any = boto3.client("sso-oidc", region_name=region, config=_sso_boto_config(10))
     try:
         resp = oidc.create_token(
             clientId=client_id,
@@ -441,7 +464,9 @@ def _list_accounts_and_roles(
 
     import boto3
 
-    sso: Any = boto3.client("sso", region_name=region)
+    sso: Any = boto3.client(
+        "sso", region_name=region, config=_sso_boto_config(_SSO_ENUM_CONCURRENCY)
+    )
     accounts: list[dict[str, Any]] = []
     for page in sso.get_paginator("list_accounts").paginate(accessToken=access_token):
         for acct in page.get("accountList", []):
@@ -463,7 +488,7 @@ def _list_accounts_and_roles(
 
     roles: list[dict[str, Any]] = []
     if accounts:
-        with ThreadPoolExecutor(max_workers=min(16, len(accounts))) as ex:
+        with ThreadPoolExecutor(max_workers=min(_SSO_ENUM_CONCURRENCY, len(accounts))) as ex:
             for res in ex.map(roles_for, [a["account_id"] for a in accounts]):
                 roles.extend(res)
     return accounts, roles
