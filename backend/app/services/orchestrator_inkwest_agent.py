@@ -27,6 +27,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.constants import MAX_RESPONSE_TOKENS
 from app.services import model_registry
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
@@ -39,7 +40,9 @@ from app.services.messages import (
     update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
-from inkwest_agent.protocol import TurnSpec
+from app.tools.connector_exec import build_connector_env
+from app.tools.definitions import get_tool_definitions
+from inkwest_agent.protocol import ToolSpec, TurnContext, TurnLimits, TurnSpec
 
 logger = logging.getLogger(__name__)
 
@@ -113,21 +116,60 @@ async def orchestrate_chat_inkwest_agent(
     # reconcile the engine-resolution heuristic with the registry's authoritative config.
     entry = model_registry.get_entry(model)
     model_target = entry.arn if entry and entry.arn else None
-    spec_kwargs: dict[str, Any] = {
-        "session_id": session_id_str,
-        "user_message": user_message,
-        "model": model,
-        "system_prompt": system_prompt,
-        "history": history,
-        "model_target": model_target,
-        "region": settings.aws_region,
-        "user_id": str(user_id) if user_id else None,
-        "kubeconfig_path": kubeconfig_path,
-        "context_name": context_name,
-    }
+    max_tokens = MAX_RESPONSE_TOKENS
     if entry and isinstance(entry.options.get("max_tokens"), int):
-        spec_kwargs["max_tokens"] = entry.options["max_tokens"]
-    spec = TurnSpec(**spec_kwargs)
+        max_tokens = entry.options["max_tokens"]
+
+    # Pre-provide the session's connector creds: build_connector_env renews-on-read and
+    # projects the AWS profiles onto the shared tmpfs (write_aws_profiles), returning the
+    # IN-CONTAINER env (AWS_* file paths, GITLAB_TOKEN, GITLAB_BASE_URL, KUBECONFIG). We
+    # forward this env to the agent at spawn (docker exec -e) — a one-way push; the agent
+    # never reaches back to the portal credential store. The agent's tool executors read
+    # these creds from the env; creds_path names the tmpfs ~/.aws for the contract (it is
+    # a descriptor — the executors consume the env, not this path).
+    #
+    # The env carries AWS_SHARED_CREDENTIALS_FILE (the connector profiles), NOT explicit
+    # AWS_ACCESS_KEY_ID/SECRET, so it does not displace the agent's model-call credential:
+    # the Bedrock backend authenticates with AWS_BEARER_TOKEN_BEDROCK (set in the
+    # container's sandbox.env), and botocore prefers the bearer token over the
+    # shared-credentials file for the bedrock service — so make_bedrock_client still talks
+    # to the backend identity. (The connector `aws` subprocess gets the bearer token
+    # stripped — see _projected_aws_env.) Requires sandbox_creds_root to be set for the
+    # AWS connector to resolve in-container; without it build_connector_env emits
+    # backend-local paths the agent can't see and aws_call degrades to NEEDS_AUTH.
+    #
+    # Best-effort: a credential-renewal hiccup must not crash the turn — degrade to no
+    # connector env (kubectl/model still work; connector tools report NEEDS_AUTH), exactly
+    # how a missing grant already behaves.
+    connector_env: dict[str, str] = {}
+    if user_id is not None:
+        try:
+            connector_env, injected = await build_connector_env(user_id, session_uuid)
+        except Exception as e:
+            logger.warning(f"Failed to project connector credentials: {e}")
+            connector_env, injected = {}, []
+        if injected:
+            logger.info(
+                "Projecting connector credentials to inkwest-agent",
+                extra={"session_id": session_id_str, "connectors": injected},
+            )
+    creds_path = f"{settings.sandbox_home.rstrip('/')}/.aws"
+
+    spec = TurnSpec(
+        session_id=session_id_str,
+        user_message=user_message,
+        model=model,
+        system_prompt=system_prompt,
+        context=TurnContext(history=history),  # mode=replay: broker seeds history
+        limits=TurnLimits(max_tokens=max_tokens),
+        tools=[ToolSpec(name=t["name"]) for t in get_tool_definitions()],
+        model_target=model_target,
+        region=settings.aws_region,
+        user_id=str(user_id) if user_id else None,
+        kubeconfig_path=kubeconfig_path,
+        context_name=context_name,
+        creds_path=creds_path,
+    )
     turn_spec_json = json.dumps(dataclasses.asdict(spec))
 
     container: str | None = None
@@ -167,6 +209,7 @@ async def orchestrate_chat_inkwest_agent(
                 turn_spec_json,
                 container=container,
                 docker_path=settings.sandbox_docker_path,
+                extra_env=connector_env or None,
                 timeout=settings.claude_cli_timeout,
                 cancel_event=cancel_event,
             )

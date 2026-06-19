@@ -38,7 +38,12 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
     user_id = uuid.UUID(spec.user_id) if spec.user_id else None
 
     # The new user turn is appended here (the broker keeps it out of history).
-    messages: list[dict[str, Any]] = [*spec.history, {"role": "user", "content": spec.user_message}]
+    # mode=replay is the only live mode: the broker seeds the full transcript every
+    # turn (the custom agent keeps none of its own). resume/resume_token are reserved.
+    messages: list[dict[str, Any]] = [
+        *spec.context.history,
+        {"role": "user", "content": spec.user_message},
+    ]
 
     system_blocks = [{"text": spec.system_prompt}]
     tool_config = to_converse_tools()
@@ -49,11 +54,11 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
     iteration = 0
     iter_latency_ms = 0
 
-    while iteration < spec.max_iterations:
+    while iteration < spec.limits.max_iterations:
         iteration += 1
 
-        if len(messages) > spec.max_conversation_messages:
-            messages = truncate_messages(messages, spec.max_conversation_messages)
+        if len(messages) > spec.limits.max_conversation_messages:
+            messages = truncate_messages(messages, spec.limits.max_conversation_messages)
 
         iter_start = time.monotonic()
         converse_messages = [to_converse_message(m) for m in messages]
@@ -65,7 +70,7 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
                     messages=converse_messages,
                     system=system_blocks,
                     toolConfig=tool_config,
-                    inferenceConfig={"maxTokens": spec.max_tokens},
+                    inferenceConfig={"maxTokens": spec.limits.max_tokens},
                 )
             )
             iter_latency_ms = int((time.monotonic() - iter_start) * 1000)
@@ -121,6 +126,9 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
                 kubeconfig_path=spec.kubeconfig_path,
                 context_name=spec.context_name,
                 cancel_event=None,  # cancel-by-kill: the broker terminates the process
+                # Creds were pre-provided by the broker as env (one-way handoff); the
+                # agent can't reach the portal credential store.
+                projected_creds=True,
             ):
                 yield ev
             messages.append({"role": "user", "content": run.tool_results})
@@ -139,6 +147,6 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
         return
 
     yield error_event(
-        f"Reached maximum iterations ({spec.max_iterations}). "
+        f"Reached maximum iterations ({spec.limits.max_iterations}). "
         "The conversation has become too complex. Please start a new session."
     )

@@ -8,6 +8,7 @@ correct, and only read-only AWS calls are permitted.
 
 import base64
 import hashlib
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -270,6 +271,153 @@ async def test_execute_aws_writes_profiles_to_ramfile_not_argv():
 
     cleanup_aws_files(sid)
     await get_credential_store().revoke_session(uid, sid)
+
+
+# --------------------------------------------------------------------------- #
+# Sandboxed agent: projected_creds sources creds from the env, NOT the RAM store
+# (broker pre-provides them — one-way handoff).
+# --------------------------------------------------------------------------- #
+async def test_execute_aws_projected_creds_uses_env_not_store(tmp_path):
+    """projected_creds=True → run aws against the broker-injected env, never the store."""
+    from app.tools.connector_exec import execute_aws
+
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text("[default]\n")  # file must exist; content irrelevant here
+    ctx = ToolExecContext(
+        user_id=uuid.uuid4(), session_id=uuid.uuid4(), kubeconfig_path="/x", projected_creds=True
+    )
+    completed = MagicMock(returncode=0, stdout='{"clusters": []}', stderr="")
+    with (
+        patch.dict(os.environ, {"AWS_SHARED_CREDENTIALS_FILE": str(cred_file)}),
+        patch("app.tools.connector_exec.subprocess.run", return_value=completed) as run,
+        # The store must NOT be consulted in projected mode — make it explode if it is.
+        patch(
+            "app.tools.connector_exec.get_or_renew_cred", side_effect=AssertionError("store hit")
+        ),
+    ):
+        out, is_error = await execute_aws({"service": "eks", "operation": "list-clusters"}, ctx)
+
+    assert is_error is False
+    assert run.call_args.kwargs["env"]["AWS_SHARED_CREDENTIALS_FILE"] == str(cred_file)
+
+
+async def test_execute_aws_projected_creds_strips_bedrock_bearer_token(tmp_path):
+    """The connector aws subprocess must NOT inherit the backend Bedrock bearer token.
+
+    There is no service allowlist (validate_aws_call), so leaving it in would let a
+    model-chosen `aws bedrock-runtime ...` run on the backend's privileged identity.
+    """
+    from app.tools.connector_exec import execute_aws
+
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text("[default]\n")
+    ctx = ToolExecContext(user_id=uuid.uuid4(), session_id=uuid.uuid4(), projected_creds=True)
+    completed = MagicMock(returncode=0, stdout="{}", stderr="")
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "AWS_SHARED_CREDENTIALS_FILE": str(cred_file),
+                "AWS_BEARER_TOKEN_BEDROCK": "backend-bedrock-secret",  # pragma: allowlist secret
+            },
+        ),
+        patch("app.tools.connector_exec.subprocess.run", return_value=completed) as run,
+    ):
+        out, is_error = await execute_aws({"service": "s3", "operation": "ls"}, ctx)
+
+    assert is_error is False
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in run.call_args.kwargs["env"]
+
+
+async def test_execute_aws_projected_creds_needs_auth_when_env_absent():
+    from app.tools.connector_exec import execute_aws
+
+    ctx = ToolExecContext(
+        user_id=uuid.uuid4(), session_id=uuid.uuid4(), kubeconfig_path="/x", projected_creds=True
+    )
+    # Ensure the env var is absent → no projected creds → NEEDS_AUTH (no store fallback).
+    with (
+        patch.dict(os.environ, {}, clear=False),
+        patch(
+            "app.tools.connector_exec.get_or_renew_cred", side_effect=AssertionError("store hit")
+        ),
+    ):
+        os.environ.pop("AWS_SHARED_CREDENTIALS_FILE", None)
+        out, is_error = await execute_aws({"service": "eks", "operation": "list-clusters"}, ctx)
+    assert is_error is True
+    assert "Give access to AWS" in out
+
+
+async def test_execute_aws_projected_creds_needs_auth_when_file_missing(tmp_path):
+    """Env points at a creds file that doesn't exist (projection failed) → NEEDS_AUTH."""
+    from app.tools.connector_exec import execute_aws
+
+    ctx = ToolExecContext(user_id=uuid.uuid4(), session_id=uuid.uuid4(), projected_creds=True)
+    missing = str(tmp_path / "nope" / "credentials")
+    with (
+        patch.dict(os.environ, {"AWS_SHARED_CREDENTIALS_FILE": missing}),
+        patch(
+            "app.tools.connector_exec.get_or_renew_cred", side_effect=AssertionError("store hit")
+        ),
+    ):
+        out, is_error = await execute_aws({"service": "eks", "operation": "list-clusters"}, ctx)
+    assert is_error is True
+    assert "Give access to AWS" in out
+
+
+async def test_execute_gitlab_projected_creds_uses_env_token(tmp_path):
+    from app.tools.connector_exec import execute_gitlab
+
+    ctx = ToolExecContext(user_id=uuid.uuid4(), session_id=uuid.uuid4(), projected_creds=True)
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = "[]"
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None, headers=None, timeout=None):
+            captured["headers"] = headers
+            captured["url"] = url
+            return _Resp()
+
+    with (
+        patch.dict(
+            os.environ,
+            {"GITLAB_TOKEN": "glpat-projected", "GITLAB_BASE_URL": "https://gl.example"},
+        ),
+        patch("app.tools.connector_exec.httpx.AsyncClient", return_value=_Client()),
+        patch(
+            "app.tools.connector_exec.get_or_renew_cred", side_effect=AssertionError("store hit")
+        ),
+    ):
+        out, is_error = await execute_gitlab({"path": "/projects"}, ctx)
+
+    assert is_error is False
+    assert captured["headers"]["Authorization"] == "Bearer glpat-projected"
+    assert captured["url"].startswith("https://gl.example/api/v4")
+
+
+async def test_execute_gitlab_projected_creds_needs_auth_when_token_absent():
+    from app.tools.connector_exec import execute_gitlab
+
+    ctx = ToolExecContext(user_id=uuid.uuid4(), session_id=uuid.uuid4(), projected_creds=True)
+    with (
+        patch.dict(os.environ, {}, clear=False),
+        patch(
+            "app.tools.connector_exec.get_or_renew_cred", side_effect=AssertionError("store hit")
+        ),
+    ):
+        os.environ.pop("GITLAB_TOKEN", None)
+        out, is_error = await execute_gitlab({"path": "/projects"}, ctx)
+    assert is_error is True
+    assert "Give access to GitLab" in out
 
 
 # --------------------------------------------------------------------------- #

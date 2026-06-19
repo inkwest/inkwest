@@ -294,14 +294,45 @@ async def _get_cred(ctx: ToolExecContext, connector: ConnectorType) -> MintedCre
     return await get_or_renew_cred(ctx.user_id, ctx.session_id, connector)
 
 
+def _projected_aws_env() -> dict[str, str] | None:
+    """The current env when the broker has projected AWS profiles into it, else None.
+
+    In the sandboxed agent the broker pre-provides the session's ~/.aws on a tmpfs and
+    injects ``AWS_SHARED_CREDENTIALS_FILE``/``AWS_CONFIG_FILE`` (in-container paths) as
+    env at spawn — the same mechanism the claude-cli shell uses. We reuse that env (so
+    the squid HTTP(S)_PROXY + PATH the CLI needs are preserved) but **strip the backend's
+    Bedrock bearer token**: the agent's container env carries ``AWS_BEARER_TOKEN_BEDROCK``
+    for the model call, and the connector ``aws`` tool has no service allowlist
+    (least privilege is the IAM role's job) — so leaving it in would let a model-chosen
+    ``aws bedrock-runtime ...`` invoke Bedrock on the *backend's* privileged identity
+    instead of the user's scoped connector role. Absence/missing file ⇒ no access yet.
+    """
+    cred_file = os.environ.get("AWS_SHARED_CREDENTIALS_FILE")
+    if not cred_file or not os.path.isfile(cred_file):
+        return None
+    env = dict(os.environ)
+    env.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+    return env
+
+
 async def execute_aws(tool_input: dict[str, Any], ctx: ToolExecContext) -> tuple[str, bool]:
     error = validate_aws_call(tool_input)
     if error:
         return (f"Validation error: {error}", True)
 
-    cred = await _get_cred(ctx, "aws")
-    if cred is None or not cred.secret.get("profiles"):
-        return _needs_auth("aws")
+    # Sandboxed agent: creds were pre-provided by the broker (projected tmpfs + env);
+    # source them from the environment, never the portal store (one-way handoff).
+    if ctx.projected_creds:
+        env = _projected_aws_env()
+        if env is None:
+            return _needs_auth("aws")
+    else:
+        cred = await _get_cred(ctx, "aws")
+        if cred is None or not cred.secret.get("profiles"):
+            return _needs_auth("aws")
+        # Credentials are projected to a tmpfs ~/.aws and referenced via env file paths,
+        # NEVER passed in argv — keeps them out of any command logging.
+        env = {**os.environ, **write_aws_profiles(ctx.session_id, cred)}
 
     service = str(tool_input["service"]).strip().lower()
     operation = str(tool_input["operation"]).strip().lower()
@@ -313,9 +344,6 @@ async def execute_aws(tool_input: dict[str, Any], ctx: ToolExecContext) -> tuple
     profile = tool_input.get("profile")
     if profile:
         cmd += ["--profile", str(profile)]
-    # Credentials are projected to a tmpfs ~/.aws and referenced via env file paths,
-    # NEVER passed in argv — keeps them out of any command logging.
-    env = {**os.environ, **write_aws_profiles(ctx.session_id, cred)}
     logger.info("Executing aws_call", extra={"service": service, "operation": operation})
 
     try:
@@ -349,13 +377,23 @@ async def execute_gitlab(tool_input: dict[str, Any], ctx: ToolExecContext) -> tu
     if error:
         return (f"Validation error: {error}", True)
 
-    cred = await _get_cred(ctx, "gitlab")
-    if cred is None:
-        return _needs_auth("gitlab")
-
     settings = get_settings()
+    # Sandboxed agent: token pre-provided as env by the broker (one-way handoff); the
+    # portal path reads the in-RAM minted credential with renew-on-read.
+    if ctx.projected_creds:
+        token = os.environ.get("GITLAB_TOKEN")
+        if not token:
+            return _needs_auth("gitlab")
+        base_url = os.environ.get("GITLAB_BASE_URL") or settings.gitlab_base_url
+    else:
+        cred = await _get_cred(ctx, "gitlab")
+        if cred is None:
+            return _needs_auth("gitlab")
+        token = cred.secret["access_token"]
+        base_url = settings.gitlab_base_url
+
     path = str(tool_input["path"]).strip()
-    url = f"{settings.gitlab_base_url.rstrip('/')}/api/v4{path}"
+    url = f"{base_url.rstrip('/')}/api/v4{path}"
     params = tool_input.get("params") if isinstance(tool_input.get("params"), dict) else None
 
     try:
@@ -363,7 +401,7 @@ async def execute_gitlab(tool_input: dict[str, Any], ctx: ToolExecContext) -> tu
             resp = await client.get(
                 url,
                 params=params,
-                headers={"Authorization": f"Bearer {cred.secret['access_token']}"},
+                headers={"Authorization": f"Bearer {token}"},
                 timeout=CONNECTOR_TOOL_TIMEOUT,
             )
     except httpx.HTTPError as e:

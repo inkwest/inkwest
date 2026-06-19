@@ -553,6 +553,7 @@ async def execute_agent(
     container: str,
     docker_path: str = "docker",
     agent_cmd: str = "inkwest-agent",
+    extra_env: dict[str, str] | None = None,
     timeout: int = 300,
     cancel_event: asyncio.Event | None = None,
 ) -> AsyncIterator[str]:
@@ -569,6 +570,10 @@ async def execute_agent(
         container: The per-conversation toolbox container to ``docker exec`` into.
         docker_path: Path to the ``docker`` CLI.
         agent_cmd: The in-container entrypoint (console script baked by P1.2).
+        extra_env: Per-session connector credentials to expose to the agent (AWS_*
+            file paths, GITLAB_TOKEN, KUBECONFIG). Each is passed as a value-less
+            ``-e KEY``: docker reads the value from THIS client's env (never argv), so
+            secrets stay out of command logs — the same one-way handoff as the CLI path.
         timeout: Seconds to wait for the agent to exit after its stream ends.
         cancel_event: Set by an explicit user stop. Cancel is by-kill (``docker exec``
             does not forward signals): the agent is signaled via its recorded PID.
@@ -588,12 +593,20 @@ async def execute_agent(
     # turn-spec reaches the agent (inherited through `sh -c ... exec "$@"`).
     pid_file = f"/tmp/inkwest-agent-{session_id}.pid"
     launch = ["sh", "-c", f'echo $$ > {shlex.quote(pid_file)}; exec "$@"', "sh", agent_cmd]
-    cmd = [docker_path, "exec", "-i", container, *launch]
+    # Value-less `-e KEY` forwards the connector creds from this client's env into the
+    # container without ever putting the values in argv (same guarantee as the CLI path).
+    env_flags = [flag for key in (extra_env or {}) for flag in ("-e", key)]
+    cmd = [docker_path, "exec", "-i", *env_flags, container, *launch]
 
     logger.info(f"Spawning inkwest-agent for Inkwest session {session_id}")
 
     # Large buffer for big tool outputs (kubectl dumps, file reads), like the CLI path.
     buffer_limit = 100 * 1024 * 1024  # 100MB
+
+    # Connector creds are injected into THIS subprocess's env only (docker reads the
+    # value-less `-e KEY` values from here) — never set process-globally, so sessions
+    # stay isolated.
+    proc_env = {**os.environ, **extra_env} if extra_env else None
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -601,6 +614,7 @@ async def execute_agent(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         limit=buffer_limit,
+        env=proc_env,
     )
 
     async def _feed_stdin() -> None:

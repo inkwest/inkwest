@@ -15,13 +15,25 @@ SESSION_ID = "11111111-1111-1111-1111-111111111111"
 
 
 def _spec(**overrides) -> TurnSpec:
-    base = {
+    base: dict = {
         "session_id": SESSION_ID,
         "user_message": "why is my pod crashing?",
         "model": "meta.llama3-1-70b-instruct-v1:0",
         "system_prompt": "You are an SRE assistant.",
         "region": "eu-west-1",
     }
+    # Convenience: route grouped fields into the nested context/limits objects.
+    context = {}
+    if "history" in overrides:
+        context["history"] = overrides.pop("history")
+    limits = {}
+    for k in ("max_iterations", "max_tokens", "max_conversation_messages"):
+        if k in overrides:
+            limits[k] = overrides.pop(k)
+    if context:
+        base["context"] = context
+    if limits:
+        base["limits"] = limits
     base.update(overrides)
     return parse_turn_spec(base)
 
@@ -107,16 +119,93 @@ def test_parse_turn_spec_rejects_non_object():
 
 
 def test_parse_turn_spec_history_must_be_list():
-    with pytest.raises(TurnSpecError, match="'history' must be a list"):
+    with pytest.raises(TurnSpecError, match="'context.history' must be a list"):
         parse_turn_spec(
             {
                 "session_id": SESSION_ID,
                 "user_message": "x",
                 "model": "m",
                 "system_prompt": "s",
-                "history": {},
+                "context": {"history": {}},
             }
         )
+
+
+def test_parse_turn_spec_nested_contract():
+    spec = parse_turn_spec(
+        {
+            "session_id": SESSION_ID,
+            "user_message": "x",
+            "model": "m",
+            "system_prompt": "s",
+            "engine": "inkwest-agent",
+            "context": {"mode": "replay", "history": [{"role": "user", "content": "hi"}]},
+            "limits": {"max_tokens": 2048, "budget_remaining": 1000, "wallclock_seconds": 60},
+            "tools": [{"name": "aws_call", "exec_profile": "agent"}],
+            "creds_path": "/home/agent/.aws",
+        }
+    )
+    assert spec.context.mode == "replay"
+    assert spec.context.history == [{"role": "user", "content": "hi"}]
+    assert spec.limits.max_tokens == 2048
+    assert spec.limits.budget_remaining == 1000
+    assert spec.tools[0].name == "aws_call" and spec.tools[0].exec_profile == "agent"
+    assert spec.creds_path == "/home/agent/.aws"
+
+
+def test_parse_turn_spec_rejects_unknown_nested_field():
+    with pytest.raises(TurnSpecError, match="'limits' has unknown"):
+        parse_turn_spec(
+            {
+                "session_id": SESSION_ID,
+                "user_message": "x",
+                "model": "m",
+                "system_prompt": "s",
+                "limits": {"bogus": 1},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "bad", [{"max_tokens": "lots"}, {"max_iterations": 1.5}, {"max_tokens": True}]
+)
+def test_parse_turn_spec_limits_reject_non_int(bad):
+    with pytest.raises(TurnSpecError, match="must be an int"):
+        parse_turn_spec(
+            {
+                "session_id": SESSION_ID,
+                "user_message": "x",
+                "model": "m",
+                "system_prompt": "s",
+                "limits": bad,
+            }
+        )
+
+
+def test_tool_spec_from_raw_defaults_exec_profile():
+    spec = _spec(tools=[{"name": "aws_call"}])  # no exec_profile on the wire
+    assert spec.tools[0].name == "aws_call"
+    assert spec.tools[0].exec_profile == "agent"  # default applied on parse
+
+
+def test_parse_turn_spec_round_trips_reserved_fields():
+    """asdict → parse_turn_spec is stable, incl. the reserved fields (wire contract)."""
+    import dataclasses
+
+    spec = parse_turn_spec(
+        {
+            "session_id": SESSION_ID,
+            "user_message": "x",
+            "model": "m",
+            "system_prompt": "s",
+            "engine": "inkwest-agent",
+            "context": {"mode": "resume", "history": [], "resume_token": "tok-123"},
+            "limits": {"budget_remaining": 5000, "wallclock_seconds": 90},
+            "tools": [{"name": "kubectl_get", "exec_profile": "broker"}],
+            "creds_path": "/home/agent/.aws",
+        }
+    )
+    assert parse_turn_spec(dataclasses.asdict(spec)) == spec
 
 
 def test_emit_writes_one_ndjson_line():
@@ -408,3 +497,26 @@ async def test_run_turn_truncates_long_history():
     assert events[-1].type == "done"
     # Truncated to the cap before translating to Converse messages.
     assert len(client.converse.call_args.kwargs["messages"]) <= 2
+
+
+@pytest.mark.asyncio
+async def test_run_turn_resume_mode_still_replays_history():
+    """mode=resume is reserved: the loop ignores it and uses the seeded history."""
+    spec = parse_turn_spec(
+        {
+            "session_id": SESSION_ID,
+            "user_message": "now",
+            "model": "m",
+            "system_prompt": "s",
+            "region": "eu-west-1",
+            "context": {"mode": "resume", "history": [{"role": "user", "content": "before"}]},
+        }
+    )
+    client = _client([_converse_text("ok")])
+    events = await _collect(spec, client)
+
+    assert events[-1].type == "done"
+    msgs = client.converse.call_args.kwargs["messages"]
+    # Seeded history is used (prior turn present) + the new user message appended.
+    assert msgs[0]["content"][0]["text"] == "before"
+    assert msgs[-1]["content"][0]["text"] == "now"

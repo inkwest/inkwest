@@ -17,3 +17,9 @@ class ToolExecContext:
     session_id: UUID
     kubeconfig_path: str | None = None
     context_name: str | None = None
+    # Set by the sandboxed inkwest-agent: connector creds were *pre-provided* by the
+    # broker (projected to a tmpfs + injected as env), so the executors source them
+    # from the environment, NOT the portal credential store — which the agent process
+    # can't reach and must never call back to (one-way handoff). The portal
+    # orchestrators leave this False and use the in-RAM store + renew-on-read.
+    projected_creds: bool = False

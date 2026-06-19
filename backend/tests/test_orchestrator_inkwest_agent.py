@@ -86,6 +86,32 @@ class TestExecuteAgent:
         assert len(out) == 2
 
     @pytest.mark.asyncio
+    async def test_extra_env_forwarded_as_value_less_e_flags(self):
+        """Connector creds forwarded via `-e KEY` (value-less, read from client env)."""
+        captured: dict = {}
+        proc = _proc([b'{"type": "done"}\n'])
+
+        def factory(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["env"] = kwargs.get("env")
+            return proc
+
+        env = {
+            "GITLAB_TOKEN": "glpat-xxx",
+            "AWS_SHARED_CREDENTIALS_FILE": "/home/agent/.aws/credentials",
+        }
+        with patch("asyncio.create_subprocess_exec", side_effect=factory):
+            async for _ in execute_agent(SESSION_ID, "{}", container="c", extra_env=env):
+                pass
+
+        cmd = captured["cmd"]
+        # value-less -e KEY (key only, never the value → stays out of argv/logs)
+        assert "-e" in cmd and "GITLAB_TOKEN" in cmd and "AWS_SHARED_CREDENTIALS_FILE" in cmd
+        assert "glpat-xxx" not in cmd
+        # docker reads the values from the client subprocess env
+        assert captured["env"]["GITLAB_TOKEN"] == "glpat-xxx"
+
+    @pytest.mark.asyncio
     async def test_nonzero_exit_raises_runtimeerror(self):
         proc = _proc([], returncode=1, stderr=b"boom")
         with patch("asyncio.create_subprocess_exec", return_value=proc):
@@ -215,6 +241,8 @@ def _patch_broker(
     entry=None,
     sandbox_enabled=True,
     model="meta.llama3-1-70b-instruct-v1:0",
+    connector_env=None,
+    injected=None,
 ):
     """Patch every DB/sandbox/model boundary the broker touches; return the stack + spies."""
     db = AsyncMock()
@@ -226,12 +254,14 @@ def _patch_broker(
         record_usage=AsyncMock(),
         ensure=AsyncMock(return_value="inkwest_conv_x"),
         release=AsyncMock(),
+        build_connector_env=AsyncMock(return_value=(connector_env or {}, injected or [])),
         db=db,
     )
     settings = SimpleNamespace(
         sandbox_enabled=sandbox_enabled,
         sandbox_docker_path="docker",
         aws_region="eu-west-1",
+        sandbox_home="/home/agent",
         claude_cli_timeout=120,
     )
     patches = [
@@ -245,6 +275,12 @@ def _patch_broker(
         patch.object(oia, "get_system_prompt", MagicMock(return_value="SYSTEM")),
         patch.object(oia, "resolve_session_model", AsyncMock(return_value=model)),
         patch.object(oia.model_registry, "get_entry", MagicMock(return_value=entry)),
+        patch.object(oia, "build_connector_env", spies.build_connector_env),
+        patch.object(
+            oia,
+            "get_tool_definitions",
+            MagicMock(return_value=[{"name": "aws_call"}, {"name": "kubectl_get"}]),
+        ),
         # The broker does `from app.services import sandbox; sandbox.ensure(...)`. Patch the
         # real module's attributes (not sys.modules) so it works regardless of whether
         # another test already imported the module — `from ... import` resolves the cached
@@ -305,8 +341,16 @@ class TestOrchestrateInkwestAgent:
         assert spec["user_id"] == str(USER_ID)
         assert spec["kubeconfig_path"] == "/etc/inkwest/kubeconfigs/c.yaml"
         assert spec["context_name"] == "ctx"
-        assert spec["max_tokens"] == 2048
-        assert spec["history"] == [{"role": "user", "content": "earlier"}]
+        # nested contract (P1.4)
+        assert spec["engine"] == "inkwest-agent"
+        assert spec["context"]["mode"] == "replay"
+        assert spec["context"]["history"] == [{"role": "user", "content": "earlier"}]
+        assert spec["limits"]["max_tokens"] == 2048
+        assert spec["tools"] == [
+            {"name": "aws_call", "exec_profile": "agent"},
+            {"name": "kubectl_get", "exec_profile": "agent"},
+        ]
+        assert spec["creds_path"] == "/home/agent/.aws"
         # sandbox lease taken and released
         spies.ensure.assert_awaited_once_with(SESSION_ID)
         spies.release.assert_awaited_once_with(SESSION_ID)
@@ -328,9 +372,71 @@ class TestOrchestrateInkwestAgent:
                 p.stop()
         spec = json.loads(spies.turn_spec)
         # trailing user turn removed so it isn't sent twice (history + user_message)
-        assert spec["history"] == [{"role": "assistant", "content": "prev"}]
+        assert spec["context"]["history"] == [{"role": "assistant", "content": "prev"}]
         # retry must not persist the user message again
         assert all(c.args[2] != "user" for c in spies.save_message.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_connector_env_projected_and_forwarded(self):
+        """Broker pre-provides creds: build_connector_env is projected, forwarded as extra_env."""
+        env = {
+            "AWS_SHARED_CREDENTIALS_FILE": "/home/agent/.aws/credentials",
+            "GITLAB_TOKEN": "glpat-xxx",
+        }
+        patches, spies = _patch_broker(connector_env=env, injected=["aws", "gitlab"])
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        spies.build_connector_env.assert_awaited_once_with(USER_ID, uuid.UUID(SESSION_ID))
+        # creds forwarded to the agent spawn as extra_env (one-way handoff)
+        assert spies.execute_kwargs["extra_env"] == env
+
+    @pytest.mark.asyncio
+    async def test_no_connector_env_forwards_none(self):
+        """No granted connectors → extra_env is None (no -e flags)."""
+        patches, spies = _patch_broker(connector_env={}, injected=[])
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        assert spies.execute_kwargs["extra_env"] is None
+
+    @pytest.mark.asyncio
+    async def test_connector_env_failure_degrades_gracefully(self):
+        """A cred-projection error must not crash the turn — degrade to no connector env."""
+        patches, spies = _patch_broker()
+        spies.build_connector_env.side_effect = RuntimeError("SSO down")
+        for p in patches:
+            p.start()
+        try:
+            events = await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        # turn still completes; no creds forwarded; sandbox still leased+released
+        assert events[-1].type == "done"
+        assert spies.execute_kwargs["extra_env"] is None
+        spies.release.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_user_id_skips_connector_env(self):
+        patches, spies = _patch_broker()
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, [json.dumps({"type": "done"})], user_id=None)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        spies.build_connector_env.assert_not_awaited()
+        assert spies.execute_kwargs["extra_env"] is None
 
     @pytest.mark.asyncio
     async def test_passthrough_and_persistence(self):
