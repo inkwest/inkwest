@@ -23,6 +23,7 @@ def _settings(tmp_path):
         sandbox_squid_image="squid:latest",
         sandbox_squid_conf="",
         sandbox_squid_errors="",
+        sandbox_squid_confd="",
         sandbox_proxy_dns="",
         sandbox_env_file="",
         sandbox_sessions_root=str(tmp_path),
@@ -75,6 +76,22 @@ async def test_ensure_provisions_once_under_concurrency(tmp_path):
     # The per-session lock serializes the racers: one provisions, four reuse.
     assert results == ["inkwest_conv_s1"] * 5
     assert prov.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_acquires_lease_and_release_balances_it(tmp_path):
+    """ensure() bumps the in-use refcount (what keeps the reaper off a live turn); the
+    ensure→release pair must return it to 0 so the sandbox is reclaimable once idle."""
+    fake = sandbox.Sandbox("s3", "inkwest_conv_s3", "inkwest_proxy_s3", "i", "e", 0.0)
+    with (
+        patch.object(sandbox, "get_settings", return_value=_settings(tmp_path)),
+        patch.object(sandbox, "provision", AsyncMock(return_value=fake)),
+        patch.object(sandbox, "_is_running", AsyncMock(return_value=True)),
+    ):
+        await sandbox.ensure("s3")
+        assert sandbox._sandboxes["s3"].in_use == 1  # lease held for the turn
+        await sandbox.release("s3")
+        assert sandbox._sandboxes["s3"].in_use == 0  # lease dropped at turn end
 
 
 @pytest.mark.asyncio
@@ -223,6 +240,36 @@ async def test_provision_binds_shared_creds_volume(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_provision_mounts_squid_confd_only_when_set(tmp_path):
+    """The proxy bind-mounts the conf.d drop-in dir read-only at /conf.d (so squid.conf's
+    `include /conf.d/*.conf` resolves to local ACL fragments) ONLY when sandbox_squid_confd
+    is configured — a dedicated path, never the image's /etc/squid/conf.d."""
+    settings = _settings(tmp_path)
+    proxy_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        # Capture the proxy's `docker run` (identified by the squid image); ignore the
+        # conversation container's run.
+        if args[0] == "run" and settings.sandbox_squid_image in args:
+            proxy_run.clear()
+            proxy_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+    ):
+        settings.sandbox_squid_confd = "/etc/inkwest/conf.d"
+        await sandbox.provision("sid")
+        assert "/etc/inkwest/conf.d:/conf.d:ro" in proxy_run
+
+        settings.sandbox_squid_confd = ""
+        await sandbox.provision("sid2")
+        assert not any(a.endswith(":/conf.d:ro") for a in proxy_run)
+
+
+@pytest.mark.asyncio
 async def test_reap_orphans_removes_labelled_objects(tmp_path):
     docker = AsyncMock(
         side_effect=[
@@ -273,6 +320,43 @@ async def test_reap_idle_skips_recently_used(tmp_path):
     ):
         await sandbox._reap_idle()
     td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reap_idle_skips_in_use_sandbox(tmp_path):
+    """A turn that outruns the idle TTL must not be torn down mid-exec: last_used is
+    stale (stamped at turn start) but the in-use refcount keeps the reaper off it."""
+    settings = _settings(tmp_path)
+    settings.sandbox_idle_ttl = 100
+    sb = sandbox.Sandbox("busy", "c", "p", "i", "e", last_used=0.0)
+    sb.in_use = 1  # a turn is still streaming
+    sandbox._sandboxes["busy"] = sb
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_now", return_value=1000.0),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        await sandbox._reap_idle()
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_release_drops_refcount_and_refreshes_clock(tmp_path):
+    sb = sandbox.Sandbox("done", "c", "p", "i", "e", last_used=0.0)
+    sb.in_use = 1
+    sandbox._sandboxes["done"] = sb
+    with patch.object(sandbox, "_now", return_value=500.0):
+        await sandbox.release("done")
+    assert sb.in_use == 0
+    assert sb.last_used == 500.0  # idle clock restarts at turn end
+
+
+@pytest.mark.asyncio
+async def test_release_is_noop_when_sandbox_gone(tmp_path):
+    # e.g. a session delete hard-tore-down the pair mid-turn; release must not raise.
+    sandbox._sandboxes.pop("missing", None)
+    await sandbox.release("missing")
 
 
 @pytest.mark.asyncio

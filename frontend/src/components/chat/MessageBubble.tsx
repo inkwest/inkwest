@@ -8,7 +8,8 @@ import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils';
-import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal } from 'lucide-react';
+import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal, PencilLine } from 'lucide-react';
+import { useComposerStore } from '@/store/composer';
 import * as api from '@/services/api';
 import {
   messageContentToMarkdown,
@@ -23,7 +24,7 @@ import {
 interface Props {
   message: Message;
   isFirstUserMessage?: boolean;
-  onRetry?: (message: Message) => void;
+  onRetry?: (messageId: string) => void;
   // Transiently emphasized when deep-linked from a search hit (see ChatView).
   highlighted?: boolean;
 }
@@ -150,7 +151,6 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
   const isUser = message.role === 'user';
   const hasError = message.status === 'error';
   const isPending = message.status === 'pending';
-  const [isRetrying, setIsRetrying] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copiedKind, setCopiedKind] = useState<'rich' | 'teams' | 'md' | null>(null);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
@@ -169,7 +169,12 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
       if (copyMenuRef.current && !copyMenuRef.current.contains(e.target as Node)) setCopyMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setCopyMenuOpen(false);
+      // Consume Escape here so the topmost overlay wins — otherwise it bubbles to the
+      // global Escape-to-stop listener (ChatInput) and would also abort a live stream.
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setCopyMenuOpen(false);
+      }
     };
     document.addEventListener('mousedown', onPointer);
     document.addEventListener('keydown', onKey);
@@ -192,18 +197,12 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
     );
   }
 
-  const handleRetry = async () => {
-    if (!message.is_retryable || isRetrying) return;
-
-    setIsRetrying(true);
-    try {
-      const updated = await api.retryMessage(message.session_id, message.id);
-      onRetry?.(updated);
-    } catch (error) {
-      console.error('Failed to retry message:', error);
-    } finally {
-      setIsRetrying(false);
-    }
+  // Fire-and-forget over the chat WS: the backend replays the interrupted turn in
+  // place and onRetry optimistically clears this bubble's error UI, so there's no
+  // local pending state to track here.
+  const handleRetry = () => {
+    if (!message.is_retryable) return;
+    onRetry?.(message.id);
   };
 
   const handleShare = () => {
@@ -218,6 +217,13 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
   };
 
   const canShare = isFirstUserMessage && isUser && typeof message.content === 'string' && currentSession?.cluster;
+
+  // "Reuse prompt": load a past user prompt back into the composer to edit & resend.
+  // String content only; the raw text (including internal newlines) is injected verbatim.
+  const canReusePrompt = isUser && typeof message.content === 'string' && message.content.trim().length > 0;
+  const handleReusePrompt = () => {
+    if (typeof message.content === 'string') useComposerStore.getState().inject(message.content);
+  };
 
   // Copy-as-Markdown is offered on assistant answers only, and only when there is
   // actual text to copy (a tool-only turn has no Markdown body).
@@ -272,7 +278,7 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
 
   const renderContent = () => {
     if (typeof message.content === 'string') {
-      return <MarkdownContent content={message.content} />;
+      return <MarkdownContent content={message.content} breaks={isUser} />;
     }
     // Only block-list content remains here (system-event objects return early above).
     if (!Array.isArray(message.content)) return null;
@@ -400,16 +406,27 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
           <MessageAttachments sessionId={message.session_id} attachments={message.attachments} />
         )}
 
-        {showTimestamps && message.created_at && (
-          <div
-            title={formatFullTimestamp(message.created_at)}
-            className={cn(
-              'mt-1 text-right',
-              TEXT_SIZE.label(compact),
-              isUser ? 'text-blue-200/60' : 'text-gray-400',
+        {((showTimestamps && message.created_at) || canReusePrompt) && (
+          <div className={cn('mt-1 flex items-center justify-end gap-2', TEXT_SIZE.label(compact))}>
+            {canReusePrompt && (
+              <button
+                type="button"
+                onClick={handleReusePrompt}
+                title="Edit & resend — load this prompt into the composer"
+                className="flex items-center gap-1 text-blue-200/60 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100 hover:text-white"
+              >
+                <PencilLine className="w-3 h-3" />
+                Edit
+              </button>
             )}
-          >
-            {formatTimestamp(message.created_at)}
+            {showTimestamps && message.created_at && (
+              <span
+                title={formatFullTimestamp(message.created_at)}
+                className={isUser ? 'text-blue-200/60' : 'text-gray-400'}
+              >
+                {formatTimestamp(message.created_at)}
+              </span>
+            )}
           </div>
         )}
 
@@ -443,26 +460,15 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
             {message.is_retryable && (
               <button
                 onClick={handleRetry}
-                disabled={isRetrying}
                 className={cn(
                   'mt-2 flex items-center gap-1.5 rounded',
                   compact ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm',
-                  'bg-red-600 hover:bg-red-700 text-white transition-colors',
-                  'disabled:opacity-50 disabled:cursor-not-allowed'
+                  'bg-red-600 hover:bg-red-700 text-white transition-colors'
                 )}
               >
-                {isRetrying ? (
-                  <>
-                    <Loader2 className={cn(compact ? 'w-3 h-3' : 'w-4 h-4', 'animate-spin')} />
-                    Retrying...
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw className={cn(compact ? 'w-3 h-3' : 'w-4 h-4')} />
-                    Retry
-                    {message.retry_count ? ` (${message.retry_count})` : ''}
-                  </>
-                )}
+                <RefreshCw className={cn(compact ? 'w-3 h-3' : 'w-4 h-4')} />
+                Retry
+                {message.retry_count ? ` (${message.retry_count})` : ''}
               </button>
             )}
           </div>

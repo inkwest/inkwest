@@ -215,12 +215,6 @@ export async function reorderSessions(sessionIds: string[]): Promise<void> {
 }
 
 // Messages
-export async function retryMessage(sessionId: string, messageId: string): Promise<Message> {
-  return fetchAPI(`/api/sessions/${sessionId}/messages/${messageId}/retry`, {
-    method: 'POST',
-  });
-}
-
 export async function getFailedMessages(sessionId: string): Promise<Message[]> {
   return fetchAPI(`/api/sessions/${sessionId}/failed-messages`);
 }

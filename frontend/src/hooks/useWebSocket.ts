@@ -21,6 +21,7 @@ export function useWebSocket(sessionId: string) {
     setIsConnected,
     setError,
     addMessage,
+    clearMessageError,
     markTodosInterrupted,
   } = useChatStore();
 
@@ -216,9 +217,24 @@ export function useWebSocket(sessionId: string) {
     wsRef.current?.sendStop();
   }, []);
 
+  // Re-run an interrupted turn. The failed user message already exists (server-side
+  // and in the store), so we don't add a new bubble — we optimistically drop its
+  // error UI and let the backend replay it in place. Only mutate the UI if the
+  // frame actually went out: on a closed/reconnecting socket retry is dropped (not
+  // queued), so faking success would strand the view in a perpetual streaming state.
+  // If the server then rejects the retry (e.g. a turn is already running), the
+  // error event resets streaming; the bubble's button stays hidden until the next
+  // refetch — an accepted, self-healing cosmetic gap in favor of a snappy click.
+  const retryMessage = useCallback((messageId: string) => {
+    if (!wsRef.current?.sendRetry()) return;
+    clearMessageError(messageId);
+    setIsStreaming(true);
+  }, [clearMessageError, setIsStreaming]);
+
   return {
     sendMessage,
     stopStreaming,
+    retryMessage,
     isConnected: useChatStore((s) => s.isConnected),
     isStreaming: useChatStore((s) => s.isStreaming),
     error: useChatStore((s) => s.error),

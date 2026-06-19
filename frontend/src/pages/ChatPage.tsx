@@ -43,7 +43,7 @@ export function ChatPage() {
     }
   }, [serverMessages, applyServerMessages, setTodos]);
 
-  const { sendMessage, stopStreaming } = useWebSocket(sessionId!);
+  const { sendMessage, stopStreaming, retryMessage } = useWebSocket(sessionId!);
 
   const handleSend = (content: string, attachments?: Attachment[]) => {
     sendMessage(content, attachments);
@@ -62,6 +62,7 @@ export function ChatPage() {
     <ChatView
       onSendMessage={handleSend}
       onStopStreaming={stopStreaming}
+      onRetryMessage={retryMessage}
       initialPrompt={initialPrompt}
       autoSubmit
       sessionId={sessionId}

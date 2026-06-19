@@ -51,6 +51,7 @@ async def orchestrate_chat_cli(
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict] | None = None,
+    persist_user_message: bool = True,
 ) -> AsyncIterator[ChatEvent]:
     """
     Orchestrate chat using Claude CLI.
@@ -81,22 +82,28 @@ async def orchestrate_chat_cli(
 
     settings = get_settings()
 
-    # Save user message (with its attachment descriptors, for history thumbnails)
-    try:
-        await save_message(db, session_id, "user", user_message, attachments=attachments)
-    except Exception as e:
-        logger.error(f"Failed to save user message: {e}")
-        yield error_event(f"Failed to save message: {str(e)}")
-        return
+    # Save user message with its attachment descriptors (for history thumbnails).
+    # Skipped on retry — the errored row is reused. NOTE: the CLI keeps its own
+    # --resume history; if the interrupted attempt already recorded this user turn
+    # there, re-sending the prompt below can duplicate it CLI-side. Accepted: the
+    # CLI provider is local-dev only (the API providers, which replay DB history,
+    # are used in prod).
+    if persist_user_message:
+        try:
+            await save_message(db, session_id, "user", user_message, attachments=attachments)
+        except Exception as e:
+            logger.error(f"Failed to save user message: {e}")
+            yield error_event(f"Failed to save message: {str(e)}")
+            return
 
-    # Auto-generate session title for first message
-    try:
-        title = await ensure_session_title(db, session_id, user_message)
-        if title:
-            logger.debug(f"Generated session title: {title}")
-    except Exception as e:
-        logger.warning(f"Failed to set session title: {e}")
-        # Non-critical, continue
+        # Auto-generate session title for first message
+        try:
+            title = await ensure_session_title(db, session_id, user_message)
+            if title:
+                logger.debug(f"Generated session title: {title}")
+        except Exception as e:
+            logger.warning(f"Failed to set session title: {e}")
+            # Non-critical, continue
 
     # Get stored CLI session ID for --resume (if any)
     cli_session_id = await get_cli_session_id(db, session_id)
@@ -261,13 +268,16 @@ required.
                     container=container,
                     docker_path=settings.sandbox_docker_path,
                     model=model_choice,
+                    cancel_event=cancel_event,
                 )
 
                 async for event in parse_cli_response(output_stream):
-                    if cancel_event and cancel_event.is_set():
-                        logger.info("CLI chat cancelled by user")
-                        yield done_event(stopped=True)
-                        return
+                    # NB: cancellation is handled authoritatively inside execute_claude_cli
+                    # (it races each read against the stop, kills the agent, then ends the
+                    # stream) — NOT by returning here. Returning mid-stream would abandon the
+                    # CLI generator before its kill ran (async-gen cleanup is GC-timed), so
+                    # the in-container agent could outlive the stop. We let the stream end and
+                    # emit the stopped marker once, below.
 
                     if event.type == "session_info" and event.metadata.get("cli_session_id"):
                         # init/metadata only — NOT client-visible output, so it must not
@@ -319,6 +329,13 @@ required.
                         yield event
                     else:
                         yield event
+
+                # The stream ends naturally once execute_claude_cli has stopped the agent
+                # on an explicit cancel; surface that to the client as a stopped turn.
+                if cancel_event and cancel_event.is_set():
+                    logger.info("CLI chat cancelled by user")
+                    yield done_event(stopped=True)
+                    return
                 break  # turn completed
             except RuntimeError as e:
                 # Stale --resume target (sandbox rebuilt -> transcript gone): the CLI fails
@@ -398,3 +415,12 @@ required.
     except Exception as e:
         logger.exception("Unexpected error in CLI orchestration")
         yield error_event(f"Unexpected error: {str(e)}")
+
+    finally:
+        # Drop the in-use lease ensure() took so the idle reaper can reclaim this sandbox
+        # once it goes quiet. Held for the whole turn (not just ensure()) so a turn longer
+        # than SANDBOX_IDLE_TTL isn't torn down mid-exec.
+        if settings.sandbox_enabled and container is not None:
+            from app.services import sandbox
+
+            await sandbox.release(session_id_str)

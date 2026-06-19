@@ -4,6 +4,7 @@ Tests for Claude CLI provider.
 Tests the CLI client, output parsing, and orchestrator.
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -589,6 +590,113 @@ class TestExecuteClaudeCliSandbox:
         assert captured["cwd"] == "/tmp/x"  # client chdir'd locally
 
 
+class TestCliCancellation:
+    """An explicit stop kills the agent promptly instead of waiting for its next line."""
+
+    @staticmethod
+    def _hanging_process() -> MagicMock:
+        """A process whose stdout never yields — simulates the agent mid-tool/mid-thought."""
+        never = asyncio.Event()
+
+        async def hang() -> bytes:
+            await never.wait()
+            return b""
+
+        proc = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.readline = AsyncMock(side_effect=hang)
+        proc.returncode = None
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        proc.wait = AsyncMock(return_value=0)
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_cancel_in_container_sigterms_in_container_agent(self):
+        cancel_event = asyncio.Event()
+        cancel_event.set()  # stop already requested before the first read
+
+        main_proc = self._hanging_process()
+        scripts: list[str] = []
+        calls = {"n": 0}
+
+        async def factory(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return main_proc  # the launch (docker exec sh -c ... claude)
+            # subsequent calls are the in-container signal / liveness checks
+            scripts.append(args[-1])
+            p = MagicMock()
+            p.wait = AsyncMock(return_value=1)  # rc!=0 -> agent reported gone, no SIGKILL
+            p.kill = MagicMock()
+            return p
+
+        with patch("asyncio.create_subprocess_exec", side_effect=factory):
+            out = [
+                line
+                async for line in execute_claude_cli(
+                    "sess-uuid",
+                    "hi",
+                    container="inkwest_conv_x",
+                    docker_path="docker",
+                    cancel_event=cancel_event,
+                )
+            ]
+
+        assert out == []  # nothing was streamed — stop won the race against readline
+        assert any("kill -TERM" in s for s in scripts)  # agent SIGTERM'd inside the container
+        main_proc.terminate.assert_called()  # local docker-exec client dropped too
+
+    @pytest.mark.asyncio
+    async def test_cancel_escalates_to_sigkill_when_agent_ignores_term(self):
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+
+        main_proc = self._hanging_process()
+        scripts: list[str] = []
+        calls = {"n": 0}
+
+        async def factory(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return main_proc
+            scripts.append(args[-1])
+            p = MagicMock()
+            p.wait = AsyncMock(return_value=0)  # rc==0 -> still alive past the grace
+            p.kill = MagicMock()
+            return p
+
+        with (
+            patch("app.services.ai_cli_client._STOP_GRACE_SECONDS", 0.0),
+            patch("asyncio.create_subprocess_exec", side_effect=factory),
+        ):
+            out = [
+                line
+                async for line in execute_claude_cli(
+                    "sess-uuid",
+                    "hi",
+                    container="inkwest_conv_x",
+                    docker_path="docker",
+                    cancel_event=cancel_event,
+                )
+            ]
+
+        assert out == []
+        assert any("kill -KILL" in s for s in scripts)  # escalated after the grace
+
+    @pytest.mark.asyncio
+    async def test_cancel_local_terminates_process(self):
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+        proc = self._hanging_process()
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            out = [line async for line in execute_claude_cli("s", "hi", cancel_event=cancel_event)]
+
+        assert out == []
+        proc.terminate.assert_called()  # local agent IS the process -> signalled directly
+
+
 class TestOrchestrateChatCliResume:
     """A stale --resume id self-heals: clear it and retry once from a fresh session."""
 
@@ -657,6 +765,70 @@ class TestOrchestrateChatCliResume:
         clear_mock.assert_awaited_once()  # the dangling id was cleared
         assert any(e.type == "text_delta" and "hi" in (e.content or "") for e in events)
         assert any(e.type == "done" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_stop_after_stream_ends_emits_stopped_done(self):
+        """When a stop kills the agent mid-turn, the CLI stream just ends (no more lines);
+        the orchestrator must still emit a `done(stopped=True)` from its post-loop check."""
+        from app.services import orchestrator_cli
+
+        sid = "22222222-2222-2222-2222-222222222222"
+        cancel_event = asyncio.Event()
+
+        def fake_execute(*args, **kwargs):
+            async def gen():
+                # One block streams before the user stops; the next read finds the stream
+                # ended (execute_claude_cli returns cleanly after killing the agent on cancel).
+                yield (
+                    '{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}'
+                )
+                cancel_event.set()
+
+            return gen()
+
+        settings = SimpleNamespace(
+            claude_cli_path="claude",
+            claude_cli_timeout=120,
+            sandbox_enabled=False,
+            sandbox_docker_path="docker",
+        )
+        save_mock = AsyncMock()
+        with (
+            patch.object(orchestrator_cli, "get_settings", return_value=settings),
+            patch.object(orchestrator_cli, "execute_claude_cli", side_effect=fake_execute),
+            patch.object(orchestrator_cli, "get_cli_session_id", AsyncMock(return_value=None)),
+            patch.object(orchestrator_cli, "set_cli_session_id", AsyncMock()),
+            patch.object(orchestrator_cli, "save_message", save_mock),
+            patch.object(orchestrator_cli, "ensure_session_title", AsyncMock(return_value=None)),
+            patch.object(orchestrator_cli, "update_session_stats", AsyncMock()),
+            patch.object(orchestrator_cli, "record_usage", AsyncMock()),
+            patch.object(orchestrator_cli, "build_connector_env", AsyncMock(return_value=({}, []))),
+            patch.object(
+                orchestrator_cli, "resolve_session_system_prompt", AsyncMock(return_value="")
+            ),
+            patch.object(orchestrator_cli, "get_system_prompt", lambda *a, **k: ""),
+        ):
+            events = [
+                event
+                async for event in orchestrator_cli.orchestrate_chat_cli(
+                    db=AsyncMock(),
+                    session_id=sid,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="hello",
+                    user_id=None,
+                    cancel_event=cancel_event,
+                )
+            ]
+
+        # Exactly one terminal done, flagged stopped — emitted by the post-loop check,
+        # not the in-loop one (cancel was not yet set while the first event was processed).
+        done_events = [e for e in events if e.type == "done"]
+        assert len(done_events) == 1
+        assert done_events[0].metadata.get("stopped") is True
+        # A stopped turn does not persist a (partial) assistant message.
+        assert not any(c.args[2] == "assistant" for c in save_mock.call_args_list)
 
 
 class TestGetOrchestrator:

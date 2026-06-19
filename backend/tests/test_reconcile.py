@@ -28,6 +28,8 @@ from app.models.message import Message
 from app.models.session import Session
 from app.services.messages import (
     INTERRUPTED_TURN_ERROR,
+    clear_retry_state,
+    get_retryable_message,
     purge_empty_sessions,
     reconcile_interrupted_turns,
 )
@@ -210,6 +212,86 @@ async def test_trailing_tool_result_is_not_flagged(db: AsyncSession) -> None:
         (await db.execute(select(Message.status).where(Message.session_id == sid))).scalars().all()
     )
     assert all(status == "success" for status in rows)
+
+
+# --- retry helpers: get_retryable_message (read-only peek) + clear_retry_state. ---
+
+
+async def test_get_retryable_message_is_read_only(db: AsyncSession) -> None:
+    # The peek must NOT mutate: the flag is cleared only after the turn starts, so
+    # a turn that never starts leaves the message retryable (regression guard).
+    sid = await _make_session(db, ("user", "analyze the cluster"))
+    assert await reconcile_interrupted_turns(db) == 1  # flag it as interrupted
+
+    assert await get_retryable_message(db, sid) == "analyze the cluster"
+
+    status, retryable, retry_count, err = await _newest(db, sid)
+    assert status == "error"  # untouched by the read
+    assert retryable is True
+    assert retry_count == 0
+    assert err == INTERRUPTED_TURN_ERROR
+
+
+async def test_clear_retry_state_clears_flag_and_bumps_count(db: AsyncSession) -> None:
+    sid = await _make_session(db, ("user", "analyze the cluster"))
+    assert await reconcile_interrupted_turns(db) == 1
+
+    await clear_retry_state(db, sid)
+
+    status, retryable, retry_count, err = await _newest(db, sid)
+    assert status == "success"
+    assert retryable is False
+    assert retry_count == 1  # bumped
+    assert err is None
+
+
+async def test_get_retryable_message_none_when_nothing_retryable(db: AsyncSession) -> None:
+    # A completed turn has no retryable row.
+    sid = await _make_session(
+        db, ("user", "hi"), ("assistant", [{"type": "text", "text": "hello"}])
+    )
+    assert await get_retryable_message(db, sid) is None
+    await clear_retry_state(db, sid)  # no-op, must not raise
+
+
+async def test_get_retryable_message_skips_non_string_content(db: AsyncSession) -> None:
+    # A structured (non-string) user payload would replay as a Python repr, so the
+    # peek refuses it rather than feeding garbage to the model.
+    sid = await _make_session(db, ("user", [{"type": "text", "text": "structured"}]))
+    await db.execute(
+        update(Message)
+        .where(Message.session_id == sid)
+        .values(status="error", is_retryable=True, error_message=INTERRUPTED_TURN_ERROR)
+    )
+    await db.commit()
+
+    assert await get_retryable_message(db, sid) is None
+
+
+async def test_retry_helpers_target_newest_retryable(db: AsyncSession) -> None:
+    # Two stale retryable user rows (the known multi-row limitation): both helpers
+    # act on the newest one only and leave the older one untouched.
+    sid = await _make_session(db, ("user", "older"), ("user", "newer"))
+    await db.execute(
+        update(Message)
+        .where(Message.session_id == sid)
+        .values(status="error", is_retryable=True, error_message=INTERRUPTED_TURN_ERROR)
+    )
+    await db.commit()
+
+    assert await get_retryable_message(db, sid) == "newer"
+    await clear_retry_state(db, sid)
+
+    rows = (
+        await db.execute(
+            select(Message.content, Message.status, Message.is_retryable)
+            .where(Message.session_id == sid)
+            .order_by(Message.created_at)
+        )
+    ).all()
+    older, newer = rows
+    assert older.content == "older" and older.status == "error" and older.is_retryable is True
+    assert newer.content == "newer" and newer.status == "success" and newer.is_retryable is False
 
 
 # --- Lifespan integration: the startup reconcile is best-effort and must not

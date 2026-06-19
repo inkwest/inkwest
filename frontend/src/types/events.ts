@@ -19,7 +19,7 @@ export interface ChatEvent {
 import { Attachment } from './api';
 
 export interface SendMessage {
-  type: 'message' | 'ping' | 'stop';
+  type: 'message' | 'ping' | 'stop' | 'retry';
   content?: string;
   // Descriptors from a prior /attachments upload, persisted on the user turn and
   // referenced to the agent as @/workdir/<file> (claude-cli only).

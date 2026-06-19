@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatInput } from './ChatInput';
 import { useDraftsStore } from '@/store/drafts';
+import { useComposerStore } from '@/store/composer';
 import { useChatStore } from '@/store/chat';
 import { useSkillsStore } from '@/store/skills';
 import { Message, Skill } from '@/types/api';
@@ -13,6 +14,7 @@ describe('ChatInput', () => {
   beforeEach(() => {
     onSend.mockClear();
     useDraftsStore.setState({ drafts: {} });
+    useComposerStore.setState({ pending: null, nonce: 0 });
     useChatStore.setState({ messages: [] });
     // Stub the templates store so the on-mount fetch is a no-op (no real network) and
     // the "/" autocomplete starts empty unless a test populates it.
@@ -65,6 +67,17 @@ describe('ChatInput', () => {
     await user.type(textarea, 'line1{shift>}{enter}{/shift}line2');
 
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('does not send on Alt+Enter and inserts a newline', async () => {
+    const user = userEvent.setup();
+    render(<ChatInput onSend={onSend} />);
+
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
+    await user.type(textarea, 'line1{alt>}{enter}{/alt}line2');
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('line1\nline2');
   });
 
   it('does not send empty messages', async () => {
@@ -136,6 +149,21 @@ describe('ChatInput', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it('stops a streaming response on Escape from anywhere on the page', () => {
+    const onStop = vi.fn();
+    render(<ChatInput onSend={onSend} onStop={onStop} isStreaming />);
+    // Dispatched on document (not the composer) — the listener is global.
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not stop on Escape when no response is streaming', () => {
+    const onStop = vi.fn();
+    render(<ChatInput onSend={onSend} onStop={onStop} />);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
   describe('invite-to-prompt border', () => {
     const existingMessage: Message = {
       id: 'm1',
@@ -188,6 +216,136 @@ describe('ChatInput', () => {
       const textarea = getTextarea();
       fireEvent.blur(textarea);
       expect(textarea).toHaveClass('invite-border');
+    });
+  });
+
+  describe('prompt history recall (ArrowUp/ArrowDown)', () => {
+    const mkUser = (id: string, content: string): Message => ({
+      id,
+      session_id: 's1',
+      role: 'user',
+      content,
+      created_at: '2026-01-01T00:00:00Z',
+    });
+    const getTextarea = () =>
+      screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
+
+    it('recalls the newest prompt on ArrowUp from an empty composer', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'first'), mkUser('m2', 'second')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('second');
+    });
+
+    it('walks older then back to newer through history', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'first'), mkUser('m2', 'second')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // second
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // first
+      expect(ta.value).toBe('first');
+      fireEvent.keyDown(ta, { key: 'ArrowDown' }); // second
+      expect(ta.value).toBe('second');
+    });
+
+    it('stays on the oldest prompt past the top', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'only')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('only');
+    });
+
+    it('restores the live draft when stepping past the newest prompt', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'draft' } });
+      ta.setSelectionRange(0, 0); // caret at start so ArrowUp enters history
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('past');
+      fireEvent.keyDown(ta, { key: 'ArrowDown' });
+      expect(ta.value).toBe('draft');
+    });
+
+    it('does not enter history when the caret is not at the start', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'multi\nline' } });
+      ta.setSelectionRange(7, 7); // somewhere on the second line
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('multi\nline');
+    });
+
+    it('ignores ArrowDown when not navigating history', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'typed' } });
+      fireEvent.keyDown(ta, { key: 'ArrowDown' });
+      expect(ta.value).toBe('typed');
+    });
+
+    it('does nothing on ArrowUp with no past prompts', () => {
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('');
+    });
+
+    it('moves the caret within a multi-line recalled prompt before walking older', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'older'), mkUser('m2', 'line1\nline2')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // recall newest multi-line prompt
+      expect(ta.value).toBe('line1\nline2');
+      // Caret on the last line: ArrowUp moves within the prompt, does not walk older.
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('line1\nline2');
+      // Caret on the first line: now ArrowUp walks to the older prompt.
+      ta.setSelectionRange(0, 0);
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('older');
+    });
+
+    it('collapses consecutive duplicate prompts', () => {
+      useChatStore.setState({
+        messages: [mkUser('m1', 'dup'), mkUser('m2', 'dup'), mkUser('m3', 'other')],
+      });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // newest: 'other'
+      expect(ta.value).toBe('other');
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // 'dup' once, not twice
+      expect(ta.value).toBe('dup');
+      fireEvent.keyDown(ta, { key: 'ArrowUp' }); // already oldest
+      expect(ta.value).toBe('dup');
+    });
+
+    it('recalls from caret 0 even when the draft begins with a newline', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: '\nleading newline' } });
+      ta.setSelectionRange(0, 0); // caret on the empty first line
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('past');
+    });
+
+    it('keeps the persisted draft intact while recalling (only the textarea changes)', () => {
+      useChatStore.setState({ messages: [mkUser('m1', 'past')] });
+      render(<ChatInput onSend={onSend} sessionId="s1" />);
+      const ta = getTextarea();
+      fireEvent.change(ta, { target: { value: 'mydraft' } });
+      ta.setSelectionRange(0, 0);
+      fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      expect(ta.value).toBe('past');
+      // The recall must not clobber the user's own draft in the store.
+      expect(useDraftsStore.getState().drafts['s1']).toBe('mydraft');
     });
   });
 
@@ -286,6 +444,57 @@ describe('ChatInput', () => {
       await user.type(getTextarea(), '/summarize{enter}'); // -> "/summarize-incident "
       expect(screen.getByText(/\[merge request URL\]/)).toBeInTheDocument(); // bracketed
       expect(screen.queryByText(/arguments libres/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('composer inject (reuse prompt)', () => {
+    const getTextarea = () =>
+      screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
+
+    it('loads injected text into an empty composer without confirming', () => {
+      const confirmSpy = vi.spyOn(window, 'confirm');
+      render(<ChatInput onSend={onSend} />);
+      act(() => useComposerStore.getState().inject('reuse this prompt'));
+      expect(getTextarea().value).toBe('reuse this prompt');
+      expect(confirmSpy).not.toHaveBeenCalled();
+      // Channel is consumed so a remount can't re-inject.
+      expect(useComposerStore.getState().pending).toBeNull();
+      confirmSpy.mockRestore();
+    });
+
+    it('overwrites non-empty composer text after the user confirms', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), 'half-typed draft');
+      act(() => useComposerStore.getState().inject('reused'));
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(getTextarea().value).toBe('reused');
+      confirmSpy.mockRestore();
+    });
+
+    it('keeps the existing draft when the user cancels the overwrite', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), 'half-typed draft');
+      act(() => useComposerStore.getState().inject('reused'));
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(getTextarea().value).toBe('half-typed draft');
+      // Channel is consumed regardless, so the cancelled prompt won't linger.
+      expect(useComposerStore.getState().pending).toBeNull();
+      confirmSpy.mockRestore();
+    });
+
+    it('does not confirm when the injected text matches the current draft', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm');
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} />);
+      await user.type(getTextarea(), 'same text');
+      act(() => useComposerStore.getState().inject('same text'));
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(getTextarea().value).toBe('same text');
+      confirmSpy.mockRestore();
     });
   });
 });

@@ -29,6 +29,7 @@ from app.models.cluster import Cluster
 from app.models.session import Session
 from app.models.user import User
 from app.services.ai_client import get_orchestrator
+from app.services.messages import clear_retry_state, get_retryable_message
 from app.services.turn_runner import TURN_END, turn_runner
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
 
     Client sends:
         {"type": "message", "content": "..."} - Send a chat message
+        {"type": "retry"} - Re-run the latest interrupted turn
+        {"type": "stop"} - Cancel the active turn
         {"type": "ping"} - Keepalive ping
 
     Server sends:
@@ -316,6 +319,49 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                         {"type": "error", "content": "A response is already in progress."}
                     )
                     continue
+                await attach(send_resumed=False)
+            elif msg_type == "retry":
+                # Re-run the latest interrupted turn. The errored user message is
+                # already in history, so we replay it in place
+                # (persist_user_message=False) rather than appending a duplicate.
+                # The DB read runs inline here (not in the turn task); guard it so a
+                # transient DB error surfaces as an error event instead of tearing
+                # down the socket.
+                try:
+                    async with async_session_maker() as db:
+                        content = await get_retryable_message(db, session_id)
+                except Exception:
+                    logger.exception("Retry lookup failed", extra={"session_id": session_id})
+                    await websocket.send_json(
+                        {"type": "error", "content": "Could not start retry, please try again."}
+                    )
+                    continue
+                if content is None:
+                    await websocket.send_json({"type": "error", "content": "Nothing to retry"})
+                    continue
+
+                logger.info("Retry requested", extra={"session_id": session_id})
+
+                started = await turn_runner.start(
+                    session_id,
+                    get_orchestrator(),
+                    {**base_kwargs, "user_message": content, "persist_user_message": False},
+                )
+                if not started:
+                    # Turn already running: leave the message retryable so the user
+                    # can retry once it frees up — do NOT clear the flag here.
+                    await websocket.send_json(
+                        {"type": "error", "content": "A response is already in progress."}
+                    )
+                    continue
+                # Turn started: now safe to clear the error flag (best-effort — a
+                # failure here only leaves a stale error bubble on reload, not lost
+                # work, since the turn is already running).
+                try:
+                    async with async_session_maker() as db:
+                        await clear_retry_state(db, session_id)
+                except Exception:
+                    logger.exception("Clear retry state failed", extra={"session_id": session_id})
                 await attach(send_resumed=False)
             else:
                 await websocket.send_json(

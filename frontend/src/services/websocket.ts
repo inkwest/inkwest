@@ -108,16 +108,22 @@ export class ChatWebSocket {
     }
   }
 
-  send(message: SendMessage): void {
+  // Returns true only when the frame was actually written to an open socket.
+  // Callers that optimistically mutate UI (e.g. retry) must check this so they
+  // don't fake success for a frame that was queued or dropped.
+  send(message: SendMessage): boolean {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
-    } else if (message.type === 'message') {
+      return true;
+    }
+    if (message.type === 'message') {
       // Never silently drop a user message during a connect/reconnect window —
       // park it and flush on open. Pings/stops are meaningless on a dead socket.
       this.pendingSends.push(message);
-    } else {
-      console.warn('WebSocket not connected, cannot send message');
+      return false;
     }
+    console.warn('WebSocket not connected, cannot send message');
+    return false;
   }
 
   sendMessage(content: string, attachments?: import('@/types/api').Attachment[]): void {
@@ -126,6 +132,10 @@ export class ChatWebSocket {
 
   sendStop(): void {
     this.send({ type: 'stop' });
+  }
+
+  sendRetry(): boolean {
+    return this.send({ type: 'retry' });
   }
 
   subscribe(handler: EventHandler): () => void {

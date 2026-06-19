@@ -1,7 +1,8 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, KeyboardEvent, ChangeEvent, ClipboardEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent, type ChangeEvent, type ClipboardEvent } from 'react';
 import { Send, Square, Paperclip, Loader2 } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
+import { useComposerStore } from '@/store/composer';
 import { useChatStore } from '@/store/chat';
 import { useSkillsStore } from '@/store/skills';
 import { useConfigStore } from '@/store/config';
@@ -69,6 +70,8 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   const compact = useSettingsStore((s) => s.compactToolCards);
   const setDraft = useDraftsStore((s) => s.setDraft);
   const clearDraft = useDraftsStore((s) => s.clearDraft);
+  const composerNonce = useComposerStore((s) => s.nonce);
+  const consumeComposer = useComposerStore((s) => s.consume);
   // Seed once from the persisted per-session draft so switching sessions (which
   // unmounts this component behind the "Loading session..." guard) and coming
   // back restores what the user had typed.
@@ -76,6 +79,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     sessionId ? useDraftsStore.getState().drafts[sessionId] ?? '' : ''
   );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Mirrors the latest `message` for effects that run on a non-`message` dep
+  // (the inject effect) and must read the current value without a stale closure.
+  const messageRef = useRef(message);
+  messageRef.current = message;
   const initialPromptApplied = useRef(false);
   const [shimmer, setShimmer] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -153,6 +160,15 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
       });
     }
   };
+
+  // Shell-style ArrowUp/Down prompt recall. null = editing live; otherwise an index into
+  // the recalled-prompts list (see collectPrompts). historyStash holds the live draft
+  // saved on entry so stepping past the newest prompt restores it. The prompt list is
+  // read on demand from the store (collectPrompts) rather than via a subscription: it's
+  // only needed at keypress time, so this avoids extra re-renders and any index drift if
+  // a real-time sync reorders messages mid-navigation.
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const historyStash = useRef('');
 
   // Inline "/" skill autocomplete (skills surfaced as Claude skills).
   const templates = useSkillsStore((s) => s.templates);
@@ -285,6 +301,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
       attachments.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
       setAttachments([]);
       setAttachError(null);
+      setHistoryIndex(null);
       if (sessionId) clearDraft(sessionId);
     }
   };
@@ -303,7 +320,22 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSubmit, disabled, isStreaming, message, initialPrompt]);
 
-  const handleKeyDown = (e: KeyboardEvent) => {
+  // Escape stops an in-flight response from anywhere on the page, not only when the
+  // composer is focused (the user is usually watching the stream, not the input).
+  // Skipped while the "/" skill dropdown is open — there Escape dismisses the dropdown
+  // (handled in handleKeyDown) rather than stopping.
+  useEffect(() => {
+    if (!isStreaming) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || showSkills) return;
+      e.preventDefault();
+      onStop?.();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isStreaming, showSkills, onStop]);
+
+  const handleKeyDown = (e: ReactKeyboardEvent) => {
     if (showSkills) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -326,6 +358,42 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         return;
       }
     }
+    // Shell-style prompt recall. ArrowUp walks to an older prompt only when the caret is
+    // on the first line (no selection), ArrowDown to a newer one only on the last line —
+    // so within a multi-line draft or recalled prompt the arrows still move the caret
+    // normally, and recall only kicks in at the edges. navigateHistory returns false when
+    // there's nothing to recall, leaving the default caret movement intact.
+    // Accepted edges: a recalled bare "/slug" re-opens the skill dropdown (handled above,
+    // so arrows drive it until Escape); and under fast key-repeat a second press may read
+    // the pre-recall caret before applyEdit's setTimeout restores it — both benign.
+    const ta = e.currentTarget as HTMLTextAreaElement;
+    const collapsed = ta.selectionStart === ta.selectionEnd;
+    if (e.key === 'ArrowUp' && !e.shiftKey && collapsed) {
+      // No newline before the caret. Use slice rather than lastIndexOf(\n, start-1):
+      // a negative fromIndex clamps to 0 instead of "search nothing", so caret-at-0 on
+      // text that begins with \n would wrongly report not-first-line.
+      const onFirstLine = ta.value.slice(0, ta.selectionStart).indexOf('\n') === -1;
+      if (onFirstLine && navigateHistory('up')) {
+        e.preventDefault();
+        return;
+      }
+    }
+    if (e.key === 'ArrowDown' && !e.shiftKey && collapsed) {
+      const onLastLine = ta.value.indexOf('\n', ta.selectionEnd) === -1;
+      if (onLastLine && navigateHistory('down')) {
+        e.preventDefault();
+        return;
+      }
+    }
+    // Alt+Enter inserts a newline, like Shift+Enter. Shift+Enter relies on the
+    // textarea's built-in default; Alt+Enter has no such default, so splice the
+    // newline in at the caret (replacing any selection, matching how typing behaves).
+    if (e.key === 'Enter' && e.altKey) {
+      e.preventDefault();
+      const { selectionStart: start, selectionEnd: end, value } = ta;
+      applyEdit({ text: value.slice(0, start) + '\n' + value.slice(end), cursor: start + 1 });
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -333,8 +401,18 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   };
 
   // Apply a text edit, then restore focus + caret after React commits the new value.
-  const applyEdit = (next: { text: string; cursor: number }) => {
-    updateMessage(next.text);
+  // `persist` mirrors the text into the per-session draft store (the default for skill
+  // picks and injects). History recall passes persist=false: the textarea shows the
+  // recalled prompt, but the persisted draft keeps the user's last manually-typed text,
+  // so abandoning a recall (e.g. switching sessions) restores their own draft, not an
+  // old prompt. A manual edit (onChange) or send then persists/clears as usual.
+  const applyEdit = (next: { text: string; cursor: number }, persist = true) => {
+    if (persist) {
+      updateMessage(next.text);
+    } else {
+      setMessage(next.text);
+      setSkillDismissed(false); // keep parity with updateMessage's dropdown reset
+    }
     setCursor(next.cursor); // sync: the dropdown/hint must react immediately (no flicker)
     setTimeout(() => {
       const ta = textareaRef.current;
@@ -344,6 +422,50 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     }, 0);
   };
 
+  // Recallable prompts (oldest→newest): plain-string user messages only (skip tool
+  // results / block content), with consecutive duplicates collapsed so a repeated send
+  // doesn't need multiple ArrowUp presses to step past. Read fresh from the store so the
+  // list always reflects the current conversation.
+  const collectPrompts = (): string[] =>
+    useChatStore.getState().messages.reduce<string[]>((acc, m) => {
+      if (
+        m.role === 'user' &&
+        typeof m.content === 'string' &&
+        m.content.trim() &&
+        m.content !== acc[acc.length - 1]
+      ) {
+        acc.push(m.content);
+      }
+      return acc;
+    }, []);
+
+  // Shell-style prompt recall. ArrowUp walks toward older prompts, ArrowDown back toward
+  // newer; stepping past the newest restores the stashed live draft and exits history.
+  // The boundary gating in handleKeyDown (first line for up, last line for down) lets the
+  // caret still move within a multi-line recalled prompt. Returns false (don't
+  // preventDefault, let the caret move normally) when there's nothing to recall.
+  const navigateHistory = (dir: 'up' | 'down'): boolean => {
+    const prompts = collectPrompts();
+    if (prompts.length === 0) return false;
+    if (dir === 'up') {
+      const idx = historyIndex === null ? prompts.length - 1 : Math.max(0, historyIndex - 1);
+      if (historyIndex === null) historyStash.current = messageRef.current;
+      setHistoryIndex(idx);
+      applyEdit({ text: prompts[idx], cursor: prompts[idx].length }, false);
+      return true;
+    }
+    if (historyIndex === null) return false;
+    if (historyIndex >= prompts.length - 1) {
+      setHistoryIndex(null);
+      applyEdit({ text: historyStash.current, cursor: historyStash.current.length }, false);
+    } else {
+      const idx = historyIndex + 1;
+      setHistoryIndex(idx);
+      applyEdit({ text: prompts[idx], cursor: prompts[idx].length }, false);
+    }
+    return true;
+  };
+
   // Autocomplete pick: replace the "/<query>" token around the cursor with "/<slug> ".
   const selectSkill = (template: Skill) =>
     applyEdit(replaceSlashToken(message, cursor, template.slug));
@@ -351,6 +473,26 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   // Palette pick: insert "/<slug> " at the cursor (no token to replace).
   const insertSkillFromPalette = (slug: string) =>
     applyEdit(insertAtCursor(message, cursor, `/${slug} `));
+
+  // External inject (e.g. "reuse this prompt" on a past user message): load the
+  // text into the composer with the caret at the end, then clear the channel.
+  // Keyed on `nonce` so re-injecting identical text still applies. If the composer
+  // already holds different unsent text, confirm first — injecting otherwise
+  // silently destroys the in-progress message (and its persisted draft).
+  useEffect(() => {
+    const { pending } = useComposerStore.getState();
+    if (pending == null) return;
+    const current = messageRef.current.trim();
+    if (current && current !== pending.trim() &&
+        !confirm('Replace the text in the composer with this prompt?')) {
+      consumeComposer();
+      return;
+    }
+    applyEdit({ text: pending, cursor: pending.length });
+    setHistoryIndex(null); // an external inject is a fresh draft, not history recall
+    consumeComposer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [composerNonce]);
 
   // Fixed-width side buttons (skill / attach / send) that stretch to the full
   // textarea height via the row's `items-stretch`: a single line reads level, and
@@ -397,6 +539,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
             onChange={(e) => {
               updateMessage(e.target.value);
               setCursor(e.target.selectionStart ?? e.target.value.length);
+              setHistoryIndex(null); // a manual edit drops out of history recall
             }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
