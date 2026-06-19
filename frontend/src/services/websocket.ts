@@ -126,8 +126,8 @@ export class ChatWebSocket {
     return false;
   }
 
-  sendMessage(content: string): void {
-    this.send({ type: 'message', content });
+  sendMessage(content: string, attachments?: import('@/types/api').Attachment[]): void {
+    this.send({ type: 'message', content, ...(attachments?.length ? { attachments } : {}) });
   }
 
   sendStop(): void {

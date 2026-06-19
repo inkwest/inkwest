@@ -50,8 +50,9 @@ export function ModelSettingsPage() {
       setSettings(data);
       setEnabled(data.enabled_models);
       setDefaultModel(data.default_model);
-      // Keep the chat-side config (header badge, session picker) in sync.
-      useConfigStore.setState({
+      // Keep the chat-side config (header badge, session picker) in sync. Preserve
+      // attachments_enabled (a sandbox/provider flag, unrelated to model settings).
+      useConfigStore.setState((s) => ({
         config: {
           provider: data.provider,
           model: data.default_model,
@@ -59,8 +60,9 @@ export function ModelSettingsPage() {
             const known = data.available_models.find((m) => m.id === id);
             return { id, label: known?.label ?? id, legacy: known?.legacy ?? false };
           }),
+          attachments_enabled: s.config?.attachments_enabled ?? false,
         },
-      });
+      }));
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update model settings');

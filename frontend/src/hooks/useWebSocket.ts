@@ -3,6 +3,7 @@ import { useChatStore } from '@/store/chat';
 import { useSessionsStore } from '@/store/sessions';
 import { ChatWebSocket } from '@/services/websocket';
 import { ChatEvent } from '@/types/events';
+import { Attachment } from '@/types/api';
 import { useConnectorsStore } from '@/store/connectors';
 import { ConnectorName } from '@/types/connectors';
 
@@ -193,19 +194,21 @@ export function useWebSocket(sessionId: string) {
     };
   }, [sessionId, handleEvent, setIsConnected]);
 
-  const sendMessage = useCallback((content: string) => {
+  const sendMessage = useCallback((content: string, attachments?: Attachment[]) => {
     if (wsRef.current) {
-      // Add user message to store immediately
+      // Add user message to store immediately (with its attachments, so the
+      // thumbnails show right away — before the server snapshot reconciles it).
       addMessage({
         id: crypto.randomUUID(),
         session_id: sessionId,
         role: 'user',
         content,
+        attachments: attachments?.length ? attachments : undefined,
         created_at: new Date().toISOString(),
       });
 
       // Send via WebSocket
-      wsRef.current.sendMessage(content);
+      wsRef.current.sendMessage(content, attachments);
       setIsStreaming(true);
     }
   }, [sessionId, addMessage, setIsStreaming]);

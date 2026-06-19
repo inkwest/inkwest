@@ -4,6 +4,7 @@ import { useSessionsStore } from '@/store/sessions';
 import { useChatStore, extractTodosFromMessages } from '@/store/chat';
 import { ChatView } from '@/components/chat/ChatView';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { Attachment } from '@/types/api';
 
 export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -44,8 +45,8 @@ export function ChatPage() {
 
   const { sendMessage, stopStreaming, retryMessage } = useWebSocket(sessionId!);
 
-  const handleSend = (content: string) => {
-    sendMessage(content);
+  const handleSend = (content: string, attachments?: Attachment[]) => {
+    sendMessage(content, attachments);
     setInitialPrompt(null);
   };
 

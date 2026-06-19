@@ -190,6 +190,17 @@ class Settings(BaseSettings):
     sandbox_memory_limit: str = "1g"  # docker run --memory, per container
     sandbox_pids_limit: int = 512  # docker run --pids-limit, per container
 
+    # File attachments uploaded into a conversation's /workdir and referenced to the
+    # agent as @/workdir/<file>. Sandbox/claude-cli only (the only orchestrator with a
+    # workdir + @-syntax). Limits guard host disk and prompt size; only these
+    # extensions are accepted (comma-separated, case-insensitive, no dots).
+    attachment_max_bytes: int = 10 * 1024 * 1024  # 10 MiB per file
+    attachment_max_per_message: int = 10
+    attachment_allowed_extensions: str = (
+        "png,jpg,jpeg,gif,webp,svg,pdf,txt,md,log,json,yaml,yml,"
+        "csv,tsv,toml,ini,conf,xml,html,sh,py,js,ts,go,sql"
+    )
+
     # ==========================================================================
     # MCP catalog — the set of MCP servers users may enable per conversation.
     # JSON object {"<key>": "<base64(server-def-json)>"}; each value base64-decodes

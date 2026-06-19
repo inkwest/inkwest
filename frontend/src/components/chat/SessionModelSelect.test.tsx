@@ -12,6 +12,7 @@ const CONFIG = {
     { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true },
     { id: 'claude-opus-4-20250514', label: 'Opus 4.0', legacy: true },
   ],
+  attachments_enabled: false,
 };
 
 function setSession(model: string | null) {

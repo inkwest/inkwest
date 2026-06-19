@@ -1,18 +1,21 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Send, Square } from 'lucide-react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent, type ChangeEvent, type ClipboardEvent } from 'react';
+import { Send, Square, Paperclip, Loader2 } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
 import { useComposerStore } from '@/store/composer';
 import { useChatStore } from '@/store/chat';
 import { useSkillsStore } from '@/store/skills';
-import { Skill } from '@/types/api';
+import { useConfigStore } from '@/store/config';
+import { Skill, Attachment } from '@/types/api';
+import { uploadAttachments, deleteAttachment } from '@/services/api';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 import { SkillPalette } from './SkillPalette';
 import { SkillAutocomplete } from './SkillAutocomplete';
+import { AttachmentChips, PendingAttachment } from './Attachments';
 import { formatArgs } from '@/lib/skillArgs';
 
 interface Props {
-  onSend: (message: string) => void;
+  onSend: (message: string, attachments?: Attachment[]) => void;
   onStop?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -88,6 +91,75 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   // the previous session's messages there, since resetChat only runs in ChatPage.
   const noMessages = useChatStore((s) => s.messages.length === 0);
   const inviteToPrompt = (large || noMessages) && !message.trim() && !focused;
+
+  // --- File attachments (sandbox/claude-cli only; needs a session to upload to) ---
+  const attachmentsEnabled = useConfigStore((s) => s.config?.attachments_enabled ?? false);
+  const canAttach = !!sessionId && attachmentsEnabled;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+
+  // Revoke any object URLs still held when the composer unmounts (session switch).
+  useEffect(() => {
+    return () => {
+      attachments.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      if (!sessionId || files.length === 0) return;
+      setAttachError(null);
+      setUploading(true);
+      try {
+        // Descriptors come back in input order, so we pair each with its local
+        // File to build an image preview without a round-trip to the server.
+        const uploaded = await uploadAttachments(sessionId, files);
+        const withPreview: PendingAttachment[] = uploaded.map((d, i) => ({
+          ...d,
+          previewUrl:
+            files[i] && d.content_type.startsWith('image/')
+              ? URL.createObjectURL(files[i])
+              : undefined,
+        }));
+        setAttachments((prev) => [...prev, ...withPreview]);
+      } catch (e) {
+        setAttachError(e instanceof Error ? e.message : 'Upload failed');
+      } finally {
+        setUploading(false);
+      }
+    },
+    [sessionId],
+  );
+
+  const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!canAttach) return;
+    const files = Array.from(e.clipboardData.files);
+    if (files.length > 0) {
+      e.preventDefault(); // a pasted file shouldn't also dump a path/text into the box
+      void addFiles(files);
+    }
+  };
+
+  const handleBrowse = (e: ChangeEvent<HTMLInputElement>) => {
+    void addFiles(Array.from(e.target.files ?? []));
+    e.target.value = ''; // let the same file be re-picked after a removal
+  };
+
+  const removeAttachment = (filename: string) => {
+    setAttachments((prev) => {
+      const gone = prev.find((a) => a.filename === filename);
+      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+      return prev.filter((a) => a.filename !== filename);
+    });
+    if (sessionId) {
+      void deleteAttachment(sessionId, filename).catch(() => {
+        /* best-effort: the file is dropped client-side regardless */
+      });
+    }
+  };
 
   // Shell-style ArrowUp/Down prompt recall. null = editing live; otherwise an index into
   // the recalled-prompts list (see collectPrompts). historyStash holds the live draft
@@ -211,12 +283,24 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
 
   const handleSend = () => {
     setShimmer(false);
-    // Don't send while a response is streaming — the button is a Stop button then,
-    // but Enter would otherwise still fire and the backend rejects a second turn
-    // ("A response is already in progress").
-    if (message.trim() && !disabled && !isStreaming) {
-      onSend(message.trim());
+    const text = message.trim();
+    // Send when there's text OR attachments. Don't send while a response is
+    // streaming (the button is Stop then, but Enter would still fire and the
+    // backend rejects a second turn) or while an upload is still in flight (its
+    // descriptor wouldn't be included).
+    if ((text || attachments.length > 0) && !disabled && !isStreaming && !uploading) {
+      // Strip the client-only previewUrl from the wire payload.
+      const descriptors: Attachment[] = attachments.map((a) => ({
+        filename: a.filename,
+        original_name: a.original_name,
+        content_type: a.content_type,
+        size: a.size,
+      }));
+      onSend(text, descriptors.length ? descriptors : undefined);
       setMessage('');
+      attachments.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
+      setAttachments([]);
+      setAttachError(null);
       setHistoryIndex(null);
       if (sessionId) clearDraft(sessionId);
     }
@@ -410,10 +494,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composerNonce]);
 
-  // Square corner buttons anchored NW (skill) / SE (send) in both variants. The
-  // compact square (h-11 = leading-6 + py-2 + border) matches a single-line
-  // textarea so the row reads level.
-  const square = large ? 'h-12 w-12 px-0 shrink-0' : 'h-11 w-11 px-0 shrink-0';
+  // Fixed-width side buttons (skill / attach / send) that stretch to the full
+  // textarea height via the row's `items-stretch`: a single line reads level, and
+  // a multi-line message grows them into tall bars instead of small squares.
+  const sideBtn = large ? 'h-full w-12 px-0 shrink-0' : 'h-full w-11 px-0 shrink-0';
   const iconSize = large ? 'h-5 w-5' : 'h-4 w-4';
 
   return (
@@ -427,6 +511,9 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
             : 'rounded-2xl border border-gray-700 bg-gray-800/90 p-2 shadow-xl shadow-black/40'
         }
       >
+        {/* Attached files (sandbox/claude-cli only), rattachés au message en cours. */}
+        {canAttach && <AttachmentChips attachments={attachments} onRemove={removeAttachment} />}
+        {attachError && <div className="mb-2 px-1 text-xs text-red-400">{attachError}</div>}
         {/* Both variants anchor the skill library to the NW corner and submit to the SE
             corner via top-/bottom-aligned side columns, with the textarea between. */}
         <div className="flex items-stretch gap-2">
@@ -434,7 +521,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           <SkillPalette
             onSelect={insertSkillFromPalette}
             disabled={disabled}
-            className={square}
+            className={sideBtn}
           />
         </div>
         <div className="relative flex-1">
@@ -455,6 +542,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
               setHistoryIndex(null); // a manual edit drops out of history recall
             }}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             onSelect={(e) => setCursor(e.currentTarget.selectionStart ?? 0)}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
@@ -474,6 +562,36 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
             rows={large ? 6 : 1}
           />
         </div>
+        {canAttach && (
+          <div className="flex flex-col justify-end">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleBrowse}
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={disabled || uploading}
+              aria-label="Attach files"
+              title="Attach files"
+              className={cn(
+                'flex items-center justify-center rounded-lg border border-gray-600 bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed',
+                sideBtn,
+              )}
+            >
+              {uploading ? (
+                <Loader2 className={cn(iconSize, 'animate-spin')} />
+              ) : (
+                <Paperclip className={iconSize} />
+              )}
+            </button>
+          </div>
+        )}
         <div className="flex flex-col justify-end">
           {isStreaming ? (
             <button
@@ -481,7 +599,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
               aria-label="Stop"
               className={cn(
                 'flex items-center justify-center rounded-lg border border-transparent bg-red-600 hover:bg-red-700',
-                square,
+                sideBtn,
               )}
             >
               <Square className={iconSize} />
@@ -490,10 +608,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
             <button
               onClick={handleSend}
               aria-label="Send message"
-              disabled={disabled || !message.trim()}
+              disabled={disabled || uploading || (!message.trim() && attachments.length === 0)}
               className={cn(
                 'flex items-center justify-center rounded-lg border border-transparent bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed',
-                square,
+                sideBtn,
                 shimmer && message.trim() && 'animate-flash-btn',
               )}
             >

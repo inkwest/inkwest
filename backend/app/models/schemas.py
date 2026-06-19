@@ -192,6 +192,8 @@ class MessageResponse(MessageBase):
 
     id: UUID
     session_id: UUID
+    # Files attached to a user turn (descriptor dicts); NULL/absent otherwise.
+    attachments: list[dict[str, Any]] | None = None
     # Model that produced this assistant turn (NULL for older/non-assistant rows).
     model: str | None = None
     token_count: int | None = None

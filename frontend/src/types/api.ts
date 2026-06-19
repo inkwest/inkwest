@@ -50,12 +50,24 @@ export interface SessionWithMessages extends Session {
 // Message types
 export type MessageStatus = 'pending' | 'success' | 'error';
 
+// A file the user attached to a turn. The agent reads it from the conversation's
+// /workdir; `filename` is the (slugified, deduped) on-disk basename used by the
+// GET/DELETE attachment endpoints.
+export interface Attachment {
+  filename: string;
+  original_name: string;
+  content_type: string;
+  size: number;
+}
+
 export interface Message {
   id: string;
   session_id: string;
   // 'system' = UI-only event line (e.g. a connector access change); never sent to the model.
   role: 'user' | 'assistant' | 'tool_result' | 'system';
   content: MessageContent;
+  /** Files attached to this (user) turn; null/undefined when none. */
+  attachments?: Attachment[] | null;
   /** Model that produced this assistant turn; null/undefined for older or non-assistant rows. */
   model?: string | null;
   status?: MessageStatus;

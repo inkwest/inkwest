@@ -291,18 +291,29 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 await websocket.send_json({"type": "pong"})
             elif msg_type == "message":
                 content = data.get("content", "").strip()
-                if not content:
+                # Descriptors echoed from a prior /attachments upload (claude-cli only).
+                raw_attachments = data.get("attachments")
+                attachments = raw_attachments if isinstance(raw_attachments, list) else []
+                # A turn may carry only files (no text) — accept it when attachments exist.
+                if not content and not attachments:
                     await websocket.send_json({"type": "error", "content": "Empty message content"})
                     continue
 
                 logger.info(
                     "Received message",
-                    extra={"session_id": session_id, "message_length": len(content)},
+                    extra={
+                        "session_id": session_id,
+                        "message_length": len(content),
+                        "attachments": len(attachments),
+                    },
                 )
 
-                started = await turn_runner.start(
-                    session_id, get_orchestrator(), {**base_kwargs, "user_message": content}
-                )
+                turn_kwargs: dict = {**base_kwargs, "user_message": content}
+                # The @-file mechanism is claude-cli only; the API/Bedrock orchestrators
+                # have no `attachments` parameter, so only pass it to the CLI one.
+                if attachments and get_settings().ai_provider == "claude-cli":
+                    turn_kwargs["attachments"] = attachments
+                started = await turn_runner.start(session_id, get_orchestrator(), turn_kwargs)
                 if not started:
                     await websocket.send_json(
                         {"type": "error", "content": "A response is already in progress."}
