@@ -75,7 +75,7 @@ The loop is host-agnostic; only the **adapter** is host-specific (format transla
 | 6 | Packaging | Python package `inkwest_agent` (loop + Converse adapter + `app/tools/*` executors + validation) **baked into the toolbox image** (python+boto3 already present). Dedicated image (`sandbox_agent_image`) = later option. No standalone binary. |
 | 7 | Engine selection | **`AGENTIC_ENGINES`** CSV; default `claude-cli`. `AI_PROVIDER` kept (engine role deprecated lot 2). Engine first-class (`session.engine` reserved), UI picker next step. Per-turn resolution (see Engine model). |
 | 8 | Replicas | **Single-replica** now. HA / sharding = **lot 2**. |
-| 9 | Sequencing + cred handoff | Current lot = **Phase 0 + 1**. **Provisioning worker = next lot**, direction **per-node DaemonSet** (writes node-local creds tmpfs; own SSO secret + identity). |
+| 9 | Sequencing + cred handoff | Current lot = **Phase 0 + 1**. **Cred isolation = next lot** (gated). **Revised direction:** the **SSO user device-auth + runtime account/role selection is the keystone — kept** (rules out static IAM/IRSA roles, which would break the user's runtime choice). Minting **centralizes in the portal/broker** (the broker also brokers creds) with a **short-lived crypto handoff** to the sandbox — *not* a per-node DaemonSet holding the SSO app secret (that spreads the secret to every node for ~zero gain mono-node). A DaemonSet, if used, narrows to a **local cred injector** (node-local tmpfs). **Mono-node end-to-end first**, before any horizontal scale. |
 
 ### Conservative defaults ⇒ zero runtime impact
 
@@ -85,7 +85,7 @@ With `AGENTIC_ENGINES=claude-cli`, include-non-anthropic **off**, and an **engin
 
 - **Phase 0 — reframe + engine first-class** (small, conservative defaults): rename `open-weight`/`bedrock-open`/`include_open` → per-vendor tags + neutral framing; `AGENTIC_ENGINES`; engine-aware catalog; `session.engine` column reserved. Ships on the current in-process loop.
 - **Phase 1 — sandboxed `inkwest-agent` runtime** (largest; the loop-isolation core): `inkwest-agent` entrypoint + toolbox deps; stdout `ChatEvent` protocol; broker spawn/stream/persist/cancel (reuse sandbox lifecycle); move `save`/`finalize` to broker side; feature-flag per engine, then retire the in-process loop.
-- **Phase 2 — privileged provisioning worker** (next lot; cred isolation, inverted + NOTIFY): intent table + `pg_notify`; per-node DaemonSet with its own identity holding the SSO app secret; move `_apply_aws_selection`/`select_account_roles`/device-auth into the worker; project creds to the sandbox node-local tmpfs.
+- **Phase 2 — credential isolation** (next lot, gated; NOTIFY-driven): intent table + `pg_notify`; **minting stays centralized in the portal/broker** (which becomes the cred broker) — keep the **SSO user device-auth + runtime account/role selection** (the security keystone; rules out static IAM/IRSA roles); hand creds to the sandbox via a **short-lived crypto handoff**, projected onto node-local tmpfs by a **local injector** (a DaemonSet in that narrowed role only — *not* holding the SSO secret). **Mono-node end-to-end first.** (Superseded: the earlier "per-node DaemonSet holds the SSO secret + the worker mints" framing.)
 
 ## Implementation slices
 
@@ -108,9 +108,11 @@ Implementation slices:
 | — | P2.5 | Strip SSO/STS creds from the portal |
 | — | P2.6 | Worker infra: DaemonSet manifest, IAM/SA, NetworkPolicy |
 
+> **Note:** the P2.x rows predate the revised Phase 2 direction (decision #9). Minting stays in the **portal/broker** (not moved into a worker), and the DaemonSet narrows to a **local cred injector**; the SSO user device-auth + runtime role selection is kept. The ticket descriptions (esp. P2.3 "move STS mint into the worker", P2.6 "DaemonSet/IAM/NetworkPolicy") are to be reframed at Phase 2 build.
+
 ## Open decisions (deferred)
 
-- **#2 worker→sandbox cred handoff** (Phase 2): per-node DaemonSet (lean) vs short-lived encrypted secret the sandbox pulls (cross-node, adds crypto + secret store). Direction locked to DaemonSet; revisit at Phase 2 build.
+- **#2 worker→sandbox cred handoff** (Phase 2): **resolved → central portal/broker minting + short-lived crypto handoff** to the sandbox (the DaemonSet-holds-the-SSO-secret option spread the secret to every node for ~zero gain mono-node). A DaemonSet, if any, is only the **local injector** onto node-local tmpfs. **Mono-node first**; cross-node/HA revisited in a later lot.
 - RW tools + broker-mediated validation (Profile B): later lot.
 - HA / sharding (multi-replica, shared state): lot 2.
 - Dedicated agent image distinct from the Claude Code toolbox: later option.
