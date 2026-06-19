@@ -172,10 +172,44 @@ def get_orchestrator():
     settings = get_settings()
 
     if settings.ai_provider == "claude-cli":
-        from app.services.orchestrator_cli import orchestrate_chat_cli
+        # Engine is decoupled from the provider: the default claude-cli deployment can
+        # additionally enable the sandboxed inkwest-agent (custom Converse loop). Resolve
+        # the engine per turn from the session's model — a non-Claude model needs the
+        # agent (the CLI is Claude-only). Claude models stay on the CLI (its native path).
+        from app.services.engines import inkwest_agent_enabled
+        from app.services.model_catalog import is_anthropic_model, provider_speaks_messages
 
-        logger.info("Using Claude CLI orchestrator")
-        return orchestrate_chat_cli
+        async def _dispatch_engine(
+            db: AsyncSession, session_id: "str | UUID", **kwargs: Any
+        ) -> AsyncIterator[Any]:
+            model = await resolve_session_model(db, session_id)
+            # Reconcile the ID heuristic with the registry's authoritative provider tag
+            # (a custom row may pin a vendor the substring heuristic would misread).
+            entry = get_entry(model)
+            wants_agent = (
+                not provider_speaks_messages(entry.provider)
+                if entry
+                else not is_anthropic_model(model)
+            )
+            # Route to the broker only when the agent can actually run (engine enabled +
+            # sandbox available); otherwise fall back to the CLI. Read fresh per turn so
+            # an admin toggle takes effect without a dispatcher rebuild.
+            if wants_agent and inkwest_agent_enabled() and get_settings().sandbox_enabled:
+                from app.services.orchestrator_inkwest_agent import (
+                    orchestrate_chat_inkwest_agent,
+                )
+
+                logger.info(f"Engine inkwest-agent (sandboxed) for model {model}")
+                orchestrate = orchestrate_chat_inkwest_agent
+            else:
+                from app.services.orchestrator_cli import orchestrate_chat_cli
+
+                orchestrate = orchestrate_chat_cli
+            async for event in orchestrate(db=db, session_id=session_id, **kwargs):
+                yield event
+
+        logger.info("Using Claude CLI orchestrator (engine-dispatched)")
+        return _dispatch_engine
 
     if settings.ai_provider == "bedrock":
         # Bedrock serves both Claude (Anthropic Messages protocol via the SDK) and

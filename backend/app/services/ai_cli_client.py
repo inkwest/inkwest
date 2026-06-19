@@ -140,6 +140,52 @@ async def _stop_agent(
         pass
 
 
+async def _stream_stdout(
+    process: asyncio.subprocess.Process,
+    *,
+    cancel_event: asyncio.Event | None,
+    container: str | None,
+    docker_path: str,
+    pid_file: str | None,
+) -> AsyncIterator[str]:
+    """Yield decoded stdout lines; on an explicit cancel, stop the agent and end.
+
+    Each read is raced against ``cancel_event`` so a stop is honored within
+    milliseconds instead of blocking until the agent's next line (it may be
+    mid-tool or mid-thought, emitting nothing for a while). On cancel the agent
+    is killed via the shared cancel-by-kill machinery and the stream ends — the
+    caller surfaces the stopped state. Shared by the Claude CLI and the
+    ``inkwest-agent`` spawn paths (identical spawn/stream/cancel mechanism).
+    """
+    assert process.stdout is not None
+    cancel_task = asyncio.ensure_future(cancel_event.wait()) if cancel_event else None
+    try:
+        while True:
+            read_task = asyncio.ensure_future(process.stdout.readline())
+            waiters = {read_task} | ({cancel_task} if cancel_task else set())
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_task is not None and cancel_task in done:
+                read_task.cancel()
+                await asyncio.gather(read_task, return_exceptions=True)
+                logger.info("Agent stream cancelled — stopping agent")
+                await _stop_agent(
+                    process,
+                    container=container,
+                    docker_path=docker_path,
+                    pid_file=pid_file,
+                )
+                return
+            line = read_task.result()
+            if not line:
+                break
+            decoded = line.decode().strip()
+            if decoded:
+                yield decoded
+    finally:
+        if cancel_task is not None and not cancel_task.done():
+            cancel_task.cancel()
+
+
 @dataclass
 class CLIResponse:
     """Parsed response from Claude CLI."""
@@ -277,41 +323,16 @@ async def execute_claude_cli(
     )
 
     try:
-        # Read stdout line by line, but race each read against an explicit stop so a
-        # cancel is honored within milliseconds instead of blocking until the agent's
-        # next line (it may be mid-tool or mid-thought, emitting nothing for a while).
-        async def read_stdout() -> AsyncIterator[str]:
-            """Read stdout line by line; stop the agent promptly on cancel."""
-            assert process.stdout is not None
-            cancel_task = asyncio.ensure_future(cancel_event.wait()) if cancel_event else None
-            try:
-                while True:
-                    read_task = asyncio.ensure_future(process.stdout.readline())
-                    waiters = {read_task} | ({cancel_task} if cancel_task else set())
-                    done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-                    if cancel_task is not None and cancel_task in done:
-                        read_task.cancel()
-                        await asyncio.gather(read_task, return_exceptions=True)
-                        logger.info("CLI stream cancelled — stopping agent")
-                        await _stop_agent(
-                            process,
-                            container=container,
-                            docker_path=docker_path,
-                            pid_file=pid_file,
-                        )
-                        return
-                    line = read_task.result()
-                    if not line:
-                        break
-                    decoded = line.decode().strip()
-                    if decoded:
-                        yield decoded
-            finally:
-                if cancel_task is not None and not cancel_task.done():
-                    cancel_task.cancel()
-
+        # Read stdout line by line, racing each read against an explicit stop (shared
+        # streaming helper); the kill-on-cancel happens inside it.
         try:
-            async for line in read_stdout():
+            async for line in _stream_stdout(
+                process,
+                cancel_event=cancel_event,
+                container=container,
+                docker_path=docker_path,
+                pid_file=pid_file,
+            ):
                 yield line
         except asyncio.CancelledError:
             logger.warning("CLI stream cancelled")
@@ -523,3 +544,163 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 tool_input=parsed.get("input", {}),
                 tool_use_id=parsed.get("id"),
             )
+
+
+async def execute_agent(
+    session_id: str,
+    turn_spec: str,
+    *,
+    container: str,
+    docker_path: str = "docker",
+    agent_cmd: str = "inkwest-agent",
+    timeout: int = 300,
+    cancel_event: asyncio.Event | None = None,
+) -> AsyncIterator[str]:
+    """Spawn the in-sandbox ``inkwest-agent`` for one turn; stream its NDJSON stdout.
+
+    The custom agentic loop runs INSIDE the conversation's toolbox container (parity
+    with Claude Code), so the portal stays a thin broker. The fully-resolved turn-spec
+    (JSON) is piped on stdin; each stdout line is one NDJSON ``ChatEvent`` (parsed by
+    :func:`parse_agent_response`); the exit code is the terminal status.
+
+    Args:
+        session_id: Inkwest session ID (for logging + the PID-file name).
+        turn_spec: The serialized turn-spec JSON handed to the agent on stdin.
+        container: The per-conversation toolbox container to ``docker exec`` into.
+        docker_path: Path to the ``docker`` CLI.
+        agent_cmd: The in-container entrypoint (console script baked by P1.2).
+        timeout: Seconds to wait for the agent to exit after its stream ends.
+        cancel_event: Set by an explicit user stop. Cancel is by-kill (``docker exec``
+            does not forward signals): the agent is signaled via its recorded PID.
+
+    Yields:
+        Lines of NDJSON output from the agent.
+
+    Raises:
+        TimeoutError: If the agent does not exit within ``timeout`` after its stream ends.
+        RuntimeError: If the agent exits non-zero without an explicit cancel.
+    """
+    # Record the agent's own PID before handing off: `exec "$@"` replaces the shell with
+    # the agent, so `$$` is the agent's PID inside the container — the target an explicit
+    # stop signals (docker exec does NOT forward signals). One turn per session
+    # (turn_runner) means no concurrent writers and Stop is only reachable once streaming
+    # has begun, so a stop can't race ahead of this write. `-i` keeps stdin open so the
+    # turn-spec reaches the agent (inherited through `sh -c ... exec "$@"`).
+    pid_file = f"/tmp/inkwest-agent-{session_id}.pid"
+    launch = ["sh", "-c", f'echo $$ > {shlex.quote(pid_file)}; exec "$@"', "sh", agent_cmd]
+    cmd = [docker_path, "exec", "-i", container, *launch]
+
+    logger.info(f"Spawning inkwest-agent for Inkwest session {session_id}")
+
+    # Large buffer for big tool outputs (kubectl dumps, file reads), like the CLI path.
+    buffer_limit = 100 * 1024 * 1024  # 100MB
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=buffer_limit,
+    )
+
+    async def _feed_stdin() -> None:
+        """Write the turn-spec then close stdin so the agent's read() returns.
+
+        Done concurrently with reading stdout so a large turn-spec (history) can't
+        deadlock against a full stdout pipe before we start draining it.
+        """
+        assert process.stdin is not None
+        try:
+            process.stdin.write(turn_spec.encode())
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # Agent exited/closed stdin early (e.g. bad spec) — its error is on stdout.
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
+
+    feed_task = asyncio.ensure_future(_feed_stdin())
+
+    try:
+        try:
+            async for line in _stream_stdout(
+                process,
+                cancel_event=cancel_event,
+                container=container,
+                docker_path=docker_path,
+                pid_file=pid_file,
+            ):
+                yield line
+        except asyncio.CancelledError:
+            logger.warning("Agent stream cancelled")
+            raise
+        finally:
+            await asyncio.gather(feed_task, return_exceptions=True)
+
+        # _stop_agent already terminated/reaped the process on an explicit cancel; don't
+        # fall through to the returncode check, which would mis-report the kill as failure.
+        if cancel_event and cancel_event.is_set():
+            return
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise TimeoutError(f"inkwest-agent timed out after {timeout}s")
+
+        if process.returncode != 0:
+            # Exit 1 is the agent's own error terminal status — it has already emitted an
+            # `error` ChatEvent on stdout, so the broker surfaces that and treats this
+            # raise as redundant. A non-zero exit with NO terminal event means the agent
+            # crashed silently; the broker turns this into an error for the client.
+            assert process.stderr is not None
+            stderr = await process.stderr.read()
+            stderr_text = stderr.decode().strip() if stderr else ""
+            error_msg = stderr_text or f"Exit code {process.returncode}"
+            logger.error(f"inkwest-agent failed with code {process.returncode}: {stderr_text}")
+            raise RuntimeError(f"inkwest-agent failed: {error_msg}")
+
+    except TimeoutError:
+        raise
+    except Exception:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        raise
+
+
+def _chat_event_from_dict(data: dict) -> ChatEvent:
+    """Reconstruct a ChatEvent from one decoded NDJSON line (the agent emits to_dict)."""
+    return ChatEvent(
+        type=data["type"],
+        content=data.get("content"),
+        tool_name=data.get("tool_name"),
+        tool_input=data.get("tool_input"),
+        tool_use_id=data.get("tool_use_id"),
+        is_error=data.get("is_error", False),
+        metadata=data.get("metadata") or {},
+    )
+
+
+async def parse_agent_response(output_stream: AsyncIterator[str]) -> AsyncIterator[ChatEvent]:
+    """Convert the agent's NDJSON stdout into ChatEvents.
+
+    Each line is one ``ChatEvent.to_dict()`` JSON object, so reconstruction is a
+    straight ``json.loads`` + rebuild (no per-type parsing like the CLI's
+    stream-json). Non-JSON or shapeless lines are skipped defensively.
+    """
+    async for line in output_stream:
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            logger.debug(f"Non-JSON agent output: {line[:100]}")
+            continue
+        if not isinstance(data, dict) or "type" not in data:
+            logger.debug(f"Skipping shapeless agent line: {line[:100]}")
+            continue
+        yield _chat_event_from_dict(data)
