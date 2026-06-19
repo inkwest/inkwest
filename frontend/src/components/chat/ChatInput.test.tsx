@@ -69,6 +69,17 @@ describe('ChatInput', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it('does not send on Alt+Enter and inserts a newline', async () => {
+    const user = userEvent.setup();
+    render(<ChatInput onSend={onSend} />);
+
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i) as HTMLTextAreaElement;
+    await user.type(textarea, 'line1{alt>}{enter}{/alt}line2');
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('line1\nline2');
+  });
+
   it('does not send empty messages', async () => {
     const user = userEvent.setup();
     render(<ChatInput onSend={onSend} />);
