@@ -301,6 +301,15 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         return;
       }
     }
+    // Alt+Enter inserts a newline, like Shift+Enter. Shift+Enter relies on the
+    // textarea's built-in default; Alt+Enter has no such default, so splice the
+    // newline in at the caret (replacing any selection, matching how typing behaves).
+    if (e.key === 'Enter' && e.altKey) {
+      e.preventDefault();
+      const { selectionStart: start, selectionEnd: end, value } = ta;
+      applyEdit({ text: value.slice(0, start) + '\n' + value.slice(end), cursor: start + 1 });
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();

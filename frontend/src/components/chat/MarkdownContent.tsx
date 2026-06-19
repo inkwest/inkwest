@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { visit } from 'unist-util-visit';
 import { CodeBlock } from './CodeBlock';
 import { MermaidDiagram } from './MermaidDiagram';
 import { useSettingsStore } from '@/store/settings';
@@ -9,13 +10,37 @@ import type { Components } from 'react-markdown';
 
 interface Props {
   content: string;
+  // Treat single newlines as hard line breaks (CommonMark collapses them to a
+  // space). Used for user messages so the multi-line text the user typed is
+  // echoed verbatim instead of reflowed onto one line.
+  breaks?: boolean;
 }
 
-// Hoisted so its identity is stable across renders (react-markdown reprocesses
+// Mini remark-breaks: split each text node on "\n" into text + hardbreak nodes
+// so soft line endings render as <br>. Equivalent to the remark-breaks plugin,
+// inlined because the org's package policy blocks adding it as a dependency.
+// A leading/trailing newline yields an empty text node here; acceptable because
+// the only caller (user messages) trims input before send, so it can't occur.
+function remarkHardBreaks() {
+  return (tree: unknown) => {
+    visit(tree as never, 'text', (node: { value?: string }, index, parent) => {
+      if (!parent || typeof index !== 'number' || !node.value?.includes('\n')) return;
+      const parts = node.value.split('\n');
+      const replacement = parts.flatMap((part, i) =>
+        i === 0 ? [{ type: 'text', value: part }] : [{ type: 'break' }, { type: 'text', value: part }]
+      );
+      (parent as { children: unknown[] }).children.splice(index, 1, ...replacement);
+      return index + replacement.length;
+    });
+  };
+}
+
+// Hoisted so identities are stable across renders (react-markdown reprocesses
 // when the plugin array changes).
 const remarkPlugins = [remarkGfm];
+const remarkPluginsWithBreaks = [remarkGfm, remarkHardBreaks];
 
-export function MarkdownContent({ content }: Props) {
+export function MarkdownContent({ content, breaks = false }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
 
   // Memoize so the custom-renderer function identities stay stable across
@@ -95,7 +120,7 @@ export function MarkdownContent({ content }: Props) {
       '[&_.contains-task-list]:list-none [&_.contains-task-list]:pl-0',
       TEXT_SIZE.body(compact), compact && 'leading-relaxed'
     )}>
-      <ReactMarkdown remarkPlugins={remarkPlugins} components={components}>
+      <ReactMarkdown remarkPlugins={breaks ? remarkPluginsWithBreaks : remarkPlugins} components={components}>
         {content}
       </ReactMarkdown>
     </div>

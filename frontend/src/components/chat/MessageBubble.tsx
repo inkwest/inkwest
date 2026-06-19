@@ -277,7 +277,7 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
 
   const renderContent = () => {
     if (typeof message.content === 'string') {
-      return <MarkdownContent content={message.content} />;
+      return <MarkdownContent content={message.content} breaks={isUser} />;
     }
     // Only block-list content remains here (system-event objects return early above).
     if (!Array.isArray(message.content)) return null;
