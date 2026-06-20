@@ -363,35 +363,77 @@ describe('ModelSettingsPage', () => {
     expect(screen.getByText('non-chat')).toBeInTheDocument();
   });
 
-  it('narrows by the IMAGE capability filter', async () => {
+  it('input checkboxes (Text + modalities) are pre-checked, hiding nothing by default', async () => {
+    render(<ModelSettingsPage />);
+    await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
+
+    expect(screen.getByLabelText('Show text-only input models')).toBeChecked();
+    for (const mod of ['IMAGE', 'VIDEO', 'SPEECH']) {
+      expect(screen.getByLabelText(`Show ${mod} input models`)).toBeChecked();
+    }
+    expect(screen.getByLabelText('Offer Opus 4.8 on Inkwest Agent')).toBeInTheDocument();
+  });
+
+  it('unchecking IMAGE hides image-only models but keeps text-only ones', async () => {
     render(<ModelSettingsPage />);
     await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
     const user = userEvent.setup();
 
-    await user.selectOptions(screen.getByLabelText('Filter by input modality'), 'IMAGE');
+    await user.click(screen.getByLabelText('Show IMAGE input models'));
 
-    // Only Opus (TEXT+IMAGE) survives; the text-only Haiku/Llama/embedding drop out.
-    expect(screen.getByLabelText('Offer Opus 4.8 on Inkwest Agent')).toBeInTheDocument();
+    // Opus (TEXT+IMAGE) loses its only badged modality → hidden everywhere; the
+    // text-only Haiku/Llama still show (their TEXT category is still allowed).
+    expect(screen.queryByLabelText('Offer Opus 4.8 on Inkwest Agent')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Offer Haiku 4.5 on Inkwest Agent')).toBeInTheDocument();
+    expect(
+      screen.getByLabelText('Offer Llama3 1 70B Instruct on Inkwest Agent')
+    ).toBeInTheDocument();
+  });
+
+  it('unchecking Text hides text-only models but keeps multimodal ones', async () => {
+    render(<ModelSettingsPage />);
+    await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
+    const user = userEvent.setup();
+
+    await user.click(screen.getByLabelText('Show text-only input models'));
+
+    // Haiku/Llama (text-only) drop out; Opus (has IMAGE) stays — symmetric with the
+    // output facet, so unchecking every input box would hide everything.
     expect(screen.queryByLabelText('Offer Haiku 4.5 on Inkwest Agent')).not.toBeInTheDocument();
     expect(
       screen.queryByLabelText('Offer Llama3 1 70B Instruct on Inkwest Agent')
     ).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Offer Opus 4.8 on Inkwest Agent')).toBeInTheDocument();
   });
 
-  it('chat-capable-only filter hides non-chat output models', async () => {
+  it('unchecking Non-chat hides embedding / image-gen output models', async () => {
     render(<ModelSettingsPage />);
     await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
     const user = userEvent.setup();
 
-    // The embedding model is visible before filtering (non-chat badge present).
+    // Output toggles are pre-checked, so the embedding model shows initially.
+    expect(screen.getByLabelText('Show chat models')).toBeChecked();
+    expect(screen.getByLabelText('Show non-chat models')).toBeChecked();
     expect(screen.getByText('non-chat')).toBeInTheDocument();
 
-    await user.click(screen.getByLabelText(/Chat-capable only/));
+    await user.click(screen.getByLabelText('Show non-chat models'));
 
     // The embedding model is now hidden; the non-chat badge is gone with it.
     expect(screen.queryByText('non-chat')).not.toBeInTheDocument();
     // Chat models remain.
     expect(screen.getByLabelText('Offer Opus 4.8 on Claude Code')).toBeInTheDocument();
+  });
+
+  it('unchecking Chat leaves only non-chat output models', async () => {
+    render(<ModelSettingsPage />);
+    await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
+    const user = userEvent.setup();
+
+    await user.click(screen.getByLabelText('Show chat models'));
+
+    // Chat models drop out; the embedding (non-chat) model and its badge remain.
+    expect(screen.queryByLabelText('Offer Opus 4.8 on Claude Code')).not.toBeInTheDocument();
+    expect(screen.getByText('non-chat')).toBeInTheDocument();
   });
 
   it('hides the all-vendors toggle when the inkwest-agent engine is disabled', async () => {

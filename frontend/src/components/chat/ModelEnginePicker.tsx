@@ -1,13 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from 'clsx';
-import { Check, ChevronDown, Image } from 'lucide-react';
-import { modelLabel, type AppConfig, type ModelInfo } from '@/services/api';
+import { Check, ChevronDown } from 'lucide-react';
+import { modelLabel, type AppConfig } from '@/services/api';
 import { engineLabel } from '@/lib/engines';
-
-/** Whether a model accepts image input (case-insensitive over input_modalities). */
-function acceptsImage(m: ModelInfo | undefined): boolean {
-  return !!m?.input_modalities?.some((x) => x.toUpperCase() === 'IMAGE');
-}
+import { ModalityIcons } from '@/components/ModalityIcons';
 
 // Highlight the (first) search-match substring so a filtered list shows *why* each row
 // matched. Case-insensitive; unchanged when there's no query/match. Mirrors the admin
@@ -34,7 +30,7 @@ type Row =
       engine: string | null;
       modelLabel: string;
       withEngine: string | null; // engine prefix to render (null = none)
-      image?: boolean; // model accepts image input → show the 🖼️ icon
+      modalities?: string[]; // model input modalities → show the IMAGE/VIDEO/SPEECH icons
       disabled?: boolean;
     };
 
@@ -121,7 +117,7 @@ export function ModelEnginePicker({
             engine: eng,
             modelLabel: m.label,
             withEngine: eng,
-            image: acceptsImage(m),
+            modalities: m.input_modalities,
           });
         }
       }
@@ -134,7 +130,7 @@ export function ModelEnginePicker({
           engine: null,
           modelLabel: m.label,
           withEngine: null,
-          image: acceptsImage(m),
+          modalities: m.input_modalities,
         });
       }
     }
@@ -184,6 +180,12 @@ export function ModelEnginePicker({
         ? `${engineLabel(engine)} · ${modelLabel(config.available_models, model)}`
         : modelLabel(config.available_models, model);
 
+  // Modalities of the model the trigger represents (the pin, or the resolved default),
+  // so the collapsed control advertises the same capability badges as the dropdown row.
+  const selectedModalities = config.available_models.find(
+    (m) => m.id === (model ?? config.model)
+  )?.input_modalities;
+
   const isCurrent = (r: Extract<Row, { kind: 'option' }>) => {
     // On Default (no pin), check the Default row AND the concrete Engine·Model pairing
     // the default resolves to, so the user sees exactly what will run.
@@ -207,13 +209,14 @@ export function ModelEnginePicker({
         className={clsx(
           'flex items-center gap-1 cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-500',
           triggerClassName ??
-            'text-xs text-gray-400 bg-gray-800 border border-gray-700 rounded-full px-2.5 py-0.5 max-w-72'
+            'text-xs text-gray-400 bg-gray-800 border border-gray-700 rounded-full px-2.5 py-0.5 max-w-[22rem]'
         )}
         title={title}
         aria-haspopup="listbox"
         aria-expanded={open}
       >
         <span className="truncate flex-1 text-left">{triggerLabel}</span>
+        <ModalityIcons modalities={selectedModalities} />
         <ChevronDown className="w-3 h-3 shrink-0" />
       </button>
 
@@ -221,7 +224,7 @@ export function ModelEnginePicker({
         <div
           className={clsx(
             'absolute z-50 mt-1 max-h-80 flex flex-col rounded-md border border-gray-700 bg-gray-800 shadow-lg',
-            menuClassName ?? 'right-0 w-72'
+            menuClassName ?? 'right-0 w-96 max-w-[calc(100vw-2rem)]'
           )}
           role="listbox"
         >
@@ -267,7 +270,7 @@ export function ModelEnginePicker({
                   )}
                 >
                   <Check className={clsx('w-3 h-3 shrink-0', isCurrent(r) ? 'opacity-100' : 'opacity-0')} />
-                  <span className="truncate">
+                  <span className="flex-1 min-w-0 truncate">
                     {r.model === null ? (
                       <>Default — {defaultDisplay}</>
                     ) : r.withEngine && !r.disabled ? (
@@ -281,14 +284,7 @@ export function ModelEnginePicker({
                       highlightMatch(r.modelLabel, query)
                     )}
                   </span>
-                  {r.image && (
-                    <Image
-                      className="w-3 h-3 shrink-0 text-gray-500"
-                      aria-label="IMAGE — image input"
-                    >
-                      <title>IMAGE — accepts image input (uploads work)</title>
-                    </Image>
-                  )}
+                  <ModalityIcons modalities={r.modalities} />
                 </button>
               )
             )}

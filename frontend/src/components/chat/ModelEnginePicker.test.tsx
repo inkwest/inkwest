@@ -24,6 +24,13 @@ const CONFIG: AppConfig = {
       engines: ['inkwest-agent'],
       input_modalities: ['TEXT'],
     },
+    {
+      id: 'mistral.voxtral-small',
+      label: 'Voxtral Small 24b',
+      legacy: false,
+      engines: ['inkwest-agent'],
+      input_modalities: ['TEXT', 'SPEECH'],
+    },
   ],
   attachments_enabled: false,
 };
@@ -66,11 +73,28 @@ describe('ModelEnginePicker', () => {
     const user = userEvent.setup();
     render(<ModelEnginePicker config={CONFIG} model={null} engine={null} onChange={onChange} />);
     await user.click(screen.getByRole('button', { name: /Claude Code · Sonnet 4.6/ }));
-    // Sonnet (TEXT+IMAGE) gets the icon; Llama (TEXT only) doesn't. The icon carries the
-    // ALL-CAPS aria-label "IMAGE — image input".
-    const icons = screen.getAllByLabelText('IMAGE — image input');
+    // Sonnet (TEXT+IMAGE) gets the icon; Llama (TEXT only) doesn't. Scope to the listbox
+    // so the trigger's own badge (the selected model) isn't counted here.
+    const listbox = screen.getByRole('listbox');
+    const icons = within(listbox).getAllByLabelText('IMAGE — image input');
     // One per Sonnet row (claude-cli + inkwest-agent sections = 2), none for Llama.
     expect(icons.length).toBe(2);
+  });
+
+  it('shows the selected model modality on the collapsed trigger', () => {
+    render(<ModelEnginePicker config={CONFIG} model={null} engine={null} onChange={vi.fn()} />);
+    // Default resolves to Sonnet (TEXT+IMAGE) → IMAGE badge on the pill, dropdown closed.
+    expect(screen.getByLabelText('IMAGE — image input')).toBeInTheDocument();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+
+  it('shows the SPEECH icon next to an audio-input model', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<ModelEnginePicker config={CONFIG} model={null} engine={null} onChange={onChange} />);
+    await user.click(screen.getByRole('button', { name: /Claude Code · Sonnet 4.6/ }));
+    // Voxtral (TEXT+SPEECH) runs only on inkwest-agent → one row, one SPEECH icon.
+    expect(screen.getAllByLabelText('SPEECH — audio input').length).toBe(1);
   });
 
   it('keeps a since-disabled pinned model selectable when allowDisabledCurrent is set', async () => {

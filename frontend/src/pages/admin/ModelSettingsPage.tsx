@@ -1,16 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import {
   ChevronDown,
   ChevronRight,
-  Image,
-  Mic,
   Pencil,
   Plus,
   RefreshCw,
   Search,
   Star,
   Trash2,
-  Video,
+  Type,
 } from 'lucide-react';
 import {
   Badge,
@@ -24,6 +22,8 @@ import {
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
 import { engineLabel } from '@/lib/engines';
+import { hasModality, INPUT_MODALITIES, MODALITY_META, type InputModality } from '@/lib/modality';
+import { ModalityIcons } from '@/components/ModalityIcons';
 import {
   AddModelRequest,
   ModelInfo,
@@ -137,41 +137,28 @@ function modelAvailability(m: ModelInfo): string[] {
   return Array.isArray(opt) ? (opt as string[]) : m.capable_engines;
 }
 
-const hasModality = (list: string[] | undefined, name: string) =>
-  !!list?.some((x) => x.toUpperCase() === name);
+// Input filter facet: the badged modalities (shared module) plus an explicit TEXT
+// category for text-only models. Listing TEXT makes the input filter a complete
+// partition — every model belongs to at least one category — so unchecking all of them
+// hides everything, symmetric with the output facet. (Per-model badges omit TEXT.)
+type InputFacet = 'TEXT' | InputModality;
+const INPUT_FACETS: InputFacet[] = ['TEXT', ...INPUT_MODALITIES];
+
+// Output facet: a model is either chat-capable (TEXT output) or not (embedding /
+// image-gen / video output). Both are filterable as pre-checked "show" toggles.
+type OutputKind = 'CHAT' | 'NONCHAT';
+const OUTPUT_KINDS: OutputKind[] = ['CHAT', 'NONCHAT'];
+
+// Shared styling for every filter checkbox, so the control set stays visually coherent.
+const FILTER_CHECKBOX = 'h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500';
 
 // Non-TEXT output (embedding / image-gen / video) ⇒ not a chat model: it can't drive a
-// conversation, so the "chat-capable only" filter hides it and we badge it as non-chat.
+// conversation, so we badge it as non-chat and the output filter can hide it.
 function isChatCapable(m: ModelInfo): boolean {
   const out = m.output_modalities ?? [];
   // Empty (unknown) is treated as chat-capable (back-compat: a model with no live modality
   // data — e.g. a static-catalog Claude row — is a normal chat model).
   return out.length === 0 || out.some((x) => x.toUpperCase() === 'TEXT');
-}
-
-// The small per-model input-modality icons (TEXT is universal → no icon). Each carries an
-// ALL-CAPS hover tooltip. SPEECH = audio input in Bedrock terms.
-function ModalityIcons({ model }: { model: ModelInfo }) {
-  const inputs = model.input_modalities ?? [];
-  return (
-    <span className="flex items-center gap-1 shrink-0">
-      {hasModality(inputs, 'IMAGE') && (
-        <span title="IMAGE — image input" aria-label="IMAGE — image input">
-          <Image className="w-3.5 h-3.5 text-gray-400" />
-        </span>
-      )}
-      {hasModality(inputs, 'VIDEO') && (
-        <span title="VIDEO — video input" aria-label="VIDEO — video input">
-          <Video className="w-3.5 h-3.5 text-gray-400" />
-        </span>
-      )}
-      {hasModality(inputs, 'SPEECH') && (
-        <span title="SPEECH — audio input" aria-label="SPEECH — audio input">
-          <Mic className="w-3.5 h-3.5 text-gray-400" />
-        </span>
-      )}
-    </span>
-  );
 }
 
 export function ModelSettingsPage() {
@@ -183,9 +170,24 @@ export function ModelSettingsPage() {
   const [defaultModel, setDefaultModel] = useState('');
   const [defaultEngine, setDefaultEngine] = useState('');
   const [search, setSearch] = useState('');
-  // Capability filter (P1.8): narrow by a required input modality + "chat-capable only".
-  const [modalityFilter, setModalityFilter] = useState<'' | 'IMAGE' | 'VIDEO' | 'SPEECH'>('');
-  const [chatOnly, setChatOnly] = useState(false);
+  // Capability filter (P1.8): two facets, both as pre-checked "show" toggles (all on =
+  // nothing hidden). Input = the allowed input categories (TEXT + badged modalities);
+  // a model is kept while at least one of its categories is checked. Output = the
+  // allowed output kinds; a model is kept while its kind (chat / non-chat) is allowed.
+  const [allowedInputs, setAllowedInputs] = useState<Set<InputFacet>>(
+    () => new Set(INPUT_FACETS)
+  );
+  const [allowedOutputs, setAllowedOutputs] = useState<Set<OutputKind>>(
+    () => new Set(OUTPUT_KINDS)
+  );
+  // Toggle one value in a Set-valued filter (immutable update).
+  const toggleIn = <T,>(setState: Dispatch<SetStateAction<Set<T>>>, value: T) =>
+    setState((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return next;
+    });
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -342,8 +344,13 @@ export function ModelSettingsPage() {
   const q = search.trim().toLowerCase();
   const matchesQuery = (m: ModelInfo) => {
     if (q && !(m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))) return false;
-    if (modalityFilter && !hasModality(m.input_modalities, modalityFilter)) return false;
-    if (chatOnly && !isChatCapable(m)) return false;
+    // Input facet: a model's categories are its badged modalities, or TEXT if it has
+    // none; it passes while at least one of those categories is checked.
+    const badged = INPUT_MODALITIES.filter((mod) => hasModality(m.input_modalities, mod));
+    const inputCats: InputFacet[] = badged.length > 0 ? badged : ['TEXT'];
+    if (!inputCats.some((cat) => allowedInputs.has(cat))) return false;
+    // Output facet: keep the model while its kind (chat / non-chat) is allowed.
+    if (!allowedOutputs.has(isChatCapable(m) ? 'CHAT' : 'NONCHAT')) return false;
     return true;
   };
 
@@ -431,33 +438,53 @@ export function ModelSettingsPage() {
                 />
               </div>
 
-              {/* Capability filter (P1.8): narrow by input modality + chat-capable only. */}
-              <div className="flex flex-wrap items-center gap-3 text-sm text-gray-300">
-                <label className="flex items-center gap-2">
-                  <span className="text-gray-400">Input modality</span>
-                  <select
-                    value={modalityFilter}
-                    onChange={(e) =>
-                      setModalityFilter(e.target.value as '' | 'IMAGE' | 'VIDEO' | 'SPEECH')
-                    }
-                    aria-label="Filter by input modality"
-                    className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    <option value="">Any</option>
-                    <option value="IMAGE">IMAGE</option>
-                    <option value="VIDEO">VIDEO</option>
-                    <option value="SPEECH">SPEECH</option>
-                  </select>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={chatOnly}
-                    onChange={(e) => setChatOnly(e.target.checked)}
-                    className="h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500"
-                  />
-                  Chat-capable only (hide embedding / image-gen output models)
-                </label>
+              {/* Capability filter (P1.8): two facets of pre-checked "show" toggles —
+                  input modality and output kind. All on = nothing hidden. */}
+              <div className="space-y-2 text-sm text-gray-300">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="w-16 shrink-0 text-gray-400">Input</span>
+                  {INPUT_FACETS.map((facet) => {
+                    const Icon = facet === 'TEXT' ? Type : MODALITY_META[facet].Icon;
+                    const label = facet === 'TEXT' ? 'Text' : facet;
+                    return (
+                      <label key={facet} className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={allowedInputs.has(facet)}
+                          onChange={() => toggleIn(setAllowedInputs, facet)}
+                          aria-label={`Show ${facet === 'TEXT' ? 'text-only' : facet} input models`}
+                          className={FILTER_CHECKBOX}
+                        />
+                        <Icon className="w-3.5 h-3.5 text-gray-400" />
+                        {label}
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="w-16 shrink-0 text-gray-400">Output</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allowedOutputs.has('CHAT')}
+                      onChange={() => toggleIn<OutputKind>(setAllowedOutputs, 'CHAT')}
+                      aria-label="Show chat models"
+                      className={FILTER_CHECKBOX}
+                    />
+                    Chat
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allowedOutputs.has('NONCHAT')}
+                      onChange={() => toggleIn<OutputKind>(setAllowedOutputs, 'NONCHAT')}
+                      aria-label="Show non-chat models"
+                      className={FILTER_CHECKBOX}
+                    />
+                    Non-chat
+                    <span className="text-gray-500">(embedding / image-gen)</span>
+                  </label>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -612,7 +639,7 @@ export function ModelSettingsPage() {
                                 <span className="text-xs text-gray-500 font-mono truncate flex-1 min-w-0">
                                   {highlightMatch(model.id, search)}
                                 </span>
-                                <ModalityIcons model={model} />
+                                <ModalityIcons modalities={model.input_modalities} />
                                 {model.source === 'custom' && <Badge variant="info">custom</Badge>}
                                 {model.legacy && <Badge variant="warning">legacy</Badge>}
                                 {/* Non-chat output (embedding / image-gen / video) — visually
