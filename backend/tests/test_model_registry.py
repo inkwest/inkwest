@@ -24,6 +24,7 @@ def reset_registry():
     yield
     model_registry._rows = {}
     model_catalog._live_models = None
+    model_catalog._modalities = {}
 
 
 def _row(model_id: str, **overrides):
@@ -166,6 +167,26 @@ def test_unpriced_model_flagged_in_merged_entry():
     entry = next(e for e in merged_entries() if e.model_id == "totally-unknown-model")
     assert entry.priced is False
     assert entry.input_price is None
+
+
+def test_merged_entry_carries_modalities_from_catalog():
+    """P1.8: _entry populates input/output modalities from the catalog capability map."""
+    model_catalog._live_models = ["anthropic.claude-opus-4-v1:0"]
+    model_catalog._modalities = {
+        "anthropic.claude-opus-4-v1:0": {"input": ["TEXT", "IMAGE"], "output": ["TEXT"]}
+    }
+    entry = next(e for e in merged_entries() if e.model_id == "anthropic.claude-opus-4-v1:0")
+    assert entry.input_modalities == ["TEXT", "IMAGE"]
+    assert entry.output_modalities == ["TEXT"]
+
+
+def test_merged_entry_modalities_empty_when_unknown():
+    """A model with no live modality data → empty lists (back-compat / text-only)."""
+    model_catalog._live_models = ["totally-unknown-model"]
+    model_catalog._modalities = {}
+    entry = next(e for e in merged_entries() if e.model_id == "totally-unknown-model")
+    assert entry.input_modalities == []
+    assert entry.output_modalities == []
 
 
 # ---------------------------------------------------------------------------

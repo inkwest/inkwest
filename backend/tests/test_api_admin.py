@@ -322,6 +322,9 @@ async def test_get_model_settings(admin_client: AsyncClient) -> None:
     assert legacy["claude-sonnet-4-20250514"] is True
     # Provider tagging is present for grouping
     assert all(m["provider"] for m in data["models"])
+    # P1.8: modality flags are exposed (empty here — static catalog, no live Bedrock data).
+    assert all("input_modalities" in m and "output_modalities" in m for m in data["models"])
+    assert all(m["input_modalities"] == [] for m in data["models"])
 
 
 @pytest.mark.asyncio

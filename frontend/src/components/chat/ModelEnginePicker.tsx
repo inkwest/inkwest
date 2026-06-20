@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from 'clsx';
-import { Check, ChevronDown } from 'lucide-react';
-import { modelLabel, type AppConfig } from '@/services/api';
+import { Check, ChevronDown, Image } from 'lucide-react';
+import { modelLabel, type AppConfig, type ModelInfo } from '@/services/api';
 import { engineLabel } from '@/lib/engines';
+
+/** Whether a model accepts image input (case-insensitive over input_modalities). */
+function acceptsImage(m: ModelInfo | undefined): boolean {
+  return !!m?.input_modalities?.some((x) => x.toUpperCase() === 'IMAGE');
+}
 
 // Highlight the (first) search-match substring so a filtered list shows *why* each row
 // matched. Case-insensitive; unchanged when there's no query/match. Mirrors the admin
@@ -29,6 +34,7 @@ type Row =
       engine: string | null;
       modelLabel: string;
       withEngine: string | null; // engine prefix to render (null = none)
+      image?: boolean; // model accepts image input → show the 🖼️ icon
       disabled?: boolean;
     };
 
@@ -115,6 +121,7 @@ export function ModelEnginePicker({
             engine: eng,
             modelLabel: m.label,
             withEngine: eng,
+            image: acceptsImage(m),
           });
         }
       }
@@ -127,6 +134,7 @@ export function ModelEnginePicker({
           engine: null,
           modelLabel: m.label,
           withEngine: null,
+          image: acceptsImage(m),
         });
       }
     }
@@ -273,6 +281,14 @@ export function ModelEnginePicker({
                       highlightMatch(r.modelLabel, query)
                     )}
                   </span>
+                  {r.image && (
+                    <Image
+                      className="w-3 h-3 shrink-0 text-gray-500"
+                      aria-label="IMAGE — image input"
+                    >
+                      <title>IMAGE — accepts image input (uploads work)</title>
+                    </Image>
+                  )}
                 </button>
               )
             )}

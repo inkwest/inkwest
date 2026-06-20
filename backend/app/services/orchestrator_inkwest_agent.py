@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.constants import MAX_RESPONSE_TOKENS
+from app.services import attachments as attachments_svc
 from app.services import model_registry
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
@@ -45,7 +46,14 @@ from app.services.prompts import get_system_prompt, resolve_session_system_promp
 from app.services.session_skills import apply_session_skills, skills_container_root
 from app.tools.connector_exec import build_connector_env
 from app.tools.definitions import get_tool_definitions
-from inkwest_agent.protocol import SkillSpec, ToolSpec, TurnContext, TurnLimits, TurnSpec
+from inkwest_agent.protocol import (
+    AttachmentSpec,
+    SkillSpec,
+    ToolSpec,
+    TurnContext,
+    TurnLimits,
+    TurnSpec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +73,13 @@ async def orchestrate_chat_inkwest_agent(
 ) -> AsyncIterator[ChatEvent]:
     """Broker one turn through the sandboxed ``inkwest-agent``. Mirrors orchestrate_chat_cli.
 
-    ``attachments`` is accepted but ignored: the @-file mechanism is Claude-Code-only
-    (no /workdir reference path through the Converse tool loop yet), and the engine
-    dispatcher sits inside the claude-cli provider branch, so the kwarg can arrive here.
+    ``attachments`` (P1.8): the upload route already wrote each file into the conversation's
+    durable ``workdir/`` (mounted at ``/workdir`` in the sandbox), so the broker passes only
+    each file's IN-CONTAINER ``/workdir/<filename>`` path + metadata on the TurnSpec — never
+    the bytes (reuses the same one-way /workdir projection as claude-cli's @-file refs). The
+    agent's Converse adapter turns IMAGE files into image blocks, gated on the model's IMAGE
+    capability (``input_modalities``, also carried on the spec). A non-image / oversized /
+    text-only-model attachment is skipped for image translation (the turn still runs).
     """
     if isinstance(session_id, uuid.UUID):
         session_id_str = str(session_id)
@@ -99,7 +111,11 @@ async def orchestrate_chat_inkwest_agent(
 
     if persist_user_message:
         try:
-            await save_message(db, session_id, "user", user_message)
+            # Persist attachment descriptors on the user row too (history thumbnails),
+            # parity with the claude-cli path. None when there are no files.
+            await save_message(
+                db, session_id, "user", user_message, attachments=attachments or None
+            )
         except Exception as e:
             logger.error(f"Failed to save user message: {e}")
             yield error_event(f"Failed to save message: {str(e)}")
@@ -207,6 +223,38 @@ async def orchestrate_chat_inkwest_agent(
         apply_session_skills(session_id_str, active_skills)
         mcp_config_path = write_agent_mcp_config(session_id_str, enabled_mcp)
 
+        # Project this turn's attachments onto the spec (P1.8). The files are already in the
+        # conversation's durable workdir (the upload route wrote them); they bind-mount at
+        # /workdir in the sandbox, so the in-container path is /workdir/<filename> — the same
+        # one-way projection claude-cli uses for @-file refs.
+        #
+        # SECURITY: the `attachments` descriptors are echoed by the client over the WS, so the
+        # filename is untrusted. Validate each through attachments.resolve_existing, which
+        # rejects any name with a path component / dot-segment and confirms the file actually
+        # lives in THIS session's workdir (realpath+commonpath, so traversal and symlink escape
+        # are both refused) — otherwise a crafted `filename` like "../.aws/credentials" would
+        # have the in-sandbox adapter read+exfiltrate an arbitrary file via the model. Only the
+        # validated basename is used to build the in-container path; bad entries are dropped.
+        attachment_specs: list[AttachmentSpec] = []
+        for a in attachments or []:
+            if not (isinstance(a, dict) and a.get("filename")):
+                continue
+            name = str(a["filename"])
+            try:
+                attachments_svc.resolve_existing(session_id_str, name)
+            except attachments_svc.AttachmentError as e:
+                # NB: "filename" is a reserved LogRecord attribute — use "attachment".
+                logger.warning("attachment_rejected", extra={"attachment": name, "error": str(e)})
+                continue
+            attachment_specs.append(
+                AttachmentSpec(
+                    path=f"/workdir/{name}",
+                    content_type=str(a.get("content_type") or ""),
+                    filename=name,
+                    size=a.get("size") if isinstance(a.get("size"), int) else None,
+                )
+            )
+
         spec = TurnSpec(
             session_id=session_id_str,
             user_message=user_message,
@@ -218,6 +266,10 @@ async def orchestrate_chat_inkwest_agent(
             skills=[SkillSpec(name=s.name, description=s.description or "") for s in active_skills],
             skills_root=skills_container_root() if active_skills else None,
             mcp_config_path=mcp_config_path,
+            attachments=attachment_specs,
+            # The agent is DB-free; hand it the resolved model's input modalities so the
+            # Converse adapter can gate IMAGE translation (empty = text-only/unknown).
+            input_modalities=list(getattr(entry, "input_modalities", []) or []),
             model_target=model_target,
             region=settings.aws_region,
             user_id=str(user_id) if user_id else None,

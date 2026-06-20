@@ -50,6 +50,13 @@ _fetched_wall: datetime | None = None
 _last_fetch_failed: bool = False
 _refresh_lock = asyncio.Lock()
 
+# Per-model input/output modalities captured from the Bedrock list-foundation-models
+# response, keyed by model id AND by its route-stripped base id (P1.8). Same pattern as
+# the live-pricing map (refreshed at catalog-refresh; empty when no Bedrock fetch ran).
+# Bedrock terms: input TEXT/IMAGE/VIDEO/SPEECH (SPEECH = audio), output
+# TEXT/EMBEDDING/IMAGE/VIDEO. Empty/unknown ⇒ text-only back-compat (no image blocks).
+_modalities: dict[str, dict[str, list[str]]] = {}
+
 
 def static_catalog() -> list[str]:
     """Provider-appropriate model list when no live catalog is available.
@@ -221,6 +228,26 @@ async def _fetch_bedrock_models(
     if not include_open:
         foundation_args += ["--by-provider", "anthropic"]
     foundation = await _aws_json(foundation_args, extra_env)
+    # Capture modalities for every listed foundation model BEFORE the chat/text filter
+    # below, so the capability map covers image-gen / embedding models too (the admin UI
+    # flags them as non-chat). Keyed by the modelId and its route-stripped base so a
+    # registry lookup by either the on-demand id or a regional inference-profile id (which
+    # carries no modality data of its own) still resolves. Captured every refresh from the
+    # current region — the map is replaced wholesale in refresh_catalog, never merged.
+    captured: dict[str, dict[str, list[str]]] = {}
+    for m in foundation.get("modelSummaries", []):
+        model_id = m.get("modelId")
+        if not model_id:
+            continue
+        caps = {
+            "input": [str(x) for x in (m.get("inputModalities") or [])],
+            "output": [str(x) for x in (m.get("outputModalities") or [])],
+        }
+        captured[model_id] = caps
+        captured.setdefault(_BEDROCK_ROUTE_PREFIX.sub("", model_id), caps)
+    global _modalities
+    _modalities = captured
+
     models = [
         p["inferenceProfileId"]
         for p in profiles.get("inferenceProfileSummaries", [])
@@ -377,6 +404,21 @@ async def _refresh_live_pricing(settings: Any) -> None:
 def available_models() -> list[str]:
     """Models available on the current provider: live list, or static fallback."""
     return list(_live_models) if _live_models else static_catalog()
+
+
+def model_modalities(model_id: str) -> tuple[list[str], list[str]]:
+    """Captured ``(input_modalities, output_modalities)`` for a model id (P1.8).
+
+    Resolves the exact id first, then its route-stripped base (a regional inference
+    profile id like ``us.anthropic...`` carries no modality data — the underlying
+    foundation model does). Empty lists when unknown (no Bedrock fetch ran, an
+    off-Bedrock provider, or a custom row) — the caller treats that as text-only,
+    preserving back-compat (no image blocks ever sent for an unknown model).
+    """
+    caps = _modalities.get(model_id) or _modalities.get(_BEDROCK_ROUTE_PREFIX.sub("", model_id))
+    if not caps:
+        return [], []
+    return list(caps.get("input", [])), list(caps.get("output", []))
 
 
 def catalog_status() -> dict:

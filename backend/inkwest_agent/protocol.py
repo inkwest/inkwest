@@ -39,6 +39,14 @@ contract in docs/SANDBOXED_AGENT_RUNTIME.md:
   Server creds/headers live in that file (projected one-way like connector
   creds, cleaned up on turn end) — never on argv. The agent's lazy MCP client
   reads it, connects the servers, and merges their tools into the Converse loop.
+- ``attachments[{path, content_type, filename, size}]`` (P1.8) — files uploaded
+  to this turn, already in the sandbox /workdir (the broker wrote them via the
+  attachments service; only the in-container path + metadata ride the spec, not
+  the bytes). The Converse adapter reads each file and, **only for an
+  IMAGE-capable model**, turns a supported image (jpeg/png/gif/webp, within a size
+  cap) into a Converse image content block on the user turn; non-image / oversized
+  / unsupported attachments are skipped for image translation. Empty (the default)
+  keeps the pre-P1.8 text-only behavior (back-compat).
 """
 
 import sys
@@ -55,8 +63,9 @@ from app.services.events import ChatEvent
 
 # Bumped when the turn-spec / event wire shape changes incompatibly so the broker
 # can refuse a mismatched agent build. P1.4 formalized context/limits/tools/creds;
-# P1.7 added skills (progressive disclosure) + the MCP config path.
-PROTOCOL_VERSION = 3
+# P1.7 added skills (progressive disclosure) + the MCP config path; P1.8 added image
+# attachments (the Converse adapter turns IMAGE files into image content blocks).
+PROTOCOL_VERSION = 4
 
 # Engine tag default (the only engine that runs this agent).
 INKWEST_AGENT = "inkwest-agent"
@@ -181,6 +190,40 @@ class SkillSpec:
 
 
 @dataclass(frozen=True)
+class AttachmentSpec:
+    """One uploaded file projected into the sandbox /workdir (P1.8).
+
+    The broker already wrote the bytes to the conversation's durable workdir (the
+    upload route / attachments service); only the in-container ``path`` + metadata ride
+    the spec — never the bytes. The Converse adapter reads the file from ``path`` and,
+    for an IMAGE-capable model, translates a supported image into a Converse image block;
+    a non-image (or oversized/unsupported) attachment is skipped for image translation.
+    """
+
+    path: str
+    content_type: str = ""
+    filename: str = ""
+    size: int | None = None
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "AttachmentSpec":
+        if not isinstance(raw, dict):
+            raise TurnSpecError("turn-spec 'attachments' entries must be objects")
+        _reject_unknown(raw, cls.__dataclass_fields__.keys(), "'attachments' entry")
+        if "path" not in raw:
+            raise TurnSpecError("turn-spec 'attachments' entry missing 'path'")
+        size = raw.get("size")
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int)):
+            raise TurnSpecError("turn-spec 'attachments.size' must be an int or null")
+        return cls(
+            path=raw["path"],
+            content_type=raw.get("content_type") or "",
+            filename=raw.get("filename") or "",
+            size=size,
+        )
+
+
+@dataclass(frozen=True)
 class TurnSpec:
     """One turn's fully-resolved inputs, handed to the agent on stdin.
 
@@ -217,18 +260,35 @@ class TurnSpec:
     skills_root: str | None = None
     # In-container path to the materialized MCP server config (P1.7); None disables MCP.
     mcp_config_path: str | None = None
+    # Files uploaded to this turn, already in the sandbox /workdir (P1.8). The Converse
+    # adapter turns IMAGE files into image content blocks on the user turn when the model
+    # is IMAGE-capable; empty (the default) keeps the pre-P1.8 text-only behavior.
+    attachments: list[AttachmentSpec] = field(default_factory=list)
+    # The resolved model's input modalities (P1.8), from the broker's live catalog
+    # (Bedrock terms: TEXT/IMAGE/VIDEO/SPEECH). The agent is DB-free, so the broker hands
+    # it the capability; the Converse adapter sends image blocks only when "IMAGE" is here.
+    # Empty (the default) = text-only/unknown ⇒ no image blocks (back-compat).
+    input_modalities: list[str] = field(default_factory=list)
 
     @property
     def invoke_target(self) -> str:
         """The Bedrock modelId to invoke (ARN override or the model ID)."""
         return self.model_target or self.model
 
+    @property
+    def image_capable(self) -> bool:
+        """Whether the resolved model accepts image input (P1.8 gate).
+
+        Case-insensitive over ``input_modalities`` so a differently-cased Bedrock token
+        ("Image"/"IMAGE") still matches. Empty modalities ⇒ False (text-only/unknown)."""
+        return any(m.upper() == "IMAGE" for m in self.input_modalities)
+
 
 # Top-level keys parse_turn_spec accepts (sub-objects validate their own keys).
 _TOP_LEVEL_KEYS = frozenset(TurnSpec.__dataclass_fields__.keys())
 # Scalar fields = everything that isn't one of the nested objects. Derived (not a hand-
 # kept list) so adding a scalar field to TurnSpec needs no second edit here.
-_NESTED_KEYS = frozenset({"context", "limits", "tools", "skills"})
+_NESTED_KEYS = frozenset({"context", "limits", "tools", "skills", "attachments"})
 _SCALAR_KEYS = _TOP_LEVEL_KEYS - _NESTED_KEYS
 _REQUIRED_KEYS = ("session_id", "user_message", "model", "system_prompt")
 
@@ -252,6 +312,9 @@ def parse_turn_spec(raw: Any) -> TurnSpec:
     skills_raw = raw.get("skills", [])
     if not isinstance(skills_raw, list):
         raise TurnSpecError("turn-spec 'skills' must be a list")
+    attachments_raw = raw.get("attachments", [])
+    if not isinstance(attachments_raw, list):
+        raise TurnSpecError("turn-spec 'attachments' must be a list")
 
     scalar = {k: raw[k] for k in _SCALAR_KEYS if k in raw}
     return TurnSpec(
@@ -259,6 +322,7 @@ def parse_turn_spec(raw: Any) -> TurnSpec:
         limits=TurnLimits.from_raw(raw.get("limits")),
         tools=[ToolSpec.from_raw(t) for t in tools_raw],
         skills=[SkillSpec.from_raw(s) for s in skills_raw],
+        attachments=[AttachmentSpec.from_raw(a) for a in attachments_raw],
         **scalar,
     )
 

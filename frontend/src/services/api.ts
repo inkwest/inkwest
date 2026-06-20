@@ -99,6 +99,9 @@ export interface ModelInfo {
   legacy: boolean;
   /** Enabled engines that can run this model (Claude → both; others → inkwest-agent). */
   engines: string[];
+  /** Input modalities from the live catalog (TEXT/IMAGE/VIDEO/SPEECH). "IMAGE" ⇒ the
+   *  picker shows the image icon and uploads are accepted. Empty = text-only/unknown. */
+  input_modalities: string[];
 }
 
 export interface AppConfig {

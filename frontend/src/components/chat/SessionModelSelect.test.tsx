@@ -5,9 +5,19 @@ import { SessionModelSelect } from './SessionModelSelect';
 import { useConfigStore } from '@/store/config';
 import { useSessionsStore } from '@/store/sessions';
 
-const SONNET = { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true };
-const OPUS = { id: 'claude-opus-4-20250514', label: 'Opus 4.0', legacy: true };
-const LLAMA = { id: 'meta.llama3-70b', label: 'Llama 3 70B', legacy: false };
+const SONNET = {
+  id: 'claude-sonnet-4-20250514',
+  label: 'Sonnet 4.0',
+  legacy: true,
+  input_modalities: [],
+};
+const OPUS = { id: 'claude-opus-4-20250514', label: 'Opus 4.0', legacy: true, input_modalities: [] };
+const LLAMA = {
+  id: 'meta.llama3-70b',
+  label: 'Llama 3 70B',
+  legacy: false,
+  input_modalities: [],
+};
 
 // Single-engine deployment: plain model names, no engine choice.
 const CONFIG_CLI = {

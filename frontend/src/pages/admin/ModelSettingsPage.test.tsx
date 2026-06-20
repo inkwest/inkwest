@@ -38,6 +38,8 @@ const SETTINGS: adminApi.ModelSettings = {
       arn: null,
       options: {},
       capable_engines: ['claude-cli', 'inkwest-agent'],
+      input_modalities: ['TEXT', 'IMAGE'],
+      output_modalities: ['TEXT'],
       input_price: 5.0,
       output_price: 25.0,
     },
@@ -54,6 +56,8 @@ const SETTINGS: adminApi.ModelSettings = {
       arn: null,
       options: {},
       capable_engines: ['claude-cli', 'inkwest-agent'],
+      input_modalities: ['TEXT'],
+      output_modalities: ['TEXT'],
       input_price: 1.0,
       output_price: 5.0,
     },
@@ -70,8 +74,30 @@ const SETTINGS: adminApi.ModelSettings = {
       arn: null,
       options: {},
       capable_engines: ['inkwest-agent'],
+      input_modalities: ['TEXT'],
+      output_modalities: ['TEXT'],
       input_price: null,
       output_price: null,
+    },
+    {
+      // An embedding model (non-chat output) — exercises the non-chat badge + the
+      // chat-capable-only filter (P1.8).
+      id: 'amazon.titan-embed-text-v2:0',
+      label: 'Titan Embed v2',
+      provider: 'amazon',
+      enabled: false,
+      is_default: false,
+      source: 'discovered',
+      legacy: false,
+      priced: true,
+      endpoint: null,
+      arn: null,
+      options: {},
+      capable_engines: ['inkwest-agent'],
+      input_modalities: ['TEXT'],
+      output_modalities: ['EMBEDDING'],
+      input_price: 0.02,
+      output_price: 0.0,
     },
   ],
 };
@@ -324,6 +350,48 @@ describe('ModelSettingsPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     await waitFor(() => expect(mockedApi.deleteModel).toHaveBeenCalledWith(LLAMA));
+  });
+
+  it('shows modality icons + a non-chat badge per model (P1.8)', async () => {
+    render(<ModelSettingsPage />);
+    await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
+
+    // Opus accepts image input → IMAGE icon (appears in both engine sections).
+    expect(screen.getAllByLabelText('IMAGE — image input').length).toBeGreaterThan(0);
+    // Haiku is text-only → no IMAGE icon associated with its rows is required; the
+    // embedding model has non-TEXT output → a "non-chat" badge.
+    expect(screen.getByText('non-chat')).toBeInTheDocument();
+  });
+
+  it('narrows by the IMAGE capability filter', async () => {
+    render(<ModelSettingsPage />);
+    await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
+    const user = userEvent.setup();
+
+    await user.selectOptions(screen.getByLabelText('Filter by input modality'), 'IMAGE');
+
+    // Only Opus (TEXT+IMAGE) survives; the text-only Haiku/Llama/embedding drop out.
+    expect(screen.getByLabelText('Offer Opus 4.8 on Inkwest Agent')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Offer Haiku 4.5 on Inkwest Agent')).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Offer Llama3 1 70B Instruct on Inkwest Agent')
+    ).not.toBeInTheDocument();
+  });
+
+  it('chat-capable-only filter hides non-chat output models', async () => {
+    render(<ModelSettingsPage />);
+    await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
+    const user = userEvent.setup();
+
+    // The embedding model is visible before filtering (non-chat badge present).
+    expect(screen.getByText('non-chat')).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText(/Chat-capable only/));
+
+    // The embedding model is now hidden; the non-chat badge is gone with it.
+    expect(screen.queryByText('non-chat')).not.toBeInTheDocument();
+    // Chat models remain.
+    expect(screen.getByLabelText('Offer Opus 4.8 on Claude Code')).toBeInTheDocument();
   });
 
   it('hides the all-vendors toggle when the inkwest-agent engine is disabled', async () => {

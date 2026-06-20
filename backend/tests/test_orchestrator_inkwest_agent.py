@@ -381,10 +381,75 @@ class TestOrchestrateInkwestAgent:
         assert spec["skills"] == []
         assert spec["skills_root"] is None
         assert spec["mcp_config_path"] is None
+        # P1.8: no attachments + the SimpleNamespace entry has no modality data → empty
+        # defaults (back-compat — the loop sends no image blocks for either).
+        assert spec["attachments"] == []
+        assert spec["input_modalities"] == []
         # remove runs twice: defensive prune after ensure (orphan from a SIGKILLed prior
         # turn) + turn-end cleanup in finally. Both target this session.
         assert spies.remove_agent_mcp_config.call_count == 2
         assert all(c.args == (SESSION_ID,) for c in spies.remove_agent_mcp_config.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_attachments_and_modalities_projected_to_turn_spec(self):
+        # P1.8: the broker maps each upload descriptor to an in-container /workdir path +
+        # metadata (never bytes), and forwards the resolved model's input modalities so the
+        # agent can gate IMAGE translation. A malformed descriptor (no filename) is dropped.
+        entry = SimpleNamespace(
+            arn=None, options={}, input_modalities=["TEXT", "IMAGE"], provider="anthropic"
+        )
+        patches, spies = _patch_broker(entry=entry)
+        # resolve_existing confines a descriptor to this session's workdir (rejects path
+        # components / traversal, confirms the file exists). Stub it to the basename-only
+        # validation so the test doesn't need real files on disk, but a traversal name is
+        # still refused — proving the broker drops it before building an in-sandbox path.
+        import os as _os
+
+        def _fake_resolve(session_id, filename):
+            if filename != _os.path.basename(filename) or filename in ("", ".", ".."):
+                raise oia.attachments_svc.AttachmentError("Invalid attachment name")
+            return f"/host/workdir/{filename}"
+
+        patches.append(
+            patch.object(oia.attachments_svc, "resolve_existing", side_effect=_fake_resolve)
+        )
+        lines = [json.dumps({"type": "done", "metadata": {}})]
+        attachments = [
+            {"filename": "diagram.png", "content_type": "image/png", "size": 1234},
+            {"filename": "notes.txt", "content_type": "text/plain", "size": 7},
+            {"content_type": "image/png"},  # no filename → dropped
+            {
+                "filename": "../../.aws/credentials",
+                "content_type": "image/png",
+            },  # traversal → dropped
+        ]
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, lines, attachments=attachments)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        spec = json.loads(spies.turn_spec)
+        assert spec["input_modalities"] == ["TEXT", "IMAGE"]
+        assert spec["attachments"] == [
+            {
+                "path": "/workdir/diagram.png",
+                "content_type": "image/png",
+                "filename": "diagram.png",
+                "size": 1234,
+            },
+            {
+                "path": "/workdir/notes.txt",
+                "content_type": "text/plain",
+                "filename": "notes.txt",
+                "size": 7,
+            },
+        ]
+        # Attachment descriptors are persisted on the user row (history thumbnails).
+        user_save = next(c for c in spies.save_message.await_args_list if c.args[2] == "user")
+        assert user_save.kwargs["attachments"] == attachments
 
     @pytest.mark.asyncio
     async def test_skills_projected_to_turn_spec(self):

@@ -31,6 +31,9 @@ class ModelInfo(BaseModel):
     # Enabled engines that can run this model (Claude → both; others → inkwest-agent
     # only). The picker pairs Engine·Model from these when more than one engine is on.
     engines: list[str]
+    # Input modalities from the live catalog (P1.8): the chat picker shows an IMAGE icon
+    # and enables uploads when "IMAGE" is present. Empty = text-only/unknown (no uploads).
+    input_modalities: list[str]
 
 
 class AppConfigResponse(BaseModel):
@@ -71,6 +74,7 @@ async def get_app_config(user: CurrentUser) -> AppConfigResponse:
                 label=e.label,
                 legacy=e.legacy,
                 engines=runnable_engines(e.model_id),
+                input_modalities=e.input_modalities,
             )
             for e in merged_entries()
             if e.model_id in selectable

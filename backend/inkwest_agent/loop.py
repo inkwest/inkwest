@@ -24,6 +24,7 @@ from app.services.events import (
     ChatEvent,
     done_event,
     error_event,
+    status_update_event,
     text_event,
     tool_result_event,
     tool_start_event,
@@ -31,7 +32,7 @@ from app.services.events import (
 from app.services.messages import truncate_messages
 from app.services.orchestrator_common import ToolRunResult, execute_tool_calls
 
-from .converse import to_converse_message, to_converse_tools
+from .converse import image_blocks_for_attachments, to_converse_message, to_converse_tools
 from .mcp import MCPManager, load_mcp_config
 from .protocol import TurnSpec
 from .skills import is_skill_tool, read_skill
@@ -56,10 +57,26 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
     # The new user turn is appended here (the broker keeps it out of history).
     # mode=replay is the only live mode: the broker seeds the full transcript every
     # turn (the custom agent keeps none of its own). resume/resume_token are reserved.
-    messages: list[dict[str, Any]] = [
-        *spec.context.history,
-        {"role": "user", "content": spec.user_message},
-    ]
+    user_turn: dict[str, Any] = {"role": "user", "content": spec.user_message}
+    messages: list[dict[str, Any]] = [*spec.context.history, user_turn]
+    # Image attachments (P1.8): translate to Converse image blocks ONCE, here, gated on the
+    # model's IMAGE capability. The blocks are Converse-native (not Anthropic-shaped), so
+    # they're merged onto the freshly-built user turn AFTER history translation in the loop
+    # rather than stored in the canonical `messages` (keeps Converse-ism out of the history
+    # the broker persists). A text-only model yields no blocks — every image is skipped.
+    image_blocks, skipped = image_blocks_for_attachments(
+        spec.attachments, image_capable=spec.image_capable
+    )
+    if skipped:
+        # Surface why an image didn't make it (text-only model / unsupported / oversized) so
+        # the user isn't left wondering — non-fatal, the turn proceeds text-only for those.
+        yield status_update_event(
+            iteration=0,
+            total_tokens=0,
+            total_cost_cents=0,
+            tool_calls=0,
+            message="Some attachments were not sent as images: " + "; ".join(skipped),
+        )
 
     system_blocks = [{"text": spec.system_prompt}]
 
@@ -71,7 +88,9 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
     # to the base executor.
     async with MCPManager(load_mcp_config(spec.mcp_config_path)) as mcp:
         tool_config = to_converse_tools(skills=spec.skills, mcp_tools=mcp.converse_tools)
-        async for event in _run_loop(spec, client, messages, system_blocks, tool_config, mcp):
+        async for event in _run_loop(
+            spec, client, messages, system_blocks, tool_config, mcp, image_blocks, user_turn
+        ):
             yield event
 
 
@@ -82,6 +101,8 @@ async def _run_loop(
     system_blocks: list[dict[str, Any]],
     tool_config: dict[str, Any],
     mcp: MCPManager,
+    image_blocks: list[dict[str, Any]],
+    image_turn: dict[str, Any],
 ) -> AsyncIterator[ChatEvent]:
     """The Converse tool-use loop proper, with MCP connected for the turn."""
     session_uuid = uuid.UUID(spec.session_id)
@@ -101,6 +122,17 @@ async def _run_loop(
 
         iter_start = time.monotonic()
         converse_messages = [to_converse_message(m) for m in messages]
+        # Merge the P1.8 image blocks onto the original user turn (matched by object
+        # identity so truncation/duplicate text can't misplace them). Skipped when
+        # truncation dropped that turn or there are no images. Converse wants images
+        # before text in the block list.
+        if image_blocks:
+            pos = next((i for i, m in enumerate(messages) if m is image_turn), None)
+            if pos is not None:
+                converse_messages[pos]["content"] = [
+                    *image_blocks,
+                    *converse_messages[pos]["content"],
+                ]
 
         try:
             response = await asyncio.to_thread(

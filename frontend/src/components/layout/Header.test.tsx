@@ -108,7 +108,13 @@ describe('Header', () => {
         default_engine: 'claude-cli',
         engines: ['claude-cli'],
         available_models: [
-          { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true, engines: ['claude-cli'] },
+          {
+            id: 'claude-sonnet-4-20250514',
+            label: 'Sonnet 4.0',
+            legacy: true,
+            engines: ['claude-cli'],
+            input_modalities: [],
+          },
         ],
         attachments_enabled: false,
       },

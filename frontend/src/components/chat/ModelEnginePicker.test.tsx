@@ -10,8 +10,20 @@ const CONFIG: AppConfig = {
   default_engine: 'claude-cli',
   engines: ['claude-cli', 'inkwest-agent'],
   available_models: [
-    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', legacy: false, engines: ['claude-cli', 'inkwest-agent'] },
-    { id: 'meta.llama3', label: 'Llama 3', legacy: false, engines: ['inkwest-agent'] },
+    {
+      id: 'claude-sonnet-4-6',
+      label: 'Sonnet 4.6',
+      legacy: false,
+      engines: ['claude-cli', 'inkwest-agent'],
+      input_modalities: ['TEXT', 'IMAGE'],
+    },
+    {
+      id: 'meta.llama3',
+      label: 'Llama 3',
+      legacy: false,
+      engines: ['inkwest-agent'],
+      input_modalities: ['TEXT'],
+    },
   ],
   attachments_enabled: false,
 };
@@ -47,6 +59,18 @@ describe('ModelEnginePicker', () => {
     await user.click(screen.getByRole('button', { name: /Claude Code · Sonnet 4.6/ }));
     await user.click(screen.getByRole('option', { name: /Inkwest Agent · Llama 3/ }));
     expect(onChange).toHaveBeenCalledWith('meta.llama3', 'inkwest-agent');
+  });
+
+  it('shows the IMAGE icon only next to a model that accepts image input', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<ModelEnginePicker config={CONFIG} model={null} engine={null} onChange={onChange} />);
+    await user.click(screen.getByRole('button', { name: /Claude Code · Sonnet 4.6/ }));
+    // Sonnet (TEXT+IMAGE) gets the icon; Llama (TEXT only) doesn't. The icon carries the
+    // ALL-CAPS aria-label "IMAGE — image input".
+    const icons = screen.getAllByLabelText('IMAGE — image input');
+    // One per Sonnet row (claude-cli + inkwest-agent sections = 2), none for Llama.
+    expect(icons.length).toBe(2);
   });
 
   it('keeps a since-disabled pinned model selectable when allowDisabledCurrent is set', async () => {

@@ -33,7 +33,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.model_registry import ModelRegistry
-from app.services.model_catalog import available_models, bedrock_vendor, is_anthropic_model
+from app.services.model_catalog import (
+    available_models,
+    bedrock_vendor,
+    is_anthropic_model,
+    model_modalities,
+)
 from app.services.pricing import (
     DEFAULT_PRICING,
     ModelPricing,
@@ -86,6 +91,12 @@ class ModelEntry:
     options: dict[str, Any] = field(default_factory=dict)
     input_price: Decimal | None = None
     output_price: Decimal | None = None
+    # Modality capabilities captured from the live Bedrock catalog (P1.8). Empty =
+    # unknown (off-Bedrock, custom row, or no live data) ⇒ treated as text-only. Drives
+    # the picker's IMAGE-upload gate + the admin modality icons. Bedrock terms: input
+    # TEXT/IMAGE/VIDEO/SPEECH, output TEXT/EMBEDDING/IMAGE/VIDEO.
+    input_modalities: list[str] = field(default_factory=list)
+    output_modalities: list[str] = field(default_factory=list)
 
 
 def _derive_provider(model_id: str) -> str:
@@ -132,6 +143,9 @@ def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
     override, has_override = _row_pricing(row)
     pricing = override or get_model_pricing(model_id)
     priced = has_override or pricing is not DEFAULT_PRICING
+    # Modalities come from the live catalog only (no DB column): a custom row with no live
+    # match yields empty lists = text-only/unknown, the back-compat default.
+    input_modalities, output_modalities = model_modalities(model_id)
     return ModelEntry(
         model_id=model_id,
         # Re-derive the vendor tag for discovered rows: their stored provider is just a
@@ -155,6 +169,8 @@ def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
         options=(row.get("options") or {}) if row else {},
         input_price=pricing.input_price if priced else None,
         output_price=pricing.output_price if priced else None,
+        input_modalities=input_modalities,
+        output_modalities=output_modalities,
     )
 
 

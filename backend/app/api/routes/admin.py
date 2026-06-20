@@ -206,6 +206,11 @@ class ModelInfo(BaseModel):
     # sections the model appears in). The engines it is actually *offered* on live in
     # options["engines"] (absent = all capable). See engines.capable_engines.
     capable_engines: list[str]
+    # Modality capabilities from the live catalog (P1.8): input TEXT/IMAGE/VIDEO/SPEECH,
+    # output TEXT/EMBEDDING/IMAGE/VIDEO. Empty = unknown/text-only. Drives the admin
+    # modality icons + the non-chat (embedding/image-gen output) badge + capability filter.
+    input_modalities: list[str]
+    output_modalities: list[str]
     # Effective per-million-token prices, null when unpriced.
     input_price: float | None
     output_price: float | None
@@ -967,6 +972,8 @@ def _model_info(entry: model_registry.ModelEntry) -> ModelInfo:
         arn=entry.arn,
         options=entry.options,
         capable_engines=capable_engines(entry.model_id),
+        input_modalities=entry.input_modalities,
+        output_modalities=entry.output_modalities,
         input_price=float(entry.input_price) if entry.input_price is not None else None,
         output_price=float(entry.output_price) if entry.output_price is not None else None,
     )

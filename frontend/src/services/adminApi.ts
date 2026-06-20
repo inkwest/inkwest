@@ -203,6 +203,12 @@ export interface ModelInfo {
   /** Engines capable of running this model (which engine sections it appears in). The
    *  engines it is actually offered on live in options.engines (absent = all capable). */
   capable_engines: string[];
+  /** Input modalities from the live catalog: TEXT/IMAGE/VIDEO/SPEECH (SPEECH = audio).
+   *  Empty = unknown/text-only. Drives the modality icons + capability filter. */
+  input_modalities: string[];
+  /** Output modalities: TEXT/EMBEDDING/IMAGE/VIDEO. A non-TEXT-only output (embedding /
+   *  image-gen) marks a non-chat model (badged + excluded by the chat-capable filter). */
+  output_modalities: string[];
   input_price: number | null;
   output_price: number | null;
 }

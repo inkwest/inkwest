@@ -1,5 +1,17 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, Pencil, Plus, RefreshCw, Search, Star, Trash2 } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  Image,
+  Mic,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Star,
+  Trash2,
+  Video,
+} from 'lucide-react';
 import {
   Badge,
   Button,
@@ -125,6 +137,43 @@ function modelAvailability(m: ModelInfo): string[] {
   return Array.isArray(opt) ? (opt as string[]) : m.capable_engines;
 }
 
+const hasModality = (list: string[] | undefined, name: string) =>
+  !!list?.some((x) => x.toUpperCase() === name);
+
+// Non-TEXT output (embedding / image-gen / video) ⇒ not a chat model: it can't drive a
+// conversation, so the "chat-capable only" filter hides it and we badge it as non-chat.
+function isChatCapable(m: ModelInfo): boolean {
+  const out = m.output_modalities ?? [];
+  // Empty (unknown) is treated as chat-capable (back-compat: a model with no live modality
+  // data — e.g. a static-catalog Claude row — is a normal chat model).
+  return out.length === 0 || out.some((x) => x.toUpperCase() === 'TEXT');
+}
+
+// The small per-model input-modality icons (TEXT is universal → no icon). Each carries an
+// ALL-CAPS hover tooltip. SPEECH = audio input in Bedrock terms.
+function ModalityIcons({ model }: { model: ModelInfo }) {
+  const inputs = model.input_modalities ?? [];
+  return (
+    <span className="flex items-center gap-1 shrink-0">
+      {hasModality(inputs, 'IMAGE') && (
+        <span title="IMAGE — image input" aria-label="IMAGE — image input">
+          <Image className="w-3.5 h-3.5 text-gray-400" />
+        </span>
+      )}
+      {hasModality(inputs, 'VIDEO') && (
+        <span title="VIDEO — video input" aria-label="VIDEO — video input">
+          <Video className="w-3.5 h-3.5 text-gray-400" />
+        </span>
+      )}
+      {hasModality(inputs, 'SPEECH') && (
+        <span title="SPEECH — audio input" aria-label="SPEECH — audio input">
+          <Mic className="w-3.5 h-3.5 text-gray-400" />
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function ModelSettingsPage() {
   const [settings, setSettings] = useState<ModelSettings | null>(null);
   // Staged per-(engine, model) offering: model_id -> engine ids it's exposed on.
@@ -134,6 +183,9 @@ export function ModelSettingsPage() {
   const [defaultModel, setDefaultModel] = useState('');
   const [defaultEngine, setDefaultEngine] = useState('');
   const [search, setSearch] = useState('');
+  // Capability filter (P1.8): narrow by a required input modality + "chat-capable only".
+  const [modalityFilter, setModalityFilter] = useState<'' | 'IMAGE' | 'VIDEO' | 'SPEECH'>('');
+  const [chatOnly, setChatOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -288,8 +340,12 @@ export function ModelSettingsPage() {
   }
 
   const q = search.trim().toLowerCase();
-  const matchesQuery = (m: ModelInfo) =>
-    !q || m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q);
+  const matchesQuery = (m: ModelInfo) => {
+    if (q && !(m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))) return false;
+    if (modalityFilter && !hasModality(m.input_modalities, modalityFilter)) return false;
+    if (chatOnly && !isChatCapable(m)) return false;
+    return true;
+  };
 
   return (
     <div className="space-y-6">
@@ -373,6 +429,35 @@ export function ModelSettingsPage() {
                   onKeyDown={(e) => e.key === 'Escape' && setSearch('')}
                   className="pl-9"
                 />
+              </div>
+
+              {/* Capability filter (P1.8): narrow by input modality + chat-capable only. */}
+              <div className="flex flex-wrap items-center gap-3 text-sm text-gray-300">
+                <label className="flex items-center gap-2">
+                  <span className="text-gray-400">Input modality</span>
+                  <select
+                    value={modalityFilter}
+                    onChange={(e) =>
+                      setModalityFilter(e.target.value as '' | 'IMAGE' | 'VIDEO' | 'SPEECH')
+                    }
+                    aria-label="Filter by input modality"
+                    className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">Any</option>
+                    <option value="IMAGE">IMAGE</option>
+                    <option value="VIDEO">VIDEO</option>
+                    <option value="SPEECH">SPEECH</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={chatOnly}
+                    onChange={(e) => setChatOnly(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500"
+                  />
+                  Chat-capable only (hide embedding / image-gen output models)
+                </label>
               </div>
             </CardContent>
           </Card>
@@ -527,8 +612,19 @@ export function ModelSettingsPage() {
                                 <span className="text-xs text-gray-500 font-mono truncate flex-1 min-w-0">
                                   {highlightMatch(model.id, search)}
                                 </span>
+                                <ModalityIcons model={model} />
                                 {model.source === 'custom' && <Badge variant="info">custom</Badge>}
                                 {model.legacy && <Badge variant="warning">legacy</Badge>}
+                                {/* Non-chat output (embedding / image-gen / video) — visually
+                                    distinct so an admin doesn't enable it for conversations. */}
+                                {!isChatCapable(model) && (
+                                  <Badge
+                                    variant="warning"
+                                    title={`Non-chat output: ${(model.output_modalities ?? []).join(', ')}`}
+                                  >
+                                    non-chat
+                                  </Badge>
+                                )}
                                 {model.priced ? (
                                   <span className="text-xs text-gray-500">
                                     ${model.input_price}/${model.output_price} per Mtok

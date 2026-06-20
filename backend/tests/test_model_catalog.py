@@ -22,6 +22,7 @@ def reset_catalog_state():
     model_catalog._live_models = None
     model_catalog._fetched_at = 0.0
     model_catalog._last_fetch_failed = False
+    model_catalog._modalities = {}
 
 
 def _settings(**overrides):
@@ -248,6 +249,63 @@ async def test_fetch_bedrock_models_parses_profiles_and_on_demand():
         "eu.anthropic.claude-opus-4-8",
         "anthropic.claude-3-5-sonnet-20241022-v2:0",
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_models_captures_modalities():
+    """P1.8: per-model input/output modalities are captured from list-foundation-models,
+    keyed by the model id AND its route-stripped base; unknown ids resolve to empties."""
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                {"inferenceProfileId": "us.anthropic.claude-opus-4-v1:0"},
+            ]
+        },
+        "list-foundation-models": {
+            "modelSummaries": [
+                {
+                    "modelId": "anthropic.claude-opus-4-v1:0",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "inputModalities": ["TEXT", "IMAGE"],
+                    "outputModalities": ["TEXT"],
+                },
+                {
+                    "modelId": "amazon.titan-embed-text-v2:0",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "inputModalities": ["TEXT"],
+                    "outputModalities": ["EMBEDDING"],
+                },
+            ]
+        },
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        return responses[args[1]]
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        await model_catalog._fetch_bedrock_models(include_open=True)
+
+    # Exact id lookup.
+    assert model_catalog.model_modalities("anthropic.claude-opus-4-v1:0") == (
+        ["TEXT", "IMAGE"],
+        ["TEXT"],
+    )
+    # Embedding model captured too (the map covers non-chat models for the admin badge).
+    assert model_catalog.model_modalities("amazon.titan-embed-text-v2:0") == (
+        ["TEXT"],
+        ["EMBEDDING"],
+    )
+    # Route-stripped base resolves: a regional inference-profile id carries no modality
+    # data of its own, so it falls back to the underlying foundation model's.
+    assert model_catalog.model_modalities("us.anthropic.claude-opus-4-v1:0") == (
+        ["TEXT", "IMAGE"],
+        ["TEXT"],
+    )
+    # Unknown id → empty (back-compat: caller treats as text-only).
+    assert model_catalog.model_modalities("meta.unknown") == ([], [])
 
 
 def test_static_catalog_claude_cli_declared_models():
