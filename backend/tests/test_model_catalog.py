@@ -244,7 +244,9 @@ async def test_fetch_bedrock_models_parses_profiles_and_on_demand():
         patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
-        models = await model_catalog._fetch_bedrock_models()
+        # Claude-only path (include_open False): the meta profile is vendor-gated out,
+        # the INFERENCE_PROFILE-only foundation row isn't on-demand → only these surface.
+        models = await model_catalog._fetch_bedrock_models(include_open=False)
 
     assert models == [
         "eu.anthropic.claude-opus-4-8",
@@ -357,7 +359,8 @@ async def test_fetch_bedrock_models_dedupes_and_sorts():
         patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
-        models = await model_catalog._fetch_bedrock_models()
+        # Claude-only path keeps the dedupe assertion independent of the modality filter.
+        models = await model_catalog._fetch_bedrock_models(include_open=False)
 
     assert models == [
         # Newest first; the eu. profile wins over global./on-demand duplicates
@@ -767,6 +770,65 @@ async def test_fetch_bedrock_profiles_open_vendor_gated_off_under_claude_only():
 
     assert models == ["eu.anthropic.claude-opus-4-8"]
     assert model_catalog.profile_arn("eu.zai.glm5") is None  # open vendor not captured
+
+
+def test_bedrock_include_open_defaults_on_with_agent_engine():
+    """The open-vendor catalog defaults ON when inkwest-agent is enabled (surfacing the
+    whole-Bedrock set is the point), an explicit admin toggle overriding; OFF without it."""
+    with patch.object(model_catalog, "inkwest_agent_enabled", return_value=False):
+        assert model_catalog.bedrock_include_open() is False  # no engine → never
+    with patch.object(model_catalog, "inkwest_agent_enabled", return_value=True):
+        # Unset setting → the default passed by the caller (True) is honored.
+        with patch.object(model_catalog, "get_bool_setting", lambda k, default=False: default):
+            assert model_catalog.bedrock_include_open() is True
+        # Explicit admin off overrides the default.
+        with patch.object(model_catalog, "get_bool_setting", lambda k, default=False: False):
+            assert model_catalog.bedrock_include_open() is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_profiles_drops_non_chat_models():
+    """Profile-backed embedding/non-TEXT models are dropped (Converse is text-only); a
+    text profile and a true profile-only model with no modality data are kept."""
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                {"inferenceProfileId": "eu.cohere.embed-v4:0", "inferenceProfileArn": "arn:emb"},
+                {"inferenceProfileId": "eu.meta.llama-x", "inferenceProfileArn": "arn:llama"},
+                {"inferenceProfileId": "eu.zai.glm5", "inferenceProfileArn": "arn:glm"},
+            ]
+        },
+        "list-foundation-models": {
+            "modelSummaries": [
+                {
+                    "modelId": "cohere.embed-v4:0",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "inputModalities": ["TEXT"],
+                    "outputModalities": ["EMBEDDING"],  # non-chat → filtered both paths
+                },
+                {
+                    "modelId": "meta.llama-x",
+                    "inferenceTypesSupported": ["INFERENCE_PROFILE"],
+                    "inputModalities": ["TEXT"],
+                    "outputModalities": ["TEXT"],
+                },
+            ]
+        },
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        return responses[args[1]]
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        models = await model_catalog._fetch_bedrock_models(include_open=True)
+
+    assert "eu.cohere.embed-v4:0" not in models  # embedding profile dropped
+    assert "eu.meta.llama-x" in models  # text profile kept
+    assert "eu.zai.glm5" in models  # profile-only, unknown modality → kept
+    assert model_catalog.profile_arn("eu.zai.glm5") == "arn:glm"
 
 
 def test_catalog_status_reports_static_when_no_live_models():

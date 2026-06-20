@@ -193,6 +193,35 @@ def _model_sort_key(model_id: str) -> tuple:
     return (-version[0], -version[1], _FAMILY_RANK.get(family, 9), label)
 
 
+def bedrock_include_open() -> bool:
+    """Whether the catalog includes non-Anthropic (open-weight) Bedrock models.
+
+    Requires the inkwest-agent engine (only it can run them via Converse). When that
+    engine is enabled the default is ON — surfacing the whole-Bedrock catalog is the
+    point of enabling it — while an explicit admin toggle (persisted) still overrides.
+    Without the engine, never include them (they'd be unusable in the picker).
+    """
+    if not inkwest_agent_enabled():
+        return False
+    return get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY, default=True)
+
+
+def _profile_is_chat(model_id: str, modalities: dict[str, dict[str, list[str]]]) -> bool:
+    """Whether a profile-backed model is a text/chat model (Converse is a text API).
+
+    Profiles carry no modality of their own, so consult the foundation modality map
+    (captured this refresh) by the model id or its route-stripped base. Keep when the
+    output is unknown (a true profile-only model we can't classify — surface it rather
+    than hide it) or includes TEXT; drop known non-chat outputs (EMBEDDING/IMAGE/VIDEO).
+    Mirrors the foundation list's output-TEXT filter, which profiles otherwise bypass.
+    """
+    caps = modalities.get(model_id) or modalities.get(_BEDROCK_ROUTE_PREFIX.sub("", model_id))
+    if not caps:
+        return True
+    out = caps.get("output") or []
+    return not out or "TEXT" in out
+
+
 def _dedupe_bedrock_models(models: list[str]) -> list[str]:
     """One entry per underlying model, keeping the preferred routing variant."""
     best: dict[str, str] = {}
@@ -274,11 +303,10 @@ async def _fetch_bedrock_models(
     if not region:
         return None
     if include_open is None:
-        # Engine-aware gate: non-Claude (open-weight) Bedrock models are loaded
-        # only when an engine that can run them is enabled (inkwest-agent) AND the
-        # admin opted in. Under claude-cli only, the engine gate forces Claude-only
-        # regardless of the flag — they'd be unusable in the picker.
-        include_open = inkwest_agent_enabled() and get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY)
+        # Engine-aware gate: non-Claude (open-weight) Bedrock models are loaded only
+        # when the inkwest-agent engine is enabled (only it can run them) — defaulting
+        # ON in that case, an explicit admin toggle overriding (see bedrock_include_open).
+        include_open = bedrock_include_open()
     region_args = ["--region", region]
     # --by-provider narrows the foundation list to Anthropic unless the admin
     # opted into open-weight models, in which case every provider is listed.
@@ -312,6 +340,10 @@ async def _fetch_bedrock_models(
     profile_models, _profile_arns = await _fetch_inference_profiles(
         region_args, extra_env, include_open
     )
+    # Profiles bypass the foundation list's output-TEXT filter below, so apply the same
+    # gate here: drop profile-backed embedding/image/video models (Converse is text-only),
+    # using the modality map captured above (profile-only models with no map entry stay).
+    profile_models = [m for m in profile_models if _profile_is_chat(m, captured)]
 
     models = list(profile_models)
     models += [

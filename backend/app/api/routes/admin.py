@@ -31,7 +31,6 @@ from app.services import model_registry
 from app.services.app_settings import (
     BEDROCK_INCLUDE_OPEN_KEY,
     DEFAULT_ENGINE_KEY,
-    get_bool_setting,
     set_setting,
 )
 from app.services.budget_service import (
@@ -44,7 +43,7 @@ from app.services.engines import (
     engine_for_turn,
     inkwest_agent_enabled,
 )
-from app.services.model_catalog import catalog_status, refresh_catalog
+from app.services.model_catalog import bedrock_include_open, catalog_status, refresh_catalog
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -986,7 +985,7 @@ def _model_settings_response() -> ModelSettingsResponse:
         default_model=default_id,
         default_engine=engine_for_turn(default_id, configured_default_engine()),
         enabled_models=model_registry.selectable_models(),
-        include_all_vendors=get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY),
+        include_all_vendors=bedrock_include_open(),
         inkwest_agent_enabled=inkwest_agent_enabled(),
         engines=enabled_engines(),
         catalog=CatalogStatus(**catalog_status()),
