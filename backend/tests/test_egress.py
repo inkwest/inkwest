@@ -160,6 +160,11 @@ def test_squid_http_access_order_is_what_the_emulator_assumes():
         "bedrock-agent-runtime.eu-west-1.amazonaws.com",
         "api.anthropic.com",  # claude-cli / Anthropic-direct
         "sts.amazonaws.com",  # global STS (creds)
+        # P1.7: the Coralogix MCP server — both engines reach it through this
+        # proxy (claude-cli's in-CLI MCP + the inkwest-agent's in-sandbox MCP client). The
+        # endpoint is api.<region>.coralogix.com/mgmt/api/v1/mcp; covered by .coralogix.com.
+        "api.eu2.coralogix.com",
+        "api.coralogix.com",
     ],
 )
 def test_model_and_aws_control_endpoints_allowed(host):
@@ -174,6 +179,10 @@ def test_model_and_aws_control_endpoints_allowed(host):
         "s3-accesspoint.eu-west-1.amazonaws.com",
         "evil.example.com",  # arbitrary host — default deny (fail closed)
         "pastebin.com",
+        # A remote MCP server on a non-allowlisted host is denied (P1.7): the in-sandbox MCP
+        # client egresses through this proxy, so an MCP server outside the allowlist can't be
+        # reached — onboarding a new remote MCP server requires a deliberate squid entry.
+        "mcp.evil-server.com",
     ],
 )
 def test_exfil_and_unknown_hosts_denied(host):

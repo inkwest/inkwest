@@ -243,6 +243,9 @@ def _patch_broker(
     model="meta.llama3-1-70b-instruct-v1:0",
     connector_env=None,
     injected=None,
+    skills=None,
+    enabled_mcp=None,
+    mcp_config_path=None,
 ):
     """Patch every DB/sandbox/model boundary the broker touches; return the stack + spies."""
     db = AsyncMock()
@@ -255,6 +258,9 @@ def _patch_broker(
         ensure=AsyncMock(return_value="inkwest_conv_x"),
         release=AsyncMock(),
         build_connector_env=AsyncMock(return_value=(connector_env or {}, injected or [])),
+        apply_session_skills=MagicMock(),
+        write_agent_mcp_config=MagicMock(return_value=mcp_config_path),
+        remove_agent_mcp_config=MagicMock(),
         db=db,
     )
     settings = SimpleNamespace(
@@ -280,6 +286,18 @@ def _patch_broker(
             oia,
             "get_tool_definitions",
             MagicMock(return_value=[{"name": "aws_call"}, {"name": "kubectl_get"}]),
+        ),
+        # P1.7 skills + MCP boundaries. Default: no skills, no MCP servers — the
+        # skill/MCP-specific tests below override the return values.
+        patch.object(oia, "get_active_skills", AsyncMock(return_value=skills or [])),
+        patch.object(oia, "get_enabled_mcp_servers", AsyncMock(return_value=enabled_mcp or [])),
+        patch.object(oia, "apply_session_skills", spies.apply_session_skills),
+        patch.object(
+            oia, "skills_container_root", MagicMock(return_value="/home/agent/.claude/skills")
+        ),
+        patch("app.services.agent_mcp_config.write_agent_mcp_config", spies.write_agent_mcp_config),
+        patch(
+            "app.services.agent_mcp_config.remove_agent_mcp_config", spies.remove_agent_mcp_config
         ),
         # The broker does `from app.services import sandbox; sandbox.ensure(...)`. Patch the
         # real module's attributes (not sys.modules) so it works regardless of whether
@@ -357,6 +375,116 @@ class TestOrchestrateInkwestAgent:
         # sandbox lease taken and released
         spies.ensure.assert_awaited_once_with(SESSION_ID)
         spies.release.assert_awaited_once_with(SESSION_ID)
+        # P1.7: no skills, no MCP servers in the default fixture → empty skills, no root,
+        # no mcp_config_path; the MCP config is still removed (cleanup is unconditional —
+        # it no-ops when there is no file).
+        assert spec["skills"] == []
+        assert spec["skills_root"] is None
+        assert spec["mcp_config_path"] is None
+        # remove runs twice: defensive prune after ensure (orphan from a SIGKILLed prior
+        # turn) + turn-end cleanup in finally. Both target this session.
+        assert spies.remove_agent_mcp_config.call_count == 2
+        assert all(c.args == (SESSION_ID,) for c in spies.remove_agent_mcp_config.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_skills_projected_to_turn_spec(self):
+        # Broker advertises name+description ONLY (progressive disclosure) and materializes
+        # the bodies into the sandbox via apply_session_skills (parity with claude-cli).
+        skills = [
+            SimpleNamespace(name="triage-pod", description="diagnose a crashlooping pod"),
+            SimpleNamespace(name="audit-iam", description=None),  # null desc tolerated
+        ]
+        patches, spies = _patch_broker(skills=skills)
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        spec = json.loads(spies.turn_spec)
+        assert spec["skills"] == [
+            {"name": "triage-pod", "description": "diagnose a crashlooping pod"},
+            {"name": "audit-iam", "description": ""},
+        ]
+        assert spec["skills_root"] == "/home/agent/.claude/skills"
+        # bodies materialized into THIS conversation's sandbox
+        spies.apply_session_skills.assert_called_once_with(SESSION_ID, skills)
+
+    @pytest.mark.asyncio
+    async def test_mcp_config_projected_and_cleaned_up(self):
+        # Broker writes the enabled MCP servers to a sandbox file and passes its in-container
+        # path; the file (which may embed creds) is removed on turn end.
+        patches, spies = _patch_broker(
+            enabled_mcp=["coralogix-prod"],
+            mcp_config_path="/home/agent/.claude/inkwest-agent-mcp.json",
+        )
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        spec = json.loads(spies.turn_spec)
+        assert spec["mcp_config_path"] == "/home/agent/.claude/inkwest-agent-mcp.json"
+        spies.write_agent_mcp_config.assert_called_once_with(SESSION_ID, ["coralogix-prod"])
+        # prune-after-ensure + turn-end cleanup
+        assert spies.remove_agent_mcp_config.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_skills_load_failure_degrades(self):
+        # A skills/MCP DB hiccup must not crash the turn — degrade to none.
+        patches, spies = _patch_broker()
+        for p in patches:
+            p.start()
+        # Re-point get_active_skills (already patched by the fixture) at a raising mock.
+        oia.get_active_skills.side_effect = RuntimeError("db down")
+        try:
+            events = await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        spec = json.loads(spies.turn_spec)
+        assert spec["skills"] == []
+        assert [e.type for e in events] == ["done"]
+
+    @pytest.mark.asyncio
+    async def test_mcp_config_cleaned_up_on_error_path(self):
+        # Security: even if the turn blows up AFTER write_agent_mcp_config, the cred-bearing
+        # config must still be removed (finally). Force execute_agent to raise unexpectedly.
+        patches, spies = _patch_broker(
+            enabled_mcp=["coralogix-prod"],
+            mcp_config_path="/home/agent/.claude/inkwest-agent-mcp.json",
+        )
+        for p in patches:
+            p.start()
+
+        def boom(session_id, turn_spec, **kw):
+            spies.turn_spec = turn_spec
+            raise ValueError("unexpected explosion mid-turn")
+
+        try:
+            with patch.object(oia, "execute_agent", side_effect=boom):
+                events = await _collect(
+                    oia.orchestrate_chat_inkwest_agent(
+                        db=spies.db,
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="why crash?",
+                        user_id=USER_ID,
+                    )
+                )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        # The error surfaced to the client, and the cred file was still cleaned up.
+        assert any(e.type == "error" for e in events)
+        # prune-after-ensure + turn-end cleanup both ran (write succeeded before the boom).
+        assert spies.remove_agent_mcp_config.call_count == 2
+        spies.write_agent_mcp_config.assert_called_once_with(SESSION_ID, ["coralogix-prod"])
 
     @pytest.mark.asyncio
     async def test_retry_drops_trailing_user_message_from_history(self):

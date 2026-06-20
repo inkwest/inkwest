@@ -28,6 +28,17 @@ contract in docs/SANDBOXED_AGENT_RUNTIME.md:
   broker pre-provides them; the agent never mints/renews — see the broker's
   one-way handoff). Credentials reach the tool executors via the connector env
   the broker injects at spawn, exactly like the claude-cli path.
+- ``skills[{name, description}]`` + ``skills_root`` (P1.7) — the active skills as
+  *progressive disclosure*: only name + short description ride the spec (the
+  always-visible half); the SKILL.md **bodies** stay on sandbox files under
+  ``skills_root`` (the broker materialized them, parity with the claude-cli
+  ``apply_session_skills``) and are read on demand by the ``read_skill`` tool.
+- ``mcp_config_path`` (P1.7) — in-container path to a JSON file the broker
+  materialized in the sandbox holding the enabled MCP server definitions
+  (``.claude.json``-shaped ``{name: {command/args/env | url/headers/type}}``).
+  Server creds/headers live in that file (projected one-way like connector
+  creds, cleaned up on turn end) — never on argv. The agent's lazy MCP client
+  reads it, connects the servers, and merges their tools into the Converse loop.
 """
 
 import sys
@@ -43,8 +54,9 @@ from app.core.constants import (
 from app.services.events import ChatEvent
 
 # Bumped when the turn-spec / event wire shape changes incompatibly so the broker
-# can refuse a mismatched agent build. P1.4 formalized context/limits/tools/creds.
-PROTOCOL_VERSION = 2
+# can refuse a mismatched agent build. P1.4 formalized context/limits/tools/creds;
+# P1.7 added skills (progressive disclosure) + the MCP config path.
+PROTOCOL_VERSION = 3
 
 # Engine tag default (the only engine that runs this agent).
 INKWEST_AGENT = "inkwest-agent"
@@ -146,6 +158,29 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
+class SkillSpec:
+    """One active skill, advertised as a tool (progressive disclosure, P1.7).
+
+    Only ``name`` + ``description`` ride the spec — the always-visible half. The
+    SKILL.md **body** stays on a sandbox file under ``TurnSpec.skills_root`` and is
+    loaded only when the model triggers the skill (the ``read_skill`` tool returns
+    it as the tool_result), so a large skill library never inflates every prompt.
+    """
+
+    name: str
+    description: str = ""
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "SkillSpec":
+        if not isinstance(raw, dict):
+            raise TurnSpecError("turn-spec 'skills' entries must be objects")
+        _reject_unknown(raw, cls.__dataclass_fields__.keys(), "'skills' entry")
+        if "name" not in raw:
+            raise TurnSpecError("turn-spec 'skills' entry missing 'name'")
+        return cls(name=raw["name"], description=raw.get("description") or "")
+
+
+@dataclass(frozen=True)
 class TurnSpec:
     """One turn's fully-resolved inputs, handed to the agent on stdin.
 
@@ -177,6 +212,11 @@ class TurnSpec:
     kubeconfig_path: str | None = None
     context_name: str | None = None
     creds_path: str | None = None
+    # Skills as tools (P1.7): name+description only; bodies live under skills_root.
+    skills: list[SkillSpec] = field(default_factory=list)
+    skills_root: str | None = None
+    # In-container path to the materialized MCP server config (P1.7); None disables MCP.
+    mcp_config_path: str | None = None
 
     @property
     def invoke_target(self) -> str:
@@ -188,7 +228,7 @@ class TurnSpec:
 _TOP_LEVEL_KEYS = frozenset(TurnSpec.__dataclass_fields__.keys())
 # Scalar fields = everything that isn't one of the nested objects. Derived (not a hand-
 # kept list) so adding a scalar field to TurnSpec needs no second edit here.
-_NESTED_KEYS = frozenset({"context", "limits", "tools"})
+_NESTED_KEYS = frozenset({"context", "limits", "tools", "skills"})
 _SCALAR_KEYS = _TOP_LEVEL_KEYS - _NESTED_KEYS
 _REQUIRED_KEYS = ("session_id", "user_message", "model", "system_prompt")
 
@@ -209,12 +249,16 @@ def parse_turn_spec(raw: Any) -> TurnSpec:
     tools_raw = raw.get("tools", [])
     if not isinstance(tools_raw, list):
         raise TurnSpecError("turn-spec 'tools' must be a list")
+    skills_raw = raw.get("skills", [])
+    if not isinstance(skills_raw, list):
+        raise TurnSpecError("turn-spec 'skills' must be a list")
 
     scalar = {k: raw[k] for k in _SCALAR_KEYS if k in raw}
     return TurnSpec(
         context=TurnContext.from_raw(raw.get("context")),
         limits=TurnLimits.from_raw(raw.get("limits")),
         tools=[ToolSpec.from_raw(t) for t in tools_raw],
+        skills=[SkillSpec.from_raw(s) for s in skills_raw],
         **scalar,
     )
 

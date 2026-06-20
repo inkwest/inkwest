@@ -20,12 +20,31 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from app.services.events import ChatEvent, done_event, error_event, text_event
+from app.services.events import (
+    ChatEvent,
+    done_event,
+    error_event,
+    text_event,
+    tool_result_event,
+    tool_start_event,
+)
 from app.services.messages import truncate_messages
 from app.services.orchestrator_common import ToolRunResult, execute_tool_calls
 
 from .converse import to_converse_message, to_converse_tools
+from .mcp import MCPManager, load_mcp_config
 from .protocol import TurnSpec
+from .skills import is_skill_tool, read_skill
+
+
+def _result_block(tool_use_id: str, content: str, is_error: bool) -> dict[str, Any]:
+    """An Anthropic-shaped tool_result block (matches execute_tool_calls' output)."""
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": content,
+        "is_error": is_error,
+    }
 
 
 async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
@@ -34,9 +53,6 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
     ``client`` is a ready bedrock-runtime client (injected so tests can mock the
     blocking ``converse`` call). The loop is otherwise self-contained.
     """
-    session_uuid = uuid.UUID(spec.session_id)
-    user_id = uuid.UUID(spec.user_id) if spec.user_id else None
-
     # The new user turn is appended here (the broker keeps it out of history).
     # mode=replay is the only live mode: the broker seeds the full transcript every
     # turn (the custom agent keeps none of its own). resume/resume_token are reserved.
@@ -46,7 +62,30 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
     ]
 
     system_blocks = [{"text": spec.system_prompt}]
-    tool_config = to_converse_tools()
+
+    # Connect the conversation's enabled MCP servers for the lifetime of this turn
+    # (P1.7). The manager is empty/degraded when MCP is unconfigured or the SDK is
+    # absent — never an error — so the loop runs regardless. Its tools merge into the
+    # toolConfig alongside the synthetic read_skill tool (skills as progressive
+    # disclosure). MCP-owned + skill tool calls are routed here; everything else goes
+    # to the base executor.
+    async with MCPManager(load_mcp_config(spec.mcp_config_path)) as mcp:
+        tool_config = to_converse_tools(skills=spec.skills, mcp_tools=mcp.converse_tools)
+        async for event in _run_loop(spec, client, messages, system_blocks, tool_config, mcp):
+            yield event
+
+
+async def _run_loop(
+    spec: TurnSpec,
+    client: Any,
+    messages: list[dict[str, Any]],
+    system_blocks: list[dict[str, Any]],
+    tool_config: dict[str, Any],
+    mcp: MCPManager,
+) -> AsyncIterator[ChatEvent]:
+    """The Converse tool-use loop proper, with MCP connected for the turn."""
+    session_uuid = uuid.UUID(spec.session_id)
+    user_id = uuid.UUID(spec.user_id) if spec.user_id else None
 
     total_input_tokens = 0
     total_output_tokens = 0
@@ -116,22 +155,41 @@ async def run_turn(spec: TurnSpec, client: Any) -> AsyncIterator[ChatEvent]:
         # tool_use drives another turn; every other stop reason ends this one.
         if stop_reason == "tool_use" and tool_calls:
             messages.append({"role": "assistant", "content": assistant_content})
-            run = ToolRunResult()
-            async for ev in execute_tool_calls(
-                run,
-                tool_calls=tool_calls,
-                user_id=user_id,
-                session_id=session_uuid,
-                session_id_str=spec.session_id,
-                kubeconfig_path=spec.kubeconfig_path,
-                context_name=spec.context_name,
-                cancel_event=None,  # cancel-by-kill: the broker terminates the process
-                # Creds were pre-provided by the broker as env (one-way handoff); the
-                # agent can't reach the portal credential store.
-                projected_creds=True,
-            ):
-                yield ev
-            messages.append({"role": "user", "content": run.tool_results})
+            # Route per call so skill (read_skill) and MCP-owned tools — which the base
+            # executor doesn't know — are handled here, while kubectl/connector calls keep
+            # going through execute_tool_calls (env-enforced creds). Results are collected
+            # in tool_use order so the next user turn's toolResult blocks stay aligned.
+            tool_results: list[dict[str, Any]] = []
+            for call in tool_calls:
+                name = call["name"]
+                if is_skill_tool(name):
+                    yield tool_start_event(name, call["input"], call["id"])
+                    output, is_error = read_skill(call["input"], spec.skills, spec.skills_root)
+                    yield tool_result_event(name, output, call["id"], is_error)
+                    tool_results.append(_result_block(call["id"], output, is_error))
+                elif mcp.owns(name):
+                    yield tool_start_event(name, call["input"], call["id"])
+                    output, is_error = await mcp.call(name, call["input"])
+                    yield tool_result_event(name, output, call["id"], is_error)
+                    tool_results.append(_result_block(call["id"], output, is_error))
+                else:
+                    run = ToolRunResult()
+                    async for ev in execute_tool_calls(
+                        run,
+                        tool_calls=[call],
+                        user_id=user_id,
+                        session_id=session_uuid,
+                        session_id_str=spec.session_id,
+                        kubeconfig_path=spec.kubeconfig_path,
+                        context_name=spec.context_name,
+                        cancel_event=None,  # cancel-by-kill: the broker terminates the process
+                        # Creds were pre-provided by the broker as env (one-way handoff); the
+                        # agent can't reach the portal credential store.
+                        projected_creds=True,
+                    ):
+                        yield ev
+                    tool_results.extend(run.tool_results)
+            messages.append({"role": "user", "content": tool_results})
             continue
 
         # Terminal stop reason (end_turn, max_tokens, stop_sequence, guardrail…).

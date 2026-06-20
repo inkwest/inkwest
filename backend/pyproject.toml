@@ -34,6 +34,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# In-sandbox MCP for the inkwest-agent loop (P1.7). Optional on purpose: the toolbox
+# image bakes this in, but the in-agent client imports it LAZILY and degrades to "no MCP
+# tools" when absent, so a backend/dev env without it still runs the loop. Not in the
+# core deps to keep the portal install lean (the broker only writes the config file).
+mcp = [
+    "mcp>=1.0.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.23.0",

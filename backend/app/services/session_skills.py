@@ -43,6 +43,17 @@ def skills_dir(session_id: str) -> str | None:
     return os.path.join(sandbox.session_dir(session_id), "claude", "skills")
 
 
+def skills_container_root() -> str:
+    """In-container path of the skills dir (the inkwest-agent reads SKILL.md from here).
+
+    The host ``claude/skills`` dir is mounted at ``<sandbox_home>/.claude`` in-container
+    (see app.services.sandbox), so the agent resolves a skill at
+    ``<sandbox_home>/.claude/skills/<slug>/SKILL.md`` — the broker passes this root in the
+    turn-spec (claude-cli has no equivalent: it discovers skills from the same files itself).
+    """
+    return f"{get_settings().sandbox_home.rstrip('/')}/.claude/skills"
+
+
 def apply_session_skills(session_id: str, skills: list[Skill]) -> None:
     """Reconcile the conversation's skills dir to ``skills`` (no-op off-sandbox).
 

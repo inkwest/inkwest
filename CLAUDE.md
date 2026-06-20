@@ -42,11 +42,11 @@ pre-commit run --all-files
 ```
 backend/app/api/routes/     # FastAPI route handlers
 backend/app/api/dependencies.py  # Auth + DB injection
-backend/app/services/       # Orchestrators, AI client, tools, budget
+backend/app/services/       # Orchestrators, AI client, tools, budget; agent_mcp_config.py (P1.7: broker materializes a conversation's enabled MCP server defs into a sandbox file, removed on turn end as it can embed creds)
 backend/app/models/         # SQLAlchemy models
 backend/app/core/           # Config, auth, database, logging
 backend/app/tools/          # kubectl definitions, executor, validation
-backend/inkwest_agent/      # standalone agent worker (P1.1): DB-free Converse loop + stdin turn-spec -> stdout NDJSON ChatEvent (`python -m inkwest_agent`)
+backend/inkwest_agent/      # standalone agent worker (P1.1): DB-free Converse loop + stdin turn-spec -> stdout NDJSON ChatEvent (`python -m inkwest_agent`). P1.7: skills-as-tools (skills.py — synthetic `read_skill` progressive disclosure) + a lazy in-sandbox MCP client (mcp.py — connects enabled servers, merges their tools as `mcp__<server>__<tool>`; optional `mcp` SDK, degrades if absent)
 frontend/src/components/    # React components (chat/, session/, layout/)
 frontend/src/store/         # Zustand stores (chat, sessions, settings)
 frontend/src/services/      # API client, WebSocket service

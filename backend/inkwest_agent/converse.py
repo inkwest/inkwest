@@ -20,6 +20,16 @@ from botocore.config import Config
 
 from app.tools.definitions import get_tool_definitions
 
+from .protocol import SkillSpec
+
+# The synthetic skill tool name. A single enum tool (rather than one tool per skill)
+# keeps the toolConfig compact regardless of library size while still surfacing every
+# skill's short description — the always-visible half of progressive disclosure.
+READ_SKILL_TOOL = "read_skill"
+# Cap each skill's short description in the always-visible tool description so a large
+# skill library can't blow Bedrock's toolSpec description size limit and fail the turn.
+_SKILL_DESC_MAX = 200
+
 # Bound the call so a hung/credential-stalled Bedrock endpoint can't pin the
 # process: boto3 runs in a worker thread and cannot be cancelled mid-call.
 _BEDROCK_CONFIG = Config(
@@ -101,17 +111,71 @@ def to_converse_message(message: dict[str, Any]) -> dict[str, Any]:
     return {"role": message["role"], "content": blocks}
 
 
-def to_converse_tools() -> dict[str, Any]:
-    """Translate the Anthropic tool definitions into a Converse toolConfig."""
+def _tool_spec(name: str, description: str, input_schema: dict[str, Any]) -> dict[str, Any]:
+    """Wrap one tool in the Converse ``toolSpec`` envelope."""
     return {
-        "tools": [
-            {
-                "toolSpec": {
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "inputSchema": {"json": tool["input_schema"]},
-                }
-            }
-            for tool in get_tool_definitions()
-        ]
+        "toolSpec": {
+            "name": name,
+            "description": description,
+            "inputSchema": {"json": input_schema},
+        }
     }
+
+
+def _short_desc(description: str) -> str:
+    """A skill's short description, truncated for the always-visible tool catalog."""
+    text = description or "(no description)"
+    return text if len(text) <= _SKILL_DESC_MAX else text[:_SKILL_DESC_MAX].rstrip() + "…"
+
+
+def skill_tool_spec(skills: list[SkillSpec]) -> dict[str, Any] | None:
+    """Build the synthetic ``read_skill`` tool for the active skills (progressive disclosure).
+
+    The tool's description carries every skill's (truncated) short description — the
+    always-visible half; the SKILL.md body is loaded only when the model calls the tool
+    with a ``name`` (the loaded half). Returns None when there are no skills, so the tool
+    isn't advertised needlessly.
+    """
+    if not skills:
+        return None
+    names = [s.name for s in skills]
+    catalog = "\n".join(f"- {s.name}: {_short_desc(s.description)}" for s in skills)
+    description = (
+        "Load a reusable investigation skill (a procedure/playbook). Call this with the "
+        "skill's `name` to read its full instructions, THEN follow them. Available skills:\n"
+        f"{catalog}"
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "enum": names,
+                "description": "The skill to load (one of the listed names).",
+            }
+        },
+        "required": ["name"],
+    }
+    return _tool_spec(READ_SKILL_TOOL, description, schema)
+
+
+def to_converse_tools(
+    skills: list[SkillSpec] | None = None,
+    mcp_tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Translate the tool surfaces into one Converse toolConfig.
+
+    Base read-only tools (kubectl/connectors) + an optional synthetic ``read_skill`` tool
+    (P1.7 skills) + optional MCP tools already in Converse ``toolSpec`` shape (P1.7 MCP).
+    Skills/MCP re-express claude-cli's native capability surfaces as Converse tools — the
+    loop has no native skill/MCP system.
+    """
+    tools: list[dict[str, Any]] = [
+        _tool_spec(t["name"], t["description"], t["input_schema"]) for t in get_tool_definitions()
+    ]
+    skill_tool = skill_tool_spec(skills or [])
+    if skill_tool is not None:
+        tools.append(skill_tool)
+    if mcp_tools:
+        tools.extend(mcp_tools)
+    return {"tools": tools}

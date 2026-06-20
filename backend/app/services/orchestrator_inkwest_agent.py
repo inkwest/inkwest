@@ -35,14 +35,17 @@ from app.services.budget_service import record_usage
 from app.services.events import ChatEvent, done_event, error_event
 from app.services.messages import (
     ensure_session_title,
+    get_active_skills,
+    get_enabled_mcp_servers,
     get_session_messages,
     save_message,
     update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
+from app.services.session_skills import apply_session_skills, skills_container_root
 from app.tools.connector_exec import build_connector_env
 from app.tools.definitions import get_tool_definitions
-from inkwest_agent.protocol import ToolSpec, TurnContext, TurnLimits, TurnSpec
+from inkwest_agent.protocol import SkillSpec, ToolSpec, TurnContext, TurnLimits, TurnSpec
 
 logger = logging.getLogger(__name__)
 
@@ -168,28 +171,61 @@ async def orchestrate_chat_inkwest_agent(
             )
     creds_path = f"{settings.sandbox_home.rstrip('/')}/.aws"
 
-    spec = TurnSpec(
-        session_id=session_id_str,
-        user_message=user_message,
-        model=model,
-        system_prompt=system_prompt,
-        context=TurnContext(history=history),  # mode=replay: broker seeds history
-        limits=TurnLimits(max_tokens=max_tokens),
-        tools=[ToolSpec(name=t["name"]) for t in get_tool_definitions()],
-        model_target=model_target,
-        region=settings.aws_region,
-        user_id=str(user_id) if user_id else None,
-        kubeconfig_path=kubeconfig_path,
-        context_name=context_name,
-        creds_path=creds_path,
-    )
-    turn_spec_json = json.dumps(dataclasses.asdict(spec))
+    # Skills + MCP (P1.7): resolve from the DB here (the agent is DB-free). Skills ride
+    # the spec as name+description ONLY (progressive disclosure); their SKILL.md bodies
+    # are materialized into the sandbox below (parity with the claude-cli path) and read
+    # on demand by the agent's read_skill tool. MCP server defs are materialized into a
+    # sandbox file whose in-container path rides the spec (set after sandbox.ensure).
+    try:
+        active_skills = await get_active_skills(db)
+    except Exception as e:
+        logger.warning("active_skills_load_failed", extra={"error": str(e)})
+        active_skills = []
+    try:
+        enabled_mcp = await get_enabled_mcp_servers(db, session_id)
+    except Exception as e:
+        logger.warning("enabled_mcp_load_failed", extra={"error": str(e)})
+        enabled_mcp = []
 
     container: str | None = None
     try:
         from app.services import sandbox
+        from app.services.agent_mcp_config import remove_agent_mcp_config, write_agent_mcp_config
 
         container = await sandbox.ensure(session_id_str)
+
+        # Security: prune any cred-bearing MCP config orphaned by a PRIOR turn whose broker
+        # was SIGKILLed before its `finally` cleanup could run (the file lives in the durable
+        # claude dir). Done right after ensure so the stale creds never sit around — the
+        # fresh config (if any) is re-materialized just below from the current DB state.
+        remove_agent_mcp_config(session_id_str)
+
+        # Materialize skill bodies + the MCP config into THIS conversation's sandbox, every
+        # turn (survives a sandbox rebuild; picks up admin edits next turn) — same cadence
+        # as orchestrate_chat_cli. apply_session_skills writes one SKILL.md per skill; the
+        # MCP config is removed on turn end (it can embed creds — see the finally).
+        apply_session_skills(session_id_str, active_skills)
+        mcp_config_path = write_agent_mcp_config(session_id_str, enabled_mcp)
+
+        spec = TurnSpec(
+            session_id=session_id_str,
+            user_message=user_message,
+            model=model,
+            system_prompt=system_prompt,
+            context=TurnContext(history=history),  # mode=replay: broker seeds history
+            limits=TurnLimits(max_tokens=max_tokens),
+            tools=[ToolSpec(name=t["name"]) for t in get_tool_definitions()],
+            skills=[SkillSpec(name=s.name, description=s.description or "") for s in active_skills],
+            skills_root=skills_container_root() if active_skills else None,
+            mcp_config_path=mcp_config_path,
+            model_target=model_target,
+            region=settings.aws_region,
+            user_id=str(user_id) if user_id else None,
+            kubeconfig_path=kubeconfig_path,
+            context_name=context_name,
+            creds_path=creds_path,
+        )
+        turn_spec_json = json.dumps(dataclasses.asdict(spec))
 
         # Reconstruct role-correct messages from the flat event stream so the persisted
         # history round-trips through Converse next turn (toolResult must live in a user
@@ -315,6 +351,11 @@ async def orchestrate_chat_inkwest_agent(
         yield error_event(f"Unexpected error: {str(e)}")
 
     finally:
+        # Remove the materialized MCP config: it can embed MCP creds/headers, so it must
+        # not outlive the turn (one-way projection — re-materialized from the DB next turn).
+        from app.services.agent_mcp_config import remove_agent_mcp_config
+
+        remove_agent_mcp_config(session_id_str)
         # Drop the in-use lease ensure() took so the idle reaper can reclaim the sandbox.
         if container is not None:
             from app.services import sandbox
