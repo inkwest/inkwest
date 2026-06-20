@@ -26,6 +26,7 @@ from app.api.routes import (
     egress,
     health,
     mcp,
+    metrics,
     sessions,
     skills,
     sync,
@@ -184,6 +185,7 @@ app.include_router(clusters.router, prefix="/api")
 app.include_router(skills.router, prefix="/api")
 app.include_router(system_prompts.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
+app.include_router(metrics.router, prefix="/api")  # Per-conversation sandbox resource metrics
 app.include_router(sessions.search_router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
