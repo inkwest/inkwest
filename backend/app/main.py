@@ -252,8 +252,10 @@ if mount_spa(app, Path(__file__).resolve().parent.parent / "static"):
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault(
             "Content-Security-Policy",
+            # blob: lets attachment thumbnails render — they're fetched with the auth
+            # header then shown via URL.createObjectURL() (a same-origin blob: URL).
             "default-src 'self'; script-src 'self'; connect-src 'self' ws: wss:; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:",
         )
         return response
 
