@@ -123,14 +123,14 @@ class TestGetOrchestrator:
             orchestrator = get_orchestrator()
             assert orchestrator.__name__ == "_dispatch_bedrock"
 
-    def test_claude_cli_returns_cli_orchestrator(self):
-        """Should return CLI orchestrator for claude-cli provider."""
+    def test_claude_cli_returns_engine_dispatcher(self):
+        """claude-cli returns the per-turn engine dispatcher (CLI vs sandboxed agent)."""
         mock_settings = MagicMock()
         mock_settings.ai_provider = "claude-cli"
 
         with patch("app.services.ai_client.get_settings", return_value=mock_settings):
             orchestrator = get_orchestrator()
-            assert orchestrator.__name__ == "orchestrate_chat_cli"
+            assert orchestrator.__name__ == "_dispatch_engine"
 
 
 class TestResolveSessionModelChoice:

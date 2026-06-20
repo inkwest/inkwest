@@ -97,12 +97,21 @@ export interface ModelInfo {
   label: string;
   /** Older generation, kept for cost reporting — not recommended for use. */
   legacy: boolean;
+  /** Enabled engines that can run this model (Claude → both; others → inkwest-agent). */
+  engines: string[];
+  /** Input modalities from the live catalog (TEXT/IMAGE/VIDEO/SPEECH). "IMAGE" ⇒ the
+   *  picker shows the image icon and uploads are accepted. Empty = text-only/unknown. */
+  input_modalities: string[];
 }
 
 export interface AppConfig {
   provider: string;
   /** Default model (ID) applied when a session has no explicit choice. */
   model: string;
+  /** The engine the default model runs on (admin choice, else resolved heuristically). */
+  default_engine: string;
+  /** Engines enabled in this deployment; >1 ⇒ the picker shows Engine·Model pairs. */
+  engines: string[];
   /** Admin-enabled models users may pick per session. */
   available_models: ModelInfo[];
   /** File attachments usable (requires the sandbox/claude-cli). Gates the attach UI. */
@@ -181,6 +190,7 @@ export async function createSession(data: {
   system_prompt_id?: string;
   system_prompt_custom?: string;
   model?: string;
+  engine?: string;
 }): Promise<Session> {
   return fetchAPI('/api/sessions', {
     method: 'POST',
@@ -198,7 +208,7 @@ export async function deleteSession(id: string): Promise<void> {
 
 export async function updateSession(
   id: string,
-  data: { title?: string; model?: string | null }
+  data: { title?: string; model?: string | null; engine?: string | null }
 ): Promise<Session> {
   return fetchAPI(`/api/sessions/${id}`, {
     method: 'PATCH',

@@ -94,6 +94,23 @@ async def test_load_registry_roundtrip(db: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_set_model_settings_persists_engine_availability(db: AsyncSession):
+    # per-(engine, model) availability rides options["engines"]; a fresh load
+    # proves it round-trips through the DB, not just the in-memory mirror.
+    model_catalog._live_models = ["claude-opus-4-8", "claude-haiku-4-5"]
+    await model_registry.set_model_settings(
+        db,
+        default="claude-opus-4-8",
+        enabled=["claude-opus-4-8", "claude-haiku-4-5"],
+        availability={"claude-opus-4-8": ["inkwest-agent"]},
+    )
+    await model_registry.load_registry(db)
+    assert model_registry._rows["claude-opus-4-8"]["options"].get("engines") == ["inkwest-agent"]
+    # A model absent from the availability map keeps no engines key (= all candidates).
+    assert "engines" not in (model_registry._rows["claude-haiku-4-5"]["options"] or {})
+
+
+@pytest.mark.asyncio
 async def test_add_then_delete_custom_model_real_engine(db: AsyncSession):
     await model_registry.add_custom_model(
         db,

@@ -47,6 +47,29 @@ def check_model_selectable(model: str | None) -> None:
         )
 
 
+def check_engine_selectable(engine: str | None, model: str | None) -> None:
+    """Raise 400 when the engine pin can't run in this deployment / for this model.
+
+    The pin is only meaningful with more than one engine enabled (the Engine·Model
+    picker). When a model is also given, the pair must be runnable
+    (Claude → claude-cli or inkwest-agent; other vendors → inkwest-agent only).
+    """
+    if engine is None:
+        return
+    from app.services.engines import enabled_engines, runnable_engines
+
+    if engine not in enabled_engines():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Engine '{engine}' is not enabled",
+        )
+    if model is not None and engine not in runnable_engines(model):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Engine '{engine}' cannot run model '{model}'",
+        )
+
+
 async def check_session_access(session: Session, user: CurrentUser) -> None:
     """Raise 403 if user doesn't own this session (non-admin)."""
     if not user.is_admin() and session.user_id and str(session.user_id) != str(user.id):
@@ -116,6 +139,7 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
 ) -> SessionResponse:
     check_model_selectable(session_data.model)
+    check_engine_selectable(session_data.engine, session_data.model)
 
     # A cluster is optional: with no cluster configured the session starts
     # without a Kube context. Validate access only when one is requested.
@@ -269,6 +293,11 @@ async def update_session(
     update_data = session_data.model_dump(exclude_unset=True)
     if "model" in update_data:
         check_model_selectable(update_data["model"])
+    # Validate any engine pin against the model that will be in effect after this
+    # patch (the incoming model when set, else the session's current one).
+    if "engine" in update_data:
+        effective = update_data["model"] if "model" in update_data else session.model
+        check_engine_selectable(update_data["engine"], effective)
     model_changed = "model" in update_data and update_data["model"] != session.model
     new_model = update_data.get("model")
     for field, value in update_data.items():

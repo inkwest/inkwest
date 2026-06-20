@@ -61,7 +61,27 @@ async def test_app_config_reflects_model_settings(
     assert resp.status_code == 200
     data = resp.json()
     assert data["model"] == "claude-opus-4-20250514"
+    # The test deployment enables both engines, so a Claude model is runnable on each
+    # (claude-cli native + inkwest-agent via Converse) — the picker can pair Engine·Model.
+    assert data["engines"] == ["claude-cli", "inkwest-agent"]
+    # Default (Opus, a Claude model) resolves to the native CLI when both engines are on.
+    assert data["default_engine"] == "claude-cli"
+    both = ["claude-cli", "inkwest-agent"]
+    # input_modalities is empty here: these are static-catalog Claude models with no live
+    # Bedrock modality data (P1.8). Populated only when the live catalog supplies it.
     assert data["available_models"] == [
-        {"id": "claude-opus-4-20250514", "label": "Opus 4.0", "legacy": True},
-        {"id": "claude-sonnet-4-20250514", "label": "Sonnet 4.0", "legacy": True},
+        {
+            "id": "claude-opus-4-20250514",
+            "label": "Opus 4.0",
+            "legacy": True,
+            "engines": both,
+            "input_modalities": [],
+        },
+        {
+            "id": "claude-sonnet-4-20250514",
+            "label": "Sonnet 4.0",
+            "legacy": True,
+            "engines": both,
+            "input_modalities": [],
+        },
     ]

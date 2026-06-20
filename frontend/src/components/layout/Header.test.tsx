@@ -100,53 +100,28 @@ describe('Header', () => {
     expect(screen.getByTestId('connection-status')).toBeInTheDocument();
   });
 
-  it('shows the default model badge when no session is active', () => {
+  it('renders no default-model badge (selection moved to the chat toolbar picker)', () => {
     useConfigStore.setState({
       config: {
         provider: 'anthropic',
         model: 'claude-sonnet-4-20250514',
+        default_engine: 'claude-cli',
+        engines: ['claude-cli'],
         available_models: [
-          { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true },
-          { id: 'claude-opus-4-20250514', label: 'Opus 4.0', legacy: true },
+          {
+            id: 'claude-sonnet-4-20250514',
+            label: 'Sonnet 4.0',
+            legacy: true,
+            engines: ['claude-cli'],
+            input_modalities: [],
+          },
         ],
         attachments_enabled: false,
       },
     });
     renderHeader();
-    const badge = screen.getByTitle(
-      'Provider: anthropic · Default model: claude-sonnet-4-20250514',
-    );
-    expect(badge).toHaveTextContent('Sonnet 4.0');
-  });
-
-  it('hides the model badge when config is not loaded', () => {
-    renderHeader();
-    expect(screen.queryByTitle(/Provider:/)).not.toBeInTheDocument();
-  });
-
-  it('hides the model badge during an active session (selector lives in the chat toolbar)', () => {
-    useConfigStore.setState({
-      config: {
-        provider: 'anthropic',
-        model: 'claude-sonnet-4-20250514',
-        available_models: [
-          { id: 'claude-sonnet-4-20250514', label: 'Sonnet 4.0', legacy: true },
-        ],
-        attachments_enabled: false,
-      },
-    });
-    useSessionsStore.setState({
-      currentSession: {
-        id: 's1',
-        cluster_id: null,
-        model: null,
-        cluster: null,
-        messages: [],
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-    });
-    renderHeader();
+    // The old "Provider: … · Default model: …" badge was removed — a bare model name
+    // with no engine is ambiguous now a model can run on more than one engine.
     expect(screen.queryByTitle(/Provider:/)).not.toBeInTheDocument();
   });
 

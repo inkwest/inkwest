@@ -200,6 +200,15 @@ export interface ModelInfo {
   endpoint: string | null;
   arn: string | null;
   options: Record<string, unknown>;
+  /** Engines capable of running this model (which engine sections it appears in). The
+   *  engines it is actually offered on live in options.engines (absent = all capable). */
+  capable_engines: string[];
+  /** Input modalities from the live catalog: TEXT/IMAGE/VIDEO/SPEECH (SPEECH = audio).
+   *  Empty = unknown/text-only. Drives the modality icons + capability filter. */
+  input_modalities: string[];
+  /** Output modalities: TEXT/EMBEDDING/IMAGE/VIDEO. A non-TEXT-only output (embedding /
+   *  image-gen) marks a non-chat model (badged + excluded by the chat-capable filter). */
+  output_modalities: string[];
   input_price: number | null;
   output_price: number | null;
 }
@@ -214,10 +223,16 @@ export interface CatalogStatus {
 export interface ModelSettings {
   provider: string;
   default_model: string;
+  /** The engine the default model runs on (admin choice, else resolved heuristically). */
+  default_engine: string;
   /** Model IDs users may pick per session (admin-enabled subset). */
   enabled_models: string[];
-  /** Whether open-weight Bedrock models are surfaced in the catalog. */
-  include_open: boolean;
+  /** Whether all Bedrock vendors (not just Anthropic) are surfaced. */
+  include_all_vendors: boolean;
+  /** Whether the custom (inkwest-agent) engine is enabled — gates the toggle. */
+  inkwest_agent_enabled: boolean;
+  /** Engines enabled in this deployment — one admin section per engine. */
+  engines: string[];
   catalog: CatalogStatus;
   /** The full merged registry: discovered models + custom rows. */
   models: ModelInfo[];
@@ -225,7 +240,11 @@ export interface ModelSettings {
 
 export interface UpdateModelSettingsRequest {
   default_model: string;
+  /** The engine the default model runs on; omit/empty = resolve heuristically. */
+  default_engine?: string;
   enabled_models: string[];
+  /** Per-(engine, model) offering: model_id -> engine ids it's exposed on. */
+  engine_availability?: Record<string, string[]>;
 }
 
 export interface AddModelRequest {
@@ -265,11 +284,13 @@ export async function updateModelSettings(
   });
 }
 
-/** Force a live catalog refresh; optionally flip the open-models flag first. */
-export async function refreshModels(includeOpen?: boolean): Promise<ModelSettings> {
+/** Force a live catalog refresh; optionally flip the all-vendors flag first. */
+export async function refreshModels(includeAllVendors?: boolean): Promise<ModelSettings> {
   return fetchAPI('/api/admin/settings/model/refresh', {
     method: 'POST',
-    body: JSON.stringify(includeOpen === undefined ? {} : { include_open: includeOpen }),
+    body: JSON.stringify(
+      includeAllVendors === undefined ? {} : { include_all_vendors: includeAllVendors }
+    ),
   });
 }
 

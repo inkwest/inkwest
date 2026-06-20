@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     # AI Provider: anthropic, bedrock, or claude-cli
     ai_provider: Literal["anthropic", "bedrock", "claude-cli"] = "claude-cli"
 
+    # Agentic engines enabled in this deployment (CSV). An engine is *which
+    # agentic loop* runs a turn, decoupled from AI_PROVIDER (the model backend):
+    #   - claude-cli    : Claude Code CLI in the sandbox (Claude models only)
+    #   - inkwest-agent : the custom Converse loop (all Bedrock vendors)
+    # Default `claude-cli` preserves today's behavior exactly. The catalog is
+    # engine-aware (see app.services.engines / model_catalog): non-Claude Bedrock
+    # models are only surfaced when an engine that can run them is enabled.
+    # See docs/SANDBOXED_AGENT_RUNTIME.md (decision #7).
+    agentic_engines: str = "claude-cli"
+
     # Anthropic settings. The default model is NOT env-configured: it lives in
     # the database (admin Model screen), falling back to the newest model of
     # the provider's catalog (see app.services.model_catalog).
@@ -144,6 +154,9 @@ class Settings(BaseSettings):
     sandbox_enabled: bool = False
     sandbox_docker_path: str = "docker"
     sandbox_toolbox_image: str = ""  # claude-toolbox image (claude + kubectl + aws)
+    # Image the broker spawns the inkwest-agent worker in (P1.3). Empty = reuse
+    # sandbox_toolbox_image (the toolbox bakes the agent in — see backend/Dockerfile.agent); set this to point at a dedicated agent image later (decision #6).
+    sandbox_agent_image: str = ""
     # The sandbox container's HOME. Claude Code state (durable, for --resume) and the creds
     # tmpfs are anchored here, and CLAUDE_CONFIG_DIR is set to <home>/.claude so it works
     # regardless of the image's own HOME env. Set this to your image's home directory.
@@ -216,6 +229,22 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    @property
+    def agent_image(self) -> str:
+        """Image to spawn the inkwest-agent worker in: the dedicated image if set,
+        else the toolbox image (which bakes the agent in)."""
+        return self.sandbox_agent_image or self.sandbox_toolbox_image
+
+    @property
+    def agentic_engines_list(self) -> list[str]:
+        """Enabled engines, parsed from the CSV (order preserved, deduped)."""
+        seen: dict[str, None] = {}
+        for raw in self.agentic_engines.split(","):
+            engine = raw.strip()
+            if engine:
+                seen.setdefault(engine, None)
+        return list(seen)
+
     @model_validator(mode="after")
     def _stamp_dev_version(self) -> "Settings":
         # "dev" means no build-time VERSION was injected. On a local/dev run, swap it
@@ -244,6 +273,11 @@ def validate_settings() -> None:
             raise ValueError("SECRET_KEY must not be empty in production")
         if settings.secret_key == default_secret:
             raise ValueError("SECRET_KEY must be changed from default in production")
+
+    # Engines validated here (local import: app.services.engines reads settings).
+    from app.services.engines import validate_engines
+
+    validate_engines()
 
     if settings.ai_provider == "anthropic" and not settings.anthropic_api_key:
         raise ValueError("ANTHROPIC_API_KEY is required when AI_PROVIDER is 'anthropic'")

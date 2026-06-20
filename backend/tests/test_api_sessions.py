@@ -429,3 +429,43 @@ async def test_update_session_unpins_model_with_null(
         )
     assert resp.status_code == 200
     assert mock_session_obj.model is None
+
+
+@pytest.mark.asyncio
+async def test_update_session_rejects_disabled_engine(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result_mock)
+
+    resp = await authenticated_client.patch(
+        f"/api/sessions/{mock_session_obj.id}",
+        json={"engine": "bogus-engine"},
+    )
+    assert resp.status_code == 400
+    assert "not enabled" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_session_accepts_engine_pin_for_claude(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+    mock_user: MagicMock,
+) -> None:
+    # a Claude model can be pinned to the inkwest-agent engine (Converse).
+    mock_session_obj.user_id = str(mock_user.id)
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result_mock)
+    mock_db.flush = AsyncMock()
+    mock_db.refresh = AsyncMock()
+
+    with patch("app.api.routes.sessions.notify", return_value=None):
+        resp = await authenticated_client.patch(
+            f"/api/sessions/{mock_session_obj.id}",
+            json={"model": "claude-opus-4-20250514", "engine": "inkwest-agent"},
+        )
+    assert resp.status_code == 200
+    assert mock_session_obj.engine == "inkwest-agent"

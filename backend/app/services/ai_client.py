@@ -158,6 +158,16 @@ async def resolve_session_model(db: AsyncSession, session_id: "str | UUID") -> s
     return await resolve_session_model_choice(db, session_id) or default_model()
 
 
+async def resolve_session_engine(db: AsyncSession, session_id: "str | UUID") -> str | None:
+    """The session's explicit engine pin, if any (NULL = resolve per turn).
+
+    Validity against the enabled set + the model's runnable engines is decided at
+    dispatch (``engine_for_turn``), so a stale pin degrades gracefully rather than
+    erroring here.
+    """
+    return await db.scalar(select(Session.engine).where(Session.id == session_id))
+
+
 def get_orchestrator():
     """
     Get the appropriate orchestrator based on AI_PROVIDER setting.
@@ -172,16 +182,60 @@ def get_orchestrator():
     settings = get_settings()
 
     if settings.ai_provider == "claude-cli":
-        from app.services.orchestrator_cli import orchestrate_chat_cli
+        # Engine is decoupled from the provider: the default claude-cli deployment can
+        # additionally enable the sandboxed inkwest-agent (custom Converse loop). Resolve
+        # the engine per turn from the session's model — a non-Claude model needs the
+        # agent (the CLI is Claude-only). Claude models stay on the CLI (its native path).
+        from app.services.engines import (
+            INKWEST_AGENT,
+            configured_default_engine,
+            engine_for_turn,
+            inkwest_agent_enabled,
+        )
 
-        logger.info("Using Claude CLI orchestrator")
-        return orchestrate_chat_cli
+        async def _dispatch_engine(
+            db: AsyncSession, session_id: "str | UUID", **kwargs: Any
+        ) -> AsyncIterator[Any]:
+            model = await resolve_session_model(db, session_id)
+            # Honor the session's explicit engine pin when set (the Engine·Model picker,
+            #) — a Claude model can then run through the sandboxed Converse loop
+            # too, not only the CLI. With no session pin, fall back to the admin's chosen
+            # default engine for the default model; otherwise engine_for_turn applies the
+            # default rule (non-Claude → agent; Claude → native CLI), reconciled against the
+            # registry's provider tag. Resolved fresh per turn so a mid-session switch /
+            # admin change takes effect without a dispatcher rebuild.
+            pinned = await resolve_session_engine(db, session_id)
+            if pinned is None and model == default_model():
+                pinned = configured_default_engine()
+            engine = engine_for_turn(model, pinned)
+            # Route to the broker only when the agent can actually run (engine enabled +
+            # sandbox available); otherwise fall back to the CLI.
+            if (
+                engine == INKWEST_AGENT
+                and inkwest_agent_enabled()
+                and get_settings().sandbox_enabled
+            ):
+                from app.services.orchestrator_inkwest_agent import (
+                    orchestrate_chat_inkwest_agent,
+                )
+
+                logger.info(f"Engine inkwest-agent (sandboxed) for model {model}")
+                orchestrate = orchestrate_chat_inkwest_agent
+            else:
+                from app.services.orchestrator_cli import orchestrate_chat_cli
+
+                orchestrate = orchestrate_chat_cli
+            async for event in orchestrate(db=db, session_id=session_id, **kwargs):
+                yield event
+
+        logger.info("Using Claude CLI orchestrator (engine-dispatched)")
+        return _dispatch_engine
 
     if settings.ai_provider == "bedrock":
         # Bedrock serves both Claude (Anthropic Messages protocol via the SDK) and
         # open-weight models (Bedrock Converse API). The target isn't known until
         # the session's model is resolved, so dispatch per turn.
-        from app.services.model_catalog import is_anthropic_model
+        from app.services.model_catalog import is_anthropic_model, provider_speaks_messages
         from app.services.orchestrator import orchestrate_chat
         from app.services.orchestrator_converse import orchestrate_chat_converse
 
@@ -196,7 +250,11 @@ def get_orchestrator():
             # (e.g. a gateway alias whose ID would fool the substring heuristic).
             # Fall back to the ID heuristic for anything not in the catalog.
             entry = get_entry(model)
-            is_open = entry.provider == "bedrock-open" if entry else not is_anthropic_model(model)
+            is_open = (
+                not provider_speaks_messages(entry.provider)
+                if entry
+                else not is_anthropic_model(model)
+            )
             orchestrate = orchestrate_chat_converse if is_open else orchestrate_chat
             logger.info(f"Bedrock turn via {'Converse' if is_open else 'Anthropic'}: {model}")
             async for event in orchestrate(db=db, session_id=session_id, **kwargs):

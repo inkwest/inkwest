@@ -835,7 +835,7 @@ class TestGetOrchestrator:
     """Tests for get_orchestrator factory function."""
 
     def test_get_orchestrator_cli(self):
-        """Test getting CLI orchestrator."""
+        """claude-cli returns a per-turn engine dispatcher (CLI vs sandboxed agent)."""
         with patch("app.services.ai_client.get_settings") as mock_settings:
             mock_settings.return_value.ai_provider = "claude-cli"
 
@@ -843,9 +843,7 @@ class TestGetOrchestrator:
 
             orchestrator = get_orchestrator()
 
-            from app.services.orchestrator_cli import orchestrate_chat_cli
-
-            assert orchestrator == orchestrate_chat_cli
+            assert orchestrator.__name__ == "_dispatch_engine"
 
     def test_get_orchestrator_anthropic(self):
         """Test getting API orchestrator for anthropic."""

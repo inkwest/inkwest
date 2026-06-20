@@ -371,6 +371,7 @@ def mock_session_obj(mock_cluster: MagicMock) -> MagicMock:
     session.system_prompt_id = None
     session.system_prompt_custom = None
     session.model = None
+    session.engine = None
     session.title = "Test Session"
     session.summary = "A test summary"
     session.is_archived = False

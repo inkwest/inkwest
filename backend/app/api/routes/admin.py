@@ -28,11 +28,22 @@ from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import Session
 from app.models.user import User
 from app.services import model_registry
-from app.services.app_settings import BEDROCK_INCLUDE_OPEN_KEY, get_bool_setting, set_setting
+from app.services.app_settings import (
+    BEDROCK_INCLUDE_OPEN_KEY,
+    DEFAULT_ENGINE_KEY,
+    set_setting,
+)
 from app.services.budget_service import (
     get_period_start,
 )
-from app.services.model_catalog import catalog_status, refresh_catalog
+from app.services.engines import (
+    capable_engines,
+    configured_default_engine,
+    enabled_engines,
+    engine_for_turn,
+    inkwest_agent_enabled,
+)
+from app.services.model_catalog import bedrock_include_open, catalog_status, refresh_catalog
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -190,6 +201,15 @@ class ModelInfo(BaseModel):
     endpoint: str | None
     arn: str | None
     options: dict[str, Any]
+    # Engines *capable* of running this model (pure vendor capability — which engine
+    # sections the model appears in). The engines it is actually *offered* on live in
+    # options["engines"] (absent = all capable). See engines.capable_engines.
+    capable_engines: list[str]
+    # Modality capabilities from the live catalog (P1.8): input TEXT/IMAGE/VIDEO/SPEECH,
+    # output TEXT/EMBEDDING/IMAGE/VIDEO. Empty = unknown/text-only. Drives the admin
+    # modality icons + the non-chat (embedding/image-gen output) badge + capability filter.
+    input_modalities: list[str]
+    output_modalities: list[str]
     # Effective per-million-token prices, null when unpriced.
     input_price: float | None
     output_price: float | None
@@ -209,30 +229,58 @@ class ModelSettingsResponse(BaseModel):
 
     provider: str
     default_model: str
+    # The engine the default model runs on (admin choice, else resolved heuristically).
+    default_engine: str
     # Model IDs users may pick per session (admin-enabled subset).
     enabled_models: list[str]
-    # Whether open-weight Bedrock models are surfaced in the catalog.
-    include_open: bool
+    # Whether all Bedrock vendors (not just Anthropic) are surfaced in the catalog.
+    include_all_vendors: bool
+    # Whether the custom (inkwest-agent) engine is enabled — gates the
+    # all-vendors toggle, which is only useful when an engine can run them.
+    inkwest_agent_enabled: bool
+    # Engines enabled in this deployment (AGENTIC_ENGINES) — the admin renders one
+    # section per engine and curates per-(engine, model) availability against this.
+    engines: list[str]
     catalog: CatalogStatus
     # The full merged registry: discovered models + custom rows.
     models: list[ModelInfo]
 
 
 class UpdateModelSettingsRequest(BaseModel):
-    """Bulk save: the enabled subset and the default model."""
+    """Bulk save: the enabled subset, the default model, and per-engine availability."""
 
     default_model: str = Field(..., min_length=1, max_length=512)
+    # The engine the default model runs on; None = resolve heuristically.
+    default_engine: str | None = Field(None, max_length=50)
     enabled_models: list[str] = Field(..., min_length=1)
+    # Optional per-(engine, model) offering: model_id -> engine ids it's exposed on.
+    # Omitted = leave each model's engine offering untouched (legacy enable-only save).
+    engine_availability: dict[str, list[str]] | None = None
 
 
 class RefreshModelsRequest(BaseModel):
-    """Force a catalog refresh, optionally flipping the open-models flag first."""
+    """Force a catalog refresh, optionally flipping the all-vendors flag first."""
 
-    include_open: bool | None = None
+    include_all_vendors: bool | None = None
 
 
-# The provider tags the registry understands (drives chat routing + UI grouping).
-ModelProvider = Literal["anthropic", "bedrock", "bedrock-open", "claude-cli"]
+# The provider tags the registry understands (drives chat routing + UI grouping):
+# per-vendor Bedrock namespaces + the off-Bedrock providers, plus the legacy
+# ``bedrock``/``bedrock-open`` tags kept so rows written before per-vendor tagging
+# still validate and route. Only ``anthropic``/``bedrock`` speak Messages.
+ModelProvider = Literal[
+    "anthropic",
+    "amazon",
+    "meta",
+    "mistral",
+    "cohere",
+    "ai21",
+    "deepseek",
+    "stability",
+    "claude-cli",
+    "bedrock",
+    "bedrock-open",
+]
 
 # Hostnames that must never be reachable via an operator-supplied endpoint.
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
@@ -922,17 +970,24 @@ def _model_info(entry: model_registry.ModelEntry) -> ModelInfo:
         endpoint=entry.endpoint,
         arn=entry.arn,
         options=entry.options,
+        capable_engines=capable_engines(entry.model_id),
+        input_modalities=entry.input_modalities,
+        output_modalities=entry.output_modalities,
         input_price=float(entry.input_price) if entry.input_price is not None else None,
         output_price=float(entry.output_price) if entry.output_price is not None else None,
     )
 
 
 def _model_settings_response() -> ModelSettingsResponse:
+    default_id = model_registry.default_model()
     return ModelSettingsResponse(
         provider=get_settings().ai_provider,
-        default_model=model_registry.default_model(),
+        default_model=default_id,
+        default_engine=engine_for_turn(default_id, configured_default_engine()),
         enabled_models=model_registry.selectable_models(),
-        include_open=get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY),
+        include_all_vendors=bedrock_include_open(),
+        inkwest_agent_enabled=inkwest_agent_enabled(),
+        engines=enabled_engines(),
         catalog=CatalogStatus(**catalog_status()),
         models=[_model_info(e) for e in model_registry.merged_entries()],
     )
@@ -966,13 +1021,43 @@ async def update_model_settings(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown models: {', '.join(unknown)}",
         )
+    # Validate per-engine availability: each entry must name a known model and only
+    # engines that model is *capable* of (a non-Claude model can't be offered on
+    # claude-cli). Reject otherwise so a stale UI can't persist an impossible pairing.
+    if body.engine_availability is not None:
+        for model_id, engines in body.engine_availability.items():
+            if model_id not in available:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unknown model in engine_availability: {model_id}",
+                )
+            bad = [e for e in engines if e not in capable_engines(model_id)]
+            if bad:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Model '{model_id}' cannot run on engine(s): {', '.join(bad)}",
+                )
+    # The default engine (if pinned) must be one the default model is capable of.
+    if body.default_engine is not None and body.default_engine not in capable_engines(
+        body.default_model
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Default model '{body.default_model}' cannot run on engine "
+            f"'{body.default_engine}'",
+        )
     try:
-        await model_registry.set_model_settings(db, body.default_model, body.enabled_models)
+        await model_registry.set_model_settings(
+            db, body.default_model, body.enabled_models, availability=body.engine_availability
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    # Persist the default engine (an app-setting, separate from the registry's model
+    # default flag). Empty string clears it → resolve heuristically.
+    await set_setting(db, DEFAULT_ENGINE_KEY, body.default_engine or "")
     logger.info(
-        f"Model settings changed by {admin.email}: "
-        f"default={body.default_model}, enabled={body.enabled_models}"
+        f"Model settings changed by {admin.email}: default={body.default_model} "
+        f"(engine={body.default_engine}), enabled={body.enabled_models}"
     )
     return _model_settings_response()
 
@@ -983,13 +1068,19 @@ async def refresh_model_catalog(
     admin: AdminUser,
     db: AsyncSession = Depends(get_db),
 ) -> ModelSettingsResponse:
-    """Force a live catalog refresh; optionally flip the open-models flag first."""
-    if body.include_open is not None:
-        await set_setting(db, BEDROCK_INCLUDE_OPEN_KEY, "true" if body.include_open else "false")
+    """Force a live catalog refresh; optionally flip the all-vendors flag first."""
+    if body.include_all_vendors is not None:
+        await set_setting(
+            db, BEDROCK_INCLUDE_OPEN_KEY, "true" if body.include_all_vendors else "false"
+        )
     await refresh_catalog(force=True)
     logger.info(
         f"Model catalog refreshed by {admin.email}"
-        + (f" (include_open={body.include_open})" if body.include_open is not None else "")
+        + (
+            f" (include_all_vendors={body.include_all_vendors})"
+            if body.include_all_vendors is not None
+            else ""
+        )
     )
     return _model_settings_response()
 

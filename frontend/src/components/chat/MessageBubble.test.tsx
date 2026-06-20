@@ -45,6 +45,20 @@ describe('MessageBubble', () => {
     expect(container.querySelector('#message-msg-1')).toBeInTheDocument();
   });
 
+  it('exposes scroll anchors for rounds fused into the bubble', () => {
+    const msg: Message = {
+      ...baseMessage,
+      role: 'assistant',
+      content: 'Done.',
+      mergedIds: ['round-2', 'round-3'],
+    };
+    const { container } = render(<MessageBubble message={msg} />);
+    // Lead id plus one anchor per absorbed round, so a search deep-link resolves.
+    expect(container.querySelector('#message-msg-1')).toBeInTheDocument();
+    expect(container.querySelector('#message-round-2')).toBeInTheDocument();
+    expect(container.querySelector('#message-round-3')).toBeInTheDocument();
+  });
+
   it('applies the highlight ring only when highlighted', () => {
     const { container, rerender } = render(<MessageBubble message={baseMessage} />);
     expect(container.querySelector('.ring-2')).toBeNull();

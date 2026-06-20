@@ -304,7 +304,8 @@ async def test_get_model_settings(admin_client: AsyncClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["default_model"] in data["enabled_models"]
-    assert "include_open" in data
+    assert "include_all_vendors" in data
+    assert "inkwest_agent_enabled" in data
     assert data["catalog"]["source"] in ("live", "static")
     available_ids = [m["id"] for m in data["models"]]
     # Nothing configured yet: all available models are selectable
@@ -321,6 +322,9 @@ async def test_get_model_settings(admin_client: AsyncClient) -> None:
     assert legacy["claude-sonnet-4-20250514"] is True
     # Provider tagging is present for grouping
     assert all(m["provider"] for m in data["models"])
+    # P1.8: modality flags are exposed (empty here — static catalog, no live Bedrock data).
+    assert all("input_modalities" in m and "output_modalities" in m for m in data["models"])
+    assert all(m["input_modalities"] == [] for m in data["models"])
 
 
 @pytest.mark.asyncio
@@ -389,10 +393,10 @@ async def test_refresh_model_catalog_sets_open_flag(
     mock_db.execute = AsyncMock(return_value=MagicMock())
     with patch("app.api.routes.admin.refresh_catalog", new=AsyncMock()) as refresh:
         resp = await admin_client.post(
-            "/api/admin/settings/model/refresh", json={"include_open": True}
+            "/api/admin/settings/model/refresh", json={"include_all_vendors": True}
         )
     assert resp.status_code == 200
-    assert resp.json()["include_open"] is True
+    assert resp.json()["include_all_vendors"] is True
     refresh.assert_awaited_once_with(force=True)
     mock_db.commit.assert_awaited()  # set_setting persisted the flag
 

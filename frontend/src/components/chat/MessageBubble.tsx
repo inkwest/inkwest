@@ -400,6 +400,12 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
           </div>
         )}
 
+        {/* Zero-size scroll anchors for rounds fused into this bubble, so a
+            search deep-link to an absorbed row id still resolves (see MessageList). */}
+        {message.mergedIds?.map((mid) => (
+          <span key={mid} id={`message-${mid}`} aria-hidden className="block h-0 w-0 overflow-hidden" />
+        ))}
+
         {renderContent()}
 
         {isUser && message.attachments && message.attachments.length > 0 && (

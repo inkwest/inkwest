@@ -33,7 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.model_registry import ModelRegistry
-from app.services.model_catalog import available_models, is_anthropic_model
+from app.services.model_catalog import (
+    available_models,
+    bedrock_vendor,
+    is_anthropic_model,
+    model_modalities,
+    profile_arn,
+)
 from app.services.pricing import (
     DEFAULT_PRICING,
     ModelPricing,
@@ -86,14 +92,34 @@ class ModelEntry:
     options: dict[str, Any] = field(default_factory=dict)
     input_price: Decimal | None = None
     output_price: Decimal | None = None
+    # Modality capabilities captured from the live Bedrock catalog (P1.8). Empty =
+    # unknown (off-Bedrock, custom row, or no live data) ⇒ treated as text-only. Drives
+    # the picker's IMAGE-upload gate + the admin modality icons. Bedrock terms: input
+    # TEXT/IMAGE/VIDEO/SPEECH, output TEXT/EMBEDDING/IMAGE/VIDEO.
+    input_modalities: list[str] = field(default_factory=list)
+    output_modalities: list[str] = field(default_factory=list)
 
 
 def _derive_provider(model_id: str) -> str:
-    """Provider tag for a discovered model ID (no explicit row)."""
-    provider = get_settings().ai_provider
-    if provider == "bedrock":
-        return "bedrock" if is_anthropic_model(model_id) else "bedrock-open"
-    return provider
+    """Provider tag for a discovered model ID (no explicit row).
+
+    The tag is the per-vendor Bedrock namespace (``anthropic``, ``meta``,
+    ``mistral``...) whenever the ID carries a recognized vendor namespace — so the
+    admin UI groups by vendor and per-turn routing reads the right provider. This
+    holds regardless of the deployment provider: under ``claude-cli`` with the
+    inkwest-agent engine on, the whole-Bedrock catalog surfaces vendor models, and
+    tagging them all ``claude-cli`` would both lump every vendor under one box and
+    misroute (a Claude model would fail ``provider_speaks_messages`` and be sent to
+    the broker instead of the CLI). A bare ``claude-*`` (Anthropic API / gateway, no
+    Bedrock namespace) is tagged ``anthropic``; anything else falls back to the
+    configured provider.
+    """
+    vendor = bedrock_vendor(model_id)
+    if vendor != "bedrock":  # a recognized Bedrock vendor namespace (incl. anthropic)
+        return vendor
+    if is_anthropic_model(model_id):  # bare claude-* without a Bedrock namespace
+        return "anthropic"
+    return get_settings().ai_provider
 
 
 def _row_pricing(row: dict[str, Any] | None) -> tuple[ModelPricing | None, bool]:
@@ -118,9 +144,25 @@ def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
     override, has_override = _row_pricing(row)
     pricing = override or get_model_pricing(model_id)
     priced = has_override or pricing is not DEFAULT_PRICING
+    # Modalities come from the live catalog only (no DB column): a custom row with no live
+    # match yields empty lists = text-only/unknown, the back-compat default.
+    input_modalities, output_modalities = model_modalities(model_id)
+    # Invoke target: an explicit row arn (custom/admin intent) always wins; otherwise a
+    # discovered profile-only model gets its inference-profile ARN from the
+    # live catalog so the orchestrator/agent invokes the profile, not the bare id.
+    arn = (row.get("arn") if row else None) or profile_arn(model_id)
     return ModelEntry(
         model_id=model_id,
-        provider=(row["provider"] if row else _derive_provider(model_id)),
+        # Re-derive the vendor tag for discovered rows: their stored provider is just a
+        # derivation cached at enable-time (set_model_settings upserts it but never
+        # refreshes it), so a row enabled before a derivation change keeps a stale tag —
+        # which mis-grouped/mis-routed open-weight models lumped under "claude-cli". Only
+        # a custom row's provider is admin intent and kept verbatim.
+        provider=(
+            row["provider"]
+            if (row and row.get("source") == "custom")
+            else _derive_provider(model_id)
+        ),
         label=(row.get("display_name") if row else None) or model_label(model_id),
         enabled=bool(row["enabled"]) if row else False,
         is_default=bool(row["is_default"]) if row else False,
@@ -128,10 +170,12 @@ def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
         legacy=(bool(row["legacy"]) if row else False) or is_legacy_model(model_id),
         priced=priced,
         endpoint=row.get("endpoint") if row else None,
-        arn=row.get("arn") if row else None,
+        arn=arn,
         options=(row.get("options") or {}) if row else {},
         input_price=pricing.input_price if priced else None,
         output_price=pricing.output_price if priced else None,
+        input_modalities=input_modalities,
+        output_modalities=output_modalities,
     )
 
 
@@ -256,11 +300,22 @@ def _validate_price_pair(input_price: Decimal | None, output_price: Decimal | No
 # the same approach as app.services.app_settings.
 
 
-async def set_model_settings(db: AsyncSession, default: str, enabled: list[str]) -> None:
+async def set_model_settings(
+    db: AsyncSession,
+    default: str,
+    enabled: list[str],
+    availability: dict[str, list[str]] | None = None,
+) -> None:
     """Bulk save: enable exactly ``enabled`` and make ``default`` the default.
 
     Upserts a row per enabled model (preserving existing source/overrides),
     disables every other row, and moves the single default flag.
+
+    ``availability`` (optional) sets each model's per-engine offering — the engine
+    ids it is exposed on, stored in ``options["engines"]`` (see
+    ``engines.capable_engines``). ``None`` leaves ``options`` untouched (the
+    legacy enable-only path); an absent key likewise leaves a model's engines
+    unset (= offered on all its candidate engines).
     """
     if default not in enabled:
         raise ValueError("the default model must be one of the enabled models")
@@ -296,6 +351,18 @@ async def set_model_settings(db: AsyncSession, default: str, enabled: list[str])
         await db.execute(
             update(ModelRegistry).where(ModelRegistry.model_id == default).values(is_default=True)
         )
+        # Per-engine availability: merge ``engines`` into each model's options JSONB
+        # (preserving any other option keys, e.g. max_tokens). Done before commit so
+        # it lands atomically with the enable/default flips.
+        if availability is not None:
+            for model_id, engines in availability.items():
+                existing = dict(_rows.get(model_id, _blank_row(model_id)).get("options") or {})
+                existing["engines"] = list(engines)
+                await db.execute(
+                    update(ModelRegistry)
+                    .where(ModelRegistry.model_id == model_id)
+                    .values(options=existing)
+                )
         await db.commit()
         enabled_set = set(enabled)
         # First pass only *creates* rows for newly-enabled discovered models (the
@@ -305,6 +372,10 @@ async def set_model_settings(db: AsyncSession, default: str, enabled: list[str])
         for model_id, row in _rows.items():
             row["enabled"] = model_id in enabled_set
             row["is_default"] = model_id == default
+        if availability is not None:
+            for model_id, engines in availability.items():
+                row = _rows.setdefault(model_id, _blank_row(model_id))
+                row["options"] = {**(row.get("options") or {}), "engines": list(engines)}
     logger.info(f"Model settings updated: default={default}, enabled={enabled}")
 
 

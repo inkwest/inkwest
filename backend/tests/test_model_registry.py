@@ -24,6 +24,8 @@ def reset_registry():
     yield
     model_registry._rows = {}
     model_catalog._live_models = None
+    model_catalog._modalities = {}
+    model_catalog._profile_arns = {}
 
 
 def _row(model_id: str, **overrides):
@@ -106,9 +108,34 @@ def test_default_model_falls_back_to_newest_enabled():
     ("provider", "model_id", "expected"),
     [
         ("anthropic", "claude-opus-4-8", "anthropic"),
-        ("claude-cli", "claude-opus-4-8", "claude-cli"),
-        ("bedrock", "eu.anthropic.claude-opus-4-8", "bedrock"),
-        ("bedrock", "meta.llama3-1-70b-instruct-v1:0", "bedrock-open"),
+        # Bare claude-* (no Bedrock namespace) → anthropic regardless of provider, so it
+        # routes to the CLI (Messages protocol) and groups under Anthropic — not the
+        # deployment provider tag.
+        ("claude-cli", "claude-opus-4-8", "anthropic"),
+        # Bedrock: per-vendor tag derived from the (region-stripped) namespace.
+        ("bedrock", "eu.anthropic.claude-opus-4-8", "anthropic"),
+        ("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic"),
+        ("bedrock", "meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("bedrock", "us.meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("bedrock", "mistral.mistral-large-2407-v1:0", "mistral"),
+        ("bedrock", "amazon.nova-pro-v1:0", "amazon"),
+        ("bedrock", "cohere.command-r-v1:0", "cohere"),
+        ("bedrock", "ai21.jamba-1-5-large-v1:0", "ai21"),
+        ("bedrock", "deepseek.r1-v1:0", "deepseek"),
+        ("bedrock", "stability.stable-image-core-v1:0", "stability"),
+        # Vendor tag is derived verbatim from the namespace — NOT an allowlist — so
+        # vendors Bedrock keeps adding group coherently instead of all under "bedrock".
+        # This holds under claude-cli too (whole-Bedrock catalog with inkwest-agent on).
+        ("claude-cli", "eu.anthropic.claude-opus-4-8", "anthropic"),
+        ("claude-cli", "mistral.magistral-small-2509", "mistral"),
+        ("claude-cli", "google.gemma-3-27b-it", "google"),
+        ("claude-cli", "nvidia.nemotron-nano-30b-3.0", "nvidia"),
+        ("claude-cli", "qwen.qwen3-coder-30b-a3b-v1:0", "qwen"),
+        ("claude-cli", "openai.gpt-oss-120b:0", "openai"),
+        ("bedrock", "twelvelabs.marengo-embed-3-0-v1:0", "twelvelabs"),
+        ("bedrock", "us.minimax.minimax-m2-5", "minimax"),
+        # Bare, un-namespaced non-Claude ID (no dot) → deployment provider fallback.
+        ("claude-cli", "some-bare-model", "claude-cli"),
     ],
 )
 def test_derive_provider(provider, model_id, expected):
@@ -143,6 +170,45 @@ def test_unpriced_model_flagged_in_merged_entry():
     assert entry.input_price is None
 
 
+def test_merged_entry_carries_modalities_from_catalog():
+    """P1.8: _entry populates input/output modalities from the catalog capability map."""
+    model_catalog._live_models = ["anthropic.claude-opus-4-v1:0"]
+    model_catalog._modalities = {
+        "anthropic.claude-opus-4-v1:0": {"input": ["TEXT", "IMAGE"], "output": ["TEXT"]}
+    }
+    entry = next(e for e in merged_entries() if e.model_id == "anthropic.claude-opus-4-v1:0")
+    assert entry.input_modalities == ["TEXT", "IMAGE"]
+    assert entry.output_modalities == ["TEXT"]
+
+
+def test_merged_entry_modalities_empty_when_unknown():
+    """A model with no live modality data → empty lists (back-compat / text-only)."""
+    model_catalog._live_models = ["totally-unknown-model"]
+    model_catalog._modalities = {}
+    entry = next(e for e in merged_entries() if e.model_id == "totally-unknown-model")
+    assert entry.input_modalities == []
+    assert entry.output_modalities == []
+
+
+def test_synthesized_entry_carries_profile_arn_as_invoke_target():
+    """a discovered profile-only model (no DB row) gets its inference-profile
+    ARN from the catalog as ``arn`` — the invoke target the orchestrator/agent reads."""
+    model_catalog._live_models = ["eu.zai.glm5"]
+    arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.zai.glm5"
+    model_catalog._profile_arns = {"eu.zai.glm5": arn, "zai.glm5": arn}
+    entry = next(e for e in merged_entries() if e.model_id == "eu.zai.glm5")
+    assert entry.arn == arn
+
+
+def test_explicit_row_arn_wins_over_profile_arn():
+    """An admin/custom row arn is intent and beats the discovered profile ARN."""
+    model_catalog._live_models = ["eu.zai.glm5"]
+    model_catalog._profile_arns = {"eu.zai.glm5": "arn:profile"}
+    model_registry._rows = {"eu.zai.glm5": _row("eu.zai.glm5", arn="arn:custom-override")}
+    entry = next(e for e in merged_entries() if e.model_id == "eu.zai.glm5")
+    assert entry.arn == "arn:custom-override"
+
+
 # ---------------------------------------------------------------------------
 # Merge
 # ---------------------------------------------------------------------------
@@ -167,6 +233,20 @@ def test_merged_entries_includes_custom_not_in_catalog():
     assert custom.provider == "bedrock-open"
     assert custom.source == "custom"
     assert custom.priced is False  # no override, not in table -> red in UI
+
+
+def test_discovered_row_provider_is_rederived_not_stale():
+    """A discovered row enabled before a derivation change keeps a stale stored provider;
+    the merged entry must re-derive it (vendor), not trust the cached tag."""
+    model_catalog._live_models = ["google.gemma-3-27b-it"]
+    model_registry._rows = {
+        # stale tag from when it was enabled under the old all-claude-cli derivation
+        "google.gemma-3-27b-it": _row(
+            "google.gemma-3-27b-it", provider="claude-cli", source="discovered", enabled=True
+        )
+    }
+    entry = next(e for e in merged_entries() if e.model_id == "google.gemma-3-27b-it")
+    assert entry.provider == "google"  # re-derived, not the stale "claude-cli"
 
 
 def test_merged_entry_label_override_and_priced_flag():

@@ -54,6 +54,7 @@ async def execute_tool_calls(
     kubeconfig_path: str | None,
     context_name: str | None,
     cancel_event: asyncio.Event | None,
+    projected_creds: bool = False,
 ) -> AsyncIterator[ChatEvent]:
     """Execute each tool call, yielding tool_start/result/connector events.
 
@@ -61,6 +62,10 @@ async def execute_tool_calls(
     caller persists them (so the save runs in the caller's module, and a
     mid-loop cancel — which sets ``result.cancelled`` and returns early —
     discards the partial results, matching the prior per-orchestrator behavior).
+
+    ``projected_creds`` is set by the sandboxed inkwest-agent: connector creds were
+    pre-provided by the broker as env, so executors read them from the environment
+    rather than the portal credential store (which the agent process can't reach).
     """
     for tool_call in tool_calls:
         if cancel_event and cancel_event.is_set():
@@ -83,6 +88,7 @@ async def execute_tool_calls(
             session_id=session_id,
             kubeconfig_path=kubeconfig_path,
             context_name=context_name,
+            projected_creds=projected_creds,
         )
         try:
             output, is_error = await execute_tool(tool_name, tool_input, tool_ctx)

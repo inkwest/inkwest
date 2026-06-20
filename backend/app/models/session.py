@@ -125,6 +125,16 @@ class Session(Base, TimestampMixin):
         comment="AI model for this session; NULL = global default",
     )
 
+    # Agentic engine for this session (claude-cli | inkwest-agent); NULL = resolve
+    # per turn from AGENTIC_ENGINES + the model (see app.services.engines). Reserved
+    # first-class now; a per-session engine picker is a next step (today: model-only
+    # UI). See docs/SANDBOXED_AGENT_RUNTIME.md (decision #7).
+    engine: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Agentic engine for this session; NULL = resolve per turn",
+    )
+
     # Per-conversation MCP selection: catalog keys (see app.services.mcp_catalog)
     # the user enabled for this session. Merged into the conversation's
     # .claude.json mcpServers; persisted so the choice survives reload / --resume.

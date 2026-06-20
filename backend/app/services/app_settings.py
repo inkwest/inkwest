@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 # Whether the Bedrock catalog includes non-Anthropic (open-weight) models.
 BEDROCK_INCLUDE_OPEN_KEY = "bedrock_include_open"
+# The engine the default model runs on when a session pins neither (the admin's
+# Engine·Model default). Unset = resolve heuristically (engines.engine_for_turn).
+DEFAULT_ENGINE_KEY = "default_engine"
 
 _settings: dict[str, str] = {}
 # Serializes writes so concurrent admin saves can't leave the in-memory copy

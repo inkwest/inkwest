@@ -309,8 +309,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 )
 
                 turn_kwargs: dict = {**base_kwargs, "user_message": content}
-                # The @-file mechanism is claude-cli only; the API/Bedrock orchestrators
-                # have no `attachments` parameter, so only pass it to the CLI one.
+                # Attachments need the per-conversation sandbox /workdir, which only exists
+                # under the claude-cli provider. Both sandbox engines consume them there:
+                # claude-cli via @/workdir/<file> refs, inkwest-agent via the TurnSpec
+                # (image files → Converse image blocks, P1.8). The pure API/Bedrock
+                # orchestrators have no /workdir and no `attachments` parameter.
                 if attachments and get_settings().ai_provider == "claude-cli":
                     turn_kwargs["attachments"] = attachments
                 started = await turn_runner.start(session_id, get_orchestrator(), turn_kwargs)

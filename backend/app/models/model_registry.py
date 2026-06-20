@@ -24,7 +24,9 @@ class ModelRegistry(Base, TimestampMixin):
     __tablename__ = "model_registry"
 
     model_id: Mapped[str] = mapped_column(String(512), primary_key=True)
-    # anthropic | bedrock | bedrock-open | claude-cli
+    # Vendor/provider tag: anthropic | amazon | meta | mistral | cohere | ai21 |
+    # deepseek | stability | claude-cli (+ legacy bedrock | bedrock-open). Drives
+    # UI grouping and chat routing (only anthropic/bedrock speak Messages).
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     # NULL = derive the label from the ID (pricing.model_label).
     display_name: Mapped[str | None] = mapped_column(String(255))

@@ -2,11 +2,21 @@ import { useState } from 'react';
 import { Button, Input, Modal, Select } from '@/components/ui';
 import { AddModelRequest, ModelInfo, UpdateModelRequest } from '@/services/adminApi';
 
+// Per-vendor Bedrock tags + off-Bedrock providers. Only anthropic/bedrock route
+// via the Anthropic Messages protocol; the rest go through Converse. The legacy
+// bedrock-open tag is kept so pre-existing custom rows remain editable.
 const PROVIDER_OPTIONS = [
   { value: 'anthropic', label: 'Anthropic' },
-  { value: 'bedrock', label: 'Bedrock (Claude)' },
-  { value: 'bedrock-open', label: 'Bedrock (open-weight)' },
+  { value: 'amazon', label: 'Amazon' },
+  { value: 'meta', label: 'Meta' },
+  { value: 'mistral', label: 'Mistral' },
+  { value: 'cohere', label: 'Cohere' },
+  { value: 'ai21', label: 'AI21' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'stability', label: 'Stability' },
   { value: 'claude-cli', label: 'Claude CLI' },
+  { value: 'bedrock', label: 'Bedrock (Claude, legacy tag)' },
+  { value: 'bedrock-open', label: 'Bedrock (other vendors, legacy tag)' },
 ];
 
 interface Props {
