@@ -25,6 +25,7 @@ def reset_registry():
     model_registry._rows = {}
     model_catalog._live_models = None
     model_catalog._modalities = {}
+    model_catalog._profile_arns = {}
 
 
 def _row(model_id: str, **overrides):
@@ -187,6 +188,25 @@ def test_merged_entry_modalities_empty_when_unknown():
     entry = next(e for e in merged_entries() if e.model_id == "totally-unknown-model")
     assert entry.input_modalities == []
     assert entry.output_modalities == []
+
+
+def test_synthesized_entry_carries_profile_arn_as_invoke_target():
+    """a discovered profile-only model (no DB row) gets its inference-profile
+    ARN from the catalog as ``arn`` — the invoke target the orchestrator/agent reads."""
+    model_catalog._live_models = ["eu.zai.glm5"]
+    arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.zai.glm5"
+    model_catalog._profile_arns = {"eu.zai.glm5": arn, "zai.glm5": arn}
+    entry = next(e for e in merged_entries() if e.model_id == "eu.zai.glm5")
+    assert entry.arn == arn
+
+
+def test_explicit_row_arn_wins_over_profile_arn():
+    """An admin/custom row arn is intent and beats the discovered profile ARN."""
+    model_catalog._live_models = ["eu.zai.glm5"]
+    model_catalog._profile_arns = {"eu.zai.glm5": "arn:profile"}
+    model_registry._rows = {"eu.zai.glm5": _row("eu.zai.glm5", arn="arn:custom-override")}
+    entry = next(e for e in merged_entries() if e.model_id == "eu.zai.glm5")
+    assert entry.arn == "arn:custom-override"
 
 
 # ---------------------------------------------------------------------------

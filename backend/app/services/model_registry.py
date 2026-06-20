@@ -38,6 +38,7 @@ from app.services.model_catalog import (
     bedrock_vendor,
     is_anthropic_model,
     model_modalities,
+    profile_arn,
 )
 from app.services.pricing import (
     DEFAULT_PRICING,
@@ -146,6 +147,10 @@ def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
     # Modalities come from the live catalog only (no DB column): a custom row with no live
     # match yields empty lists = text-only/unknown, the back-compat default.
     input_modalities, output_modalities = model_modalities(model_id)
+    # Invoke target: an explicit row arn (custom/admin intent) always wins; otherwise a
+    # discovered profile-only model gets its inference-profile ARN from the
+    # live catalog so the orchestrator/agent invokes the profile, not the bare id.
+    arn = (row.get("arn") if row else None) or profile_arn(model_id)
     return ModelEntry(
         model_id=model_id,
         # Re-derive the vendor tag for discovered rows: their stored provider is just a
@@ -165,7 +170,7 @@ def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
         legacy=(bool(row["legacy"]) if row else False) or is_legacy_model(model_id),
         priced=priced,
         endpoint=row.get("endpoint") if row else None,
-        arn=row.get("arn") if row else None,
+        arn=arn,
         options=(row.get("options") or {}) if row else {},
         input_price=pricing.input_price if priced else None,
         output_price=pricing.output_price if priced else None,

@@ -23,6 +23,7 @@ def reset_catalog_state():
     model_catalog._fetched_at = 0.0
     model_catalog._last_fetch_failed = False
     model_catalog._modalities = {}
+    model_catalog._profile_arns = {}
 
 
 def _settings(**overrides):
@@ -566,6 +567,206 @@ async def test_fetch_bedrock_models_engine_enabled_and_flag_surfaces_open():
 
     foundation_call = next(a for a in captured_args if a[1] == "list-foundation-models")
     assert "--by-provider" not in foundation_call
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_profile_only_model_surfaces_with_arn():
+    """a model invocable only via an inference profile (omitted by
+    list-foundation-models) is surfaced, keying vendor/pricing on the route-stripped
+    underlying id, with the profile ARN carried as the invoke target."""
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                {
+                    "inferenceProfileId": "eu.zai.glm5",
+                    "inferenceProfileArn": (
+                        "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.zai.glm5"
+                    ),
+                    "type": "SYSTEM_DEFINED",
+                },
+            ]
+        },
+        "list-foundation-models": {
+            # GLM5 is NOT in the foundation list (profile-only); only the flash variant is.
+            "modelSummaries": [
+                {
+                    "modelId": "zai.glm-4.7-flash",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "outputModalities": ["TEXT"],
+                },
+            ]
+        },
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        return responses[args[1]]
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        models = await model_catalog._fetch_bedrock_models(include_open=True)
+
+    assert "eu.zai.glm5" in models
+    assert "zai.glm-4.7-flash" in models
+    # Vendor + pricing key on the route-stripped underlying id.
+    assert model_catalog.bedrock_vendor("eu.zai.glm5") == "zai"
+    # ARN resolves by the surfaced (route-prefixed) id AND the underlying namespaced id.
+    arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.zai.glm5"
+    assert model_catalog.profile_arn("eu.zai.glm5") == arn
+    assert model_catalog.profile_arn("zai.glm5") == arn
+    # An on-demand model needs no profile → no spurious ARN.
+    assert model_catalog.profile_arn("zai.glm-4.7-flash") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_profile_deduped_against_foundation_model():
+    """An overlapping base+profile model yields one entry (no dupe); the profile id is the
+    recommended invoke path so it wins, and its ARN is keyed by the underlying base id too."""
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                {
+                    "inferenceProfileId": "eu.anthropic.claude-opus-4-8",
+                    "inferenceProfileArn": "arn:aws:bedrock:eu-west-1:123:inference-profile/opus",
+                    "type": "SYSTEM_DEFINED",
+                },
+            ]
+        },
+        "list-foundation-models": {
+            "modelSummaries": [
+                {
+                    "modelId": "anthropic.claude-opus-4-8",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "outputModalities": ["TEXT"],
+                },
+            ]
+        },
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        return responses[args[1]]
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        models = await model_catalog._fetch_bedrock_models()
+
+    # Single entry for the underlying model (dedupe), the regional profile preferred.
+    assert models == ["eu.anthropic.claude-opus-4-8"]
+    # ARN resolves whether keyed by the surfaced id or the route-stripped base.
+    arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/opus"
+    assert model_catalog.profile_arn("eu.anthropic.claude-opus-4-8") == arn
+    assert model_catalog.profile_arn("anthropic.claude-opus-4-8") == arn
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_application_profile_without_arn_falls_back_to_id():
+    """An application profile missing inferenceProfileArn still surfaces, invoked by id."""
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                {"inferenceProfileId": "eu.anthropic.claude-fable-5", "type": "APPLICATION"},
+            ]
+        },
+        "list-foundation-models": {"modelSummaries": []},
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        return responses[args[1]]
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        models = await model_catalog._fetch_bedrock_models()
+
+    assert models == ["eu.anthropic.claude-fable-5"]
+    # Missing ARN ⇒ the id itself is the invoke target.
+    assert model_catalog.profile_arn("eu.anthropic.claude-fable-5") == "eu.anthropic.claude-fable-5"
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_profiles_best_effort_on_failure():
+    """A failing/throttled list-inference-profiles must not break discovery — the
+    foundation-model catalog still yields, with no profile ARNs."""
+
+    async def fake_aws_json(args, extra_env=None):
+        if args[1] == "list-inference-profiles":
+            raise RuntimeError("AccessDeniedException: bedrock:ListInferenceProfiles")
+        return {
+            "modelSummaries": [
+                {
+                    "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+                    "inferenceTypesSupported": ["ON_DEMAND"],
+                    "outputModalities": ["TEXT"],
+                },
+            ]
+        }
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        models = await model_catalog._fetch_bedrock_models()
+
+    assert models == ["anthropic.claude-3-haiku-20240307-v1:0"]
+    assert model_catalog._profile_arns == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_profiles_junk_payload_does_not_crash():
+    """Malformed profile entries (non-dict element / missing id) are skipped, not fatal —
+    one bad entry must not downgrade the whole live catalog to the static fallback."""
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                "not-a-dict",  # non-dict element — skipped, must not raise
+                {"type": "SYSTEM_DEFINED"},  # no inferenceProfileId — skipped
+                {"inferenceProfileId": "eu.anthropic.claude-opus-4-8"},  # valid
+            ]
+        },
+        "list-foundation-models": {"modelSummaries": []},
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        return responses[args[1]]
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        models = await model_catalog._fetch_bedrock_models()
+
+    assert models == ["eu.anthropic.claude-opus-4-8"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_bedrock_profiles_open_vendor_gated_off_under_claude_only():
+    """Engine gate: with include_open False, open-vendor profiles stay out of the catalog
+    (only Anthropic profiles surface) — profiles are not added under a Claude-only catalog."""
+    responses = {
+        "list-inference-profiles": {
+            "inferenceProfileSummaries": [
+                {"inferenceProfileId": "eu.anthropic.claude-opus-4-8"},
+                {"inferenceProfileId": "eu.zai.glm5", "inferenceProfileArn": "arn:zai"},
+            ]
+        },
+        "list-foundation-models": {"modelSummaries": []},
+    }
+
+    async def fake_aws_json(args, extra_env=None):
+        return responses[args[1]]
+
+    with (
+        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
+    ):
+        models = await model_catalog._fetch_bedrock_models(include_open=False)
+
+    assert models == ["eu.anthropic.claude-opus-4-8"]
+    assert model_catalog.profile_arn("eu.zai.glm5") is None  # open vendor not captured
 
 
 def test_catalog_status_reports_static_when_no_live_models():

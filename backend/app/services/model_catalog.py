@@ -57,6 +57,15 @@ _refresh_lock = asyncio.Lock()
 # TEXT/EMBEDDING/IMAGE/VIDEO. Empty/unknown ⇒ text-only back-compat (no image blocks).
 _modalities: dict[str, dict[str, list[str]]] = {}
 
+# Invoke target (inference-profile ARN) for models reachable only via a profile
+# keyed by the catalog model id AND its route-stripped base id — the same
+# dual-key pattern as ``_modalities`` so a registry lookup by either the surfaced
+# (route-prefixed) id or the underlying namespaced id resolves the ARN. Populated from
+# ``list-inference-profiles`` at catalog-refresh, replaced wholesale (never merged), and
+# consumed by the registry's ``_entry`` so a synthesized/discovered row's ``arn`` resolves
+# to the profile at call time. Empty when no Bedrock fetch ran or profiles were unavailable.
+_profile_arns: dict[str, str] = {}
+
 
 def static_catalog() -> list[str]:
     """Provider-appropriate model list when no live catalog is available.
@@ -203,6 +212,59 @@ def _dedupe_bedrock_models(models: list[str]) -> list[str]:
     return list(best.values())
 
 
+async def _fetch_inference_profiles(
+    region_args: list[str],
+    extra_env: dict[str, str] | None,
+    include_open: bool,
+) -> tuple[list[str], dict[str, str]]:
+    """Profile-backed model ids + their invoke-target ARNs.
+
+    Some Bedrock models are invocable ONLY via an inference profile (cross-region
+    SYSTEM_DEFINED or APPLICATION), so ``list-foundation-models`` omits them and they
+    never reach the picker. ``list-inference-profiles`` fills that gap: each profile
+    surfaces its model id (so vendor grouping + live pricing key on the namespaced base
+    after route-stripping) and carries ``inferenceProfileArn`` as the invoke target.
+
+    Best-effort: a missing/throttled/perm-denied call (older CLI, no
+    ``bedrock:ListInferenceProfiles``) must NOT break discovery — same posture as the
+    live-pricing fetch. On any failure return empties so the foundation-model catalog
+    still stands; never raise.
+    """
+    try:
+        profiles = await _aws_json(["bedrock", "list-inference-profiles", *region_args], extra_env)
+    except Exception as e:
+        # Structured warning: discovery continues with the foundation-model catalog only.
+        logger.warning(
+            "inference_profiles_fetch_failed",
+            extra={"error": str(e), "region_args": region_args},
+        )
+        return [], {}
+
+    models: list[str] = []
+    arns: dict[str, str] = {}
+    for p in profiles.get("inferenceProfileSummaries", []):
+        # Per-element defensiveness: a non-dict element (or one with no id) is skipped,
+        # not allowed to raise — discovery is best-effort and one bad entry must not
+        # downgrade the whole live catalog to the static fallback.
+        if not isinstance(p, dict):
+            continue
+        profile_id = p.get("inferenceProfileId")
+        if not profile_id:
+            continue  # malformed entry — skip rather than crash the whole refresh
+        # Vendor gate on the route-stripped base (not a brittle ".anthropic." substring):
+        # under Claude-only the open vendors must stay out of the catalog.
+        if not include_open and bedrock_vendor(profile_id) != "anthropic":
+            continue
+        # The ARN is the invoke target; fall back to the id only if the ARN is absent
+        # (so the model still surfaces, invoked by id like an on-demand model).
+        arn = p.get("inferenceProfileArn") or profile_id
+        models.append(profile_id)
+        # Dual-key like _modalities: resolve by the surfaced id OR the underlying base id.
+        arns[profile_id] = arn
+        arns.setdefault(_BEDROCK_ROUTE_PREFIX.sub("", profile_id), arn)
+    return models, arns
+
+
 async def _fetch_bedrock_models(
     region: str | None = None,
     extra_env: dict[str, str] | None = None,
@@ -218,10 +280,6 @@ async def _fetch_bedrock_models(
         # regardless of the flag — they'd be unusable in the picker.
         include_open = inkwest_agent_enabled() and get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY)
     region_args = ["--region", region]
-    # Cross-region inference profiles (eu.anthropic..., us.anthropic...) are the
-    # recommended way to invoke recent models; on-demand foundation models cover
-    # the rest. Both lists are needed for a complete picture.
-    profiles = await _aws_json(["bedrock", "list-inference-profiles", *region_args], extra_env)
     # --by-provider narrows the foundation list to Anthropic unless the admin
     # opted into open-weight models, in which case every provider is listed.
     foundation_args = ["bedrock", "list-foundation-models", *region_args]
@@ -245,14 +303,17 @@ async def _fetch_bedrock_models(
         }
         captured[model_id] = caps
         captured.setdefault(_BEDROCK_ROUTE_PREFIX.sub("", model_id), caps)
-    global _modalities
+    global _modalities, _profile_arns
     _modalities = captured
 
-    models = [
-        p["inferenceProfileId"]
-        for p in profiles.get("inferenceProfileSummaries", [])
-        if include_open or ".anthropic." in p.get("inferenceProfileId", "")
-    ]
+    # Cross-region/application inference profiles surface models the foundation list
+    # omits (and the recommended invoke path for recent ones); best-effort so a profile
+    # fetch failure leaves the foundation catalog intact. Replaced wholesale every refresh.
+    profile_models, _profile_arns = await _fetch_inference_profiles(
+        region_args, extra_env, include_open
+    )
+
+    models = list(profile_models)
     models += [
         m["modelId"]
         for m in foundation.get("modelSummaries", [])
@@ -419,6 +480,17 @@ def model_modalities(model_id: str) -> tuple[list[str], list[str]]:
     if not caps:
         return [], []
     return list(caps.get("input", [])), list(caps.get("output", []))
+
+
+def profile_arn(model_id: str) -> str | None:
+    """Inference-profile ARN to invoke ``model_id`` with, or None.
+
+    Resolves the exact id first, then its route-stripped base (so a lookup by the
+    surfaced route-prefixed id or the underlying namespaced id both resolve). None
+    when the model is reachable as a base on-demand model (no profile needed), off
+    Bedrock, or no Bedrock fetch ran — callers then invoke by the model id itself.
+    """
+    return _profile_arns.get(model_id) or _profile_arns.get(_BEDROCK_ROUTE_PREFIX.sub("", model_id))
 
 
 def catalog_status() -> dict:
