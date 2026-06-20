@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { Fragment, useEffect, useState, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { Search, X, Loader2, RefreshCw } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
@@ -8,16 +8,27 @@ import { SearchSessionHit } from '@/types/api';
 import { formatRelativeTime, cn } from '@/lib/utils';
 
 const DEBOUNCE_MS = 300;
+// Mirror the backend's MAX_SEARCH_TOKENS cap: it only matches the first N tokens, so
+// highlighting beyond N would mark words the result wasn't actually selected for.
+const MAX_SEARCH_TOKENS = 10;
 
 function HighlightText({ text, query }: { text: string; query: string }) {
-  if (!query) return <>{text}</>;
-  const idx = text.toLowerCase().indexOf(query.toLowerCase());
-  if (idx === -1) return <>{text}</>;
+  // Word-independent search: highlight every query token wherever it occurs, in any
+  // order — a single contiguous indexOf would miss non-adjacent multi-word matches.
+  const tokens = query.split(/\s+/).filter(Boolean).slice(0, MAX_SEARCH_TOKENS);
+  if (tokens.length === 0) return <>{text}</>;
+  const escaped = tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  // Capturing group → split keeps matches at odd indices.
+  const parts = text.split(new RegExp(`(${escaped.join('|')})`, 'gi'));
   return (
     <>
-      {text.slice(0, idx)}
-      <mark className="bg-yellow-500/30 text-yellow-200 rounded-sm px-0.5">{text.slice(idx, idx + query.length)}</mark>
-      {text.slice(idx + query.length)}
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="bg-yellow-500/30 text-yellow-200 rounded-sm px-0.5">{part}</mark>
+        ) : (
+          <Fragment key={i}>{part}</Fragment>
+        )
+      )}
     </>
   );
 }
