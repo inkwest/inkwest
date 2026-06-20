@@ -1,5 +1,47 @@
 import { create } from 'zustand';
-import { Message } from '@/types/api';
+import { ContentBlock, Message, MessageContent } from '@/types/api';
+
+// The backend persists a turn the way the model API frames it — and how many rows
+// that takes depends on the orchestrator. The CLI path writes ONE fused assistant
+// row per turn; the Converse / Anthropic / inkwest-agent paths drive the tool loop
+// themselves and write one assistant row + one tool_result row PER ROUND. The live
+// stream always fuses a whole turn into a single bubble, so a reloaded multi-round
+// turn would fragment into many bubbles where the live one (and the CLI path)
+// showed one. Those per-round rows are the API-correct shape for replay (a
+// tool_result must be its own row), so they can't be fused server-side — instead
+// fuse for presentation here: collapse each run of consecutive assistant +
+// tool_result rows into one assistant message, concatenating their blocks in turn
+// order. Only `user` rows carry error/retry state (see messages.py) and they break
+// the run, so no error affordance is lost. The first row's identity (id, model,
+// created_at) leads the fused bubble.
+export function groupServerMessages(messages: Message[]): Message[] {
+  const grouped: Message[] = [];
+  for (const msg of messages) {
+    const prev = grouped[grouped.length - 1];
+    const partOfAssistantTurn = msg.role === 'assistant' || msg.role === 'tool_result';
+    if (partOfAssistantTurn && prev?.role === 'assistant') {
+      grouped[grouped.length - 1] = {
+        ...prev,
+        content: [...toBlocks(prev.content), ...toBlocks(msg.content)],
+        // Track absorbed row ids so a search deep-link to a fused-away round
+        // still resolves its scroll/highlight target (see MessageBubble anchors).
+        mergedIds: [...(prev.mergedIds ?? []), msg.id],
+      };
+      continue;
+    }
+    grouped.push(msg);
+  }
+  return grouped;
+}
+
+// Normalize a message's content to a block list so consecutive turn rows can be
+// concatenated. Assistant/tool_result rows are block arrays (or a bare string for
+// a text-only round); session-event objects never reach here (they are 'system').
+function toBlocks(content: MessageContent): ContentBlock[] {
+  if (Array.isArray(content)) return content;
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  return [];
+}
 
 // Todo item type for tracking task progress
 export interface TodoItem {
@@ -111,11 +153,14 @@ export const useChatStore = create<ChatState>((set) => ({
   // deliver a snapshot taken before the just-sent user message was persisted;
   // blindly applying it would wipe the optimistic bubble while streaming.
   applyServerMessages: (messages) =>
-    set((state) =>
-      state.isStreaming && messages.length < state.messages.length
+    set((state) => {
+      const grouped = groupServerMessages(messages);
+      // Compare grouped-to-grouped: state.messages is already grouped, so a stale
+      // snapshot is one that would yield fewer turns than we're currently showing.
+      return state.isStreaming && grouped.length < state.messages.length
         ? state
-        : { messages }
-    ),
+        : { messages: grouped };
+    }),
   appendStreamingText: (text) =>
     set((state) => {
       // Update legacy field

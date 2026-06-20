@@ -77,6 +77,10 @@ export interface Message {
   is_retryable?: boolean;
   retry_count?: number;
   created_at: string;
+  /** Frontend-only: ids of the server rows fused into this bubble for display
+   *  (see groupServerMessages). Lets a search deep-link to any absorbed round
+   *  still resolve its scroll/highlight target. Absent on un-fused rows. */
+  mergedIds?: string[];
 }
 
 export type MessageContent = string | ContentBlock[] | SessionEventContent;

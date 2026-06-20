@@ -22,7 +22,11 @@ export function MessageList({ messages, highlightedId, onRetry }: Props) {
           key={message.id}
           message={message}
           isFirstUserMessage={i === firstUserIdx}
-          highlighted={message.id === highlightedId}
+          // Also match a deep-link aimed at a round fused into this bubble.
+          highlighted={
+            message.id === highlightedId ||
+            (highlightedId != null && (message.mergedIds?.includes(highlightedId) ?? false))
+          }
           onRetry={onRetry}
         />
       ))}
