@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Check, Menu, User, LogOut, Shield } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore, TaskListPosition } from '@/store/settings';
@@ -7,7 +7,6 @@ import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
-import { modelLabel } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
 
 const TASK_LIST_OPTIONS: { value: TaskListPosition; label: string }[] = [
@@ -27,7 +26,9 @@ export function Header() {
   const currentSession = inAdminPanel ? null : storeSession;
   const { compactToolCards, toggleCompactToolCards, showTimestamps, toggleShowTimestamps, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
   const { user, oidcEnabled, isAuthenticated, logout } = useAuthStore();
-  const { config, fetchConfig } = useConfigStore();
+  // fetchConfig still primes the shared config (model picker, attachments gate) once
+  // the user is authenticated, even though the header no longer renders a model badge.
+  const { fetchConfig } = useConfigStore();
   const version = useUpdateStore((s) => s.loadedVersion);
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -84,16 +85,10 @@ export function Header() {
         )}
       </div>
       <div className="flex items-center gap-3">
-        {/* In a chat the model selector lives in the conversation toolbar
-            (ConnectorPanel); here only the global default outside sessions. */}
-        {config && !currentSession && (
-          <span
-            className="text-xs text-gray-400 bg-gray-800 border border-gray-700 rounded-full px-2.5 py-0.5 hidden sm:inline truncate max-w-48"
-            title={`Provider: ${config.provider} · Default model: ${config.model}`}
-          >
-            {modelLabel(config.available_models, config.model)}
-          </span>
-        )}
+        {/* The per-conversation model/engine selector lives in the chat toolbar
+            (ConnectorPanel). No global default badge here: outside a session it
+            named only a model with no engine, which is ambiguous now that a model
+            can run on more than one engine. */}
         {currentSession && (currentSession.total_input_tokens || currentSession.total_output_tokens) ? (
           <span className="text-xs text-gray-500 hidden sm:inline" title="Input / Output tokens">
             {formatTokenCount(currentSession.total_input_tokens || 0)}&darr; {formatTokenCount(currentSession.total_output_tokens || 0)}&uarr;
@@ -161,13 +156,17 @@ export function Header() {
               {(user?.is_admin || oidcEnabled) && (
                 <div className="border-t border-gray-700 p-2 space-y-1">
                   {user?.is_admin && (
-                    <button
-                      onClick={() => { navigate(inAdminPanel ? '/' : '/admin'); setShowMenu(false); }}
+                    // A real link (not a button+navigate) so middle-click / ⌘-click opens
+                    // the admin panel in a new tab; the onClick just closes the menu on a
+                    // plain left-click (it doesn't fire for modified/middle clicks).
+                    <Link
+                      to={inAdminPanel ? '/' : '/admin'}
+                      onClick={() => setShowMenu(false)}
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
                     >
                       {inAdminPanel ? <ArrowLeft className="h-4 w-4" /> : <Shield className="h-4 w-4" />}
                       {inAdminPanel ? 'Back to Chat' : 'Admin Panel'}
-                    </button>
+                    </Link>
                   )}
                   {oidcEnabled && (
                     <button

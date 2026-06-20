@@ -16,6 +16,7 @@ const EXISTING: ModelInfo = {
   endpoint: null,
   arn: 'arn:aws:bedrock:eu-west-1::model/x',
   options: { max_tokens: 4096 },
+  capable_engines: ['inkwest-agent'],
   input_price: 0.72,
   output_price: 0.72,
 };

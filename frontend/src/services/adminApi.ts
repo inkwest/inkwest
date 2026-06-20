@@ -200,6 +200,9 @@ export interface ModelInfo {
   endpoint: string | null;
   arn: string | null;
   options: Record<string, unknown>;
+  /** Engines capable of running this model (which engine sections it appears in). The
+   *  engines it is actually offered on live in options.engines (absent = all capable). */
+  capable_engines: string[];
   input_price: number | null;
   output_price: number | null;
 }
@@ -214,12 +217,16 @@ export interface CatalogStatus {
 export interface ModelSettings {
   provider: string;
   default_model: string;
+  /** The engine the default model runs on (admin choice, else resolved heuristically). */
+  default_engine: string;
   /** Model IDs users may pick per session (admin-enabled subset). */
   enabled_models: string[];
   /** Whether all Bedrock vendors (not just Anthropic) are surfaced. */
   include_all_vendors: boolean;
   /** Whether the custom (inkwest-agent) engine is enabled — gates the toggle. */
   inkwest_agent_enabled: boolean;
+  /** Engines enabled in this deployment — one admin section per engine. */
+  engines: string[];
   catalog: CatalogStatus;
   /** The full merged registry: discovered models + custom rows. */
   models: ModelInfo[];
@@ -227,7 +234,11 @@ export interface ModelSettings {
 
 export interface UpdateModelSettingsRequest {
   default_model: string;
+  /** The engine the default model runs on; omit/empty = resolve heuristically. */
+  default_engine?: string;
   enabled_models: string[];
+  /** Per-(engine, model) offering: model_id -> engine ids it's exposed on. */
+  engine_availability?: Record<string, string[]>;
 }
 
 export interface AddModelRequest {

@@ -279,11 +279,22 @@ def _validate_price_pair(input_price: Decimal | None, output_price: Decimal | No
 # the same approach as app.services.app_settings.
 
 
-async def set_model_settings(db: AsyncSession, default: str, enabled: list[str]) -> None:
+async def set_model_settings(
+    db: AsyncSession,
+    default: str,
+    enabled: list[str],
+    availability: dict[str, list[str]] | None = None,
+) -> None:
     """Bulk save: enable exactly ``enabled`` and make ``default`` the default.
 
     Upserts a row per enabled model (preserving existing source/overrides),
     disables every other row, and moves the single default flag.
+
+    ``availability`` (optional) sets each model's per-engine offering — the engine
+    ids it is exposed on, stored in ``options["engines"]`` (see
+    ``engines.capable_engines``). ``None`` leaves ``options`` untouched (the
+    legacy enable-only path); an absent key likewise leaves a model's engines
+    unset (= offered on all its candidate engines).
     """
     if default not in enabled:
         raise ValueError("the default model must be one of the enabled models")
@@ -319,6 +330,18 @@ async def set_model_settings(db: AsyncSession, default: str, enabled: list[str])
         await db.execute(
             update(ModelRegistry).where(ModelRegistry.model_id == default).values(is_default=True)
         )
+        # Per-engine availability: merge ``engines`` into each model's options JSONB
+        # (preserving any other option keys, e.g. max_tokens). Done before commit so
+        # it lands atomically with the enable/default flips.
+        if availability is not None:
+            for model_id, engines in availability.items():
+                existing = dict(_rows.get(model_id, _blank_row(model_id)).get("options") or {})
+                existing["engines"] = list(engines)
+                await db.execute(
+                    update(ModelRegistry)
+                    .where(ModelRegistry.model_id == model_id)
+                    .values(options=existing)
+                )
         await db.commit()
         enabled_set = set(enabled)
         # First pass only *creates* rows for newly-enabled discovered models (the
@@ -328,6 +351,10 @@ async def set_model_settings(db: AsyncSession, default: str, enabled: list[str])
         for model_id, row in _rows.items():
             row["enabled"] = model_id in enabled_set
             row["is_default"] = model_id == default
+        if availability is not None:
+            for model_id, engines in availability.items():
+                row = _rows.setdefault(model_id, _blank_row(model_id))
+                row["options"] = {**(row.get("options") or {}), "engines": list(engines)}
     logger.info(f"Model settings updated: default={default}, enabled={enabled}")
 
 

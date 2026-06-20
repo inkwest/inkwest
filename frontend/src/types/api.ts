@@ -36,6 +36,8 @@ export interface Session {
   cluster?: ClusterSummary | null;
   /** Per-session model; null/undefined = global default. */
   model?: string | null;
+  /** Per-session agentic engine pairing; null/undefined = resolve per turn. */
+  engine?: string | null;
   total_input_tokens?: number;
   total_output_tokens?: number;
   created_at: string;

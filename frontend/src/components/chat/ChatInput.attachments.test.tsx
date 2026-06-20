@@ -22,6 +22,8 @@ function enableAttachments(enabled: boolean) {
     config: {
       provider: 'claude-cli',
       model: 'm',
+      default_engine: 'claude-cli',
+      engines: ['claude-cli'],
       available_models: [],
       attachments_enabled: enabled,
     },

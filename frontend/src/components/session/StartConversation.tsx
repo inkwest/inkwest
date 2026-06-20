@@ -8,6 +8,7 @@ import { ConnectorName } from '@/types/connectors';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
 import { McpPanel } from '@/components/connector/McpPanel';
+import { ModelEnginePicker } from '@/components/chat/ModelEnginePicker';
 
 const CUSTOM = '__custom__';
 
@@ -32,9 +33,10 @@ export function StartConversation() {
   const [selectedPrompt, setSelectedPrompt] = useState('');
   const [customPrompt, setCustomPrompt] = useState('');
 
-  // Per-session model choice; '' until the config (default + enabled list) loads.
+  // Per-session Engine·Model choice; null = follow the global default (don't pin).
   const { config, fetchConfig } = useConfigStore();
-  const [selectedModel, setSelectedModel] = useState('');
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [selectedEngine, setSelectedEngine] = useState<string | null>(null);
 
   // Lazily-created session: null until the first interaction materializes it.
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -51,11 +53,6 @@ export function StartConversation() {
     fetchConfig();
   }, [fetchConfig]);
 
-  // Preselect the default model once loaded (don't clobber a manual pick).
-  useEffect(() => {
-    if (config) setSelectedModel((cur) => cur || config.model);
-  }, [config]);
-
   // Preselect the default prompt once loaded (don't clobber a manual pick).
   useEffect(() => {
     if (!isAdmin) return;
@@ -69,16 +66,22 @@ export function StartConversation() {
   const ensureSession = useCallback(async (): Promise<string> => {
     if (sessionId) return sessionId;
     if (!creatingRef.current) {
-      const opts: { systemPromptId?: string; systemPromptCustom?: string; model?: string } =
+      const opts: {
+        systemPromptId?: string;
+        systemPromptCustom?: string;
+        model?: string;
+        engine?: string;
+      } =
         isAdmin && selectedPrompt === CUSTOM
           ? { systemPromptCustom: customPrompt.trim() }
           : isAdmin && selectedPrompt
             ? { systemPromptId: selectedPrompt }
             : {};
-      // Pin the model only on an explicit non-default pick — untouched sessions
-      // keep following the global default if the admin later changes it.
-      if (selectedModel && selectedModel !== config?.model) {
+      // Pin the Engine·Model only on an explicit pick (null = Default) — untouched
+      // sessions keep following the global default if the admin later changes it.
+      if (selectedModel) {
         opts.model = selectedModel;
+        if (selectedEngine) opts.engine = selectedEngine;
       }
       creatingRef.current = createSession(undefined, opts)
         .then((s) => {
@@ -93,7 +96,7 @@ export function StartConversation() {
         });
     }
     return creatingRef.current;
-  }, [sessionId, isAdmin, selectedPrompt, customPrompt, selectedModel, config, createSession]);
+  }, [sessionId, isAdmin, selectedPrompt, customPrompt, selectedModel, selectedEngine, createSession]);
 
   const handleSend = async (message: string) => {
     if (customInvalid) return;
@@ -174,21 +177,20 @@ export function StartConversation() {
           </div>
         )}
 
-        {config && config.available_models.length > 1 && (
+        {config && (config.available_models.length > 1 || config.engines.length > 1) && (
           <div>
             <label className="block text-sm text-gray-400 mb-2">Model</label>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
-            >
-              {config.available_models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                  {m.id === config.model ? ' (default)' : ''}
-                </option>
-              ))}
-            </select>
+            <ModelEnginePicker
+              config={config}
+              model={selectedModel}
+              engine={selectedEngine}
+              onChange={(model, engine) => {
+                setSelectedModel(model);
+                setSelectedEngine(engine);
+              }}
+              triggerClassName="w-full justify-between bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+              menuClassName="left-0 right-0"
+            />
           </div>
         )}
 

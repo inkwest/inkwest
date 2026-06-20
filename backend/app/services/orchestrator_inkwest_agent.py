@@ -120,6 +120,19 @@ async def orchestrate_chat_inkwest_agent(
     if entry and isinstance(entry.options.get("max_tokens"), int):
         max_tokens = entry.options["max_tokens"]
 
+    # Make the agent model-aware. Non-Claude Converse models (Llama/Mistral/Nova/…) have
+    # no innate sense of their own identity, and even Claude-on-Converse isn't told its
+    # deployment name — so users asking "which model are you?" got vague answers. State it
+    # explicitly in the system prompt (the broker is the only component that knows the
+    # resolved model + engine for the turn).
+    model_label = (getattr(entry, "label", None) or model) if entry else model
+    system_prompt += (
+        "\n\n## Runtime identity\n"
+        f"You are running as the **{model_label}** model (id `{model}`) on the Inkwest "
+        "Agent engine (Amazon Bedrock, Converse API). When asked which model or engine "
+        "you are, answer with this."
+    )
+
     # Pre-provide the session's connector creds: build_connector_env renews-on-read and
     # projects the AWS profiles onto the shared tmpfs (write_aws_profiles), returning the
     # IN-CONTAINER env (AWS_* file paths, GITLAB_TOKEN, GITLAB_BASE_URL, KUBECONFIG). We

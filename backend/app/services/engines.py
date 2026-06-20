@@ -41,24 +41,112 @@ def inkwest_agent_enabled() -> bool:
     return INKWEST_AGENT in enabled_engines()
 
 
-def resolve_engine(model_id: str) -> str:
+def _speaks_anthropic_provider(provider: str | None, model_id: str) -> bool:
+    """Whether the model talks the Anthropic Messages protocol (i.e. Claude).
+
+    Prefers the registry's authoritative provider tag (a custom row may pin a
+    vendor the substring heuristic would misread); falls back to the ID heuristic
+    when there's no row. Local import breaks the cycle (model_catalog imports this
+    module for the catalog gate).
+    """
+    from app.services.model_catalog import is_anthropic_model, provider_speaks_messages
+
+    if provider is not None:
+        return provider_speaks_messages(provider)
+    return is_anthropic_model(model_id)
+
+
+def _speaks_anthropic(model_id: str) -> bool:
+    """Convenience wrapper resolving the registry entry then the protocol."""
+    from app.services.model_registry import get_entry
+
+    entry = get_entry(model_id)
+    return _speaks_anthropic_provider(entry.provider if entry else None, model_id)
+
+
+def capable_engines(model_id: str) -> list[str]:
+    """The engines *capable* of running ``model_id`` — pure vendor capability, with
+    no admin curation and no enabled-set filtering.
+
+    ``claude-cli`` is the only Claude-only client; every other engine is an agent
+    that speaks Converse and can run any vendor. So a Claude model is capable on
+    **all** known engines; every other vendor is capable on the agent engines (all
+    known except ``claude-cli``). Generalizes to N future agents without code
+    changes. The admin UI uses this to know which engine sections a model appears
+    in (independent of which engines it is *offered* on).
+    """
+    from app.services.model_registry import get_entry
+
+    entry = get_entry(model_id)
+    is_claude = _speaks_anthropic_provider(entry.provider if entry else None, model_id)
+    capable = KNOWN_ENGINES if is_claude else (KNOWN_ENGINES - {CLAUDE_CLI})
+    ordered = enabled_engines()
+    # Enabled engines first (stable display order), then any capable-but-not-enabled.
+    return [e for e in ordered if e in capable] + sorted(e for e in capable if e not in ordered)
+
+
+def _engine_availability(model_id: str) -> list[str] | None:
+    """The admin-curated per-model engine offering (``options["engines"]``), or None
+    when unset — None means *offered on every capable engine* (default / back-compat).
+    """
+    from app.services.model_registry import get_entry
+
+    entry = get_entry(model_id)
+    avail = entry.options.get("engines") if entry else None
+    return avail if isinstance(avail, list) else None
+
+
+def runnable_engines(model_id: str) -> list[str]:
+    """Enabled engines a user may actually pick for ``model_id`` right now.
+
+    Vendor capability ∩ admin per-model offering (``options["engines"]``, unset =
+    all capable) ∩ the deployment's enabled set, in enabled order — the selectable
+    (engine, model) pairs the UI offers derive from this.
+    """
+    capable = capable_engines(model_id)
+    avail = _engine_availability(model_id)
+    offered = capable if avail is None else [e for e in capable if e in avail]
+    offered_set = set(offered)
+    return [e for e in enabled_engines() if e in offered_set]
+
+
+def engine_for_turn(model_id: str, pinned: str | None = None) -> str:
     """The engine that should run a turn for ``model_id``.
 
-    - Non-Claude model → ``inkwest-agent`` (the only engine that can run it; it
-      is selectable only when that engine is enabled, so this is reachable).
-    - Claude model → the single enabled engine, else ``claude-cli`` (the default,
-      native Claude path) when more than one is enabled.
+    Precedence (degrades gracefully so a stale pin / engine toggle / admin curation
+    never wedges a turn): an explicit session pin when it can run the model → the
+    native Claude path (``claude-cli``) when offered → the first runnable engine →
+    the capability default when nothing is offered.
     """
-    # Local import breaks the import cycle (model_catalog imports this module for
-    # the catalog gate); is_anthropic_model is a pure string predicate.
-    from app.services.model_catalog import is_anthropic_model
+    runnable = runnable_engines(model_id)
+    if pinned and pinned in runnable:
+        return pinned
+    if DEFAULT_ENGINE in runnable:
+        return DEFAULT_ENGINE
+    if runnable:
+        return runnable[0]
+    # Nothing offered (engine off / admin disabled every pairing): fall back to the
+    # capability default so the turn still resolves to a sane engine.
+    return DEFAULT_ENGINE if _speaks_anthropic(model_id) else INKWEST_AGENT
 
-    engines = enabled_engines()
-    if not is_anthropic_model(model_id):
-        return INKWEST_AGENT
-    if len(engines) == 1:
-        return engines[0]
-    return DEFAULT_ENGINE
+
+def resolve_engine(model_id: str) -> str:
+    """The engine for ``model_id`` with no explicit session pin.
+
+    Thin wrapper over :func:`engine_for_turn`; kept as the stable name the design
+    doc references. New callers should prefer ``engine_for_turn`` so a session's
+    explicit choice is honored.
+    """
+    return engine_for_turn(model_id)
+
+
+def configured_default_engine() -> str | None:
+    """The admin-chosen engine for the default model (the Engine·Model default), or
+    None when unset → the engine is then resolved heuristically (engine_for_turn).
+    """
+    from app.services.app_settings import DEFAULT_ENGINE_KEY, get_setting
+
+    return get_setting(DEFAULT_ENGINE_KEY) or None
 
 
 def validate_engines() -> None:

@@ -336,7 +336,10 @@ class TestOrchestrateInkwestAgent:
         assert spec["user_message"] == "why crash?"
         assert spec["model"] == "meta.llama3-1-70b-instruct-v1:0"
         assert spec["model_target"] == "arn:aws:bedrock:::model/x"
-        assert spec["system_prompt"] == "SYSTEM"
+        # The broker appends a runtime-identity block so the agent knows its own model.
+        assert spec["system_prompt"].startswith("SYSTEM")
+        assert "Runtime identity" in spec["system_prompt"]
+        assert "meta.llama3-1-70b-instruct-v1:0" in spec["system_prompt"]
         assert spec["region"] == "eu-west-1"
         assert spec["user_id"] == str(USER_ID)
         assert spec["kubeconfig_path"] == "/etc/inkwest/kubeconfigs/c.yaml"
@@ -647,7 +650,9 @@ class TestOrchestrateInkwestAgent:
 
 
 class TestEngineDispatch:
-    async def _dispatch(self, *, model, entry, agent_enabled, sandbox_enabled):
+    async def _dispatch(
+        self, *, model, entry, agent_enabled, sandbox_enabled, pinned=None, default_engine=None
+    ):
         from app.services.ai_client import get_orchestrator
 
         seen = {}
@@ -665,7 +670,13 @@ class TestEngineDispatch:
         with (
             patch("app.services.ai_client.get_settings") as gs,
             patch("app.services.ai_client.resolve_session_model", AsyncMock(return_value=model)),
+            patch("app.services.ai_client.resolve_session_engine", AsyncMock(return_value=pinned)),
+            # default_model() == model makes the session count as "on the default", so the
+            # admin default engine applies when the session itself pins no engine.
+            patch("app.services.ai_client.default_model", MagicMock(return_value=model)),
+            patch("app.services.engines.configured_default_engine", return_value=default_engine),
             patch("app.services.ai_client.get_entry", MagicMock(return_value=entry)),
+            patch("app.services.model_registry.get_entry", MagicMock(return_value=entry)),
             patch("app.services.engines.inkwest_agent_enabled", return_value=agent_enabled),
             patch("app.services.orchestrator_cli.orchestrate_chat_cli", fake_cli),
             patch(
@@ -704,6 +715,39 @@ class TestEngineDispatch:
                 sandbox_enabled=True,
             )
             == "cli"
+        )
+
+    @pytest.mark.asyncio
+    async def test_claude_model_pinned_to_agent_routes_to_agent(self):
+        # an explicit inkwest-agent pin sends a Claude model through the
+        # sandboxed Converse loop instead of its default CLI path.
+        entry = SimpleNamespace(provider="anthropic", arn=None, options={})
+        assert (
+            await self._dispatch(
+                model="anthropic.claude-3-5-sonnet",
+                entry=entry,
+                agent_enabled=True,
+                sandbox_enabled=True,
+                pinned="inkwest-agent",
+            )
+            == "agent"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_engine_sends_default_claude_model_to_agent(self):
+        # the admin set the default model's engine to inkwest-agent; an
+        # unpinned session on the default routes there even though it's a Claude model.
+        entry = SimpleNamespace(provider="anthropic", arn=None, options={})
+        assert (
+            await self._dispatch(
+                model="anthropic.claude-3-5-sonnet",
+                entry=entry,
+                agent_enabled=True,
+                sandbox_enabled=True,
+                pinned=None,
+                default_engine="inkwest-agent",
+            )
+            == "agent"
         )
 
     @pytest.mark.asyncio

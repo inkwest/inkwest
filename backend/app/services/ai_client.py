@@ -158,6 +158,16 @@ async def resolve_session_model(db: AsyncSession, session_id: "str | UUID") -> s
     return await resolve_session_model_choice(db, session_id) or default_model()
 
 
+async def resolve_session_engine(db: AsyncSession, session_id: "str | UUID") -> str | None:
+    """The session's explicit engine pin, if any (NULL = resolve per turn).
+
+    Validity against the enabled set + the model's runnable engines is decided at
+    dispatch (``engine_for_turn``), so a stale pin degrades gracefully rather than
+    erroring here.
+    """
+    return await db.scalar(select(Session.engine).where(Session.id == session_id))
+
+
 def get_orchestrator():
     """
     Get the appropriate orchestrator based on AI_PROVIDER setting.
@@ -176,25 +186,35 @@ def get_orchestrator():
         # additionally enable the sandboxed inkwest-agent (custom Converse loop). Resolve
         # the engine per turn from the session's model — a non-Claude model needs the
         # agent (the CLI is Claude-only). Claude models stay on the CLI (its native path).
-        from app.services.engines import inkwest_agent_enabled
-        from app.services.model_catalog import is_anthropic_model, provider_speaks_messages
+        from app.services.engines import (
+            INKWEST_AGENT,
+            configured_default_engine,
+            engine_for_turn,
+            inkwest_agent_enabled,
+        )
 
         async def _dispatch_engine(
             db: AsyncSession, session_id: "str | UUID", **kwargs: Any
         ) -> AsyncIterator[Any]:
             model = await resolve_session_model(db, session_id)
-            # Reconcile the ID heuristic with the registry's authoritative provider tag
-            # (a custom row may pin a vendor the substring heuristic would misread).
-            entry = get_entry(model)
-            wants_agent = (
-                not provider_speaks_messages(entry.provider)
-                if entry
-                else not is_anthropic_model(model)
-            )
+            # Honor the session's explicit engine pin when set (the Engine·Model picker,
+            #) — a Claude model can then run through the sandboxed Converse loop
+            # too, not only the CLI. With no session pin, fall back to the admin's chosen
+            # default engine for the default model; otherwise engine_for_turn applies the
+            # default rule (non-Claude → agent; Claude → native CLI), reconciled against the
+            # registry's provider tag. Resolved fresh per turn so a mid-session switch /
+            # admin change takes effect without a dispatcher rebuild.
+            pinned = await resolve_session_engine(db, session_id)
+            if pinned is None and model == default_model():
+                pinned = configured_default_engine()
+            engine = engine_for_turn(model, pinned)
             # Route to the broker only when the agent can actually run (engine enabled +
-            # sandbox available); otherwise fall back to the CLI. Read fresh per turn so
-            # an admin toggle takes effect without a dispatcher rebuild.
-            if wants_agent and inkwest_agent_enabled() and get_settings().sandbox_enabled:
+            # sandbox available); otherwise fall back to the CLI.
+            if (
+                engine == INKWEST_AGENT
+                and inkwest_agent_enabled()
+                and get_settings().sandbox_enabled
+            ):
                 from app.services.orchestrator_inkwest_agent import (
                     orchestrate_chat_inkwest_agent,
                 )

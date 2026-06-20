@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Pencil, Plus, RefreshCw, Search, Star, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ChevronDown, ChevronRight, Pencil, Plus, RefreshCw, Search, Star, Trash2 } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -11,6 +11,7 @@ import {
   Input,
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
+import { engineLabel } from '@/lib/engines';
 import {
   AddModelRequest,
   ModelInfo,
@@ -26,8 +27,7 @@ import {
 import { useConfigStore } from '@/store/config';
 import { ModelFormModal } from './ModelFormModal';
 
-// Group order in the list; unknown providers fall after the known ones.
-// Anthropic first, then the other Bedrock vendors, then legacy/off-Bedrock tags.
+// Group order within an engine section; unknown providers fall after the known ones.
 const PROVIDER_ORDER = [
   'anthropic',
   'amazon',
@@ -78,6 +78,9 @@ function providerRank(provider: string): number {
   return i === -1 ? PROVIDER_ORDER.length : i;
 }
 
+const providerLabel = (provider: string) =>
+  PROVIDER_LABELS[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
+
 // Highlight the (first) search-match substring so a filtered list shows *why* each row
 // matched. Case-insensitive; returns the text unchanged when there's no query/match.
 function highlightMatch(text: string, query: string) {
@@ -101,12 +104,37 @@ function formatRefreshed(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? 'never' : d.toLocaleString();
 }
 
+// Group models by provider, ordered by providerRank then id.
+function groupByProvider(models: ModelInfo[]): [string, ModelInfo[]][] {
+  const byProvider = new Map<string, ModelInfo[]>();
+  for (const m of models) {
+    const list = byProvider.get(m.provider) ?? [];
+    list.push(m);
+    byProvider.set(m.provider, list);
+  }
+  return [...byProvider.entries()].sort(
+    ([a], [b]) => providerRank(a) - providerRank(b) || a.localeCompare(b)
+  );
+}
+
+// The engine availability a model is offered on, from the registry: an explicit
+// options.engines list when curated, else all engines the model is capable of.
+function modelAvailability(m: ModelInfo): string[] {
+  if (!m.enabled) return [];
+  const opt = m.options?.engines;
+  return Array.isArray(opt) ? (opt as string[]) : m.capable_engines;
+}
+
 export function ModelSettingsPage() {
   const [settings, setSettings] = useState<ModelSettings | null>(null);
-  // Staged enable/default selection; metadata edits apply immediately.
-  const [enabled, setEnabled] = useState<string[]>([]);
+  // Staged per-(engine, model) offering: model_id -> engine ids it's exposed on.
+  // A model is "enabled" iff it's offered on at least one engine.
+  const [availability, setAvailability] = useState<Record<string, string[]>>({});
+  // The default is an (engine, model) pair — a model can run on more than one engine.
   const [defaultModel, setDefaultModel] = useState('');
+  const [defaultEngine, setDefaultEngine] = useState('');
   const [search, setSearch] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -116,13 +144,14 @@ export function ModelSettingsPage() {
   const [deleteTarget, setDeleteTarget] = useState<ModelInfo | null>(null);
 
   // Adopt a fresh settings payload (initial load + every write that returns one).
-  // Immediate ops (add/edit/delete/refresh) are authoritative server state and
-  // intentionally reset the staged enable/default selection to it; the user
-  // re-applies any in-progress checkbox changes (which require a Save anyway).
+  // Rebuilds the staged per-engine availability from the authoritative server state.
   const adopt = (data: ModelSettings) => {
     setSettings(data);
-    setEnabled(data.enabled_models);
     setDefaultModel(data.default_model);
+    setDefaultEngine(data.default_engine);
+    const avail: Record<string, string[]> = {};
+    for (const m of data.models) avail[m.id] = modelAvailability(m);
+    setAvailability(avail);
   };
 
   useEffect(() => {
@@ -132,40 +161,53 @@ export function ModelSettingsPage() {
       .finally(() => setIsLoading(false));
   }, []);
 
-  // Keep the chat-side config (header badge, session picker) in sync after a save.
-  const syncConfig = (data: ModelSettings) => {
-    useConfigStore.setState((s) => ({
-      config: {
-        provider: data.provider,
-        model: data.default_model,
-        available_models: data.models
-          .filter((m) => data.enabled_models.includes(m.id))
-          .map((m) => ({ id: m.id, label: m.label, legacy: m.legacy })),
-        // Preserve attachments_enabled (sandbox/provider flag, unrelated to model settings).
-        attachments_enabled: s.config?.attachments_enabled ?? false,
-      },
-    }));
+  // Keep the chat-side config (session picker) in sync after a save by re-fetching the
+  // authoritative app config — it computes the enabled set + per-model runnable engines
+  // server-side, so we don't duplicate that logic here.
+  const syncConfig = () => {
+    void useConfigStore.getState().refreshConfig();
   };
 
-  // Persist a complete selection immediately (save-on-click — there is no Save
-  // form). An empty selection is refused client-side: the backend requires at
-  // least one enabled model and a default within the enabled set.
-  const persist = async (nextDefault: string, nextEnabled: string[]) => {
-    setEnabled(nextEnabled);
-    setDefaultModel(nextDefault);
-    if (nextEnabled.length === 0) {
-      setError('Enable at least one model.');
+  const enabledIds = (avail: Record<string, string[]>) =>
+    Object.keys(avail).filter((id) => (avail[id]?.length ?? 0) > 0);
+
+  // Persist a complete selection immediately (save-on-click — there is no Save form).
+  // The default is an (engine, model) pair; it's reconciled against the offering so it
+  // always names an enabled model on an engine it's actually offered on. An empty
+  // selection is refused client-side (the backend requires ≥1 enabled model).
+  const persist = async (
+    wantModel: string,
+    wantEngine: string,
+    nextAvail: Record<string, string[]>
+  ) => {
+    setAvailability(nextAvail);
+    const enabled = enabledIds(nextAvail);
+    if (enabled.length === 0) {
+      setDefaultModel(wantModel);
+      setDefaultEngine(wantEngine);
+      setError('Enable at least one model on an engine.');
       return;
     }
+    // Keep the default valid: fall back to the first enabled model, and to that model's
+    // first offered engine, when the requested pairing is no longer offered.
+    const dm = enabled.includes(wantModel) ? wantModel : enabled[0];
+    const dmEngines = nextAvail[dm] ?? [];
+    const de = dmEngines.includes(wantEngine) ? wantEngine : (dmEngines[0] ?? '');
+    setDefaultModel(dm);
+    setDefaultEngine(de);
     setIsSaving(true);
     setError(null);
     try {
+      const engine_availability: Record<string, string[]> = {};
+      for (const id of enabled) engine_availability[id] = nextAvail[id];
       const data = await updateModelSettings({
-        default_model: nextDefault,
-        enabled_models: nextEnabled,
+        default_model: dm,
+        default_engine: de,
+        enabled_models: enabled,
+        engine_availability,
       });
       adopt(data);
-      syncConfig(data);
+      syncConfig();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update model settings');
     } finally {
@@ -173,18 +215,30 @@ export function ModelSettingsPage() {
     }
   };
 
-  // Toggle a model's enabled state and save. Disabling the current default
-  // auto-reassigns it to the first remaining enabled model so the selection
-  // stays valid without a manual step.
-  const toggleEnabled = (id: string) => {
-    const next = enabled.includes(id) ? enabled.filter((m) => m !== id) : [...enabled, id];
-    const nextDefault = next.includes(defaultModel) ? defaultModel : (next[0] ?? '');
-    void persist(nextDefault, next);
+  // Toggle a single (engine, model) offering and save. Removing the default pairing's
+  // engine reassigns the default (handled in persist).
+  const toggleEngineModel = (engine: string, id: string) => {
+    const cur = availability[id] ?? [];
+    const nextEngines = cur.includes(engine) ? cur.filter((e) => e !== engine) : [...cur, engine];
+    void persist(defaultModel, defaultEngine, { ...availability, [id]: nextEngines });
   };
 
-  // Star a model as the default and save. Only enabled models are eligible (the
-  // row gates the call), so the resulting default is always within the set.
-  const setDefault = (id: string) => void persist(id, enabled);
+  // Enable/disable an engine across a set of models (a whole engine section, or one
+  // provider sub-block within it). Only touches models capable of that engine.
+  const setEngineForModels = (engine: string, models: ModelInfo[], on: boolean) => {
+    const next = { ...availability };
+    for (const m of models) {
+      if (!m.capable_engines.includes(engine)) continue;
+      const cur = next[m.id] ?? [];
+      if (on) next[m.id] = cur.includes(engine) ? cur : [...cur, engine];
+      else next[m.id] = cur.filter((e) => e !== engine);
+    }
+    void persist(defaultModel, defaultEngine, next);
+  };
+
+  // Star an (engine, model) pairing as the default and save. Only a pairing the model is
+  // actually offered on is eligible (the row gates the call).
+  const setDefault = (engine: string, id: string) => void persist(id, engine, availability);
 
   const handleRefresh = async (includeOpen?: boolean) => {
     setIsRefreshing(true);
@@ -221,26 +275,21 @@ export function ModelSettingsPage() {
     setFormState(null);
   };
 
-  const grouped = useMemo(() => {
-    if (!settings) return [];
-    const q = search.trim().toLowerCase();
-    const matches = settings.models.filter(
-      (m) => !q || m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q)
-    );
-    const byProvider = new Map<string, ModelInfo[]>();
-    for (const m of matches) {
-      const list = byProvider.get(m.provider) ?? [];
-      list.push(m);
-      byProvider.set(m.provider, list);
-    }
-    return [...byProvider.entries()].sort(
-      ([a], [b]) => providerRank(a) - providerRank(b) || a.localeCompare(b)
-    );
-  }, [settings, search]);
+  const toggleCollapsed = (engine: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(engine)) next.delete(engine);
+      else next.add(engine);
+      return next;
+    });
 
   if (isLoading) {
     return <p className="text-gray-400">Loading…</p>;
   }
+
+  const q = search.trim().toLowerCase();
+  const matchesQuery = (m: ModelInfo) =>
+    !q || m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q);
 
   return (
     <div className="space-y-6">
@@ -250,7 +299,7 @@ export function ModelSettingsPage() {
           {isSaving && <span className="ml-3 align-middle text-sm font-normal text-gray-400">Saving…</span>}
         </h1>
         <p className="text-gray-400 mt-1">
-          Enable the models users may select, set the default, and manage per-model metadata
+          Pick which models each engine offers, set the default, and manage per-model metadata
           and pricing. The catalog is discovered from the configured AI provider at runtime.
         </p>
       </div>
@@ -328,107 +377,199 @@ export function ModelSettingsPage() {
             </CardContent>
           </Card>
 
-          {/* Grouped model list — vendor cards auto-flow into 2 balanced columns
-              (CSS multi-column masonry) so short groups (e.g. a single Cohere model)
-              don't each eat a full-width row. break-inside-avoid keeps a card whole. */}
-          <div className="columns-1 md:columns-2 gap-6 [&>*]:mb-6 [&>*]:break-inside-avoid">
-          {grouped.map(([provider, models]) => (
-            <Card key={provider} variant="bordered">
-              <CardHeader>
-                <CardTitle>
-                  {PROVIDER_LABELS[provider] ??
-                    provider.charAt(0).toUpperCase() + provider.slice(1)}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-1">
-                {models.map((model) => {
-                  const isEnabled = enabled.includes(model.id);
-                  const isDefault = defaultModel === model.id;
-                  return (
-                  <div
-                    key={model.id}
-                    className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-gray-700/50"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isEnabled}
-                      disabled={isSaving}
-                      onChange={() => toggleEnabled(model.id)}
-                      aria-label={`Enable ${model.label}`}
-                      className="h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500 disabled:opacity-50"
-                    />
-                    {/* Star = default. Settable only when enabled (backend rejects a
-                        default outside the enabled set); disabled+dimmed otherwise. */}
+          {/* One collapsible section per enabled engine. Within a section, models the
+              engine can run are grouped by provider; the checkbox toggles whether that
+              model is OFFERED on this engine (a Claude model appears in every section). */}
+          {settings.engines.map((engine) => {
+            const sectionModels = settings.models.filter(
+              (m) => m.capable_engines.includes(engine) && matchesQuery(m)
+            );
+            const grouped = groupByProvider(sectionModels);
+            const isOn = (m: ModelInfo) => (availability[m.id] ?? []).includes(engine);
+            const allOn = sectionModels.length > 0 && sectionModels.every(isOn);
+            const noneOn = sectionModels.every((m) => !isOn(m));
+            const offered = sectionModels.filter(isOn).length;
+            const isCollapsed = collapsed.has(engine);
+            return (
+              <Card key={engine} variant="bordered">
+                <CardHeader>
+                  <div className="flex items-center justify-between gap-2">
                     <button
                       type="button"
-                      onClick={() => setDefault(model.id)}
-                      disabled={!isEnabled || isSaving}
-                      aria-label={isDefault ? `${model.label} is the default` : `Set ${model.label} as default`}
-                      aria-pressed={isDefault}
-                      title={
-                        !isEnabled
-                          ? 'Enable this model to set it as default'
-                          : isDefault
-                            ? 'Default model'
-                            : 'Set as default'
-                      }
-                      className={cn(
-                        'p-1 rounded focus:outline-none focus:ring-2 focus:ring-blue-500',
-                        isDefault
-                          ? 'text-amber-400'
-                          : isEnabled
-                            ? 'text-gray-500 hover:text-amber-300'
-                            : 'text-gray-700 cursor-not-allowed',
-                      )}
+                      onClick={() => toggleCollapsed(engine)}
+                      aria-expanded={!isCollapsed}
+                      className="flex items-center gap-2 text-left"
                     >
-                      <Star className="w-4 h-4" fill={isDefault ? 'currentColor' : 'none'} />
-                    </button>
-                    <span className="text-sm text-gray-200 whitespace-nowrap shrink-0">
-                      {highlightMatch(model.label, search)}
-                    </span>
-                    <span className="text-xs text-gray-500 font-mono truncate flex-1 min-w-0">
-                      {highlightMatch(model.id, search)}
-                    </span>
-                    {model.source === 'custom' && <Badge variant="info">custom</Badge>}
-                    {model.legacy && <Badge variant="warning">legacy</Badge>}
-                    {model.priced ? (
-                      <span className="text-xs text-gray-500">
-                        ${model.input_price}/${model.output_price} per Mtok
-                      </span>
-                    ) : (
-                      <Badge variant="danger" title="No pricing — cost tracking uses a default estimate">
-                        unpriced
-                      </Badge>
-                    )}
-                    <div className="ml-auto flex items-center gap-1">
-                      <button
-                        onClick={() => setFormState({ model })}
-                        aria-label={`Edit ${model.label}`}
-                        className="p-1.5 text-gray-400 hover:text-gray-200 rounded"
-                      >
-                        <Pencil className="w-4 h-4" />
-                      </button>
-                      {model.source === 'custom' && (
-                        <button
-                          onClick={() => setDeleteTarget(model)}
-                          aria-label={`Delete ${model.label}`}
-                          className="p-1.5 text-gray-400 hover:text-red-400 rounded"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                      {isCollapsed ? (
+                        <ChevronRight className="w-4 h-4 text-gray-400" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-gray-400" />
                       )}
+                      <CardTitle>{engineLabel(engine)}</CardTitle>
+                      <span className="text-xs text-gray-500">
+                        {offered}/{sectionModels.length} offered
+                      </span>
+                    </button>
+                    {/* Bulk enable/disable every (visible) model on this engine. */}
+                    <div className="flex items-center gap-1 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setEngineForModels(engine, sectionModels, true)}
+                        disabled={isSaving || allOn || sectionModels.length === 0}
+                        aria-label={`Offer all on ${engineLabel(engine)}`}
+                        className="px-1.5 py-0.5 rounded text-gray-400 hover:text-gray-200 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        All
+                      </button>
+                      <span className="text-gray-600">·</span>
+                      <button
+                        type="button"
+                        onClick={() => setEngineForModels(engine, sectionModels, false)}
+                        disabled={isSaving || noneOn}
+                        aria-label={`Offer none on ${engineLabel(engine)}`}
+                        className="px-1.5 py-0.5 rounded text-gray-400 hover:text-gray-200 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        None
+                      </button>
                     </div>
                   </div>
-                  );
-                })}
-              </CardContent>
-            </Card>
-          ))}
-          </div>
-
-          {grouped.length === 0 && (
-            <p className="text-gray-500 text-sm">No models match “{search}”.</p>
-          )}
+                </CardHeader>
+                {!isCollapsed && (
+                  <CardContent className="space-y-4">
+                    {grouped.length === 0 && (
+                      <p className="text-gray-500 text-sm">No models match “{search}”.</p>
+                    )}
+                    {grouped.map(([provider, models]) => {
+                      const provAllOn = models.every(isOn);
+                      const provNoneOn = models.every((m) => !isOn(m));
+                      return (
+                        <div key={provider} className="space-y-1">
+                          <div className="flex items-center justify-between gap-2 px-1">
+                            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                              {providerLabel(provider)}
+                            </h3>
+                            <div className="flex items-center gap-1 text-xs">
+                              <button
+                                type="button"
+                                onClick={() => setEngineForModels(engine, models, true)}
+                                disabled={isSaving || provAllOn}
+                                aria-label={`Offer all ${providerLabel(provider)} on ${engineLabel(engine)}`}
+                                className="px-1.5 py-0.5 rounded text-gray-500 hover:text-gray-200 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                              >
+                                All
+                              </button>
+                              <span className="text-gray-600">·</span>
+                              <button
+                                type="button"
+                                onClick={() => setEngineForModels(engine, models, false)}
+                                disabled={isSaving || provNoneOn}
+                                aria-label={`Offer no ${providerLabel(provider)} on ${engineLabel(engine)}`}
+                                className="px-1.5 py-0.5 rounded text-gray-500 hover:text-gray-200 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                              >
+                                None
+                              </button>
+                            </div>
+                          </div>
+                          {models.map((model) => {
+                            const offeredHere = isOn(model);
+                            // The default is an (engine, model) pair: this row is the default
+                            // only in the section whose engine matches. Settable only where the
+                            // model is offered, so picking the star also picks the engine.
+                            const isDefault = defaultModel === model.id && defaultEngine === engine;
+                            const eligibleDefault = offeredHere;
+                            return (
+                              <div
+                                key={model.id}
+                                className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-gray-700/50"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={offeredHere}
+                                  disabled={isSaving}
+                                  onChange={() => toggleEngineModel(engine, model.id)}
+                                  aria-label={`Offer ${model.label} on ${engineLabel(engine)}`}
+                                  className="h-4 w-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-blue-500 disabled:opacity-50"
+                                />
+                                {/* Star = default (model-level). Settable only when the model
+                                    is offered on some engine (backend rejects a default outside
+                                    the enabled set); disabled+dimmed otherwise. */}
+                                <button
+                                  type="button"
+                                  onClick={() => setDefault(engine, model.id)}
+                                  disabled={!eligibleDefault || isSaving}
+                                  aria-label={
+                                    isDefault
+                                      ? `${model.label} on ${engineLabel(engine)} is the default`
+                                      : `Set ${model.label} on ${engineLabel(engine)} as default`
+                                  }
+                                  aria-pressed={isDefault}
+                                  title={
+                                    !eligibleDefault
+                                      ? 'Offer this model on this engine to make it the default'
+                                      : isDefault
+                                        ? 'Default Engine·Model'
+                                        : 'Set as default'
+                                  }
+                                  className={cn(
+                                    'p-1 rounded focus:outline-none focus:ring-2 focus:ring-blue-500',
+                                    isDefault
+                                      ? 'text-amber-400'
+                                      : eligibleDefault
+                                        ? 'text-gray-500 hover:text-amber-300'
+                                        : 'text-gray-700 cursor-not-allowed'
+                                  )}
+                                >
+                                  <Star className="w-4 h-4" fill={isDefault ? 'currentColor' : 'none'} />
+                                </button>
+                                <span className="text-sm text-gray-200 whitespace-nowrap shrink-0">
+                                  {highlightMatch(model.label, search)}
+                                </span>
+                                <span className="text-xs text-gray-500 font-mono truncate flex-1 min-w-0">
+                                  {highlightMatch(model.id, search)}
+                                </span>
+                                {model.source === 'custom' && <Badge variant="info">custom</Badge>}
+                                {model.legacy && <Badge variant="warning">legacy</Badge>}
+                                {model.priced ? (
+                                  <span className="text-xs text-gray-500">
+                                    ${model.input_price}/${model.output_price} per Mtok
+                                  </span>
+                                ) : (
+                                  <Badge
+                                    variant="danger"
+                                    title="No pricing — cost tracking uses a default estimate"
+                                  >
+                                    unpriced
+                                  </Badge>
+                                )}
+                                <div className="ml-auto flex items-center gap-1">
+                                  <button
+                                    onClick={() => setFormState({ model })}
+                                    aria-label={`Edit ${model.label} (${engineLabel(engine)} section)`}
+                                    className="p-1.5 text-gray-400 hover:text-gray-200 rounded"
+                                  >
+                                    <Pencil className="w-4 h-4" />
+                                  </button>
+                                  {model.source === 'custom' && (
+                                    <button
+                                      onClick={() => setDeleteTarget(model)}
+                                      aria-label={`Delete ${model.label} (${engineLabel(engine)} section)`}
+                                      className="p-1.5 text-gray-400 hover:text-red-400 rounded"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </CardContent>
+                )}
+              </Card>
+            );
+          })}
         </>
       )}
 
