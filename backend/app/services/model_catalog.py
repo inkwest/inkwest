@@ -27,6 +27,7 @@ import os
 import re
 import time
 from datetime import UTC, datetime
+from typing import Any
 
 from anthropic import AsyncAnthropic
 
@@ -135,13 +136,6 @@ def is_anthropic_model(model_id: str) -> bool:
     return "anthropic" in lowered or "claude" in lowered
 
 
-# Bedrock model IDs are namespaced by vendor (``<vendor>.<model>``, optionally
-# behind a regional routing prefix). These are the vendors Bedrock serves; the
-# tag drives admin-UI grouping and chat routing (only ``anthropic`` speaks the
-# Messages protocol — see ``provider_speaks_messages``).
-BEDROCK_VENDORS = frozenset(
-    {"anthropic", "amazon", "meta", "mistral", "cohere", "ai21", "deepseek", "stability"}
-)
 # Provider tags whose models speak the Anthropic Messages protocol (Claude).
 # ``bedrock`` is the legacy pre-vendor tag for Claude-on-Bedrock, kept so rows
 # persisted before per-vendor tagging still route correctly.
@@ -149,16 +143,20 @@ _MESSAGES_PROVIDERS = frozenset({"anthropic", "bedrock"})
 
 
 def bedrock_vendor(model_id: str) -> str:
-    """The Bedrock vendor tag for a model ID (``meta``, ``anthropic``, ...).
+    """The Bedrock vendor tag for a model ID (``meta``, ``anthropic``, ``qwen``...).
 
-    Strips any regional routing prefix (``us.``/``eu.``...) then takes the
-    leading namespace. An unrecognized namespace falls back to the generic
-    ``bedrock`` tag (still groupable, routed as non-Claude unless it is
-    ``anthropic``).
+    Bedrock IDs are ``<vendor>.<model>`` behind an optional regional routing prefix
+    (``us.``/``eu.``...). Strip the prefix, then take the leading namespace as the
+    vendor — verbatim, NOT against a fixed allowlist: Bedrock keeps onboarding
+    vendors (google, nvidia, qwen, openai, minimax, twelvelabs, deepseek, …) and an
+    allowlist silently lumps every new one under one bucket. Only a bare,
+    un-namespaced ID (no ``.``) falls back to the generic ``bedrock`` tag. The tag
+    drives admin-UI grouping + chat routing — only ``anthropic`` speaks the Messages
+    protocol (``provider_speaks_messages``); every other vendor goes via Converse.
     """
     base = _BEDROCK_ROUTE_PREFIX.sub("", model_id)
     vendor = base.split(".", 1)[0] if "." in base else ""
-    return vendor if vendor in BEDROCK_VENDORS else "bedrock"
+    return vendor or "bedrock"
 
 
 def provider_speaks_messages(provider: str) -> bool:
@@ -347,6 +345,33 @@ async def refresh_catalog(force: bool = False) -> None:
             _live_models = fetched
             _fetched_wall = datetime.now(UTC)
             logger.info(f"Model catalog refreshed: {len(fetched)} models ({settings.ai_provider})")
+
+        # Best-effort: refresh live Bedrock prices for the catalog's region from the
+        # public Price List (no creds). A failed fetch returns {} and is ignored, so the
+        # last good live map (or the static table) stands — pricing never regresses.
+        await _refresh_live_pricing(settings)
+
+
+def _bedrock_pricing_region(settings: Any) -> str | None:
+    """The Bedrock region whose Price List backs the catalog, or None (no Bedrock)."""
+    if settings.ai_provider == "bedrock":
+        return settings.aws_region
+    if settings.ai_provider == "claude-cli":
+        env = _claude_cli_backend_env()
+        if env.get("CLAUDE_CODE_USE_BEDROCK", "").lower() in ("1", "true", "yes"):
+            return env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")
+    return None
+
+
+async def _refresh_live_pricing(settings: Any) -> None:
+    region = _bedrock_pricing_region(settings)
+    if not region:
+        return
+    from app.services import pricing, pricing_live
+
+    resolved = await pricing_live.fetch_bedrock_pricing(region)
+    if resolved:  # keep the prior live map on a transient fetch failure
+        pricing.set_live_pricing(resolved)
 
 
 def available_models() -> list[str]:

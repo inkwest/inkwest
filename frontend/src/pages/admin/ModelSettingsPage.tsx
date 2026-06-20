@@ -37,6 +37,15 @@ const PROVIDER_ORDER = [
   'ai21',
   'deepseek',
   'stability',
+  'google',
+  'nvidia',
+  'qwen',
+  'openai',
+  'minimax',
+  'twelvelabs',
+  'writer',
+  'luma',
+  'zai',
   'bedrock',
   'bedrock-open',
   'claude-cli',
@@ -50,6 +59,15 @@ const PROVIDER_LABELS: Record<string, string> = {
   ai21: 'AI21',
   deepseek: 'DeepSeek',
   stability: 'Stability',
+  google: 'Google',
+  nvidia: 'NVIDIA',
+  qwen: 'Qwen',
+  openai: 'OpenAI',
+  minimax: 'MiniMax',
+  twelvelabs: 'TwelveLabs',
+  writer: 'Writer',
+  luma: 'Luma',
+  zai: 'Z.AI',
   bedrock: 'Bedrock (Claude)',
   'bedrock-open': 'Bedrock (other vendors)',
   'claude-cli': 'Claude CLI',
@@ -58,6 +76,23 @@ const PROVIDER_LABELS: Record<string, string> = {
 function providerRank(provider: string): number {
   const i = PROVIDER_ORDER.indexOf(provider);
   return i === -1 ? PROVIDER_ORDER.length : i;
+}
+
+// Highlight the (first) search-match substring so a filtered list shows *why* each row
+// matched. Case-insensitive; returns the text unchanged when there's no query/match.
+function highlightMatch(text: string, query: string) {
+  const q = query.trim();
+  const idx = q ? text.toLowerCase().indexOf(q.toLowerCase()) : -1;
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="bg-amber-400/30 text-amber-100 rounded px-0.5">
+        {text.slice(idx, idx + q.length)}
+      </mark>
+      {text.slice(idx + q.length)}
+    </>
+  );
 }
 
 function formatRefreshed(iso: string | null): string {
@@ -208,7 +243,7 @@ export function ModelSettingsPage() {
   }
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">
           Model
@@ -233,7 +268,11 @@ export function ModelSettingsPage() {
             <CardContent className="space-y-4 pt-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="text-sm text-gray-400">
-                  Provider <span className="text-gray-200 font-medium">{settings.provider}</span> ·{' '}
+                  Provider <span className="text-gray-200 font-medium">{settings.provider}</span>
+                  {settings.inkwest_agent_enabled && (
+                    <span className="text-gray-200 font-medium"> + inkwest-agent engine</span>
+                  )}{' '}
+                  ·{' '}
                   {settings.catalog.count} models ·{' '}
                   <span className={settings.catalog.source === 'live' ? 'text-green-400' : 'text-amber-400'}>
                     {settings.catalog.source}
@@ -279,20 +318,27 @@ export function ModelSettingsPage() {
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
                 <Input
-                  placeholder="Quick search by name or ID…"
+                  placeholder="Quick search by name or ID… (Esc to clear)"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Escape' && setSearch('')}
                   className="pl-9"
                 />
               </div>
             </CardContent>
           </Card>
 
-          {/* Grouped model list */}
+          {/* Grouped model list — vendor cards auto-flow into 2 balanced columns
+              (CSS multi-column masonry) so short groups (e.g. a single Cohere model)
+              don't each eat a full-width row. break-inside-avoid keeps a card whole. */}
+          <div className="columns-1 md:columns-2 gap-6 [&>*]:mb-6 [&>*]:break-inside-avoid">
           {grouped.map(([provider, models]) => (
             <Card key={provider} variant="bordered">
               <CardHeader>
-                <CardTitle>{PROVIDER_LABELS[provider] ?? provider}</CardTitle>
+                <CardTitle>
+                  {PROVIDER_LABELS[provider] ??
+                    provider.charAt(0).toUpperCase() + provider.slice(1)}
+                </CardTitle>
               </CardHeader>
               <CardContent className="space-y-1">
                 {models.map((model) => {
@@ -337,9 +383,11 @@ export function ModelSettingsPage() {
                     >
                       <Star className="w-4 h-4" fill={isDefault ? 'currentColor' : 'none'} />
                     </button>
-                    <span className="text-sm text-gray-200">{model.label}</span>
-                    <span className="text-xs text-gray-500 font-mono truncate max-w-xs">
-                      {model.id}
+                    <span className="text-sm text-gray-200 whitespace-nowrap shrink-0">
+                      {highlightMatch(model.label, search)}
+                    </span>
+                    <span className="text-xs text-gray-500 font-mono truncate flex-1 min-w-0">
+                      {highlightMatch(model.id, search)}
                     </span>
                     {model.source === 'custom' && <Badge variant="info">custom</Badge>}
                     {model.legacy && <Badge variant="warning">legacy</Badge>}
@@ -376,6 +424,7 @@ export function ModelSettingsPage() {
               </CardContent>
             </Card>
           ))}
+          </div>
 
           {grouped.length === 0 && (
             <p className="text-gray-500 text-sm">No models match “{search}”.</p>

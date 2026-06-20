@@ -39,6 +39,35 @@ class TestGetModelPricing:
         assert pricing.input_price == Decimal("5.00")
         assert pricing.output_price == Decimal("15.00")
 
+    def test_open_weight_without_live_prices_is_default(self):
+        """Open-weight models aren't in the static table → DEFAULT (priced=False) until the
+        live Price List resolves them."""
+        from app.services import pricing as pricing_mod
+
+        pricing_mod.set_live_pricing({})  # ensure no live map
+        p = get_model_pricing("mistral.magistral-small-2509")
+        assert p.input_price == Decimal("5.00")  # DEFAULT_PRICING
+
+    def test_live_pricing_resolves_across_naming_styles(self):
+        """Live prices (keyed by price_match_keys) resolve a routed/versioned model ID."""
+        from app.services import pricing as pricing_mod
+        from app.services.pricing import ModelPricing, price_match_keys
+
+        # Build a live map the way pricing_live does: index by every key of the token.
+        live: dict = {}
+        for key in price_match_keys("Magistral-Small-2509"):
+            live[key] = ModelPricing(Decimal("0.50"), Decimal("1.50"))
+        for key in price_match_keys("NovaLite"):
+            live[key] = ModelPricing(Decimal("0.06"), Decimal("0.24"))
+        pricing_mod.set_live_pricing(live)
+        try:
+            assert get_model_pricing("mistral.magistral-small-2509").input_price == Decimal("0.50")
+            assert get_model_pricing("eu.amazon.nova-lite-v1:0").output_price == Decimal("0.24")
+            # live wins over the static table for Claude too, if present
+            assert get_model_pricing("unknown.vendor-x").input_price == Decimal("5.00")  # default
+        finally:
+            pricing_mod.set_live_pricing({})
+
 
 class TestCalculateCost:
     """Tests for calculate_cost function."""

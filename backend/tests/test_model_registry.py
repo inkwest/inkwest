@@ -106,7 +106,10 @@ def test_default_model_falls_back_to_newest_enabled():
     ("provider", "model_id", "expected"),
     [
         ("anthropic", "claude-opus-4-8", "anthropic"),
-        ("claude-cli", "claude-opus-4-8", "claude-cli"),
+        # Bare claude-* (no Bedrock namespace) → anthropic regardless of provider, so it
+        # routes to the CLI (Messages protocol) and groups under Anthropic — not the
+        # deployment provider tag.
+        ("claude-cli", "claude-opus-4-8", "anthropic"),
         # Bedrock: per-vendor tag derived from the (region-stripped) namespace.
         ("bedrock", "eu.anthropic.claude-opus-4-8", "anthropic"),
         ("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic"),
@@ -118,8 +121,19 @@ def test_default_model_falls_back_to_newest_enabled():
         ("bedrock", "ai21.jamba-1-5-large-v1:0", "ai21"),
         ("bedrock", "deepseek.r1-v1:0", "deepseek"),
         ("bedrock", "stability.stable-image-core-v1:0", "stability"),
-        # Unknown namespace → generic bedrock fallback.
-        ("bedrock", "newvendor.some-model-v1:0", "bedrock"),
+        # Vendor tag is derived verbatim from the namespace — NOT an allowlist — so
+        # vendors Bedrock keeps adding group coherently instead of all under "bedrock".
+        # This holds under claude-cli too (whole-Bedrock catalog with inkwest-agent on).
+        ("claude-cli", "eu.anthropic.claude-opus-4-8", "anthropic"),
+        ("claude-cli", "mistral.magistral-small-2509", "mistral"),
+        ("claude-cli", "google.gemma-3-27b-it", "google"),
+        ("claude-cli", "nvidia.nemotron-nano-30b-3.0", "nvidia"),
+        ("claude-cli", "qwen.qwen3-coder-30b-a3b-v1:0", "qwen"),
+        ("claude-cli", "openai.gpt-oss-120b:0", "openai"),
+        ("bedrock", "twelvelabs.marengo-embed-3-0-v1:0", "twelvelabs"),
+        ("bedrock", "us.minimax.minimax-m2-5", "minimax"),
+        # Bare, un-namespaced non-Claude ID (no dot) → deployment provider fallback.
+        ("claude-cli", "some-bare-model", "claude-cli"),
     ],
 )
 def test_derive_provider(provider, model_id, expected):
@@ -178,6 +192,20 @@ def test_merged_entries_includes_custom_not_in_catalog():
     assert custom.provider == "bedrock-open"
     assert custom.source == "custom"
     assert custom.priced is False  # no override, not in table -> red in UI
+
+
+def test_discovered_row_provider_is_rederived_not_stale():
+    """A discovered row enabled before a derivation change keeps a stale stored provider;
+    the merged entry must re-derive it (vendor), not trust the cached tag."""
+    model_catalog._live_models = ["google.gemma-3-27b-it"]
+    model_registry._rows = {
+        # stale tag from when it was enabled under the old all-claude-cli derivation
+        "google.gemma-3-27b-it": _row(
+            "google.gemma-3-27b-it", provider="claude-cli", source="discovered", enabled=True
+        )
+    }
+    entry = next(e for e in merged_entries() if e.model_id == "google.gemma-3-27b-it")
+    assert entry.provider == "google"  # re-derived, not the stale "claude-cli"
 
 
 def test_merged_entry_label_override_and_priced_flag():

@@ -43,6 +43,14 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         input_price=Decimal("3.00"),
         output_price=Decimal("15.00"),
     ),
+    "claude-opus-4-5": ModelPricing(
+        input_price=Decimal("5.00"),
+        output_price=Decimal("25.00"),
+    ),
+    "claude-sonnet-4-5": ModelPricing(
+        input_price=Decimal("3.00"),
+        output_price=Decimal("15.00"),
+    ),
     "claude-haiku-4-5": ModelPricing(
         input_price=Decimal("1.00"),
         output_price=Decimal("5.00"),
@@ -147,13 +155,58 @@ def _pricing_candidates(model: str) -> list[str]:
     return [model, base, no_version, bare, re.sub(r"-\d{8}$", "", bare)]
 
 
+_ALNUM_RE = re.compile(r"[^a-z0-9]")
+
+
+def price_match_keys(token: str) -> set[str]:
+    """Normalized keys for matching a model token across naming styles.
+
+    Bridges the AWS Price List's loose model tokens (from a product's ``usagetype``,
+    e.g. ``Magistral-Small-2509``, ``NovaLite``, ``nvidia.nemotron-super-3-120b``) to
+    real Bedrock model IDs (``mistral.magistral-small-2509``, ``amazon.nova-lite-v1:0``).
+    Strips the regional routing prefix + version suffix, lowercases to alphanumerics, and
+    also yields the form **without** the leading vendor namespace — so the price side and
+    the model-ID side meet on a common key regardless of which carries the vendor prefix.
+    """
+    token = _ROUTE_PREFIX_RE.sub("", token)
+    token = re.sub(r"-v\d+(:\d+)?$", "", token)  # -v1:0
+    token = re.sub(r":\d+$", "", token)  # bare :0 version
+    keys = {_ALNUM_RE.sub("", token.lower())}
+    if "." in token:
+        keys.add(_ALNUM_RE.sub("", token.split(".", 1)[1].lower()))
+    return {k for k in keys if k}
+
+
+# Live prices resolved from the AWS public bulk Price List at catalog-refresh time
+# (see app.services.pricing_live), keyed by every ``price_match_keys`` of the price-list
+# model token. Consulted before the static table so accurate per-vendor prices need no
+# hardcoding (and don't rot). Empty until the first successful refresh.
+_LIVE_PRICING: dict[str, ModelPricing] = {}
+
+
+def set_live_pricing(by_key: dict[str, ModelPricing]) -> None:
+    """Replace the live price map (called after a price-list refresh; ``{}`` clears it)."""
+    global _LIVE_PRICING
+    _LIVE_PRICING = by_key
+
+
+def _live_pricing(model: str) -> ModelPricing | None:
+    if not _LIVE_PRICING:
+        return None
+    for key in price_match_keys(model):
+        hit = _LIVE_PRICING.get(key)
+        if hit is not None:
+            return hit
+    return None
+
+
 def get_model_pricing(model: str) -> ModelPricing:
     """
     Get pricing for a model.
 
-    Matches by exact ID, then by progressively normalized forms (Bedrock
-    routing prefix, version suffix, date snapshot stripped) — never by
-    substring, which would let unrelated IDs inherit a price.
+    Resolution order: live Price-List prices (accurate, refreshed) → the static table
+    (exact ID then progressively normalized forms — Bedrock routing prefix, version
+    suffix, date snapshot stripped; never substring) → the conservative default.
 
     Args:
         model: Model name or ID
@@ -161,6 +214,9 @@ def get_model_pricing(model: str) -> ModelPricing:
     Returns:
         ModelPricing with input and output prices
     """
+    live = _live_pricing(model)
+    if live is not None:
+        return live
     for candidate in _pricing_candidates(model):
         if candidate in MODEL_PRICING:
             return MODEL_PRICING[candidate]

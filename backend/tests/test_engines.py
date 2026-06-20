@@ -24,8 +24,10 @@ def test_agentic_engines_list_empty():
 
 
 def test_default_is_claude_cli_only():
-    # The shipped default preserves today's behavior: only Claude Code.
-    assert Settings().agentic_engines_list == ["claude-cli"]
+    # The shipped CODE default preserves today's behavior: only Claude Code.
+    # _env_file=None so a developer's local .env (which may enable inkwest-agent for
+    # sandbox testing) can't mask the default this test guards.
+    assert Settings(_env_file=None).agentic_engines_list == ["claude-cli"]
 
 
 def test_agent_image_falls_back_to_toolbox():

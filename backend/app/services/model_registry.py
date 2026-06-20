@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.model_registry import ModelRegistry
-from app.services.model_catalog import available_models, bedrock_vendor
+from app.services.model_catalog import available_models, bedrock_vendor, is_anthropic_model
 from app.services.pricing import (
     DEFAULT_PRICING,
     ModelPricing,
@@ -91,14 +91,23 @@ class ModelEntry:
 def _derive_provider(model_id: str) -> str:
     """Provider tag for a discovered model ID (no explicit row).
 
-    On Bedrock the tag is the per-vendor namespace (``anthropic``, ``meta``,
-    ``mistral``...) so the admin UI can group by vendor; off Bedrock it is the
-    configured provider (``anthropic`` / ``claude-cli``).
+    The tag is the per-vendor Bedrock namespace (``anthropic``, ``meta``,
+    ``mistral``...) whenever the ID carries a recognized vendor namespace — so the
+    admin UI groups by vendor and per-turn routing reads the right provider. This
+    holds regardless of the deployment provider: under ``claude-cli`` with the
+    inkwest-agent engine on, the whole-Bedrock catalog surfaces vendor models, and
+    tagging them all ``claude-cli`` would both lump every vendor under one box and
+    misroute (a Claude model would fail ``provider_speaks_messages`` and be sent to
+    the broker instead of the CLI). A bare ``claude-*`` (Anthropic API / gateway, no
+    Bedrock namespace) is tagged ``anthropic``; anything else falls back to the
+    configured provider.
     """
-    provider = get_settings().ai_provider
-    if provider == "bedrock":
-        return bedrock_vendor(model_id)
-    return provider
+    vendor = bedrock_vendor(model_id)
+    if vendor != "bedrock":  # a recognized Bedrock vendor namespace (incl. anthropic)
+        return vendor
+    if is_anthropic_model(model_id):  # bare claude-* without a Bedrock namespace
+        return "anthropic"
+    return get_settings().ai_provider
 
 
 def _row_pricing(row: dict[str, Any] | None) -> tuple[ModelPricing | None, bool]:
@@ -125,7 +134,16 @@ def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
     priced = has_override or pricing is not DEFAULT_PRICING
     return ModelEntry(
         model_id=model_id,
-        provider=(row["provider"] if row else _derive_provider(model_id)),
+        # Re-derive the vendor tag for discovered rows: their stored provider is just a
+        # derivation cached at enable-time (set_model_settings upserts it but never
+        # refreshes it), so a row enabled before a derivation change keeps a stale tag —
+        # which mis-grouped/mis-routed open-weight models lumped under "claude-cli". Only
+        # a custom row's provider is admin intent and kept verbatim.
+        provider=(
+            row["provider"]
+            if (row and row.get("source") == "custom")
+            else _derive_provider(model_id)
+        ),
         label=(row.get("display_name") if row else None) or model_label(model_id),
         enabled=bool(row["enabled"]) if row else False,
         is_default=bool(row["is_default"]) if row else False,

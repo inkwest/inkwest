@@ -435,8 +435,14 @@ async def test_fetch_bedrock_models_default_excludes_open():
         ("ai21.jamba-1-5-large-v1:0", "ai21"),
         ("deepseek.r1-v1:0", "deepseek"),
         ("stability.stable-image-core-v1:0", "stability"),
-        ("newvendor.some-model-v1:0", "bedrock"),  # unknown namespace → fallback
-        ("no-dot-id", "bedrock"),  # no namespace at all → fallback
+        # Vendor derived verbatim from the namespace (no allowlist) — vendors Bedrock
+        # keeps adding get their own tag instead of all collapsing to "bedrock".
+        ("google.gemma-3-27b-it", "google"),
+        ("qwen.qwen3-coder-30b-a3b-v1:0", "qwen"),
+        ("openai.gpt-oss-120b:0", "openai"),
+        ("us.minimax.minimax-m2-5", "minimax"),
+        ("newvendor.some-model-v1:0", "newvendor"),  # any namespace → its own vendor tag
+        ("no-dot-id", "bedrock"),  # no namespace at all → generic fallback
     ],
 )
 def test_bedrock_vendor(model_id, expected):
