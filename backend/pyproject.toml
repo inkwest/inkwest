@@ -80,6 +80,9 @@ strict = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "e2e: end-to-end test needing external toolchain/network (skips when unavailable)",
+]
 
 [tool.coverage.run]
 # inkwest_agent is a first-class shipped unit (the sandbox runtime), not just app/.
