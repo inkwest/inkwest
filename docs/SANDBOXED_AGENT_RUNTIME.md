@@ -73,7 +73,7 @@ The loop is host-agnostic; only the **adapter** is host-specific (format transla
 | # | Decision | Verdict |
 |---|---|---|
 | 1 | Custom-engine adapter | **Converse-only**. No Messages adapter (Anthropic-direct only ever via `claude-cli`). |
-| 2 | Where the loop runs | Custom loop **moves into the sandbox** (Phase 1). One loop (`orchestrator_common`) + Converse adapter, packaged as `inkwest-agent`. Portal = broker. |
+| 2 | Where the loop runs | Custom loop **moves into the sandbox** (Phase 1). One loop (shared DB-free tool execution carved into `tool_execution` + `message_window`) + Converse adapter, packaged as `inkwest-agent`. Portal = broker. |
 | 3 | History / state | **Resume by default** (agent transcript in durable per-conv dir); broker persists events → DB canonical. Turn-spec reserves `context{mode:resume\|replay, history?}`. Agent: zero DB access. |
 | 4 | Tool execution | **Profile A** (agent-exec, env-enforced) default for the read-only toolset. **Profile B** (broker-mediated) reserved per-tool for a later **RW lot**. `exec_profile` per-tool in the contract from day 1. |
 | 5 | Transport / cancel | **NDJSON `ChatEvent` on stdout** + **cancel-by-kill**. Reuse `ai_cli_client`. One spawn/stream/cancel mechanism for both engines. |
@@ -130,6 +130,6 @@ After this lands, a portal compromise yields neither tool execution, nor model a
 
 - Sandbox lifecycle: `app/services/sandbox.py` (`ensure`, reaper, squid proxy, tmpfs `~/.aws`/`~/.kube`, durable per-conv `claude/` + `workdir/` + `logs/squid/`).
 - In-sandbox engine pattern: `orchestrator_cli.py` + `ai_cli_client.py` (spawn-in-container, stdout→`ChatEvent`, cancel-by-kill, `--resume`).
-- The custom loop: `orchestrator_common.py` / `orchestrator.py` / `orchestrator_converse.py` (Converse already unifies Bedrock vendors).
+- The custom loop: `tool_execution.py` (DB-free tool-call loop, shared) / `message_window.py` (pure transcript truncation) / `orchestrator_common.py` (`finalize_turn`, DB) / `orchestrator.py` / `orchestrator_converse.py` (Converse already unifies Bedrock vendors). The DB-free pieces were carved out of `orchestrator_common`/`messages` so `inkwest_agent` imports them without the DB/web stack.
 - NOTIFY infra: `pubsub.py` (channel, listener loop, fan-out) — reusable by the worker.
 - Durable connector tables: `connector_pending_state`, `connector_audit` — extend for the intent queue.
