@@ -23,36 +23,6 @@ from app.services.pubsub import notify
 logger = logging.getLogger(__name__)
 
 
-def truncate_messages(messages: list[dict[str, Any]], max_messages: int) -> list[dict[str, Any]]:
-    """Truncate messages while preserving tool_use/tool_result pairs.
-
-    Naive slicing can orphan a tool_use without its result (or vice versa),
-    which causes API validation errors. This helper finds a safe cut point.
-    """
-    if len(messages) <= max_messages:
-        return messages
-
-    truncated = messages[-max_messages:]
-
-    # If the first message is a tool_result (role=user with tool_result content),
-    # it's orphaned — drop messages until we find a non-orphan boundary.
-    while truncated and _is_tool_result_message(truncated[0]):
-        truncated = truncated[1:]
-
-    return truncated
-
-
-def _is_tool_result_message(msg: dict[str, Any]) -> bool:
-    if msg.get("role") == "tool":
-        return True
-    content = msg.get("content")
-    if isinstance(content, list) and content:
-        first = content[0]
-        if isinstance(first, dict) and first.get("type") == "tool_result":
-            return True
-    return False
-
-
 async def get_session_messages(
     db: AsyncSession, session_id: str | uuid.UUID
 ) -> list[dict[str, Any]]:

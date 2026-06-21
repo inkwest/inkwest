@@ -8,8 +8,8 @@ terminal ``done`` event's metadata instead of being written to the DB here.
 
 Cancellation is **by-kill** (the broker terminates the process), so there is no
 in-process ``cancel_event`` — the loop runs to a terminal stop or the broker
-SIGKILLs it. Tool execution reuses ``orchestrator_common.execute_tool_calls``
-(already DB-free; Profile A, env-enforced).
+SIGKILLs it. Tool execution reuses ``tool_execution.execute_tool_calls``
+(DB-free; Profile A, env-enforced).
 """
 
 import asyncio
@@ -29,8 +29,8 @@ from app.services.events import (
     tool_result_event,
     tool_start_event,
 )
-from app.services.messages import truncate_messages
-from app.services.orchestrator_common import ToolRunResult, execute_tool_calls
+from app.services.message_window import truncate_messages
+from app.services.tool_execution import ToolRunResult, execute_tool_calls
 
 from .converse import image_blocks_for_attachments, to_converse_message, to_converse_tools
 from .mcp import MCPManager, load_mcp_config

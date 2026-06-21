@@ -1,0 +1,107 @@
+"""
+Tool-call execution — the DB-free half of the shared orchestration loop.
+
+Carved out of ``orchestrator_common.py``: running a batch of tool calls
+and yielding their ``ChatEvent``s needs no DB session, so it lives here, away from
+``finalize_turn`` (usage/stats persistence, which is sqlalchemy-bound). The two
+API-based orchestrators and the standalone ``inkwest_agent`` loop all share this —
+a fix in tool dispatch, the connector re-auth affordance, or cancel handling lands
+once for all three.
+"""
+
+import asyncio
+import logging
+import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from typing import Any
+
+from app.services.events import (
+    ChatEvent,
+    connector_required_event,
+    tool_result_event,
+    tool_start_event,
+)
+from app.tools.connector_exec import connector_for_tool, is_needs_auth
+from app.tools.dispatch import execute_tool
+from app.tools.exec_context import ToolExecContext
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolRunResult:
+    """Out-param for execute_tool_calls: the tool_result blocks + cancel flag."""
+
+    tool_results: list[dict[str, Any]] = field(default_factory=list)
+    cancelled: bool = False
+
+
+async def execute_tool_calls(
+    result: ToolRunResult,
+    *,
+    tool_calls: list[dict[str, Any]],
+    user_id: uuid.UUID | None,
+    session_id: uuid.UUID,
+    session_id_str: str,
+    kubeconfig_path: str | None,
+    context_name: str | None,
+    cancel_event: asyncio.Event | None,
+    projected_creds: bool = False,
+) -> AsyncIterator[ChatEvent]:
+    """Execute each tool call, yielding tool_start/result/connector events.
+
+    The Anthropic-shaped tool_result blocks are appended to ``result``; the
+    caller persists them (so the save runs in the caller's module, and a
+    mid-loop cancel — which sets ``result.cancelled`` and returns early —
+    discards the partial results, matching the prior per-orchestrator behavior).
+
+    ``projected_creds`` is set by the sandboxed inkwest-agent: connector creds were
+    pre-provided by the broker as env, so executors read them from the environment
+    rather than the portal credential store (which the agent process can't reach).
+    """
+    for tool_call in tool_calls:
+        if cancel_event and cancel_event.is_set():
+            logger.info("Chat cancelled during tool execution")
+            result.cancelled = True
+            return
+
+        tool_id = tool_call["id"]
+        tool_name = tool_call["name"]
+        tool_input = tool_call["input"]
+
+        logger.debug(f"Executing tool: {tool_name}")
+        yield tool_start_event(tool_name, tool_input, tool_id)
+
+        # Execute the tool (kubectl or a connector tool). Connector tools fetch
+        # the user's temporary credential from the RAM store by
+        # (user_id, session_id) — never via the model or tool input.
+        tool_ctx = ToolExecContext(
+            user_id=user_id,
+            session_id=session_id,
+            kubeconfig_path=kubeconfig_path,
+            context_name=context_name,
+            projected_creds=projected_creds,
+        )
+        try:
+            output, is_error = await execute_tool(tool_name, tool_input, tool_ctx)
+        except Exception as e:
+            logger.exception(f"Exception executing tool {tool_name}")
+            output = f"Error executing tool: {str(e)}"
+            is_error = True
+
+        yield tool_result_event(tool_name, output, tool_id, is_error)
+
+        # Surface a first-class re-auth affordance when a connector is missing.
+        connector = connector_for_tool(tool_name)
+        if connector and is_needs_auth(output, is_error):
+            yield connector_required_event(connector, session_id_str)
+
+        result.tool_results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_id,
+                "content": output,
+                "is_error": is_error,
+            }
+        )

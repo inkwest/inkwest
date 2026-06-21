@@ -61,11 +61,6 @@ def _leaked_forbidden() -> list[str]:
     return json.loads(lines[-1])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="P0: carve-out not done yet — agent still imports the DB/web stack. "
-    "Remove this marker in P1 once the edges are severed (XPASS will force it).",
-)
 def test_agent_import_pulls_no_db_or_web_stack() -> None:
     """`import inkwest_agent` must not transitively import sqlalchemy/fastapi/asyncpg."""
     leaked = _leaked_forbidden()
@@ -75,11 +70,6 @@ def test_agent_import_pulls_no_db_or_web_stack() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="P0: carve-out not done yet — see test_agent_import_pulls_no_db_or_web_stack. "
-    "Remove this marker in P1 once the edges are severed (XPASS will force it).",
-)
 @pytest.mark.parametrize("pkg", FORBIDDEN)
 def test_individual_forbidden_dep_absent(pkg: str) -> None:
     """Per-dep view so a regression names the offending package directly."""
