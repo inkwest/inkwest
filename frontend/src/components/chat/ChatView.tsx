@@ -3,12 +3,14 @@ import { useSearchParams } from 'react-router-dom';
 import { useChatStore } from '@/store/chat';
 import { useSettingsStore } from '@/store/settings';
 import { useEgressSocket, isBlocked } from '@/hooks/useEgressSocket';
+import { useSessionMetrics } from '@/hooks/useSessionMetrics';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { StreamingMessage } from './StreamingMessage';
 import { ErrorBanner } from './ErrorBanner';
 import { FloatingTodoPanel } from './FloatingTodoPanel';
 import { EgressLog } from './EgressPanel';
+import { MonitoringPanel } from './MonitoringPanel';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
 import { ConnectorInlineNotice } from './ConnectorInlineNotice';
 import { Attachment } from '@/types/api';
@@ -41,10 +43,13 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
   // Live network-egress audit (sandbox only). The WS stays subscribed regardless of the
   // active tab so the counter keeps updating while the user is on the Conversation tab.
   const egress = useEgressSocket(sessionId);
-  const [tab, setTab] = useState<'chat' | 'egress'>('chat');
+  const metrics = useSessionMetrics(sessionId);
+  const [tab, setTab] = useState<'chat' | 'egress' | 'monitoring'>('chat');
   const egressAvailable = egress.connected || egress.events.length > 0;
   const blockedCount = egress.events.filter(isBlocked).length;
   const showEgress = egressAvailable && tab === 'egress';
+  const metricsAvailable = metrics.status === 'running' || metrics.samples.length > 0;
+  const showMonitoring = metricsAvailable && tab === 'monitoring';
 
   // Check if scrolled to bottom (with 50px threshold)
   const checkIfAtBottom = useCallback(() => {
@@ -174,10 +179,25 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
             </>
           )}
         </button>
+        <button
+          onClick={() => metricsAvailable && setTab('monitoring')}
+          disabled={!metricsAvailable}
+          title={metricsAvailable ? undefined : 'Resource graphs appear once the session sandbox is active'}
+          className={cn(
+            tabClass(tab === 'monitoring'),
+            'flex items-center gap-1.5',
+            !metricsAvailable && 'opacity-50 cursor-not-allowed hover:text-gray-400',
+          )}
+        >
+          Monitoring
+          {metrics.status === 'running' && (
+            <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
+          )}
+        </button>
       </div>
 
-      {/* Chat stays mounted (just hidden) when viewing egress, to preserve scroll + state. */}
-      <div className={cn('flex-1 flex flex-col min-h-0', showEgress && 'hidden')}>
+      {/* Chat stays mounted (just hidden) on the other tabs, to preserve scroll + state. */}
+      <div className={cn('flex-1 flex flex-col min-h-0', (showEgress || showMonitoring) && 'hidden')}>
         {sessionId && <ConnectorPanel sessionId={sessionId} />}
         <div
           ref={containerRef}
@@ -194,6 +214,7 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
       </div>
 
       {showEgress && <EgressLog events={egress.events} connected={egress.connected} />}
+      {showMonitoring && <MonitoringPanel samples={metrics.samples} status={metrics.status} />}
 
       <FloatingTodoPanel />
     </div>
