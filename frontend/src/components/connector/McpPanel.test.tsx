@@ -178,6 +178,38 @@ describe('McpPanel', () => {
     openSpy.mockRestore();
   });
 
+  it('ignores a second Connect click while a poll is already in flight', async () => {
+    // closed:false keeps the poll alive so the in-flight guard stays armed for the 2nd click.
+    const popup = { closed: false, location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    mockStartAuth.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize' });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    const connect = await screen.findByRole('button', { name: 'Connect' });
+    fireEvent.click(connect);
+    fireEvent.click(connect); // double-click: guard must drop this one
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    openSpy.mockRestore();
+  });
+
+  it('drops the key from the session selection BEFORE revoking upstream on Disconnect', async () => {
+    mockGetCatalog.mockResolvedValue(
+      cat([], [{ key: 'notion', kind: 'oauth2', auth_status: 'connected' }])
+    );
+    mockGetSession.mockResolvedValue({ enabled: ['notion'] });
+    mockSetSession.mockResolvedValue({ enabled: [] });
+    mockDisconnect.mockResolvedValue(
+      cat([], [{ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' }])
+    );
+    render(<McpPanel sessionId="s1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
+    // setSessionMcp must have run first, so a failed revoke can't leave it enabled-but-revoked.
+    expect(mockSetSession.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDisconnect.mock.invocationCallOrder[0]
+    );
+  });
+
   it('enables a connected oauth server into the conversation selection on OK', async () => {
     mockSetSession.mockResolvedValue({ enabled: ['notion'] });
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });

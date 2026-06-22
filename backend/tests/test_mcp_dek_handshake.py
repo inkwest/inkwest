@@ -60,6 +60,50 @@ async def test_supply_rejects_wrong_length() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wrapped_rejects_oversized_blob() -> None:
+    """An authenticated client can't OOM the worker by sending a multi-MB wrapped_dek — the
+    encoded length is capped before decode + DB insert."""
+    huge = base64.b64encode(b"A" * (5 * 1024 * 1024)).decode()
+    reply = await hs.handle_dek_message(_USER, {"type": "mcp_dek_wrapped", "wrapped_dek": huge})
+    assert reply == {"type": "mcp_dek_error", "reason": "too_large"}
+
+
+@pytest.mark.asyncio
+async def test_wrapped_rejects_oversized_iv() -> None:
+    """The IV is capped too, not just the wrapped DEK."""
+    ok_wrapped = base64.b64encode(b"A" * 60).decode()
+    huge_iv = base64.b64encode(b"A" * 1024).decode()
+    reply = await hs.handle_dek_message(
+        _USER, {"type": "mcp_dek_wrapped", "wrapped_dek": ok_wrapped, "wrap_iv": huge_iv}
+    )
+    assert reply == {"type": "mcp_dek_error", "reason": "too_large"}
+
+
+@pytest.mark.asyncio
+async def test_sweep_orphaned_deks_empty_store_is_zero() -> None:
+    assert await hs.sweep_orphaned_deks() == 0
+
+
+@pytest.mark.asyncio
+async def test_sweep_orphaned_deks_evicts_only_disconnected() -> None:
+    """The backstop evicts a DEK whose socket vanished (no refcount) but never one with a
+    live connection."""
+    live = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
+    try:
+        await get_dek_store().put(_USER, generate_dek())  # orphan: no note_connect
+        await get_dek_store().put(live, generate_dek())
+        await hs.note_connect(live)  # has a live socket
+
+        removed = await hs.sweep_orphaned_deks()
+        assert removed == 1
+        assert await get_dek_store().get(_USER) is None  # orphan evicted
+        assert await get_dek_store().get(live) is not None  # connected DEK kept
+    finally:
+        hs._conn_counts.clear()
+        await get_dek_store().delete(live)
+
+
+@pytest.mark.asyncio
 async def test_reset_bootstraps_a_fresh_dek_in_ram() -> None:
     reply = await hs.handle_dek_message(_USER, {"type": "mcp_dek_reset"})
     assert reply is not None and reply["type"] == "mcp_dek_bootstrap"

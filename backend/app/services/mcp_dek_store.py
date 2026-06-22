@@ -46,6 +46,11 @@ class DekStore:
         async with self._lock:
             return str(user_id) in self._deks
 
+    async def user_ids(self) -> set[str]:
+        """Snapshot of the user ids with a resident DEK (for the orphan sweep)."""
+        async with self._lock:
+            return set(self._deks)
+
 
 _store: DekStore | None = None
 

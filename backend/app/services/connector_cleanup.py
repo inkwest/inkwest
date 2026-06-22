@@ -41,6 +41,13 @@ async def _cleanup_loop() -> None:
             swept = mcp_oauth.sweep_refresh_state()
             if swept:
                 logger.info("mcp_oauth_negcache_sweep", removed=swept)
+            # Backstop: evict any RAM DEK whose socket vanished without a clean disconnect, so
+            # "decryptable only while connected" holds even after a missed close.
+            from app.services.mcp_dek_handshake import sweep_orphaned_deks
+
+            orphaned = await sweep_orphaned_deks()
+            if orphaned:
+                logger.info("mcp_dek_orphan_sweep", removed=orphaned)
             cutoff = datetime.now(UTC) - timedelta(seconds=CONNECTOR_STATE_TTL_SECONDS)
             mcp_cutoff = datetime.now(UTC) - timedelta(seconds=MCP_OAUTH_STATE_TTL_SECONDS)
             async with async_session_maker() as db:

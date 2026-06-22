@@ -37,4 +37,13 @@ describe('McpInlineNotice', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
     await waitFor(() => expect(openMcpAuthPopup).toHaveBeenCalledWith('notion'));
   });
+
+  it('ignores a second Reconnect click while a poll is already in flight', async () => {
+    useMcpStore.getState().flagAuthRequired('notion');
+    render(<McpInlineNotice />);
+    const btn = screen.getByRole('button', { name: 'Reconnect' });
+    fireEvent.click(btn);
+    fireEvent.click(btn); // double-click: the in-flight guard must drop this one
+    await waitFor(() => expect(openMcpAuthPopup).toHaveBeenCalledTimes(1));
+  });
 });

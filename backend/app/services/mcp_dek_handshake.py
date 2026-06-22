@@ -27,6 +27,13 @@ user's tabs is handled by making bootstrap reuse the live RAM DEK (below).
 
 Same single-replica / session-affinity constraint as the credential and warm-grant stores
 (the OAuth callback reads this RAM DEK by ``user_id`` and must hit the same process).
+
+Multi-device caveat: ``mcp_user_keys`` holds ONE wrapped DEK per user, wrapped by that
+browser/profile's non-extractable key. A second device (different wrapping key) that connects
+gets the first device's wrapped form, fails to unwrap, and sends ``mcp_dek_reset`` → a fresh
+DEK is minted and the row overwritten (last-writer-wins), so grants sealed under the previous
+DEK become undecryptable and need a reconnect. Acceptable for the single-active-device target;
+true multi-device custody would require a wrapped-DEK row per (user, wrapping-key).
 """
 
 import asyncio
@@ -51,6 +58,13 @@ logger = logging.getLogger(__name__)
 # concurrent connect/bootstrap on another tab cannot interleave (refcount race / DEK leak).
 _conn_counts: dict[str, int] = {}
 _lock = asyncio.Lock()
+
+# Bounds on the client-supplied wrapped-DEK frame (base64-encoded). A 32-byte DEK wrapped by
+# AES-GCM is ~60 bytes raw (~80 base64); these caps leave generous headroom for other wrap
+# algorithms while stopping an authenticated client from pushing a multi-MB blob through the
+# decode + DB insert (single-worker OOM vector). Checked on the encoded string BEFORE decode.
+_MAX_WRAPPED_B64 = 4096
+_MAX_IV_B64 = 64
 
 
 def _b64e(raw: bytes) -> str:
@@ -78,6 +92,23 @@ async def note_disconnect(user_id: UUID) -> None:
             await get_dek_store().delete(user_id)
         else:
             _conn_counts[key] = remaining
+
+
+async def sweep_orphaned_deks() -> int:
+    """Evict DEKs for users with no live socket; return the count removed.
+
+    Eviction is normally synchronous in :func:`note_disconnect`, but a socket that dies
+    without a clean close (missed ``finally``) could otherwise leave a DEK resident with no
+    refcount entry — silently weakening the "decryptable only while connected" property. This
+    is the backstop, called from the connector-cleanup loop. SAFE: a user with a live socket
+    has a ``_conn_counts`` entry and is never swept; only DEKs with no refcount at all go.
+    """
+    store = get_dek_store()
+    async with _lock:
+        orphaned = [uid for uid in await store.user_ids() if uid not in _conn_counts]
+        for uid in orphaned:
+            await store.delete(UUID(uid))
+    return len(orphaned)
 
 
 async def handle_dek_message(user_id: UUID, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -122,9 +153,14 @@ async def handle_dek_message(user_id: UUID, data: dict[str, Any]) -> dict[str, A
         return {"type": "mcp_dek_ready"}
 
     if msg_type == "mcp_dek_wrapped":
+        wrapped_b64 = data.get("wrapped_dek", "")
+        iv_b64 = data.get("wrap_iv") or ""
+        # Cap the encoded length BEFORE decoding so a multi-MB frame never reaches _b64d/the DB.
+        if len(wrapped_b64) > _MAX_WRAPPED_B64 or len(iv_b64) > _MAX_IV_B64:
+            return {"type": "mcp_dek_error", "reason": "too_large"}
         try:
-            wrapped = _b64d(data.get("wrapped_dek", ""))
-            iv = _b64d(data["wrap_iv"]) if data.get("wrap_iv") else None
+            wrapped = _b64d(wrapped_b64)
+            iv = _b64d(iv_b64) if iv_b64 else None
         except (binascii.Error, ValueError):
             return {"type": "mcp_dek_error", "reason": "bad_base64"}
         if not wrapped:

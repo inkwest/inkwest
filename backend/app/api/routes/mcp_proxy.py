@@ -34,10 +34,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["mcp-proxy"])
 
-# Injectable for tests (httpx.MockTransport). Connect/write bounded; read unbounded so a
-# long-lived SSE stream is not severed, but the initial connect can't hang forever.
+# Injectable for tests (httpx.MockTransport). Connect/write/pool bounded. read is an *idle*
+# (inter-byte) ceiling, not a total deadline: 1 h matches the squid read_timeout for MCP, so a
+# normal SSE stream with periodic events survives, while a genuinely hung upstream releases the
+# client + FD instead of pinning them forever (unbounded read would never let go at 3 AM).
 _transport: httpx.AsyncBaseTransport | None = None
-_TIMEOUT = httpx.Timeout(connect=5.0, write=30.0, read=None, pool=5.0)
+_TIMEOUT = httpx.Timeout(connect=5.0, write=30.0, read=3600.0, pool=5.0)
 
 # Hop-by-hop headers (RFC 7230 §6.1) plus framing headers httpx/Starlette must own.
 _HOP_BY_HOP = {
@@ -137,6 +139,11 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
         mcp_oauth.assert_public_https(server.url)
     except McpOauthError as e:
         raise HTTPException(status_code=502, detail="MCP server URL rejected") from e
+
+    # The authority can't be crossed (pin_url pins to the catalog base host), but reject dot
+    # segments so a crafted path can't traverse the upstream's own URL space.
+    if any(seg in ("..", ".") for seg in path.split("/") if seg):
+        raise HTTPException(status_code=400, detail="Invalid proxy path")
 
     body = await _read_capped_body(request)  # buffer once — needed again on the 401-retry
     url = _upstream_url(server.url, path)

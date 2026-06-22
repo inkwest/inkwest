@@ -115,6 +115,25 @@ async def test_missing_or_bad_jwt_is_401() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejects_path_traversal() -> None:
+    """A dot-segment in the opaque path is rejected with 400 before any upstream fetch — the
+    authority is already pinned, but this stops traversal of the upstream's own URL space.
+    %2e%2e survives client URL normalization yet decodes to '..' at the route."""
+    fresh = AsyncMock(return_value="upstream-token")
+    ps = _patches(lambda r: _streaming(200), fresh_token=fresh)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.get("/api/mcp-proxy/notion/%2e%2e/secret", headers=_bearer())
+        assert resp.status_code == 400
+        fresh.assert_not_called()  # rejected before token work / upstream
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
 async def test_body_intact_on_401_retry() -> None:
     calls = {"n": 0, "bodies": []}
 

@@ -57,6 +57,8 @@ export function McpPanel({
   // Active connect-poll intervals, tracked so they're always cleared on unmount (otherwise a
   // popup left open would poll the catalog forever and setState on an unmounted component).
   const pollTimers = useRef<Set<number>>(new Set());
+  // Keys with an in-flight connect poll, so a double-click doesn't spawn a second popup+poll.
+  const connecting = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const timers = pollTimers.current;
@@ -140,7 +142,9 @@ export function McpPanel({
   };
 
   const connectOauth = (key: string) => {
+    if (connecting.current.has(key)) return; // a poll is already in flight for this key
     const popup = openMcpAuthPopup(key, () => setError('Failed to start MCP authorization'));
+    connecting.current.add(key);
     // Poll the catalog while connecting; stop as soon as the grant lands ("connected"), the
     // popup closes, or a hard deadline elapses — so an abandoned popup can't poll forever.
     // The timer is tracked in pollTimers so unmount cleanup always clears it.
@@ -152,6 +156,7 @@ export function McpPanel({
       if (connected || !popup || popup.closed || Date.now() - startedAt > POLL_DEADLINE_MS) {
         window.clearInterval(timer);
         pollTimers.current.delete(timer);
+        connecting.current.delete(key);
       }
     }, 2000);
     pollTimers.current.add(timer);
@@ -159,10 +164,9 @@ export function McpPanel({
 
   const disconnectOauth = async (key: string) => {
     try {
-      const cat = await disconnectMcpAuth(key);
-      setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
-      // Disconnect means "stop using it here" — also drop it from the conversation selection
-      // so the next turn doesn't re-flag a server the user deliberately disconnected.
+      // Drop it from the conversation selection FIRST: if the upstream revoke then fails, the
+      // server is at least no longer enabled (consistent), rather than revoked-but-still-enabled
+      // which would re-flag a reconnect every turn.
       if (sessionId && enabled.has(key)) {
         const next = [...enabled].filter((k) => k !== key);
         const res = await setSessionMcp(sessionId, next);
@@ -170,6 +174,8 @@ export function McpPanel({
         setEnabled(set);
         setDraftEnabled(set);
       }
+      const cat = await disconnectMcpAuth(key);
+      setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
     } catch {
       setError('Failed to disconnect MCP server');
     }

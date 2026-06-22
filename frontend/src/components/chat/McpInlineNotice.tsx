@@ -14,6 +14,8 @@ export function McpInlineNotice({ sessionId }: { sessionId?: string }) {
   const clearAuthRequired = useMcpStore((s) => s.clearAuthRequired);
   // Track poll timers so they're always cleared on unmount (never poll forever).
   const timers = useRef<Set<number>>(new Set());
+  // Keys with an in-flight reconnect poll, so a double-click doesn't spawn a second popup+poll.
+  const reconnecting = useRef<Set<string>>(new Set());
   const prevSession = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -34,7 +36,9 @@ export function McpInlineNotice({ sessionId }: { sessionId?: string }) {
   if (authRequired.length === 0) return null;
 
   const reconnect = (key: string) => {
+    if (reconnecting.current.has(key)) return; // a poll is already in flight for this key
     openMcpAuthPopup(key);
+    reconnecting.current.add(key);
     const startedAt = Date.now();
     const DEADLINE_MS = 5 * 60 * 1000;
     // Poll the catalog (not the popup) until the grant lands or a deadline — so the banner
@@ -51,6 +55,7 @@ export function McpInlineNotice({ sessionId }: { sessionId?: string }) {
       if (connected || Date.now() - startedAt > DEADLINE_MS) {
         window.clearInterval(timer);
         timers.current.delete(timer);
+        reconnecting.current.delete(key);
       }
     }, 2000);
     timers.current.add(timer);
