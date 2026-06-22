@@ -160,10 +160,17 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
 
   // align="top": keeps the modal anchored while the filtered list resizes.
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="Sélection des comptes & rôles AWS" size="lg" align="top">
-      <div className="flex flex-col" style={{ maxHeight: '80vh' }}>
-        {/* Search + global check-all */}
-        <div className="flex items-center gap-2 mb-3">
+    <Modal
+      isOpen={isOpen}
+      onClose={handleClose}
+      title="Sélection des comptes & rôles AWS"
+      size="lg"
+      align="top"
+      bodyClassName="flex flex-col overflow-hidden"
+    >
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* Search + global check-all (pinned header) */}
+        <div className="flex items-center gap-2 mb-3 shrink-0">
           <input
             type="text"
             value={query}
@@ -187,16 +194,20 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           </button>
         </div>
 
-        {loading && <p className="text-gray-400 text-sm">Chargement des comptes…</p>}
-        {refreshing && <div className="mb-2"><AwsEnumProgressBar progress={refreshProgress} /></div>}
-        {error && <p className="text-red-400 text-sm">{error}</p>}
+        {loading && <p className="text-gray-400 text-sm shrink-0">Chargement des comptes…</p>}
+        {/* Shown only while actively enumerating; header/footer stay pinned, so its
+            appearance just shortens the scrolling list — no layout jump. */}
+        {refreshProgress && (
+          <div className="mb-2 shrink-0"><AwsEnumProgressBar progress={refreshProgress} /></div>
+        )}
+        {error && <p className="text-red-400 text-sm shrink-0">{error}</p>}
         {!loading && grouped.length === 0 && !error && (
           <p className="text-gray-400 text-sm">
             {query ? 'Aucun résultat pour cette recherche.' : 'Aucun compte/rôle disponible pour ton SSO.'}
           </p>
         )}
 
-        <div className="flex-1 overflow-y-auto pr-1 space-y-3">
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3">
           {grouped.map(({ account, roles: accountRoles }) => {
             const allOn = accountRoles.every((r) => selected.has(key(account.account_id, r)));
             return (
@@ -238,7 +249,7 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           })}
         </div>
 
-        <div className="flex items-center justify-between gap-2 pt-3 border-t border-gray-800 mt-2">
+        <div className="flex items-center justify-between gap-2 pt-3 border-t border-gray-800 mt-2 shrink-0">
           <span className="text-xs text-gray-500">
             {submitting
               ? `Création de ${selected.size} accès en cours…`
