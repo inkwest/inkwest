@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { Check, ChevronDown } from 'lucide-react';
-import { modelLabel, type AppConfig } from '@/services/api';
+import { modelLabel, modelModalities, type AppConfig } from '@/services/api';
 import { engineLabel } from '@/lib/engines';
 import { ModalityIcons } from '@/components/ModalityIcons';
 
@@ -30,7 +30,7 @@ type Row =
       engine: string | null;
       modelLabel: string;
       withEngine: string | null; // engine prefix to render (null = none)
-      modalities?: string[]; // model input modalities → show the IMAGE/VIDEO/SPEECH icons
+      modalities?: string[]; // input modalities → the TEXT icon (when accepted) + IMAGE/VIDEO/SPEECH
       disabled?: boolean;
     };
 
@@ -102,7 +102,18 @@ export function ModelEnginePicker({
   // every model runnable on it. Single-engine ⇒ a flat model list, no headers.
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [
-      { kind: 'option', key: 'default', model: null, engine: null, modelLabel: '', withEngine: null },
+      {
+        kind: 'option',
+        key: 'default',
+        model: null,
+        engine: null,
+        modelLabel: '',
+        withEngine: null,
+        // The Default row resolves to config.model — surface that model's modalities so its
+        // capability icons match the concrete Engine·Model row it runs (else it showed only
+        // the universal TEXT icon, hiding e.g. image support).
+        modalities: modelModalities(config.available_models, config.model),
+      },
     ];
     if (showEngine) {
       for (const eng of config.engines) {
@@ -180,11 +191,13 @@ export function ModelEnginePicker({
         ? `${engineLabel(engine)} · ${modelLabel(config.available_models, model)}`
         : modelLabel(config.available_models, model);
 
-  // Modalities of the model the trigger represents (the pin, or the resolved default),
-  // so the collapsed control advertises the same capability badges as the dropdown row.
-  const selectedModalities = config.available_models.find(
-    (m) => m.id === (model ?? config.model)
-  )?.input_modalities;
+  // Modalities of the model the trigger represents (the pin, or the resolved default), so the
+  // collapsed control advertises the same capability badges as the dropdown row. Memoised so
+  // the catalog scan doesn't rerun on unrelated re-renders (e.g. each filter-box keystroke).
+  const selectedModalities = useMemo(
+    () => modelModalities(config.available_models, model ?? config.model),
+    [config.available_models, config.model, model]
+  );
 
   const isCurrent = (r: Extract<Row, { kind: 'option' }>) => {
     // On Default (no pin), check the Default row AND the concrete Engine·Model pairing

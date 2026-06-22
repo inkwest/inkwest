@@ -8,7 +8,6 @@ import {
   Search,
   Star,
   Trash2,
-  Type,
 } from 'lucide-react';
 import {
   Badge,
@@ -22,7 +21,13 @@ import {
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
 import { engineLabel } from '@/lib/engines';
-import { hasModality, INPUT_MODALITIES, MODALITY_META, type InputModality } from '@/lib/modality';
+import {
+  hasModality,
+  INPUT_MODALITIES,
+  MODALITY_META,
+  TEXT_META,
+  type InputModality,
+} from '@/lib/modality';
 import { ModalityIcons } from '@/components/ModalityIcons';
 import {
   AddModelRequest,
@@ -344,11 +349,15 @@ export function ModelSettingsPage() {
   const q = search.trim().toLowerCase();
   const matchesQuery = (m: ModelInfo) => {
     if (q && !(m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))) return false;
-    // Input facet: a model's categories are its badged modalities, or TEXT if it has
-    // none; it passes while at least one of those categories is checked.
+    // Input facet: a model belongs to TEXT when it accepts text (declared, or empty/
+    // unknown = text-only) AND to each badged modality it declares — same rule as the
+    // per-model icons, so a TEXT+IMAGE model lives in BOTH facets and stays visible when
+    // either is checked. It passes while at least one of its categories is checked; a
+    // model with no recognised category isn't hidden (keeps "all on = nothing hidden").
     const badged = INPUT_MODALITIES.filter((mod) => hasModality(m.input_modalities, mod));
-    const inputCats: InputFacet[] = badged.length > 0 ? badged : ['TEXT'];
-    if (!inputCats.some((cat) => allowedInputs.has(cat))) return false;
+    const acceptsText = hasModality(m.input_modalities, 'TEXT') || !m.input_modalities?.length;
+    const inputCats: InputFacet[] = [...(acceptsText ? (['TEXT'] as InputFacet[]) : []), ...badged];
+    if (inputCats.length > 0 && !inputCats.some((cat) => allowedInputs.has(cat))) return false;
     // Output facet: keep the model while its kind (chat / non-chat) is allowed.
     if (!allowedOutputs.has(isChatCapable(m) ? 'CHAT' : 'NONCHAT')) return false;
     return true;
@@ -444,7 +453,7 @@ export function ModelSettingsPage() {
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span className="w-16 shrink-0 text-gray-400">Input</span>
                   {INPUT_FACETS.map((facet) => {
-                    const Icon = facet === 'TEXT' ? Type : MODALITY_META[facet].Icon;
+                    const Icon = facet === 'TEXT' ? TEXT_META.Icon : MODALITY_META[facet].Icon;
                     const label = facet === 'TEXT' ? 'Text' : facet;
                     return (
                       <label key={facet} className="flex items-center gap-1.5 cursor-pointer">

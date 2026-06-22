@@ -31,8 +31,9 @@ class ModelInfo(BaseModel):
     # Enabled engines that can run this model (Claude → both; others → inkwest-agent
     # only). The picker pairs Engine·Model from these when more than one engine is on.
     engines: list[str]
-    # Input modalities from the live catalog (P1.8): the chat picker shows an IMAGE icon
-    # and enables uploads when "IMAGE" is present. Empty = text-only/unknown (no uploads).
+    # Input modalities from the live catalog (P1.8): the chat picker shows a TEXT icon (when
+    # text is accepted) plus an IMAGE icon (and enables uploads) when "IMAGE" is present.
+    # Empty = text-only/unknown (TEXT icon only, no uploads).
     input_modalities: list[str]
 
 
