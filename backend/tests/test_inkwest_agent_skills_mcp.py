@@ -449,7 +449,7 @@ async def test_loop_three_way_routing_in_one_turn(monkeypatch, tmp_path):
     client = _client([multi, _final("done")])
 
     with patch(
-        "app.services.orchestrator_common.execute_tool",
+        "app.services.tool_execution.execute_tool",
         new=AsyncMock(return_value=("pod/foo Running", False)),
     ) as base_exec:
         events = await _collect(spec, client)

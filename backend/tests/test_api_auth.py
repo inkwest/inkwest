@@ -16,7 +16,7 @@ from app.core.auth import (
     verify_ws_ticket,
 )
 from app.main import app
-from app.services.messages import truncate_messages
+from app.services.message_window import truncate_messages
 
 
 @pytest.fixture

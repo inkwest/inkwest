@@ -8,6 +8,7 @@ import pytest
 
 from app.services import orchestrator_common as ocom
 from app.services import orchestrator_converse as oc
+from app.services import tool_execution as tex
 
 
 async def _collect(gen):
@@ -193,8 +194,8 @@ async def test_converse_tool_use_then_finish():
         *_patches(),
         patch.object(oc, "get_settings", MagicMock(return_value=settings)),
         patch.object(oc, "_make_bedrock_client", MagicMock(return_value=client)),
-        patch.object(ocom, "execute_tool", execute_tool),
-        patch.object(ocom, "connector_for_tool", MagicMock(return_value=None)),
+        patch.object(tex, "execute_tool", execute_tool),
+        patch.object(tex, "connector_for_tool", MagicMock(return_value=None)),
     ]
     for p in ctx:
         p.start()
@@ -333,8 +334,8 @@ async def test_converse_cancelled_mid_tool_loop():
         *_patches(),
         patch.object(oc, "get_settings", MagicMock(return_value=settings)),
         patch.object(oc, "_make_bedrock_client", MagicMock(return_value=client)),
-        patch.object(ocom, "execute_tool", AsyncMock(side_effect=exec_then_cancel)),
-        patch.object(ocom, "connector_for_tool", MagicMock(return_value=None)),
+        patch.object(tex, "execute_tool", AsyncMock(side_effect=exec_then_cancel)),
+        patch.object(tex, "connector_for_tool", MagicMock(return_value=None)),
     ]
     for p in ctx:
         p.start()
@@ -389,8 +390,8 @@ async def test_converse_tool_exception_surfaces_error_result():
         *_patches(),
         patch.object(oc, "get_settings", MagicMock(return_value=settings)),
         patch.object(oc, "_make_bedrock_client", MagicMock(return_value=client)),
-        patch.object(ocom, "execute_tool", AsyncMock(side_effect=RuntimeError("boom"))),
-        patch.object(ocom, "connector_for_tool", MagicMock(return_value=None)),
+        patch.object(tex, "execute_tool", AsyncMock(side_effect=RuntimeError("boom"))),
+        patch.object(tex, "connector_for_tool", MagicMock(return_value=None)),
     ]
     for p in ctx:
         p.start()
@@ -483,9 +484,9 @@ async def test_converse_emits_connector_required():
         *_patches(),
         patch.object(oc, "get_settings", MagicMock(return_value=settings)),
         patch.object(oc, "_make_bedrock_client", MagicMock(return_value=client)),
-        patch.object(ocom, "execute_tool", AsyncMock(return_value=("needs auth", True))),
-        patch.object(ocom, "connector_for_tool", MagicMock(return_value="gitlab")),
-        patch.object(ocom, "is_needs_auth", MagicMock(return_value=True)),
+        patch.object(tex, "execute_tool", AsyncMock(return_value=("needs auth", True))),
+        patch.object(tex, "connector_for_tool", MagicMock(return_value="gitlab")),
+        patch.object(tex, "is_needs_auth", MagicMock(return_value=True)),
     ]
     for p in ctx:
         p.start()
@@ -544,8 +545,8 @@ async def test_converse_tool_result_save_failure_continues():
         patch.object(oc, "get_settings", MagicMock(return_value=settings)),
         patch.object(oc, "_make_bedrock_client", MagicMock(return_value=client)),
         patch.object(oc, "save_message", AsyncMock(side_effect=_save)),
-        patch.object(ocom, "execute_tool", AsyncMock(return_value=("out", False))),
-        patch.object(ocom, "connector_for_tool", MagicMock(return_value=None)),
+        patch.object(tex, "execute_tool", AsyncMock(return_value=("out", False))),
+        patch.object(tex, "connector_for_tool", MagicMock(return_value=None)),
     ]
     for p in ctx:
         p.start()

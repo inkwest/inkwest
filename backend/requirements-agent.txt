@@ -1,0 +1,16 @@
+# Lean runtime dependencies for the standalone inkwest-agent sandbox image.
+#
+# The full inkwest-backend pyproject declares ~25 deps (fastapi, sqlalchemy, asyncpg,
+# anthropic, kubernetes, OTel, …). The carved agent imports NONE of them: Dockerfile.agent
+# COPYs the code and installs ONLY this list, so the image ships no DB ORM, no web stack,
+# and no unused deps. The import/runtime guards (tests/test_agent_{import,runtime}_guard.py)
+# enforce that the agent never reaches the excluded deps. Version floors track pyproject.toml.
+#
+# botocore is pulled transitively by boto3. mcp is optional in pyproject (the in-agent client
+# imports it lazily and degrades without it) but baked here so the MCP feature works in-image.
+boto3>=1.34.0
+httpx>=0.26.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+structlog>=24.1.0
+mcp>=1.0.0

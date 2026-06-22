@@ -17,6 +17,7 @@ import sys
 from app.services.events import error_event
 
 from .converse import make_bedrock_client
+from .logging import setup_logging
 from .loop import run_turn
 from .protocol import TurnSpecError, emit, parse_turn_spec
 
@@ -47,6 +48,8 @@ async def _run() -> int:
 
 def main() -> None:
     """Console-script / ``python -m inkwest_agent`` entrypoint."""
+    # Logs go to stderr — stdout is the NDJSON ChatEvent channel the broker parses.
+    setup_logging()
     sys.exit(asyncio.run(_run()))
 
 

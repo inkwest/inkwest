@@ -24,6 +24,7 @@ from app.models.base import Base
 from app.models.message import Message
 from app.models.session import Session
 from app.services import messages as messages_mod
+from app.services.message_window import truncate_messages
 from app.services.messages import (
     clear_cli_session_id,
     ensure_session_title,
@@ -34,7 +35,6 @@ from app.services.messages import (
     save_message,
     save_session_event,
     set_cli_session_id,
-    truncate_messages,
     update_session_stats,
     update_session_summary,
     update_session_title,

@@ -16,8 +16,10 @@ dependencies = [
     "websockets>=12.0",
     "kubernetes>=28.1.0",
     "httpx>=0.26.0",
-    # Structured logging with FastAPI access logs
+    # Structured logging with FastAPI access logs (backend); the standalone agent uses
+    # structlog directly (no fastapi) — declared explicitly, not leaned on transitively.
     "fastapi-structured-logging>=0.3.0",
+    "structlog>=24.1.0",
     "orjson>=3.9.0",
     # OpenTelemetry
     "opentelemetry-distro>=0.44b0",
@@ -78,9 +80,13 @@ strict = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "e2e: end-to-end test needing external toolchain/network (skips when unavailable)",
+]
 
 [tool.coverage.run]
-source = ["app"]
+# inkwest_agent is a first-class shipped unit (the sandbox runtime), not just app/.
+source = ["app", "inkwest_agent"]
 branch = true
 omit = [
     "app/__init__.py",

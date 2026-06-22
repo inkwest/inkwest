@@ -36,18 +36,15 @@ from app.services.events import (
     text_event,
     thinking_event,
 )
+from app.services.message_window import truncate_messages
 from app.services.messages import (
     ensure_session_title,
     get_session_messages,
     save_message,
-    truncate_messages,
 )
-from app.services.orchestrator_common import (
-    ToolRunResult,
-    execute_tool_calls,
-    finalize_turn,
-)
+from app.services.orchestrator_common import finalize_turn
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
+from app.services.tool_execution import ToolRunResult, execute_tool_calls
 from app.tools.definitions import get_tool_definitions
 
 logger = logging.getLogger(__name__)

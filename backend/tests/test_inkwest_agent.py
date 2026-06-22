@@ -335,7 +335,7 @@ async def test_run_turn_executes_tool_then_finishes():
     )
     # Patch the shared executor so no real kubectl/subprocess runs.
     with patch(
-        "app.services.orchestrator_common.execute_tool",
+        "app.services.tool_execution.execute_tool",
         new=AsyncMock(return_value=("pod/foo Running", False)),
     ) as exec_tool:
         events = await _collect(_spec(), client)
@@ -379,7 +379,7 @@ async def test_run_turn_max_iterations_emits_error():
         return_value=_converse_tool("tu", "kubectl_get", {"resource": "pods"})
     )
     with patch(
-        "app.services.orchestrator_common.execute_tool",
+        "app.services.tool_execution.execute_tool",
         new=AsyncMock(return_value=("ok", False)),
     ):
         events = await _collect(_spec(max_iterations=3), client)
