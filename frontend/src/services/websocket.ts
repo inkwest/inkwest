@@ -22,21 +22,20 @@ export class ChatWebSocket {
   async connect(): Promise<void> {
     if (this._disconnected) return;
     const wsUrl = wsBaseUrl();
-    const token = localStorage.getItem('session_token');
+    // The ticket POST is cookie-authed (dev mode returns the dev user); the WS
+    // handshake can't carry the cookie reliably, so it rides the subprotocol.
     let protocols: string[] = ['inkwest'];
-    if (token) {
-      try {
-        const ticket = await fetchWsTicket();
-        if (this._disconnected) return;
-        protocols = ['inkwest', `ticket|${ticket}`];
-      } catch {
-        if (this._disconnected) return;
-        this.notifyHandlers({ type: 'error', content: 'Failed to authenticate connection' });
-        if (this.reconnectAttempts < this.maxReconnectAttempts) {
-          this.scheduleReconnect();
-        }
-        return;
+    try {
+      const ticket = await fetchWsTicket();
+      if (this._disconnected) return;
+      protocols = ['inkwest', `ticket|${ticket}`];
+    } catch {
+      if (this._disconnected) return;
+      this.notifyHandlers({ type: 'error', content: 'Failed to authenticate connection' });
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        this.scheduleReconnect();
       }
+      return;
     }
     this.ws = new WebSocket(`${wsUrl}/ws/chat/${this.sessionId}`, protocols);
 
@@ -65,7 +64,8 @@ export class ChatWebSocket {
       this.notifyHandlers({ type: 'disconnected' } as unknown as ChatEvent);
 
       if (event.code === 4001) {
-        localStorage.removeItem('session_token');
+        // Session expired/invalid — bounce to root; the AuthGuard re-checks and
+        // redirects to login if the cookie is gone.
         window.location.href = '/';
         return;
       }

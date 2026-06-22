@@ -11,6 +11,7 @@ from uuid import UUID
 
 import httpx
 import jwt
+from fastapi import Response
 from jwt import PyJWKClient
 
 from app.core.config import get_settings
@@ -21,6 +22,39 @@ logger = logging.getLogger(__name__)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 WS_TICKET_EXPIRATION_SECONDS = 10
+
+# Session cookie. The session JWT is delivered to the browser as an HttpOnly
+# cookie (never readable by JS) instead of a bearer token in localStorage, so an
+# XSS can't exfiltrate it. SameSite=Lax blocks cross-site forged requests (the
+# SPA is same-origin in prod, same-site in dev), so no separate CSRF token is
+# needed. Secure is gated on production because dev runs over plain HTTP.
+SESSION_COOKIE_NAME = "session_token"
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    """Attach the session JWT as an HttpOnly cookie on the response."""
+    settings = get_settings()
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=JWT_EXPIRATION_HOURS * 3600,
+        httponly=True,
+        secure=settings.app_env == "production",
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    """Remove the session cookie (logout). Attributes must match set_cookie."""
+    settings = get_settings()
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=settings.app_env == "production",
+        samesite="lax",
+    )
 
 
 class AuthError(Exception):

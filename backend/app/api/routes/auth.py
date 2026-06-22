@@ -9,7 +9,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, select, text
@@ -17,10 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_db
 from app.core.auth import (
+    SESSION_COOKIE_NAME,
     AuthError,
+    clear_session_cookie,
     create_session_token,
     create_ws_ticket,
     get_oidc_client,
+    set_session_cookie,
     verify_session_token,
 )
 from app.core.config import get_settings
@@ -69,7 +72,7 @@ class AuthStatusResponse(BaseModel):
 
 @router.get("/status", response_model=AuthStatusResponse)
 async def get_auth_status(
-    authorization: str | None = Header(None),
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> AuthStatusResponse:
     """
@@ -100,11 +103,11 @@ async def get_auth_status(
             ),
         )
 
-    if not authorization or not authorization.startswith("Bearer "):
-        logger.debug("auth_status: no bearer token, unauthenticated")
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        logger.debug("auth_status: no session cookie, unauthenticated")
         return AuthStatusResponse(oidc_enabled=True, authenticated=False, login_redirect_mode=mode)
 
-    token = authorization[7:]
     payload = verify_session_token(token)
 
     if not payload:
@@ -196,8 +199,9 @@ async def callback(
     """
     Handle OIDC callback.
 
-    Exchanges authorization code for tokens and redirects to the frontend
-    with the session token in the URL fragment.
+    Exchanges authorization code for tokens, sets the session JWT as an HttpOnly
+    cookie, and redirects to the frontend. Errors redirect to the callback page
+    with an ``#error=`` fragment.
     """
     settings = get_settings()
     oidc_client = get_oidc_client()
@@ -262,7 +266,11 @@ async def callback(
 
         logger.info(f"User logged in: {user.email}")
 
-        return RedirectResponse(url=f"{frontend_callback}#token={session_token}")
+        # Token rides in an HttpOnly cookie, not the URL fragment — keeps it out
+        # of browser history and unreadable by JS. Land on the SPA root directly.
+        redirect = RedirectResponse(url=f"{settings.frontend_url}/")
+        set_session_cookie(redirect, session_token)
+        return redirect
 
     except AuthError as e:
         logger.error(f"Authentication failed: {e}")
@@ -272,15 +280,16 @@ async def callback(
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, str]:
+async def logout(response: Response, current_user: CurrentUser) -> dict[str, str]:
     """
     Logout the current user.
 
-    Clears the session token. For full logout, the frontend should also
-    redirect to the OIDC provider's logout endpoint.
+    Clears the HttpOnly session cookie. Requires the session cookie so a
+    cross-site forged request (which SameSite=Lax strips of the cookie) can't
+    log a victim out. For full logout, the frontend should also redirect to the
+    OIDC provider's logout endpoint.
     """
-    # In a cookie-based implementation, we would clear the cookie here
-    # For bearer token auth, the frontend just discards the token
+    clear_session_cookie(response)
     return {"message": "Logged out successfully"}
 
 
