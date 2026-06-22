@@ -330,6 +330,168 @@ async def test_aws_options_refresh_reenumerates_and_updates_cache(
     upd.assert_awaited_once_with(mock_user.id, accounts, roles)
 
 
+async def test_aws_options_progress_idle_when_no_enumeration(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    from app.api.routes.connectors import _aws_enum_progress
+
+    _aws_enum_progress.pop((str(mock_user.id), str(mock_session_obj.id)), None)
+    with patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS):
+        resp = await authenticated_client.get(
+            f"/api/connectors/{mock_session_obj.id}/aws/options/progress"
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"phase": "idle", "done": 0, "total": 0}
+
+
+async def test_aws_options_progress_reports_live_enumeration(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    from app.api.routes.connectors import _aws_enum_progress
+
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    _aws_enum_progress[key] = {"phase": "enumerating", "done": 12, "total": 47}
+    try:
+        with patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS):
+            resp = await authenticated_client.get(
+                f"/api/connectors/{mock_session_obj.id}/aws/options/progress"
+            )
+    finally:
+        _aws_enum_progress.pop(key, None)
+    assert resp.status_code == 200
+    assert resp.json() == {"phase": "enumerating", "done": 12, "total": 47}
+
+
+def test_list_accounts_and_roles_reports_progress() -> None:
+    """The enumeration fires progress_cb once per account (total known up front)."""
+    from app.services.connectors import aws
+
+    def paginator(op: str) -> MagicMock:
+        page = (
+            {"accountList": [{"accountId": "1"}, {"accountId": "2"}]}
+            if op == "list_accounts"
+            else {"roleList": [{"roleName": "ReadOnly"}]}
+        )
+        return MagicMock(paginate=lambda **kw: [page])
+
+    sso = MagicMock()
+    sso.get_paginator.side_effect = paginator
+    calls: list[tuple[int, int]] = []
+    with patch("boto3.client", return_value=sso):
+        accounts, roles = aws._list_accounts_and_roles(
+            "tok", "eu-west-1", lambda done, total: calls.append((done, total))
+        )
+    assert [a["account_id"] for a in accounts] == ["1", "2"]
+    assert len(roles) == 2
+    # (0, 2) at start (ListAccounts done), then one tick per completed account.
+    assert calls[0] == (0, 2)
+    assert calls[-1] == (2, 2)
+
+
+def test_end_enum_progress_only_pops_own_token() -> None:
+    """A stale _end_enum_progress must not yank a newer enumeration's entry."""
+    from app.api.routes import connectors as c
+
+    key = ("u", "s")
+    t1, _ = c._begin_enum_progress(key)
+    t2, cb2 = c._begin_enum_progress(key)  # a second enumeration took over the key
+    c._end_enum_progress(key, t1)  # the first one ending late must be a no-op
+    assert key in c._aws_enum_progress
+    cb2(3, 5)
+    assert c._aws_enum_progress[key]["done"] == 3
+    c._end_enum_progress(key, t2)
+    assert key not in c._aws_enum_progress
+
+
+async def test_aws_options_refresh_clears_progress_on_error(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws", enumerate_accounts_roles=AsyncMock(side_effect=RuntimeError("boto boom"))
+    )
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/options/refresh"
+        )
+    assert resp.status_code == 502
+    # The finally must have dropped the entry even though enumeration raised.
+    assert (str(mock_user.id), str(mock_session_obj.id)) not in c._aws_enum_progress
+
+
+async def test_aws_options_refresh_clears_progress_on_success(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(type="aws", enumerate_accounts_roles=AsyncMock(return_value=([], [])))
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.api.routes.connectors.update_aws_warm_options", AsyncMock()),
+    ):
+        resp = await authenticated_client.post(
+            f"/api/connectors/{mock_session_obj.id}/aws/options/refresh"
+        )
+    assert resp.status_code == 200
+    assert (str(mock_user.id), str(mock_session_obj.id)) not in c._aws_enum_progress
+
+
+async def test_aws_options_progress_rejects_malformed_session_id(
+    authenticated_client: AsyncClient,
+) -> None:
+    with patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS):
+        resp = await authenticated_client.get("/api/connectors/not-a-uuid/aws/options/progress")
+    assert resp.status_code == 400
+
+
+async def test_aws_device_poll_enumeration_failure_is_terminal(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """A boto failure during enumeration must drop the spent device code, not 500."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_device_pending[key] = "device-code-xyz"
+    conn = MagicMock(
+        type="aws",
+        poll_device_token=AsyncMock(return_value={"access_token": "t", "expires_in": 3600}),
+        provisional_from_token=AsyncMock(side_effect=RuntimeError("boto boom")),
+    )
+    store = MagicMock(get=AsyncMock(return_value=None))
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        ):
+            resp = await authenticated_client.post(
+                f"/api/connectors/{mock_session_obj.id}/aws/device/poll"
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "error"
+        # Spent device code dropped → next poll won't re-redeem it.
+        assert key not in c._aws_device_pending
+        # Progress entry cleaned up by the finally even though enumeration raised.
+        assert key not in c._aws_enum_progress
+    finally:
+        c._aws_device_pending.pop(key, None)
+        c._aws_enum_progress.pop(key, None)
+
+
 async def test_aws_options_refresh_409_when_no_provisional(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:

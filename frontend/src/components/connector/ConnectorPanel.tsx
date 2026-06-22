@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/Button';
 import { useConnectorsStore } from '@/store/connectors';
 import { ConnectorName } from '@/types/connectors';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
+import { AwsEnumProgressBar } from './AwsEnumProgressBar';
+import { useAwsEnumProgress, EnumProgress } from '@/hooks/useAwsEnumProgress';
 import { ConnectorPermissions } from './ConnectorPermissions';
 import { McpPanel } from './McpPanel';
 import { LABELS, ICONS } from './connectorChrome';
@@ -36,6 +38,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     fetchStatus,
     pollAwsDevice,
     openAwsVerification,
+    closeAwsVerification,
     clearAwsDevice,
     awsDevice,
     awsModalRequested,
@@ -50,6 +53,34 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
   const { grant, busy, error: startError } = useConnectorGrant(sessionId);
   const [renewing, setRenewing] = useState(false);
   const [awsModalOpen, setAwsModalOpen] = useState(false);
+  // Once the user approves, the still-pending poll blocks on the slow account
+  // enumeration — poll its progress so the modal shows accounts being retrieved.
+  const liveEnumProgress = useAwsEnumProgress(sessionId, awsDevice?.status === 'pending');
+  // Latch the last seen progress: the backend clears its registry entry a beat
+  // before the approving poll returns, so reading `liveEnumProgress` directly would
+  // briefly flash the (now useless) verification code back up in that gap. Hold the
+  // last value until the device modal closes (awsDevice → null).
+  const [enumProgress, setEnumProgress] = useState<EnumProgress | null>(null);
+  // Close the popup exactly once per device flow: liveEnumProgress changes identity
+  // on every poll tick, so without this guard the effect would re-fire each second.
+  const popupClosedRef = useRef(false);
+  useEffect(() => {
+    if (liveEnumProgress) {
+      setEnumProgress(liveEnumProgress);
+      // Enumeration started ⇒ the code was just validated. Close the AWS popup now
+      // rather than waiting for the approving poll to return (it blocks on the fetch).
+      if (!popupClosedRef.current) {
+        popupClosedRef.current = true;
+        closeAwsVerification();
+      }
+    }
+  }, [liveEnumProgress, closeAwsVerification]);
+  useEffect(() => {
+    if (!awsDevice) {
+      setEnumProgress(null);
+      popupClosedRef.current = false; // re-arm for the next device flow
+    }
+  }, [awsDevice]);
 
   useEffect(() => {
     if (sessionId) {
@@ -237,24 +268,37 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
                   </ul>
                 </div>
               )}
-              <p>
-                1. Ouvre la page de vérification AWS, 2. vérifie que le code affiché
-                correspond, puis approuve.
-              </p>
-              <div className="text-center">
-                <div className="text-xs text-gray-500 mb-1">Code de vérification</div>
-                <div className="font-mono text-2xl tracking-widest text-gray-100">
-                  {awsDevice.userCode}
-                </div>
-              </div>
-              <Button onClick={openAwsVerification} className="w-full">
-                <ExternalLink className="h-4 w-4 mr-2" />
-                Ouvrir la page AWS
-              </Button>
+              {/* Once enumeration starts, approval is already done — swap the code
+                  prompt for the account-retrieval progress. */}
+              {!enumProgress && (
+                <>
+                  <p>
+                    1. Ouvre la page de vérification AWS, 2. vérifie que le code affiché
+                    correspond, puis approuve.
+                  </p>
+                  <div className="text-center">
+                    <div className="text-xs text-gray-500 mb-1">Code de vérification</div>
+                    <div className="font-mono text-2xl tracking-widest text-gray-100">
+                      {awsDevice.userCode}
+                    </div>
+                  </div>
+                  <Button onClick={openAwsVerification} className="w-full">
+                    <ExternalLink className="h-4 w-4 mr-2" />
+                    Ouvrir la page AWS
+                  </Button>
+                </>
+              )}
+              {enumProgress && <AwsEnumProgressBar progress={enumProgress} />}
               <div className="flex items-start justify-between gap-2">
                 <div className="text-xs text-gray-500">
-                  En attente d'approbation…
-                  <div>Cette fenêtre se fermera automatiquement une fois l'accès accordé.</div>
+                  {enumProgress ? (
+                    'Accès approuvé. Récupération de vos comptes…'
+                  ) : (
+                    <>
+                      En attente d'approbation…
+                      <div>Cette fenêtre se fermera automatiquement une fois l'accès accordé.</div>
+                    </>
+                  )}
                 </div>
                 <button
                   onClick={clearAwsDevice}

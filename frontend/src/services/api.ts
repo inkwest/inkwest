@@ -297,6 +297,14 @@ export async function refreshAwsOptions(
   return fetchAPI(`/api/connectors/${sessionId}/aws/options/refresh`, { method: 'POST' });
 }
 
+// Live progress of the SSO account enumeration (the slow part of a grant/refresh).
+// phase "idle" → nothing running; "enumerating" → done/total accounts processed.
+export async function getAwsEnumProgress(
+  sessionId: string
+): Promise<{ phase: string; done: number; total: number }> {
+  return fetchAPI(`/api/connectors/${sessionId}/aws/options/progress`);
+}
+
 export async function selectAwsRoles(
   sessionId: string,
   selections: { account_id: string; role_name: string }[]

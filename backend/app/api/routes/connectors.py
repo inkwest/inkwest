@@ -26,6 +26,7 @@ from app.models.connector_audit import ConnectorAuditLog
 from app.models.connector_pending_state import ConnectorPendingState
 from app.models.session import Session
 from app.models.user import User
+from app.services.connectors.aws import EnumProgressCb
 from app.services.connectors.base import (
     ConnectorError,
     ConnectorStatus,
@@ -54,6 +55,44 @@ _MAX_PENDING_STATES = 10000
 # AWS device authorizations in flight, keyed by (user_id, session_id) -> deviceCode.
 # Process RAM (same single-replica constraint as the credential store).
 _aws_device_pending: dict[tuple[str, str], str] = {}
+
+# Live account-enumeration progress, keyed by (user_id, session_id). Written from
+# the enumeration thread, read by the progress poll endpoint (GIL-safe for these
+# int/str fields; a stale read just shows a slightly older count). Entry lives only
+# for the duration of an enumeration — set on start, popped in a finally.
+#
+# Process-local, like the credential store: the progress poll must hit the same
+# replica that runs the enumeration, so it relies on the same single-replica /
+# session-affinity deployment constraint (see store.py). Cross-replica, the poll
+# just returns "idle" → the UI degrades to closing the popup on the poll's return.
+#
+# Each entry carries a unique ``token``: ``_end_enum_progress`` only pops the entry
+# it created, so a concurrent enumeration for the same key (e.g. a double poll) can't
+# yank a still-running sibling's progress out from under it.
+_aws_enum_progress: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _begin_enum_progress(key: tuple[str, str]) -> tuple[object, EnumProgressCb]:
+    """Publish an initial progress entry and return its (token, callback)."""
+    token = object()
+    _aws_enum_progress[key] = {"phase": "enumerating", "done": 0, "total": 0, "token": token}
+
+    def cb(done: int, total: int) -> None:
+        _aws_enum_progress[key] = {
+            "phase": "enumerating",
+            "done": done,
+            "total": total,
+            "token": token,
+        }
+
+    return token, cb
+
+
+def _end_enum_progress(key: tuple[str, str], token: object) -> None:
+    """Drop the progress entry — but only if we still own it (see token rationale)."""
+    cur = _aws_enum_progress.get(key)
+    if cur is not None and cur.get("token") is token:
+        _aws_enum_progress.pop(key, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -90,6 +129,13 @@ class RedirectResponseModel(BaseModel):
 class AwsOptionsResponse(BaseModel):
     accounts: list[dict[str, Any]]
     roles: list[dict[str, Any]]
+
+
+class AwsEnumProgressResponse(BaseModel):
+    # phase: "idle" (no enumeration running) | "enumerating".
+    phase: str
+    done: int = 0
+    total: int = 0
 
 
 class AwsSelectItem(BaseModel):
@@ -445,9 +491,29 @@ async def aws_device_poll(
         return AwsDevicePollResponse(status="pending")
 
     # Approved → mint the provisional (needs_selection) credential and store it.
-    cred = await conn.provisional_from_token(
-        token["access_token"], token["expires_in"], refresh_token=token.get("refresh_token")
-    )
+    # Enumerating accounts/roles is the slow part; publish progress so a concurrent
+    # /aws/options/progress poll can show "retrieving N accounts" while this blocks.
+    prog_token, prog_cb = _begin_enum_progress(key)
+    try:
+        cred = await conn.provisional_from_token(
+            token["access_token"],
+            token["expires_in"],
+            refresh_token=token.get("refresh_token"),
+            progress_cb=prog_cb,
+        )
+    except Exception as e:  # noqa: BLE001 — boto raises varied client errors during enumeration
+        # The device code is already redeemed and can't be reused, so don't leave it
+        # pending (the next poll would re-redeem a spent code and 500). Drop it and
+        # surface a clean error — the user re-runs the device flow. Mirrors the
+        # refresh path, which also treats enumeration failure as terminal.
+        _aws_device_pending.pop(key, None)
+        logger.warning(
+            "aws_enumeration_failed",
+            extra={"session_id": str(sid), "error": type(e).__name__},
+        )
+        return AwsDevicePollResponse(status="error", detail="AWS account enumeration failed")
+    finally:
+        _end_enum_progress(key, prog_token)
     # The SSO token is user-scoped: keep it warm so the user's other conversations
     # can grant access with just the account/role selection — no new device flow.
     await store_aws_warm(current_user.id, cred)
@@ -499,15 +565,44 @@ async def aws_options_refresh(
     access_token = cred.secret.get("sso_access_token")
     if not access_token:
         raise HTTPException(status_code=409, detail="No SSO token; re-initiate")
+    key = (str(current_user.id), str(sid))
+    prog_token, prog_cb = _begin_enum_progress(key)
     try:
-        accounts, roles = await conn.enumerate_accounts_roles(access_token)
+        accounts, roles = await conn.enumerate_accounts_roles(access_token, progress_cb=prog_cb)
     except Exception as e:  # noqa: BLE001 — boto raises varied client errors here
         raise HTTPException(status_code=502, detail="AWS enumeration failed") from e
+    finally:
+        _end_enum_progress(key, prog_token)
     cred.available_accounts = accounts
     cred.available_roles = roles
     await get_credential_store().put(current_user.id, sid, cred)
     await update_aws_warm_options(current_user.id, accounts, roles)
     return AwsOptionsResponse(accounts=accounts, roles=roles)
+
+
+@router.get("/{session_id}/aws/options/progress", response_model=AwsEnumProgressResponse)
+async def aws_options_progress(
+    session_id: str,
+    current_user: CurrentUser,
+) -> AwsEnumProgressResponse:
+    """Report live account-enumeration progress (drives the picker's progress bar).
+
+    Returns ``phase="idle"`` when nothing is enumerating. Polled on its own ~1s
+    timer while a grant/refresh blocks — for the *whole* device-approval wait, not
+    just the enumeration — so it deliberately skips the session-ownership DB lookup
+    the other routes do: the registry key is scoped to ``current_user.id``, so a
+    user can only ever read their own progress regardless of the session id. The
+    id is still parsed to reject malformed input and to match the canonical key.
+    """
+    _require_enabled()
+    try:
+        sid = uuid.UUID(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid session id") from e
+    p = _aws_enum_progress.get((str(current_user.id), str(sid)))
+    if not p:
+        return AwsEnumProgressResponse(phase="idle")
+    return AwsEnumProgressResponse(phase="enumerating", done=int(p["done"]), total=int(p["total"]))
 
 
 @router.post("/{session_id}/aws/select", response_model=ConnectorStatusResponse)

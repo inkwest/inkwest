@@ -56,6 +56,7 @@ interface ConnectorsState {
   startAwsDevice: (sessionId: string) => Promise<void>;
   pollAwsDevice: (sessionId: string) => Promise<string>;
   openAwsVerification: () => void;
+  closeAwsVerification: () => void;
   clearAwsDevice: () => void;
   requestAwsModal: () => void;
   clearAwsModalRequest: () => void;
@@ -259,6 +260,11 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
     const d = get().awsDevice;
     if (d) openAwsPopup(d.verificationUri);
   },
+
+  // Close the verification popup as soon as the code is validated — the approving
+  // poll then blocks on account enumeration, so we can't wait for it to return.
+  // Idempotent (closeAwsPopup no-ops on an already-closed window).
+  closeAwsVerification: () => closeAwsPopup(),
 
   pollAwsDevice: async (sessionId) => {
     const { status, detail } = await api.pollAwsDevice(sessionId);

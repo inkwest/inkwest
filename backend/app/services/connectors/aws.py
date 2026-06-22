@@ -19,6 +19,7 @@ STS credentials — are capped by the user's own SSO assignments.
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -34,6 +35,10 @@ from app.services.connectors.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Progress callback for account enumeration: (done, total) accounts whose roles
+# have been listed. Lets a long grant report "retrieving N accounts" to the UI.
+EnumProgressCb = Callable[[int, int], None]
 
 # Scope required to enumerate accounts/roles and mint role credentials.
 _SSO_SCOPE = "sso:account:access"
@@ -148,16 +153,17 @@ class AwsConnector(Connector):
         )
 
     async def enumerate_accounts_roles(
-        self, access_token: str
+        self, access_token: str, *, progress_cb: EnumProgressCb | None = None
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """List the accounts/roles the SSO token can assume (role-filter applied).
 
         The expensive part of a grant: one AWS round-trip per account. Callers cache
         the result on the warm grant so re-opening the picker doesn't re-enumerate.
+        ``progress_cb`` (if given) is fired per completed account for UI feedback.
         """
         s = get_settings()
         accounts, roles = await asyncio.to_thread(
-            _list_accounts_and_roles, access_token, s.aws_sso_region
+            _list_accounts_and_roles, access_token, s.aws_sso_region, progress_cb
         )
         return _filter_by_role(accounts, roles, s.aws_sso_role_filter)
 
@@ -169,15 +175,19 @@ class AwsConnector(Connector):
         *,
         accounts: list[dict[str, Any]] | None = None,
         roles: list[dict[str, Any]] | None = None,
+        progress_cb: EnumProgressCb | None = None,
     ) -> MintedCredential:
         """Build the provisional (``needs_selection``) credential from the SSO token.
 
         ``accounts``/``roles`` skip enumeration when a fresh cached list is supplied
-        (warm-grant cache); otherwise the SSO portal is queried.
+        (warm-grant cache); otherwise the SSO portal is queried (``progress_cb``
+        reports enumeration progress for UI feedback).
         """
         s = get_settings()
         if accounts is None or roles is None:
-            accounts, roles = await self.enumerate_accounts_roles(access_token)
+            accounts, roles = await self.enumerate_accounts_roles(
+                access_token, progress_cb=progress_cb
+            )
         return MintedCredential(
             connector="aws",
             scope=_SSO_SCOPE,
@@ -452,16 +462,15 @@ def _create_token_device(
 
 
 def _list_accounts_and_roles(
-    access_token: str, region: str | None
+    access_token: str, region: str | None, progress_cb: EnumProgressCb | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """List accounts and their roles via the SSO portal (sync; run in a thread).
 
     Roles are listed **per account** — one AWS round-trip each — so we fan those out
     in parallel (the boto3 low-level client is thread-safe) to avoid a slow N×latency
-    serial walk when the user has many accounts.
+    serial walk when the user has many accounts. ``progress_cb`` is fired from this
+    (single) thread as each account completes, so the UI can show progress.
     """
-    from concurrent.futures import ThreadPoolExecutor
-
     import boto3
 
     sso: Any = boto3.client(
@@ -486,11 +495,21 @@ def _list_accounts_and_roles(
                 out.append({"account_id": account_id, "role_name": role["roleName"]})
         return out
 
+    total = len(accounts)
     roles: list[dict[str, Any]] = []
     if accounts:
-        with ThreadPoolExecutor(max_workers=min(_SSO_ENUM_CONCURRENCY, len(accounts))) as ex:
+        # Emit the starting tick only once we know there's work — a zero-account
+        # token would otherwise flash an empty "0/0" progress in the UI.
+        if progress_cb:
+            progress_cb(0, total)  # total now known (ListAccounts done) — roles fan-out next
+        # ex.map yields in this thread, so the progress increment stays single-threaded.
+        with ThreadPoolExecutor(max_workers=min(_SSO_ENUM_CONCURRENCY, total)) as ex:
+            done = 0
             for res in ex.map(roles_for, [a["account_id"] for a in accounts]):
                 roles.extend(res)
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total)
     return accounts, roles
 
 
