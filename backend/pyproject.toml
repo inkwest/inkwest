@@ -33,6 +33,9 @@ dependencies = [
     "boto3>=1.34.0",
     # Generating per-session EKS kubeconfigs (refresh_eks port)
     "PyYAML>=6.0",
+    # Prometheus metrics exporter on a dedicated port (app.core.metrics_server). >=0.20:
+    # start_http_server returns (server, thread) so the lifespan can stop it cleanly.
+    "prometheus-client>=0.20.0",
 ]
 
 [project.optional-dependencies]

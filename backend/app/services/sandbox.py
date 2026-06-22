@@ -34,6 +34,7 @@ import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -351,8 +352,16 @@ async def ensure(session_id: str) -> str:
             await _teardown_unlocked(session_id, remove_dir=False)  # already holding the lock
             sb = None
         if sb is None:
-            sb = await provision(session_id)
+            provision_started = _now()
+            try:
+                sb = await provision(session_id)
+            except Exception:
+                metrics.sandbox_provision_total.labels(result="error").inc()
+                raise
+            metrics.sandbox_provision_total.labels(result="ok").inc()
+            metrics.sandbox_provision_duration_seconds.observe(_now() - provision_started)
             _sandboxes[session_id] = sb
+            metrics.sandbox_active.set(len(_sandboxes))
             logger.info("sandbox_provisioned", session_id=session_id, conv=sb.conv)
         # Refcount, not a bool: correct only because turn_runner enforces one active
         # turn per session, so ensure()/release() pair 1:1 (in_use is 0 or 1). The
@@ -384,6 +393,7 @@ async def _teardown_unlocked(session_id: str, *, remove_dir: bool) -> None:
     hold it (``ensure``'s dead-pair rebuild, the reaper)."""
     await _remove_pair(_names(session_id))
     _sandboxes.pop(session_id, None)
+    metrics.sandbox_active.set(len(_sandboxes))
     if remove_dir:
         shutil.rmtree(session_dir(session_id), ignore_errors=True)
     logger.info("sandbox_torn_down", session_id=session_id, removed_dir=remove_dir)

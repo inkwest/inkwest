@@ -13,6 +13,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
 from app.services.model_registry import calculate_cost, default_model
@@ -336,6 +337,16 @@ async def record_usage(
         provider = settings.ai_provider
 
     cost = calculate_cost(model, input_tokens, output_tokens)
+
+    # Per-model token/cost rates for Prometheus: the resolved model is known here, and this
+    # is the single sink every orchestrator funnels usage through. Best-effort — a metrics
+    # hiccup must never block usage persistence below.
+    try:
+        metrics.tokens_total.labels(model=model, direction="input").inc(input_tokens)
+        metrics.tokens_total.labels(model=model, direction="output").inc(output_tokens)
+        metrics.model_cost_usd_total.labels(model=model).inc(float(cost))
+    except Exception:  # noqa: BLE001 — metrics are non-critical
+        logger.warning("usage_metrics_emit_failed", exc_info=True)
 
     record = UsageRecord(
         user_id=user_id,

@@ -16,6 +16,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_db
+from app.core import metrics
 from app.core.auth import (
     SESSION_COOKIE_NAME,
     AuthError,
@@ -260,11 +261,13 @@ async def callback(
         await db.refresh(user)
 
         if not user.is_active:
+            metrics.auth_logins_total.labels(result="failure").inc()
             return RedirectResponse(url=f"{frontend_callback}#error=Account+disabled")
 
         session_token = create_session_token(uuid.UUID(str(user.id)), user.roles)
 
         logger.info(f"User logged in: {user.email}")
+        metrics.auth_logins_total.labels(result="success").inc()
 
         # Token rides in an HttpOnly cookie, not the URL fragment — keeps it out
         # of browser history and unreadable by JS. Land on the SPA root directly.
@@ -274,6 +277,7 @@ async def callback(
 
     except AuthError as e:
         logger.error(f"Authentication failed: {e}")
+        metrics.auth_logins_total.labels(result="failure").inc()
         from urllib.parse import quote
 
         return RedirectResponse(url=f"{frontend_callback}#error={quote(str(e))}")

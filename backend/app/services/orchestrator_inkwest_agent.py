@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.constants import MAX_RESPONSE_TOKENS
 from app.services import attachments as attachments_svc
@@ -336,6 +337,12 @@ async def orchestrate_chat_inkwest_agent(
                         }
                     )
                 elif event.type == "tool_result":
+                    # Count agent-side tools here (the agent runs its own executor in the
+                    # unscraped sandbox; the backend only sees the streamed result). Covers
+                    # skill/MCP tools that never touch tool_execution.execute_tool_calls.
+                    metrics.tool_calls_total.labels(
+                        tool=event.tool_name or "unknown", is_error=str(event.is_error)
+                    ).inc()
                     pending_results.append(
                         {
                             "type": "tool_result",
