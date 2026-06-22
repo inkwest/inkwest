@@ -133,6 +133,7 @@ export async function getAppConfig(): Promise<AppConfig> {
 export interface VersionInfo {
   version: string;
   commit: string;
+  build_timestamp: string;
 }
 
 export async function getVersion(): Promise<VersionInfo> {

@@ -36,7 +36,11 @@ async def test_version_reflects_build_settings(client: AsyncClient) -> None:
     settings = get_settings()
     resp = await client.get("/version")
     assert resp.status_code == 200
-    assert resp.json() == {"version": settings.version, "commit": settings.commit_hash}
+    assert resp.json() == {
+        "version": settings.version,
+        "commit": settings.commit_hash,
+        "build_timestamp": settings.build_timestamp,
+    }
 
 
 @pytest.mark.asyncio
@@ -71,3 +75,20 @@ def test_dev_stamping_is_development_only() -> None:
     from app.core.config import Settings
 
     assert Settings(version="dev", app_env="production").version == "dev"
+
+
+def test_non_tag_build_version_carries_commit() -> None:
+    # CI non-tag image: VERSION defaults to v0.0.0 but a real COMMIT_HASH is
+    # injected → append the sha so each dev build is distinct (drives the reload
+    # banner across dev redeploys, which a static "v0.0.0" never would).
+    from app.core.config import Settings
+
+    assert Settings(version="v0.0.0", commit_hash="9f6f96e").version == "v0.0.0-9f6f96e"
+
+
+def test_non_tag_build_version_without_real_sha_stays_bare() -> None:
+    # No real sha injected (default/unknown) → no ugly "v0.0.0-unknown" suffix.
+    from app.core.config import Settings
+
+    assert Settings(version="v0.0.0", commit_hash="unknown").version == "v0.0.0"
+    assert Settings(version="v0.0.0", commit_hash="00000000-dirty").version == "v0.0.0"

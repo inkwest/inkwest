@@ -51,4 +51,8 @@ async def version() -> VersionResponse:
     detect a newer deployment and prompt a reload.
     """
     settings = get_settings()
-    return VersionResponse(version=settings.version, commit=settings.commit_hash)
+    return VersionResponse(
+        version=settings.version,
+        commit=settings.commit_hash,
+        build_timestamp=settings.build_timestamp,
+    )
