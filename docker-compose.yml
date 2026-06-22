@@ -51,6 +51,7 @@ services:
     container_name: inkwest-backend
     ports:
       - "8000:8000"
+      - "9090:9090"  # Prometheus metrics exporter (METRICS_PORT, on by default)
     environment:
       - DATABASE_URL=postgresql+asyncpg://inkwest:inkwest@db:5432/inkwest
       # AI Provider: anthropic, bedrock, or claude-cli

@@ -846,7 +846,8 @@ class TestGetOrchestrator:
             assert orchestrator.__name__ == "_dispatch_engine"
 
     def test_get_orchestrator_anthropic(self):
-        """Test getting API orchestrator for anthropic."""
+        """Anthropic returns a per-turn dispatcher wrapping the API orchestrator (engine+model
+        metric labels)."""
         with patch("app.services.ai_client.get_settings") as mock_settings:
             mock_settings.return_value.ai_provider = "anthropic"
 
@@ -854,9 +855,7 @@ class TestGetOrchestrator:
 
             orchestrator = get_orchestrator()
 
-            from app.services.orchestrator import orchestrate_chat
-
-            assert orchestrator == orchestrate_chat
+            assert orchestrator.__name__ == "_dispatch_anthropic"
 
     def test_get_orchestrator_bedrock(self):
         """Bedrock returns a per-turn dispatcher (Claude vs Converse by model)."""

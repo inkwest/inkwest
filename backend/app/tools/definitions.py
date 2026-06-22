@@ -328,6 +328,10 @@ CONNECTOR_TOOLS: list[dict[str, Any]] = [
 
 CONNECTOR_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in CONNECTOR_TOOLS)
 KUBECTL_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in KUBECTL_TOOLS)
+# Every native tool name (gating-independent). Used to clamp the raw model-supplied name
+# before it labels the duration HISTOGRAM, so a hallucinated name can't multiply bucket
+# series (the counter keeps the raw name on purpose — to observe what the model attempts).
+ALL_TOOL_NAMES: frozenset[str] = KUBECTL_TOOL_NAMES | CONNECTOR_TOOL_NAMES
 
 
 def get_tool_definitions() -> list[dict[str, Any]]:

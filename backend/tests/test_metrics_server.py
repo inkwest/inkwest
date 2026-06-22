@@ -32,14 +32,19 @@ def test_app_instruments_are_served(running_exporter):
     recorded value shows up in the scrape under its inkwest_ name."""
     from app.core import metrics
 
-    metrics.chat_turns_total.inc()
-    metrics.tool_calls_total.labels(tool="kubectl_get", is_error="False").inc()
-    metrics.tokens_total.labels(model="claude-test", direction="input").inc(5)
+    metrics.chat_turns_total.labels(engine="claude-cli", model="claude-test").inc()
+    metrics.tool_calls_total.labels(
+        tool="kubectl_get", is_error="False", engine="claude-cli", model="claude-test"
+    ).inc()
+    metrics.tokens_total.labels(model="claude-test", direction="input", engine="claude-cli").inc(5)
     with urllib.request.urlopen(f"http://127.0.0.1:{running_exporter}/metrics", timeout=5) as r:
         body = r.read().decode()
-    assert "inkwest_chat_turns_total" in body
-    assert 'inkwest_tool_calls_total{is_error="False",tool="kubectl_get"}' in body
-    assert 'inkwest_tokens_total{direction="input",model="claude-test"}' in body
+    assert 'inkwest_chat_turns_total{engine="claude-cli",model="claude-test"}' in body
+    assert (
+        'inkwest_tool_calls_total{engine="claude-cli",is_error="False",'
+        'model="claude-test",tool="kubectl_get"}' in body
+    )
+    assert 'inkwest_tokens_total{direction="input",engine="claude-cli",model="claude-test"}' in body
 
 
 def test_start_is_idempotent():
@@ -65,3 +70,54 @@ def test_stop_frees_the_port(running_exporter):
         assert reused == running_exporter
     finally:
         metrics_server.stop_metrics_server()
+
+
+def test_record_tool_call_routes_mcp_separately():
+    """record_tool_call sends mcp__<server>__<tool> to the MCP metric (parsing the server)
+    and native tools to the generic metric — MCP must not pollute tool_calls_total."""
+    from prometheus_client import REGISTRY
+
+    from app.core import metrics
+
+    metrics.record_tool_call("mcp__coralogix-dev__get_datetime", is_error=False)
+    metrics.record_tool_call("kubectl_get", is_error=False)
+
+    common = {"engine": "unknown", "model": "unknown", "is_error": "False"}
+    # MCP routed to the MCP metric, server AND tool parsed from the name.
+    assert (
+        REGISTRY.get_sample_value(
+            "inkwest_mcp_tool_calls_total",
+            {"server": "coralogix-dev", "tool": "get_datetime", **common},
+        )
+        or 0
+    ) >= 1
+    # Native tool routed to the generic metric.
+    assert (
+        REGISTRY.get_sample_value("inkwest_tool_calls_total", {"tool": "kubectl_get", **common})
+        or 0
+    ) >= 1
+    # The MCP name must NOT appear as a generic tool.
+    assert (
+        REGISTRY.get_sample_value(
+            "inkwest_tool_calls_total",
+            {"tool": "mcp__coralogix-dev__get_datetime", **common},
+        )
+        is None
+    )
+
+
+def test_landing_page_and_404(running_exporter):
+    """/ serves the HTML landing page (version + link); unknown paths 404."""
+    import urllib.error
+
+    base = f"http://127.0.0.1:{running_exporter}"
+    with urllib.request.urlopen(f"{base}/", timeout=5) as r:
+        assert r.status == 200
+        body = r.read().decode()
+    assert "Inkwest backend" in body
+    assert "/metrics" in body
+    try:
+        urllib.request.urlopen(f"{base}/nope", timeout=5)
+        raise AssertionError("expected 404 for unknown path")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404

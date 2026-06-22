@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
 from app.services.ai_client import resolve_session_model_choice
@@ -312,6 +313,11 @@ required.
                         )
                         yield event
                     elif event.type == "tool_result":
+                        # The CLI runs tools inside its own subprocess loop (not
+                        # execute_tool_calls), so count them here off the streamed result —
+                        # otherwise the claude-cli engine's tool usage is invisible.
+                        # record_tool_call routes mcp__* to the MCP metric.
+                        metrics.record_tool_call(event.tool_name or "unknown", event.is_error)
                         content.append(
                             {
                                 "type": "tool_result",

@@ -342,9 +342,12 @@ async def record_usage(
     # is the single sink every orchestrator funnels usage through. Best-effort — a metrics
     # hiccup must never block usage persistence below.
     try:
-        metrics.tokens_total.labels(model=model, direction="input").inc(input_tokens)
-        metrics.tokens_total.labels(model=model, direction="output").inc(output_tokens)
-        metrics.model_cost_usd_total.labels(model=model).inc(float(cost))
+        engine = metrics.turn_engine()
+        metrics.tokens_total.labels(model=model, direction="input", engine=engine).inc(input_tokens)
+        metrics.tokens_total.labels(model=model, direction="output", engine=engine).inc(
+            output_tokens
+        )
+        metrics.model_cost_usd_total.labels(model=model, engine=engine).inc(float(cost))
     except Exception:  # noqa: BLE001 — metrics are non-critical
         logger.warning("usage_metrics_emit_failed", exc_info=True)
 
