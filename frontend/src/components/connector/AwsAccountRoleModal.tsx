@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/Button';
 import * as api from '@/services/api';
 import { useConnectorsStore } from '@/store/connectors';
 import { AwsAccount, AwsRole } from '@/types/connectors';
+import { useAwsEnumProgress } from '@/hooks/useAwsEnumProgress';
+import { AwsEnumProgressBar } from './AwsEnumProgressBar';
 
 interface Props {
   sessionId: string;
@@ -28,6 +30,8 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Refresh re-enumerates from the SSO portal (slow) — surface its progress.
+  const refreshProgress = useAwsEnumProgress(sessionId, refreshing);
 
   // load(false): cached list (instant); load(true): force a fresh SSO enumeration.
   const load = useCallback(
@@ -184,6 +188,7 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
         </div>
 
         {loading && <p className="text-gray-400 text-sm">Chargement des comptes…</p>}
+        {refreshing && <div className="mb-2"><AwsEnumProgressBar progress={refreshProgress} /></div>}
         {error && <p className="text-red-400 text-sm">{error}</p>}
         {!loading && grouped.length === 0 && !error && (
           <p className="text-gray-400 text-sm">
