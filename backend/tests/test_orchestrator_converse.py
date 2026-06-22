@@ -305,8 +305,12 @@ async def test_converse_client_error_yields_error_event():
 
 @pytest.mark.asyncio
 async def test_converse_cancelled_mid_tool_loop():
-    """Cancel firing during tool execution stops the turn (shared loop branch)."""
+    """Cancel firing during tool execution stops the turn AND persists a tool_result
+    for every tool_use — the first real, the cancelled one synthetic — so the saved
+    turn keeps a 1:1 pairing (an orphaned tool_use breaks the next Bedrock call)."""
     import asyncio
+
+    from app.services.tool_execution import CANCELLED_TOOL_RESULT
 
     cancel = asyncio.Event()
 
@@ -339,6 +343,7 @@ async def test_converse_cancelled_mid_tool_loop():
     ]
     for p in ctx:
         p.start()
+    save_mock = oc.save_message  # patched to an AsyncMock while patches are active
     try:
         events = await _collect(
             oc.orchestrate_chat_converse(
@@ -359,6 +364,19 @@ async def test_converse_cancelled_mid_tool_loop():
     assert events[-1].metadata.get("stopped") is True
     # Only the first tool ran before cancel tripped the second iteration.
     assert client.converse.call_count == 1
+
+    # Both tool_use ids got a persisted tool_result — t1 real, t2 synthetic — so
+    # the interrupted turn leaves no orphaned tool_use behind.
+    tool_result_saves = [
+        c for c in save_mock.call_args_list if len(c.args) >= 4 and c.args[2] == "tool_result"
+    ]
+    assert len(tool_result_saves) == 1
+    blocks = tool_result_saves[0].args[3]
+    assert [b["tool_use_id"] for b in blocks] == ["t1", "t2"]
+    assert blocks[0]["content"] == "out"
+    assert blocks[0]["is_error"] is False
+    assert blocks[1]["content"] == CANCELLED_TOOL_RESULT
+    assert blocks[1]["is_error"] is True
 
 
 @pytest.mark.asyncio

@@ -318,10 +318,6 @@ async def orchestrate_chat_converse(
         # Converse stop reasons: tool_use drives another turn; everything else
         # (end_turn, max_tokens, stop_sequence, guardrail…) ends this turn.
         if stop_reason == "tool_use" and tool_calls:
-            if cancel_event and cancel_event.is_set():
-                yield done_event(stopped=True)
-                return
-
             messages.append({"role": "assistant", "content": assistant_content})
             run = ToolRunResult()
             async for ev in execute_tool_calls(
@@ -335,15 +331,23 @@ async def orchestrate_chat_converse(
                 cancel_event=cancel_event,
             ):
                 yield ev
+
+            # Persist tool results even when cancelled: the assistant turn with
+            # its tool_use blocks is already saved (above), so it needs matching
+            # tool_result rows or the next API call rejects the orphaned tool_use.
+            # execute_tool_calls fills synthetic results for any cancelled call,
+            # keeping the pairing 1:1.
+            if run.tool_results:
+                try:
+                    await save_message(db, session_id, "tool_result", run.tool_results)
+                except Exception as e:
+                    logger.error(f"Failed to save tool results: {e}")
+
             if run.cancelled:
                 yield done_event(stopped=True)
                 return
 
             messages.append({"role": "user", "content": run.tool_results})
-            try:
-                await save_message(db, session_id, "tool_result", run.tool_results)
-            except Exception as e:
-                logger.error(f"Failed to save tool results: {e}")
             continue
 
         # Terminal stop reason (end_turn, max_tokens, stop_sequence, guardrail…).

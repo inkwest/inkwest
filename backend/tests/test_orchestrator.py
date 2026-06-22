@@ -160,7 +160,9 @@ class TestOrchestrateChat:
         mock_kubectl_success,
     ):
         """Anthropic-side wiring of the shared execute_tool_calls cancel path:
-        cancel firing inside the tool loop ends the turn with a stopped done-event."""
+        cancel firing inside the tool loop ends the turn stopped AND persists a
+        synthetic tool_result for the cancelled tool_use, so the saved turn keeps a
+        1:1 tool_use/tool_result pairing (an orphaned tool_use breaks the next API call)."""
         from app.services.orchestrator import orchestrate_chat
 
         tool_response, final_response = single_tool_response
@@ -176,9 +178,9 @@ class TestOrchestrateChat:
                 self.calls += 1
                 return self.calls > self.n
 
-        # Checks before the tool loop: while-top, after-api, before-tools (3);
-        # the 4th check is the per-tool one inside execute_tool_calls.
-        cancel = _CancelOnNth(3)
+        # Checks before the tool runs: while-top, after-api (2); the 3rd check is
+        # the per-tool one inside execute_tool_calls — where the cancel must trip.
+        cancel = _CancelOnNth(2)
 
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(side_effect=[tool_response, final_response])
@@ -198,6 +200,18 @@ class TestOrchestrateChat:
         assert events[-1].metadata.get("stopped") is True
         # Cancel tripped before the tool ran and before the second API call.
         assert mock_client.messages.create.await_count == 1
+
+        # The interrupted turn still persisted a tool_result for the orphaned
+        # tool_use (toolu_01), marked as a cancellation.
+        tool_result_saves = [
+            c
+            for c in mock_save_message.call_args_list
+            if len(c.args) >= 4 and c.args[2] == "tool_result"
+        ]
+        assert len(tool_result_saves) == 1
+        blocks = tool_result_saves[0].args[3]
+        assert [b["tool_use_id"] for b in blocks] == ["toolu_01"]
+        assert blocks[0]["is_error"] is True
 
     @pytest.mark.asyncio
     async def test_multi_tool_sequence(
