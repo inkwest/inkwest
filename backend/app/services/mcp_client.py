@@ -53,7 +53,7 @@ Supports various MCP servers for cloud providers, git platforms, and observabili
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import httpx
@@ -64,7 +64,7 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 
-class MCPServerType(str, Enum):
+class MCPServerType(StrEnum):
     """Types of MCP servers."""
 
     # Cloud Providers
@@ -333,9 +333,14 @@ class MCPClient:
         """
         tasks = [self.call_tool(call) for call in calls]
         results = await asyncio.gather(*tasks)
+        engine, model = metrics.turn_engine(), metrics.turn_model()
         for r in results:
             metrics.mcp_tool_calls_total.labels(
-                server=r.server_name, is_error=str(not r.success)
+                server=r.server_name,
+                tool=r.tool_name,
+                is_error=str(not r.success),
+                engine=engine,
+                model=model,
             ).inc()
         return results
 

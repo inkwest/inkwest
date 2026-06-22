@@ -22,6 +22,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -151,6 +152,18 @@ async def orchestrate_chat_inkwest_agent(
         f"You are running as the **{model_label}** model (id `{model}`) on the Inkwest "
         "Agent engine (Amazon Bedrock, Converse API). When asked which model or engine "
         "you are, answer with this."
+    )
+
+    # Anchor the current date/time in the prompt. Open-weight Converse models routinely
+    # guess the year wrong (e.g. emit 2024 timestamps in metric queries) and never chain
+    # the result of a datetime tool into later tool args — yielding empty windows that
+    # read as false "no data" findings. Stating "now" up front removes the guess.
+    now = datetime.now(UTC)
+    system_prompt += (
+        "\n\n## Current date & time\n"
+        f"The current UTC date and time is **{now.isoformat(timespec='seconds')}**. "
+        "Use this for any relative time range (today, last 24h, this week) and for the "
+        "year/month in absolute timestamps — do not guess the date."
     )
 
     # Pre-provide the session's connector creds: build_connector_env renews-on-read and
@@ -339,10 +352,9 @@ async def orchestrate_chat_inkwest_agent(
                 elif event.type == "tool_result":
                     # Count agent-side tools here (the agent runs its own executor in the
                     # unscraped sandbox; the backend only sees the streamed result). Covers
-                    # skill/MCP tools that never touch tool_execution.execute_tool_calls.
-                    metrics.tool_calls_total.labels(
-                        tool=event.tool_name or "unknown", is_error=str(event.is_error)
-                    ).inc()
+                    # skill/MCP tools that never touch tool_execution.execute_tool_calls —
+                    # record_tool_call routes mcp__* to the MCP metric.
+                    metrics.record_tool_call(event.tool_name or "unknown", event.is_error)
                     pending_results.append(
                         {
                             "type": "tool_result",

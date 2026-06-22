@@ -106,13 +106,14 @@ class TestGetOrchestrator:
     """Tests for get_orchestrator function."""
 
     def test_anthropic_returns_api_orchestrator(self):
-        """Should return API orchestrator for Anthropic provider."""
+        """Anthropic returns a per-turn dispatcher wrapping the API orchestrator (so the
+        turn carries engine+model metric labels like the other providers)."""
         mock_settings = MagicMock()
         mock_settings.ai_provider = "anthropic"
 
         with patch("app.services.ai_client.get_settings", return_value=mock_settings):
             orchestrator = get_orchestrator()
-            assert orchestrator.__name__ == "orchestrate_chat"
+            assert orchestrator.__name__ == "_dispatch_anthropic"
 
     def test_bedrock_returns_dispatcher(self):
         """Bedrock returns a per-turn dispatcher (Claude vs Converse by model)."""
@@ -131,6 +132,80 @@ class TestGetOrchestrator:
         with patch("app.services.ai_client.get_settings", return_value=mock_settings):
             orchestrator = get_orchestrator()
             assert orchestrator.__name__ == "_dispatch_engine"
+
+
+class TestDispatcherSetsTurnContext:
+    """Regression: each dispatcher must set engine+model in the task context so deep metric
+    sites (record_usage, tools) and turn_runner read the right values. A refactor that drops
+    set_turn_engine/model would silently revert every label to 'unknown' with tests green."""
+
+    @pytest.mark.asyncio
+    async def test_engine_dispatcher_sets_context(self):
+        import asyncio
+
+        from app.services import ai_client, engines
+
+        seen = {}
+
+        async def fake_cli(db, session_id, **kwargs):
+            from app.core import metrics
+
+            seen["engine"] = metrics.turn_engine()
+            seen["model"] = metrics.turn_model()
+            return
+            yield
+
+        mock_settings = MagicMock()
+        mock_settings.ai_provider = "claude-cli"
+        mock_settings.sandbox_enabled = False
+        with (
+            patch.object(ai_client, "get_settings", return_value=mock_settings),
+            patch.object(ai_client, "resolve_session_model", AsyncMock(return_value="claude-x")),
+            patch.object(ai_client, "resolve_session_engine", AsyncMock(return_value=None)),
+            patch.object(engines, "configured_default_engine", return_value=None),
+            patch.object(engines, "engine_for_turn", return_value="claude-cli"),
+            patch("app.services.orchestrator_cli.orchestrate_chat_cli", fake_cli),
+        ):
+            dispatch = ai_client.get_orchestrator()
+
+            async def run():
+                async for _ in dispatch(db=AsyncMock(), session_id="s"):
+                    pass
+
+            await asyncio.create_task(run())
+        assert seen == {"engine": "claude-cli", "model": "claude-x"}
+
+    @pytest.mark.asyncio
+    async def test_anthropic_dispatcher_sets_context(self):
+        import asyncio
+
+        from app.services import ai_client
+
+        seen = {}
+
+        async def fake_api(db, session_id, **kwargs):
+            from app.core import metrics
+
+            seen["engine"] = metrics.turn_engine()
+            seen["model"] = metrics.turn_model()
+            return
+            yield
+
+        mock_settings = MagicMock()
+        mock_settings.ai_provider = "anthropic"
+        with (
+            patch.object(ai_client, "get_settings", return_value=mock_settings),
+            patch.object(ai_client, "resolve_session_model", AsyncMock(return_value="claude-y")),
+            patch("app.services.orchestrator.orchestrate_chat", fake_api),
+        ):
+            dispatch = ai_client.get_orchestrator()
+
+            async def run():
+                async for _ in dispatch(db=AsyncMock(), session_id="s"):
+                    pass
+
+            await asyncio.create_task(run())
+        assert seen == {"engine": "anthropic", "model": "claude-y"}
 
 
 class TestResolveSessionModelChoice:

@@ -44,7 +44,9 @@ async def finalize_turn(
     """
     # Loop iterations this turn took (API orchestrators only — the CLI/agent run their own
     # loops elsewhere). finalize_turn runs once per completed turn, so this is the right spot.
-    metrics.orchestration_iterations.observe(iteration)
+    metrics.orchestration_iterations.labels(engine=metrics.turn_engine(), model=model).observe(
+        iteration
+    )
 
     usage_failed = False
     try:

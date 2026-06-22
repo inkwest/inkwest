@@ -25,6 +25,7 @@ from app.services.events import (
     tool_start_event,
 )
 from app.tools.connector_exec import connector_for_tool, is_needs_auth
+from app.tools.definitions import ALL_TOOL_NAMES
 from app.tools.dispatch import execute_tool
 from app.tools.exec_context import ToolExecContext
 
@@ -117,8 +118,14 @@ async def execute_tool_calls(
         # deliberately, to observe what tools the model attempts (hallucinations included).
         # Trade-off accepted: a flood of distinct bogus names would grow label cardinality;
         # revisit (clamp to a known set) if that shows up in practice.
-        metrics.tool_duration_seconds.labels(tool=tool_name).observe(time.monotonic() - started_at)
-        metrics.tool_calls_total.labels(tool=tool_name, is_error=str(is_error)).inc()
+        # The duration histogram is per-bucket per-label, so clamp the raw name to the known
+        # set here (a hallucinated name → "unknown") to bound series. The counter
+        # (record_tool_call) keeps the raw name deliberately.
+        dur_tool = tool_name if tool_name in ALL_TOOL_NAMES else "unknown"
+        metrics.tool_duration_seconds.labels(
+            tool=dur_tool, engine=metrics.turn_engine(), model=metrics.turn_model()
+        ).observe(time.monotonic() - started_at)
+        metrics.record_tool_call(tool_name, is_error)
 
         yield tool_result_event(tool_name, output, tool_id, is_error)
 

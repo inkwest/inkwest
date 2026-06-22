@@ -95,7 +95,11 @@ async def test_tool_name_recorded_raw_for_metrics():
     ):
         await _drain(run, [{"id": "t1", "name": name, "input": {}}], None)
 
+    # No dispatcher ran in this unit test, so engine/model context default to "unknown".
     assert (
-        REGISTRY.get_sample_value("inkwest_tool_calls_total", {"tool": name, "is_error": "True"})
+        REGISTRY.get_sample_value(
+            "inkwest_tool_calls_total",
+            {"tool": name, "is_error": "True", "engine": "unknown", "model": "unknown"},
+        )
         or 0
     ) >= 1
