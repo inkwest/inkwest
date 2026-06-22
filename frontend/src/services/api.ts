@@ -123,6 +123,12 @@ export function modelLabel(models: ModelInfo[], id: string): string {
   return models.find((m) => m.id === id)?.label ?? id;
 }
 
+/** Input modalities for a model ID (undefined when unknown) — drives the picker's
+ *  capability icons. `id` may be null so callers can pass `pin ?? default` directly. */
+export function modelModalities(models: ModelInfo[], id: string | null): string[] | undefined {
+  return models.find((m) => m.id === id)?.input_modalities;
+}
+
 export async function getAppConfig(): Promise<AppConfig> {
   return fetchAPI('/api/config');
 }
