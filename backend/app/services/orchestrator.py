@@ -327,11 +327,6 @@ async def orchestrate_chat(
 
         # Execute tools if requested
         if response.stop_reason == "tool_use" and tool_calls:
-            if cancel_event and cancel_event.is_set():
-                logger.info(f"Chat cancelled at iteration {iteration} (before tool execution)")
-                yield done_event(stopped=True)
-                return
-
             # Add assistant message to conversation
             messages.append({"role": "assistant", "content": assistant_content})
 
@@ -347,16 +342,24 @@ async def orchestrate_chat(
                 cancel_event=cancel_event,
             ):
                 yield ev
+
+            # Persist tool results even when cancelled: the assistant turn with
+            # its tool_use blocks is already saved (above), so it needs matching
+            # tool_result rows or the next API call rejects the orphaned tool_use.
+            # execute_tool_calls fills synthetic results for any cancelled call,
+            # keeping the pairing 1:1.
+            if run.tool_results:
+                try:
+                    await save_message(db, session_id, "tool_result", run.tool_results)
+                except Exception as e:
+                    logger.error(f"Failed to save tool results: {e}")  # streamed already; continue
+
             if run.cancelled:
                 yield done_event(stopped=True)
                 return
 
             # Tool results go back as role="user" per Anthropic API convention.
             messages.append({"role": "user", "content": run.tool_results})
-            try:
-                await save_message(db, session_id, "tool_result", run.tool_results)
-            except Exception as e:
-                logger.error(f"Failed to save tool results: {e}")  # streamed already; continue
             continue
 
         # Unexpected stop reason

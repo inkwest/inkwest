@@ -37,6 +37,20 @@ class ToolRunResult:
     cancelled: bool = False
 
 
+# Shown as the tool_result for any tool_use the user cancelled before it ran.
+CANCELLED_TOOL_RESULT = "Tool execution cancelled by the user."
+
+
+def _cancelled_result(tool_id: str) -> dict[str, Any]:
+    """An Anthropic-shaped tool_result standing in for a cancelled tool_use."""
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_id,
+        "content": CANCELLED_TOOL_RESULT,
+        "is_error": True,
+    }
+
+
 async def execute_tool_calls(
     result: ToolRunResult,
     *,
@@ -52,18 +66,25 @@ async def execute_tool_calls(
     """Execute each tool call, yielding tool_start/result/connector events.
 
     The Anthropic-shaped tool_result blocks are appended to ``result``; the
-    caller persists them (so the save runs in the caller's module, and a
-    mid-loop cancel — which sets ``result.cancelled`` and returns early —
-    discards the partial results, matching the prior per-orchestrator behavior).
+    caller persists them (so the save runs in the caller's module). On a mid-loop
+    cancel this sets ``result.cancelled`` and fills a synthetic "cancelled"
+    result for every not-yet-executed tool_use before returning, so
+    ``result.tool_results`` always pairs 1:1 with ``tool_calls``. The caller MUST
+    persist them even when cancelled: the assistant turn carrying the tool_use
+    blocks is already saved, and an orphaned tool_use (no matching tool_result)
+    makes the next API call fail validation on both Anthropic and Bedrock.
 
     ``projected_creds`` is set by the sandboxed inkwest-agent: connector creds were
     pre-provided by the broker as env, so executors read them from the environment
     rather than the portal credential store (which the agent process can't reach).
     """
-    for tool_call in tool_calls:
+    for idx, tool_call in enumerate(tool_calls):
         if cancel_event and cancel_event.is_set():
             logger.info("Chat cancelled during tool execution")
             result.cancelled = True
+            # Keep tool_use/tool_result pairing intact: stand in a cancelled
+            # result for this call and every one after it (none have run).
+            result.tool_results.extend(_cancelled_result(tc["id"]) for tc in tool_calls[idx:])
             return
 
         tool_id = tool_call["id"]
