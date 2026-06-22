@@ -13,10 +13,16 @@ export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
    * so content-height changes (e.g. live filtering) don't make it jump.
    */
   align?: 'center' | 'top';
+  /**
+   * Override the body's scroll/layout. Default is `overflow-y-auto` (the whole
+   * body scrolls). Pass e.g. `flex flex-col overflow-hidden` when the content
+   * manages its own internal scroll (pinned header/footer + a scrolling middle).
+   */
+  bodyClassName?: string;
 }
 
 export const Modal = forwardRef<HTMLDivElement, ModalProps>(
-  ({ className, isOpen, onClose, title, size = 'md', align = 'center', children, ...props }, ref) => {
+  ({ className, isOpen, onClose, title, size = 'md', align = 'center', bodyClassName, children, ...props }, ref) => {
     useEffect(() => {
       const handleEscape = (e: KeyboardEvent) => {
         // Consume Escape here so the topmost overlay wins — otherwise it bubbles to the
@@ -51,7 +57,19 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
       center: 'items-center',
       // Fixed top offset: the modal's top edge stays put when its content
       // grows/shrinks (e.g. while filtering a list), instead of re-centering.
-      top: 'items-start pt-16',
+      // pt-12 (3rem) matches the bottom gap left by the cap below (6rem total →
+      // 3rem top + 3rem bottom), so a maxed-out modal sits symmetrically.
+      top: 'items-start pt-12',
+    };
+
+    // The dialog cap must leave room for the wrapper's vertical chrome, else the
+    // dialog overflows the viewport and the outer container (overflow-y-auto)
+    // grows a second scrollbar with the footer pushed off-screen. 'top' adds a
+    // fixed pt-12 offset, so it needs a larger cap (pt-12 + matching 3rem bottom
+    // gap → 6rem). 'center' keeps the long-standing 90vh (it has its own slack).
+    const maxHeights = {
+      center: 'max-h-[90vh]',
+      top: 'max-h-[calc(100vh-6rem)]',
     };
 
     return createPortal(
@@ -70,7 +88,8 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
               'relative w-full bg-gray-800 text-white rounded-lg shadow-xl',
               // flex column + capped height so tall content scrolls inside the
               // body instead of overflowing the viewport.
-              'flex flex-col max-h-[90vh] overflow-hidden',
+              'flex flex-col overflow-hidden',
+              maxHeights[align],
               sizes[size],
               className
             )}
@@ -88,7 +107,9 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
               </div>
             )}
 
-            <div className="px-6 py-4 flex-1 min-h-0 overflow-y-auto">{children}</div>
+            <div className={clsx('px-6 py-4 flex-1 min-h-0', bodyClassName ?? 'overflow-y-auto')}>
+              {children}
+            </div>
           </div>
         </div>
       </div>,
