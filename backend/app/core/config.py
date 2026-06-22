@@ -223,6 +223,18 @@ class Settings(BaseSettings):
     # ==========================================================================
     mcp_catalog: str = ""
 
+    # Prometheus metrics exporter on a DEDICATED port (separate from the API). On by default;
+    # serves the global registry (process/Python + the inkwest_* app metrics) at /metrics.
+    # The endpoint is UNAUTHENTICATED and binds 0.0.0.0 for in-cluster scraping — restrict
+    # this port to the scraper via NetworkPolicy/firewall (the port is the isolation
+    # boundary). Boot is best-effort: a port clash logs and the app continues. The exporter
+    # serves ONE process's registry, so this assumes the documented single-worker /
+    # single-replica deployment; with multiple uvicorn workers only one binds the port and
+    # counters would reflect that worker alone (move to prometheus_client multiprocess mode
+    # before scaling out).
+    metrics_enabled: bool = True
+    metrics_port: int = 9090
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

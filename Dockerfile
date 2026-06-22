@@ -92,6 +92,7 @@ ENV OTEL_SERVICE_NAME=inkwest \
     BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
 
 USER app
-EXPOSE 8000
+# 8000 = API/SPA; 9090 = Prometheus metrics exporter (METRICS_PORT, on by default).
+EXPOSE 8000 9090
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["opentelemetry-instrument", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -58,6 +58,7 @@ from typing import Any
 
 import httpx
 
+from app.core import metrics
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -331,7 +332,12 @@ class MCPClient:
             List of results in same order as calls
         """
         tasks = [self.call_tool(call) for call in calls]
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+        for r in results:
+            metrics.mcp_tool_calls_total.labels(
+                server=r.server_name, is_error=str(not r.success)
+            ).inc()
+        return results
 
     def _build_headers(self, server: MCPServerConfig) -> dict[str, str]:
         """Build request headers for a server."""
