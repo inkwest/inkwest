@@ -534,3 +534,34 @@ export const useSystemPromptStore = create<SystemPromptState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 }));
+
+// ============================================================================
+// System Info store (read-only)
+// ============================================================================
+
+interface SystemInfoState {
+  info: adminApi.SystemInfo | null;
+  isLoading: boolean;
+  error: string | null;
+
+  fetchSystemInfo: () => Promise<void>;
+  clearError: () => void;
+}
+
+export const useSystemInfoStore = create<SystemInfoState>((set) => ({
+  info: null,
+  isLoading: false,
+  error: null,
+
+  fetchSystemInfo: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const info = await adminApi.getSystemInfo();
+      set({ info, isLoading: false });
+    } catch (error) {
+      set({ error: (error as Error).message, isLoading: false });
+    }
+  },
+
+  clearError: () => set({ error: null }),
+}));

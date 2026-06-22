@@ -16,6 +16,7 @@ import {
   RoleMappingsPage,
   UsagePage,
   ModelSettingsPage,
+  SystemInfoPage,
 } from '@/pages/admin';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
@@ -111,6 +112,7 @@ function App() {
           <Route path="roles" element={<RoleMappingsPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="model" element={<ModelSettingsPage />} />
+          <Route path="system-info" element={<SystemInfoPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
