@@ -77,15 +77,42 @@ describe('ModelEnginePicker', () => {
     // so the trigger's own badge (the selected model) isn't counted here.
     const listbox = screen.getByRole('listbox');
     const icons = within(listbox).getAllByLabelText('IMAGE — image input');
-    // One per Sonnet row (claude-cli + inkwest-agent sections = 2), none for Llama.
-    expect(icons.length).toBe(2);
+    // One per Sonnet row (claude-cli + inkwest-agent = 2) plus the Default row, which
+    // resolves to Sonnet and mirrors its modalities. None for Llama.
+    expect(icons.length).toBe(3);
+  });
+
+  it('mirrors the resolved default model modalities on the Default row', async () => {
+    const user = userEvent.setup();
+    render(<ModelEnginePicker config={CONFIG} model={null} engine={null} onChange={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Claude Code · Sonnet 4.6/ }));
+    const listbox = screen.getByRole('listbox');
+    const defaultRow = within(listbox)
+      .getAllByRole('option')
+      .find((o) => (o.textContent ?? '').startsWith('Default'))!;
+    // Default → Sonnet (TEXT+IMAGE): the row shows both icons, not the lone TEXT icon.
+    expect(within(defaultRow).getByLabelText('TEXT — text input')).toBeInTheDocument();
+    expect(within(defaultRow).getByLabelText('IMAGE — image input')).toBeInTheDocument();
   });
 
   it('shows the selected model modality on the collapsed trigger', () => {
     render(<ModelEnginePicker config={CONFIG} model={null} engine={null} onChange={vi.fn()} />);
-    // Default resolves to Sonnet (TEXT+IMAGE) → IMAGE badge on the pill, dropdown closed.
+    // Default resolves to Sonnet (TEXT+IMAGE) → TEXT + IMAGE badges on the pill, dropdown closed.
+    expect(screen.getByLabelText('TEXT — text input')).toBeInTheDocument();
     expect(screen.getByLabelText('IMAGE — image input')).toBeInTheDocument();
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+
+  it('shows the universal TEXT icon on every model row, image-capable or not', async () => {
+    const user = userEvent.setup();
+    render(<ModelEnginePicker config={CONFIG} model={null} engine={null} onChange={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: /Claude Code · Sonnet 4.6/ }));
+    const listbox = screen.getByRole('listbox');
+    // One TEXT icon per row — including the text-only Llama, which carries no other icon.
+    // The count matches the IMAGE+SPEECH-bearing and the text-only rows alike.
+    const textIcons = within(listbox).getAllByLabelText('TEXT — text input');
+    const imageIcons = within(listbox).getAllByLabelText('IMAGE — image input');
+    expect(textIcons.length).toBeGreaterThan(imageIcons.length);
   });
 
   it('shows the SPEECH icon next to an audio-input model', async () => {

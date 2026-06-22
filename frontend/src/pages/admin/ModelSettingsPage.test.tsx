@@ -358,6 +358,11 @@ describe('ModelSettingsPage', () => {
 
     // Opus accepts image input → IMAGE icon (appears in both engine sections).
     expect(screen.getAllByLabelText('IMAGE — image input').length).toBeGreaterThan(0);
+    // The universal TEXT icon renders on every model row (text-only Haiku included), so it
+    // always outnumbers the IMAGE icons — the lone-image-icon ambiguity is gone.
+    expect(screen.getAllByLabelText('TEXT — text input').length).toBeGreaterThan(
+      screen.getAllByLabelText('IMAGE — image input').length
+    );
     // Haiku is text-only → no IMAGE icon associated with its rows is required; the
     // embedding model has non-TEXT output → a "non-chat" badge.
     expect(screen.getByText('non-chat')).toBeInTheDocument();
@@ -374,20 +379,24 @@ describe('ModelSettingsPage', () => {
     expect(screen.getByLabelText('Offer Opus 4.8 on Inkwest Agent')).toBeInTheDocument();
   });
 
-  it('unchecking IMAGE hides image-only models but keeps text-only ones', async () => {
+  it('unchecking IMAGE keeps text+image models (they belong to TEXT too)', async () => {
     render(<ModelSettingsPage />);
     await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
     const user = userEvent.setup();
 
     await user.click(screen.getByLabelText('Show IMAGE input models'));
 
-    // Opus (TEXT+IMAGE) loses its only badged modality → hidden everywhere; the
-    // text-only Haiku/Llama still show (their TEXT category is still allowed).
-    expect(screen.queryByLabelText('Offer Opus 4.8 on Inkwest Agent')).not.toBeInTheDocument();
+    // Opus (TEXT+IMAGE) lives in BOTH facets, so dropping IMAGE alone leaves it visible
+    // via its still-checked TEXT category — the text-only models stay too.
+    expect(screen.getByLabelText('Offer Opus 4.8 on Inkwest Agent')).toBeInTheDocument();
     expect(screen.getByLabelText('Offer Haiku 4.5 on Inkwest Agent')).toBeInTheDocument();
     expect(
       screen.getByLabelText('Offer Llama3 1 70B Instruct on Inkwest Agent')
     ).toBeInTheDocument();
+
+    // Dropping TEXT as well leaves Opus in no checked input facet → now hidden.
+    await user.click(screen.getByLabelText('Show text-only input models'));
+    expect(screen.queryByLabelText('Offer Opus 4.8 on Inkwest Agent')).not.toBeInTheDocument();
   });
 
   it('unchecking Text hides text-only models but keeps multimodal ones', async () => {
