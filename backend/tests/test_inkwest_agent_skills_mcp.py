@@ -12,11 +12,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.events import ChatEvent
+from inkwest_agent import clock as clock_mod
 from inkwest_agent import converse as converse_mod
 from inkwest_agent import loop as loop_mod
 from inkwest_agent import mcp as mcp_mod
 from inkwest_agent import skills as skills_mod
-from inkwest_agent.converse import READ_SKILL_TOOL, skill_tool_spec, to_converse_tools
+from inkwest_agent.converse import (
+    CURRENT_DATETIME_TOOL,
+    READ_SKILL_TOOL,
+    skill_tool_spec,
+    to_converse_tools,
+)
 from inkwest_agent.mcp import MCPManager, load_mcp_config
 from inkwest_agent.protocol import (
     PROTOCOL_VERSION,
@@ -113,7 +119,23 @@ def test_to_converse_tools_merges_skill_and_mcp(monkeypatch):
     ]
     cfg = to_converse_tools(skills=[SkillSpec(name="s", description="d")], mcp_tools=mcp_tools)
     names = [t["toolSpec"]["name"] for t in cfg["tools"]]
-    assert names == ["kubectl_get", READ_SKILL_TOOL, "mcp__cx__query"]
+    # current_datetime is always advertised, right after the base tools.
+    assert names == ["kubectl_get", CURRENT_DATETIME_TOOL, READ_SKILL_TOOL, "mcp__cx__query"]
+
+
+def test_datetime_tool_always_advertised(monkeypatch):
+    # The clock has no skills/MCP precondition — it must be present even with neither.
+    monkeypatch.setattr(
+        converse_mod,
+        "get_tool_definitions",
+        lambda: [{"name": "kubectl_get", "description": "d", "input_schema": {"type": "object"}}],
+    )
+    cfg = to_converse_tools()
+    spec = next(
+        t["toolSpec"] for t in cfg["tools"] if t["toolSpec"]["name"] == CURRENT_DATETIME_TOOL
+    )
+    # No-arg tool → empty-object schema (Converse requires an object schema).
+    assert spec["inputSchema"]["json"] == {"type": "object", "properties": {}}
 
 
 # --------------------------------------------------------------------------- #
@@ -159,6 +181,20 @@ def test_read_skill_missing_body_file(tmp_path):
 def test_is_skill_tool():
     assert skills_mod.is_skill_tool(READ_SKILL_TOOL)
     assert not skills_mod.is_skill_tool("kubectl_get")
+
+
+def test_is_datetime_tool():
+    assert clock_mod.is_datetime_tool(CURRENT_DATETIME_TOOL)
+    assert not clock_mod.is_datetime_tool("kubectl_get")
+
+
+def test_current_datetime_returns_utc_iso():
+    from datetime import datetime, timedelta
+
+    output, is_error = clock_mod.current_datetime({})
+    assert is_error is False
+    parsed = datetime.fromisoformat(output)  # must round-trip as a valid ISO-8601 instant
+    assert parsed.utcoffset() == timedelta(0)  # UTC-aware (never naive) and zero-offset
 
 
 def test_read_skill_os_error(tmp_path):
@@ -372,6 +408,20 @@ async def test_loop_routes_read_skill_tool(tmp_path):
     result = next(e for e in events if e.type == "tool_result")
     assert result.tool_name == READ_SKILL_TOOL
     assert "Triage steps" in (result.content or "")
+
+
+@pytest.mark.asyncio
+async def test_loop_routes_datetime_tool():
+    # The loop must dispatch current_datetime to the synthetic clock, not the base executor.
+    spec = _spec_with()
+    client = _client([_tool_use("t1", CURRENT_DATETIME_TOOL, {}), _final("done")])
+    events = await _collect(spec, client)
+    result = next(e for e in events if e.type == "tool_result")
+    assert result.tool_name == CURRENT_DATETIME_TOOL
+    assert result.is_error is False
+    from datetime import datetime
+
+    datetime.fromisoformat(result.content or "")  # the dispatched result is a valid ISO instant
 
 
 @pytest.mark.asyncio

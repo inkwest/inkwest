@@ -154,16 +154,21 @@ async def orchestrate_chat_inkwest_agent(
         "you are, answer with this."
     )
 
-    # Anchor the current date/time in the prompt. Open-weight Converse models routinely
-    # guess the year wrong (e.g. emit 2024 timestamps in metric queries) and never chain
-    # the result of a datetime tool into later tool args — yielding empty windows that
-    # read as false "no data" findings. Stating "now" up front removes the guess.
-    now = datetime.now(UTC)
+    # Anchor today's date in the prompt. Open-weight Converse models routinely guess the
+    # year wrong (e.g. emit 2024 timestamps in metric queries) and don't chain a datetime
+    # tool's output into later tool args — yielding empty windows that read as false "no
+    # data" findings. DATE granularity, not second: a per-turn timestamp would make the
+    # system prompt unique every turn and defeat any prompt cache later added to this path
+    # (none today — no cachePoint here yet); a date stays stable within a UTC day and still
+    # fixes the year/month guess. For an exact instant the agent has the synthetic
+    # `current_datetime` tool (see the caveat) — accuracy on demand, reliability up front.
+    today = datetime.now(UTC).date().isoformat()
     system_prompt += (
-        "\n\n## Current date & time\n"
-        f"The current UTC date and time is **{now.isoformat(timespec='seconds')}**. "
-        "Use this for any relative time range (today, last 24h, this week) and for the "
-        "year/month in absolute timestamps — do not guess the date."
+        "\n\n## Current date\n"
+        f"Today's UTC date is **{today}** (captured at turn start). Use it for the "
+        "year/month in timestamps and for relative ranges (today, last 24h, this week). "
+        "This date is approximate — for an exact current instant, or before any "
+        "time-sensitive query, call the `current_datetime` tool and re-check accurately."
     )
 
     # Pre-provide the session's connector creds: build_connector_env renews-on-read and
