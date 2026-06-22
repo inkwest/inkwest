@@ -12,6 +12,15 @@ describe('useUpdateStore', () => {
     expect(useUpdateStore.getState().updateAvailable).toBe(false);
   });
 
+  it('captures the build timestamp at baseline (display-only, not compared)', () => {
+    useUpdateStore.getState().recordVersion('v0.0.0-9f6f96e', '2026-06-22T10:00:00Z');
+    expect(useUpdateStore.getState().loadedBuildTimestamp).toBe('2026-06-22T10:00:00Z');
+    // A later reading's timestamp must not matter — only the version drives the banner.
+    useUpdateStore.getState().recordVersion('v0.0.0-9f6f96e', '2026-06-22T11:00:00Z');
+    expect(useUpdateStore.getState().updateAvailable).toBe(false);
+    expect(useUpdateStore.getState().loadedBuildTimestamp).toBe('2026-06-22T10:00:00Z');
+  });
+
   it('does not flag an update when the version is unchanged', () => {
     useUpdateStore.getState().recordVersion('v1');
     useUpdateStore.getState().recordVersion('v1');

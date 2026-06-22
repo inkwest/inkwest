@@ -354,6 +354,7 @@ class VersionResponse(BaseModel):
 
     version: str
     commit: str
+    build_timestamp: str
 
 
 # =============================================================================

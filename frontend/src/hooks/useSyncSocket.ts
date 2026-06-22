@@ -73,7 +73,9 @@ export function useSyncSocket() {
         // deploy that dropped this socket bumps the backend version, so a
         // differing reading surfaces the reload banner. Best-effort.
         void getVersion()
-          .then(({ version }) => useUpdateStore.getState().recordVersion(version))
+          .then(({ version, build_timestamp }) =>
+            useUpdateStore.getState().recordVersion(version, build_timestamp)
+          )
           .catch(() => {});
         pingRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {

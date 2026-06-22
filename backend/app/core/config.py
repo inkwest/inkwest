@@ -253,6 +253,12 @@ class Settings(BaseSettings):
         # "dev" sentinel rather than churning a fresh version (and banner) per restart.
         if self.version == "dev" and self.app_env == "development":
             self.version = _DEV_VERSION
+        # CI non-tag image: the build injects COMMIT_HASH but no tag, so VERSION keeps
+        # the Dockerfile default "v0.0.0". Append the sha so the build is identifiable
+        # and the update banner trips per redeploy (every dev image would otherwise
+        # report an identical "v0.0.0"). Skip when no real sha was injected.
+        elif self.version == "v0.0.0" and self.commit_hash not in ("", "unknown", "00000000-dirty"):
+            self.version = f"{self.version}-{self.commit_hash}"
         return self
 
 
