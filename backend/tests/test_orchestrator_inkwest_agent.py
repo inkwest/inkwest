@@ -246,6 +246,7 @@ def _patch_broker(
     skills=None,
     enabled_mcp=None,
     mcp_config_path=None,
+    mcp_dead=None,
 ):
     """Patch every DB/sandbox/model boundary the broker touches; return the stack + spies."""
     db = AsyncMock()
@@ -259,7 +260,8 @@ def _patch_broker(
         release=AsyncMock(),
         build_connector_env=AsyncMock(return_value=(connector_env or {}, injected or [])),
         apply_session_skills=MagicMock(),
-        write_agent_mcp_config=MagicMock(return_value=mcp_config_path),
+        # OAuth2-aware materializer returns (in-container path, dead oauth keys).
+        write_agent_mcp_config_with_oauth=AsyncMock(return_value=(mcp_config_path, mcp_dead or [])),
         remove_agent_mcp_config=MagicMock(),
         db=db,
     )
@@ -295,7 +297,10 @@ def _patch_broker(
         patch.object(
             oia, "skills_container_root", MagicMock(return_value="/home/agent/.claude/skills")
         ),
-        patch("app.services.agent_mcp_config.write_agent_mcp_config", spies.write_agent_mcp_config),
+        patch(
+            "app.services.agent_mcp_config.write_agent_mcp_config_with_oauth",
+            spies.write_agent_mcp_config_with_oauth,
+        ),
         patch(
             "app.services.agent_mcp_config.remove_agent_mcp_config", spies.remove_agent_mcp_config
         ),
@@ -493,9 +498,32 @@ class TestOrchestrateInkwestAgent:
                 p.stop()
         spec = json.loads(spies.turn_spec)
         assert spec["mcp_config_path"] == "/home/agent/.claude/inkwest-agent-mcp.json"
-        spies.write_agent_mcp_config.assert_called_once_with(SESSION_ID, ["coralogix-prod"])
+        spies.write_agent_mcp_config_with_oauth.assert_called_once_with(
+            SESSION_ID, ["coralogix-prod"], user_id=USER_ID, db=spies.db
+        )
         # prune-after-ensure + turn-end cleanup
         assert spies.remove_agent_mcp_config.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_mcp_dead_grant_emits_auth_required(self):
+        # An enabled OAuth2 MCP server with no active grant surfaces as mcp_auth_required
+        # on the inkwest-agent engine too (parity with claude-cli), so its tools don't
+        # silently vanish from the agent's tool surface.
+        patches, spies = _patch_broker(
+            enabled_mcp=["notion"],
+            mcp_config_path=None,
+            mcp_dead=["notion"],
+        )
+        for p in patches:
+            p.start()
+        try:
+            events = await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        auth_events = [e for e in events if e.type == "mcp_auth_required"]
+        assert len(auth_events) == 1
+        assert auth_events[0].metadata["mcp_key"] == "notion"
 
     @pytest.mark.asyncio
     async def test_skills_load_failure_degrades(self):
@@ -549,7 +577,9 @@ class TestOrchestrateInkwestAgent:
         assert any(e.type == "error" for e in events)
         # prune-after-ensure + turn-end cleanup both ran (write succeeded before the boom).
         assert spies.remove_agent_mcp_config.call_count == 2
-        spies.write_agent_mcp_config.assert_called_once_with(SESSION_ID, ["coralogix-prod"])
+        spies.write_agent_mcp_config_with_oauth.assert_called_once_with(
+            SESSION_ID, ["coralogix-prod"], user_id=USER_ID, db=spies.db
+        )
 
     @pytest.mark.asyncio
     async def test_retry_drops_trailing_user_message_from_history(self):

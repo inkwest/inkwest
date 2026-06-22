@@ -168,6 +168,36 @@ async def _oauth_proxy_servers(
     return servers, dead
 
 
+async def oauth_proxy_servers_for(
+    session_id: str,
+    enabled_keys: list[str],
+    *,
+    user_id: UUID | None,
+    db: AsyncSession,
+    existing: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Proxy-URL ``mcpServers`` entries for the enabled OAuth2 keys + the dead keys.
+
+    Shared by the claude-cli (``.claude.json``) and inkwest-agent engines so OAuth2 MCP
+    brokering is identical across both. The agent materializer reads only the static
+    catalog (``build_mcp_servers``), so without this the Converse engine would silently
+    drop every OAuth2 server. Selects the oauth subset of ``enabled_keys``, then defers
+    to :func:`_oauth_proxy_servers` (grant check + mint-stable JWT). No oauth keys, or no
+    ``user_id``, yields ``({}, [])``.
+    """
+    oauth_catalog = get_oauth_catalog()
+    enabled_oauth = [k for k in enabled_keys if k in oauth_catalog]
+    if not enabled_oauth or user_id is None:
+        return {}, []
+    return await _oauth_proxy_servers(
+        db,
+        user_id=user_id,
+        session_id=session_id,
+        enabled_oauth_keys=enabled_oauth,
+        existing=existing or {},
+    )
+
+
 async def apply_session_mcp_selection(
     session_id: str, enabled_keys: list[str], *, user_id: UUID | None, db: AsyncSession
 ) -> list[str]:
@@ -188,20 +218,12 @@ async def apply_session_mcp_selection(
     static_catalog = get_mcp_catalog()
     oauth_catalog = get_oauth_catalog()
     enabled_static = [k for k in enabled_keys if k in static_catalog]
-    enabled_oauth = [k for k in enabled_keys if k in oauth_catalog]
 
     config = _read_config(path)
     existing_servers = config.get("mcpServers") or {}
-    if enabled_oauth and user_id is not None:
-        oauth_servers, dead = await _oauth_proxy_servers(
-            db,
-            user_id=user_id,
-            session_id=session_id,
-            enabled_oauth_keys=enabled_oauth,
-            existing=existing_servers,
-        )
-    else:
-        oauth_servers, dead = {}, []
+    oauth_servers, dead = await oauth_proxy_servers_for(
+        session_id, enabled_keys, user_id=user_id, db=db, existing=existing_servers
+    )
 
     enabled_servers = {**build_mcp_servers(enabled_static), **oauth_servers}
     catalog_keys = set(static_catalog) | set(oauth_catalog)

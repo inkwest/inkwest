@@ -6,11 +6,12 @@ DB-free agent can read them) and removes it on turn end (it may embed creds).
 
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services import agent_mcp_config as amc
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
+USER_ID = "22222222-2222-2222-2222-222222222222"
 
 
 def _settings(tmp_path, *, enabled=True):
@@ -115,3 +116,63 @@ def test_no_leftover_tmp_file_on_write(tmp_path):
         amc.write_agent_mcp_config(SESSION_ID, ["cx"])
     leftovers = [f for f in os.listdir(tmp_path / "claude") if f.endswith(".tmp")]
     assert leftovers == []
+
+
+# --- OAuth2 engine parity (mirrors the claude-cli .claude.json path) -------------------
+
+
+async def test_with_oauth_merges_static_and_proxy_servers(tmp_path):
+    """The agent config carries BOTH static-catalog defs and OAuth2 proxy entries —
+    the gap this closes: OAuth2 MCP servers were invisible to the inkwest-agent engine."""
+    (tmp_path / "claude").mkdir()
+    static_def = {"type": "http", "url": "https://cx.example/mcp"}
+    proxy_def = {"type": "http", "url": "http://backend/api/mcp-proxy/notion/", "headers": {}}
+    s, d = _patches(tmp_path)
+    with (
+        s,
+        d,
+        patch.object(amc, "build_mcp_servers", return_value={"cx": static_def}),
+        patch(
+            "app.services.mcp_config.oauth_proxy_servers_for",
+            new=AsyncMock(return_value=({"notion": proxy_def}, [])),
+        ),
+    ):
+        path, dead = await amc.write_agent_mcp_config_with_oauth(
+            SESSION_ID, ["cx", "notion"], user_id=USER_ID, db=MagicMock()
+        )
+
+    assert path == "/home/agent/.claude/inkwest-agent-mcp.json"
+    assert dead == []
+    written = json.loads((tmp_path / "claude" / "inkwest-agent-mcp.json").read_text())
+    assert written == {"mcpServers": {"cx": static_def, "notion": proxy_def}}
+
+
+async def test_with_oauth_returns_dead_keys_for_inactive_grant(tmp_path):
+    """An enabled OAuth2 server with no active grant surfaces as a dead key (the broker
+    turns it into mcp_auth_required) and is NOT written into the config."""
+    (tmp_path / "claude").mkdir()
+    s, d = _patches(tmp_path)
+    with (
+        s,
+        d,
+        patch.object(amc, "build_mcp_servers", return_value={}),
+        patch(
+            "app.services.mcp_config.oauth_proxy_servers_for",
+            new=AsyncMock(return_value=({}, ["notion"])),
+        ),
+    ):
+        path, dead = await amc.write_agent_mcp_config_with_oauth(
+            SESSION_ID, ["notion"], user_id=USER_ID, db=MagicMock()
+        )
+
+    assert dead == ["notion"]
+    assert path is None  # nothing materialized when only dead keys
+
+
+async def test_with_oauth_noop_off_sandbox(tmp_path):
+    s, d = _patches(tmp_path, enabled=False)
+    with s, d:
+        path, dead = await amc.write_agent_mcp_config_with_oauth(
+            SESSION_ID, ["notion"], user_id=USER_ID, db=MagicMock()
+        )
+    assert (path, dead) == (None, [])
