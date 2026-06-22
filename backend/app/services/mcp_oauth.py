@@ -40,12 +40,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.constants import (
     MCP_OAUTH_HTTP_TIMEOUT,
     MCP_OAUTH_MAX_RESPONSE_BYTES,
     MCP_OAUTH_STATE_TTL_SECONDS,
 )
-from app.core.crypto import seal, unseal, vault_ref
+from app.core.crypto import VaultDecryptError, seal, unseal, vault_ref
 from app.models.mcp_oauth_client import McpOauthClient
 from app.models.mcp_oauth_pending_state import McpOauthPendingState
 from app.models.mcp_user_token import McpUserToken
@@ -126,6 +127,17 @@ class Discovery:
 # --------------------------------------------------------------------------- #
 # SSRF guard — the backend has unrestricted egress (unlike the sandbox)
 # --------------------------------------------------------------------------- #
+def _allow_hosts() -> frozenset[str]:
+    """Exact hostnames waived from the public-IP requirement (MCP_OAUTH_ALLOW_HOSTS)."""
+    raw = get_settings().mcp_oauth_allow_hosts
+    return frozenset(h.strip() for h in raw.split(",") if h.strip())
+
+
+# Audit the SSRF waiver once per host, not per request — an allowlisted host is hit many
+# times per flow (discover, PRM, issuer, each endpoint, plus per-request IP-pinning).
+_warned_allow_hosts: set[str] = set()
+
+
 def _validated_ips(url: str) -> list[str]:
     """Validate ``url`` is https and resolves only to public IPs; return those IPs.
 
@@ -151,13 +163,22 @@ def _validated_ips(url: str) -> list[str]:
             raise McpOauthError(f"cannot resolve host {host!r}") from e
     if not ips:
         raise McpOauthError(f"cannot resolve host {host!r}")
+    # Explicit operator allowlist (MCP_OAUTH_ALLOW_HOSTS): named hosts may resolve to a
+    # non-public address — for internal/VPN-hosted MCP servers behind private DNS. https +
+    # IP-pinning still apply; this only waives the public-IP requirement, and only for these
+    # exact hosts. Keyed on hostname, never on the IP, so it can't be widened by DNS.
+    host_allowed = host in _allow_hosts()
     for ip in ips:
         # Allow-list, not deny-list: only globally-routable addresses pass. A deny-list of
         # private/loopback/link-local/etc. silently admits special-purpose ranges it forgot —
         # e.g. RFC 6598 CGNAT 100.64.0.0/10, routable to internal infra in cloud/k8s/NAT.
         # ``is_global`` rejects every non-public range without enumerating them.
         if not ipaddress.ip_address(ip).is_global:
-            raise McpOauthError(f"refusing URL resolving to non-public address {ip}")
+            if not host_allowed:
+                raise McpOauthError(f"refusing URL resolving to non-public address {ip}")
+            if host not in _warned_allow_hosts:
+                _warned_allow_hosts.add(host)
+                logger.warning("mcp_oauth_allowlisted_private_host", extra={"host": host, "ip": ip})
     return ips
 
 
@@ -547,7 +568,20 @@ async def _load_active(
     row = await db.get(McpUserToken, (user_id, mcp_key))
     if row is None or row.status != "active" or row.blob is None or row.blob_iv is None:
         raise GrantDeadError(f"no active grant for {mcp_key}")
-    return row, json.loads(unseal(dek, row.blob, row.blob_iv))
+    try:
+        blob = json.loads(unseal(dek, row.blob, row.blob_iv))
+    except (VaultDecryptError, ValueError) as e:
+        # Undecryptable (stale/mismatched DEK) or non-JSON plaintext (corrupted blob): the
+        # grant is unusable. Surface it as DEAD (→ 401 reconnect) rather than letting it
+        # bubble to the proxy's generic handler as 503 ("try again"), which would loop the
+        # user forever with no path to recovery. JSONDecodeError is a ValueError subclass.
+        raise GrantDeadError(f"grant blob undecryptable for {mcp_key}") from e
+    # We only ever seal a dict; a non-dict here means a corrupted blob that still
+    # authenticated (not cryptographically reachable, but cheap to fail closed) — guard it so
+    # downstream blob["access_token"] can't raise an uncaught TypeError past this DEAD mapping.
+    if not isinstance(blob, dict):
+        raise GrantDeadError(f"grant blob is not an object for {mcp_key}")
+    return row, blob
 
 
 async def get_fresh_token(

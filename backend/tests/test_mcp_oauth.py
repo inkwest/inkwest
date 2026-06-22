@@ -583,6 +583,32 @@ def test_ssrf_guard_rejects_cgnat() -> None:
         mcp_oauth.assert_public_https("https://sneaky.example.com/mcp")
 
 
+def _allow_settings():
+    return MagicMock(mcp_oauth_allow_hosts="internal-mcp.example.com")
+
+
+def test_ssrf_allowlist_permits_named_private_host(monkeypatch) -> None:
+    """MCP_OAUTH_ALLOW_HOSTS waives the public-IP requirement for exact-named hosts
+    (internal/VPN MCP behind private DNS) — https + IP-pin still apply, and the waiver is
+    keyed on the hostname, so a different private host is still rejected."""
+    monkeypatch.setattr(mcp_oauth, "_resolve_ips", lambda host: ["10.1.0.91"])
+    monkeypatch.setattr(mcp_oauth, "get_settings", _allow_settings)
+    mcp_oauth._warned_allow_hosts.clear()
+    # Allowlisted host on a private IP: permitted, and the IP is still returned for pinning.
+    assert mcp_oauth._validated_ips("https://internal-mcp.example.com/mcp") == ["10.1.0.91"]
+    # A non-listed host on the same range is still rejected (exact-match, not a CIDR opener).
+    with pytest.raises(McpOauthError, match="non-public"):
+        mcp_oauth.assert_public_https("https://other-internal.example.com/mcp")
+
+
+def test_ssrf_allowlist_still_requires_https(monkeypatch) -> None:
+    """The allowlist waives only the public-IP check — an allowlisted http host is rejected."""
+    monkeypatch.setattr(mcp_oauth, "_resolve_ips", lambda host: ["10.1.0.91"])
+    monkeypatch.setattr(mcp_oauth, "get_settings", _allow_settings)
+    with pytest.raises(McpOauthError, match="non-https"):
+        mcp_oauth.assert_public_https("http://internal-mcp.example.com/mcp")
+
+
 # --------------------------------------------------------------------------- #
 # pin_url — the DNS-rebinding mitigation (validate, then pin to the validated IP)
 # --------------------------------------------------------------------------- #
@@ -686,3 +712,33 @@ async def test_exchange_code_no_dek_does_not_consume_state(monkeypatch) -> None:
         await mcp_oauth.exchange_code(db, state="s", code="c", redirect_uri="x")  # dek=None
     # Exactly one execute (the peek SELECT); the DELETE-RETURNING never ran.
     assert len(executed) == 1
+
+
+# --------------------------------------------------------------------------- #
+# _load_active — an unusable grant is DEAD (→401 reconnect), never an uncaught error
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_get_fresh_token_undecryptable_blob_is_grant_dead() -> None:
+    """A blob sealed under a different DEK (stale/mismatched key) must surface as
+    GrantDeadError → 401 reconnect, NOT bubble VaultDecryptError to the proxy's 503 loop."""
+    blob, iv = seal(generate_dek(), json.dumps({"access_token": "x"}).encode())
+    token = McpUserToken(user_id=_USER, mcp_key="notion", vault_ref="r", status="active")
+    token.blob, token.blob_iv = blob, iv
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=token)
+    with pytest.raises(GrantDeadError):
+        await mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=generate_dek())
+
+
+@pytest.mark.asyncio
+async def test_get_fresh_token_non_dict_blob_is_grant_dead() -> None:
+    """A blob that decrypts to valid-but-non-object JSON must fail closed as GrantDeadError,
+    not crash on blob["access_token"]."""
+    dek = generate_dek()
+    blob, iv = seal(dek, json.dumps("not-an-object").encode())
+    token = McpUserToken(user_id=_USER, mcp_key="notion", vault_ref="r", status="active")
+    token.blob, token.blob_iv = blob, iv
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=token)
+    with pytest.raises(GrantDeadError):
+        await mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=dek)

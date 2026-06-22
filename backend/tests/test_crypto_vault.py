@@ -31,6 +31,24 @@ def test_round_trip_sizes(plaintext: bytes) -> None:
     assert unseal(dek, ciphertext, nonce) == plaintext
 
 
+def test_unseal_rejects_wrong_nonce_length() -> None:
+    """A corrupted/short nonce makes AESGCM raise ValueError; unseal must normalize it to
+    VaultDecryptError so the documented "any failure → VaultDecryptError" contract holds
+    (callers branch only on VaultDecryptError to mark a grant dead)."""
+    dek = generate_dek()
+    ciphertext, nonce = seal(dek, b"payload")
+    with pytest.raises(VaultDecryptError):
+        unseal(dek, ciphertext, nonce[:-1])  # 11-byte nonce
+
+
+def test_unseal_rejects_tampered_ciphertext() -> None:
+    dek = generate_dek()
+    ciphertext, nonce = seal(dek, b"payload")
+    tampered = ciphertext[:-1] + bytes([ciphertext[-1] ^ 0x01])
+    with pytest.raises(VaultDecryptError):
+        unseal(dek, tampered, nonce)
+
+
 def test_ciphertext_is_opaque() -> None:
     """The ciphertext must not leak the plaintext (no substring of the token survives)."""
     dek = generate_dek()

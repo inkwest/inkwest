@@ -240,6 +240,12 @@ class Settings(BaseSettings):
     # can route to the backend (Docker host-gateway alias) — NOT 127.0.0.1 (that is the
     # toolbox itself). Empty disables oauth-entry injection into .claude.json (Increment 2).
     mcp_proxy_base_url: str = ""
+    # Explicit allowlist (comma-separated exact hostnames) of OAuth2 MCP servers permitted to
+    # resolve to a non-public address — for internal/VPN-hosted MCP servers behind private DNS.
+    # The SSRF guard still requires https and still IP-pins the connection; this only waives the
+    # public-IP requirement for these exact hosts. Empty = public-only (the safe default). A
+    # deliberate, scoped operator decision — not a blanket private-network opener.
+    mcp_oauth_allow_hosts: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

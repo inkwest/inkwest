@@ -59,9 +59,16 @@ def unseal(dek: bytes, ciphertext: bytes, nonce: bytes) -> bytes:
     """
     if len(dek) != DEK_BYTES:
         raise VaultDecryptError("DEK has wrong length")
+    if len(nonce) != _NONCE_BYTES:
+        # Reject a corrupted/short nonce up front; AESGCM would raise ValueError (not
+        # InvalidTag) on it, and the docstring's "any failure → VaultDecryptError" contract
+        # must hold so callers can branch solely on VaultDecryptError.
+        raise VaultDecryptError("nonce has wrong length")
     try:
         return AESGCM(dek).decrypt(nonce, ciphertext, None)
-    except InvalidTag as e:
+    except (InvalidTag, ValueError) as e:
+        # InvalidTag = wrong DEK / tampered ciphertext; ValueError = any other malformed input
+        # AESGCM rejects. Both normalize to the single opaque error (no decryption oracle).
         raise VaultDecryptError("authentication failed") from e
 
 
