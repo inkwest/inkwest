@@ -508,3 +508,31 @@ export async function updateSystemPrompt(
 export async function deleteSystemPrompt(id: string): Promise<void> {
   await fetchAPI(`/api/system-prompts/${id}`, { method: 'DELETE' });
 }
+
+// ============================================================================
+// System Info API
+// ============================================================================
+
+/** Read-only build + deployment info shown on the admin System Info page. */
+export interface SystemInfo {
+  /** App/API image (combined prod image: backend + baked SPA), from build-time env. */
+  app_version: string;
+  app_commit: string;
+  app_build_timestamp: string;
+  /** Image ref the broker spawns the inkwest-agent in; '' when sandbox not configured. */
+  agent_image: string;
+  app_env: string;
+  ai_provider: string;
+  default_model: string;
+  /** Agentic engines live in this deployment (AGENTIC_ENGINES). */
+  engines: string[];
+  oidc_enabled: boolean;
+  sandbox_enabled: boolean;
+  attachments_enabled: boolean;
+  /** Model/pricing discovery freshness (reuses the model-settings catalog shape). */
+  catalog: CatalogStatus;
+}
+
+export async function getSystemInfo(): Promise<SystemInfo> {
+  return fetchAPI('/api/admin/system-info');
+}

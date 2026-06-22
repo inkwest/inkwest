@@ -328,6 +328,39 @@ async def test_get_model_settings(admin_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_system_info_forbidden_for_non_admin(
+    authenticated_client: AsyncClient,
+) -> None:
+    resp = await authenticated_client.get("/api/admin/system-info")
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_system_info(admin_client: AsyncClient) -> None:
+    resp = await admin_client.get("/api/admin/system-info")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    # App image build metadata is always populated (dev/local placeholders otherwise).
+    assert data["app_version"]
+    assert "app_commit" in data
+    assert "app_build_timestamp" in data
+    # Agent image ref — the broker's worker image, or '' when the sandbox isn't configured.
+    assert isinstance(data["agent_image"], str)
+    assert data["ai_provider"] == "claude-cli"
+    assert isinstance(data["default_model"], str) and data["default_model"]
+    # Runtime/feature state.
+    assert isinstance(data["engines"], list)
+    assert isinstance(data["oidc_enabled"], bool)
+    assert isinstance(data["sandbox_enabled"], bool)
+    assert isinstance(data["attachments_enabled"], bool)
+    # Catalog freshness block.
+    assert data["catalog"]["source"] in ("live", "static")
+    assert isinstance(data["catalog"]["last_fetch_failed"], bool)
+    assert isinstance(data["catalog"]["count"], int)
+
+
+@pytest.mark.asyncio
 async def test_update_model_settings(
     admin_client: AsyncClient, mock_db: AsyncMock, reset_model_settings: None
 ) -> None:

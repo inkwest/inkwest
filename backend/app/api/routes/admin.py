@@ -1148,3 +1148,56 @@ async def delete_model(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     logger.info(f"Custom model deleted by {admin.email}: {model_id}")
     return _model_settings_response()
+
+
+# =============================================================================
+# System Info Endpoint
+# =============================================================================
+
+
+class SystemInfoResponse(BaseModel):
+    """Read-only build + deployment info for the admin console."""
+
+    # App/API image — the combined prod image (backend + baked SPA). Injected as env
+    # vars at image build time (see Dockerfile: VERSION / COMMIT_HASH / BUILD_TIMESTAMP).
+    app_version: str
+    app_commit: str
+    app_build_timestamp: str
+    # Image the broker spawns the inkwest-agent worker in. The runtime only knows the
+    # reference it was told to run (tag), not the agent's own build metadata. Empty when
+    # the sandbox is not configured.
+    agent_image: str
+    # Resolved runtime environment.
+    app_env: str
+    ai_provider: str
+    default_model: str
+    # Agentic engines live in this deployment (AGENTIC_ENGINES).
+    engines: list[str]
+    # Auth + sandbox runtime state.
+    oidc_enabled: bool
+    sandbox_enabled: bool
+    attachments_enabled: bool
+    # Model/pricing discovery freshness (live vs static, last refresh, fetch health).
+    catalog: CatalogStatus
+
+
+@router.get("/system-info", response_model=SystemInfoResponse)
+async def get_system_info(admin: AdminUser) -> SystemInfoResponse:
+    """Backend build metadata, the agent image ref, and the resolved runtime environment."""
+    await refresh_catalog()  # TTL-aware; keeps the resolved default model + catalog status fresh
+    settings = get_settings()
+    return SystemInfoResponse(
+        app_version=settings.version,
+        app_commit=settings.commit_hash,
+        app_build_timestamp=settings.build_timestamp,
+        agent_image=settings.agent_image,
+        app_env=settings.app_env,
+        ai_provider=settings.ai_provider,
+        default_model=model_registry.default_model(),
+        engines=enabled_engines(),
+        oidc_enabled=settings.oidc_enabled,
+        sandbox_enabled=settings.sandbox_enabled,
+        # Mirrors /api/config: attachments need the per-conversation sandbox (claude-cli).
+        attachments_enabled=settings.sandbox_enabled and settings.ai_provider == "claude-cli",
+        catalog=CatalogStatus(**catalog_status()),
+    )
