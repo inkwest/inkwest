@@ -211,6 +211,12 @@ async def orchestrate_chat_converse(
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
     system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
+    # NB: intentionally NO current-date anchor / current_datetime tool here, unlike the
+    # sandboxed inkwest-agent path (orchestrator_inkwest_agent.py + inkwest_agent.clock).
+    # Open-weight vendors — the models that guess the year — are gated behind the
+    # inkwest-agent engine, so they always route to that path; this in-process loop only
+    # ever serves Anthropic-on-Converse, which grounds the date fine. Add both here if the
+    # gating ever changes.
     model = await resolve_session_model(db, session_id)
 
     # A custom row may pin an ARN (provisioned/imported model) as the invoke target.
