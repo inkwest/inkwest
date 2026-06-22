@@ -158,6 +158,20 @@ cors_origins = (
     if settings.cors_origins
     else [settings.frontend_url]
 )
+# Session auth rides a SameSite=Lax cookie: the browser only sends it to the API
+# when the SPA is same-site as the API (the combined prod image is same-origin;
+# dev :3000/:8000 is same-site localhost). An explicit CORS_ORIGINS override
+# usually means a cross-site SPA host — where Lax silently withholds the cookie
+# and every request 401s. Surface that at startup so it isn't debugged at 3 AM.
+if settings.cors_origins:
+    logger.warning(
+        "cors_origins_override_set",
+        origins=cors_origins,
+        note=(
+            "Session cookie is SameSite=Lax; a cross-site SPA host will not "
+            "receive it. Keep the SPA same-site as the API."
+        ),
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,

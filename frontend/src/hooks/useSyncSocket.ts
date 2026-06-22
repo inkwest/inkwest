@@ -52,17 +52,16 @@ export function useSyncSocket() {
         wsRef.current = null;
       }
 
-      const token = localStorage.getItem('session_token');
+      // Cookie-authed ticket POST (dev mode returns the dev user); the ticket
+      // rides the WS subprotocol since the handshake can't carry the cookie.
       let protocols: string[] = ['inkwest'];
-      if (token) {
-        try {
-          const ticket = await fetchWsTicket();
-          if (unmounted) return;
-          protocols = ['inkwest', `ticket|${ticket}`];
-        } catch {
-          scheduleReconnect();
-          return;
-        }
+      try {
+        const ticket = await fetchWsTicket();
+        if (unmounted) return;
+        protocols = ['inkwest', `ticket|${ticket}`];
+      } catch {
+        scheduleReconnect();
+        return;
       }
       const ws = new WebSocket(`${WS_URL}/ws/sync`, protocols);
       wsRef.current = ws;
@@ -105,7 +104,7 @@ export function useSyncSocket() {
       ws.onclose = (event) => {
         cleanup();
         if (event.code === 4001) {
-          localStorage.removeItem('session_token');
+          // Session expired/invalid — back to root; AuthGuard re-checks the cookie.
           if (!unmounted) navigate('/');
           return;
         }

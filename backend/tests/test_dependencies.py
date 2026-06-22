@@ -26,17 +26,20 @@ async def test_get_current_user_dev_mode() -> None:
         settings.oidc_enabled = False
         mock_settings.return_value = settings
 
-        user = await get_current_user(mock_db)
+        # Dev mode short-circuits before reading the request cookie.
+        user = await get_current_user(MagicMock(), mock_db)
 
     assert user is dev_user
 
 
 @pytest.mark.asyncio
-async def test_get_current_user_oidc_missing_auth() -> None:
-    """In OIDC mode without Authorization header, raises 401."""
+async def test_get_current_user_oidc_missing_cookie() -> None:
+    """In OIDC mode without the session cookie, raises 401."""
     from app.api.dependencies import get_current_user
 
     mock_db = AsyncMock()
+    request = MagicMock()
+    request.cookies = {}
 
     with patch("app.api.dependencies.get_settings") as mock_settings:
         settings = MagicMock()
@@ -44,7 +47,7 @@ async def test_get_current_user_oidc_missing_auth() -> None:
         mock_settings.return_value = settings
 
         with pytest.raises(HTTPException) as exc_info:
-            await get_current_user(mock_db, authorization=None)
+            await get_current_user(request, mock_db)
 
     assert exc_info.value.status_code == 401
 

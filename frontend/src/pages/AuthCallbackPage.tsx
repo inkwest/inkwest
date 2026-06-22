@@ -7,18 +7,15 @@ export function AuthCallbackPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const hash = window.location.hash.substring(1);
-    const params = new URLSearchParams(hash);
-    const token = params.get('token');
+    // Success sets an HttpOnly cookie server-side and redirects straight to '/',
+    // so this page only ever handles the error fragment. Anything else → home.
+    const params = new URLSearchParams(window.location.hash.substring(1));
     const err = params.get('error');
 
-    if (token) {
-      localStorage.setItem('session_token', token);
-      navigate('/', { replace: true });
-    } else if (err) {
+    if (err) {
       setError(decodeURIComponent(err));
     } else {
-      setError('No token received');
+      navigate('/', { replace: true });
     }
   }, [navigate]);
 

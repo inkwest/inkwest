@@ -39,8 +39,8 @@ export function getLoginUrl(): string {
 }
 
 export async function logout(): Promise<void> {
+  // Backend clears the HttpOnly session cookie; nothing to drop client-side.
   await fetchAPI('/api/auth/logout', { method: 'POST' });
-  localStorage.removeItem('session_token');
 }
 
 // ============================================================================

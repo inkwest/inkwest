@@ -10,9 +10,12 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.auth import (
     JWT_ALGORITHM,
+    SESSION_COOKIE_NAME,
     WS_TICKET_EXPIRATION_SECONDS,
+    clear_session_cookie,
     create_ws_ticket,
     extract_ws_ticket,
+    set_session_cookie,
     verify_ws_ticket,
 )
 from app.main import app
@@ -85,7 +88,7 @@ async def test_auth_status_oidc_invalid_token(client: AsyncClient) -> None:
     ):
         resp = await client.get(
             "/api/auth/status",
-            headers={"Authorization": "Bearer bad-token"},
+            cookies={"session_token": "bad-token"},
         )
 
     assert resp.status_code == 200
@@ -117,20 +120,81 @@ async def test_callback_disabled_when_no_oidc(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_callback_success_sets_cookie_no_fragment(
+    client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """Success sets the HttpOnly cookie and redirects to the SPA root — the JWT
+    must never appear in the redirect URL (no #token fragment)."""
+    recent = datetime.now(UTC)
+    state_result = MagicMock()
+    state_result.first.return_value = (recent,)  # valid, unexpired login state
+    user = MagicMock()
+    user.id = uuid4()
+    user.email = "u@example.com"
+    user.display_name = "U"
+    user.roles = ["admin"]
+    user.is_active = True
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = user
+    # Calls: state pop (RETURNING), cutoff cleanup, user lookup.
+    mock_db.execute = AsyncMock(side_effect=[state_result, MagicMock(), user_result])
+
+    oidc = MagicMock()
+    oidc.is_enabled = True
+    oidc.exchange_code = AsyncMock(return_value={"id_token": "id-tok"})
+    oidc.validate_id_token = AsyncMock(return_value={"sub": "s"})
+    oidc.extract_user_info = MagicMock(
+        return_value={
+            "oidc_subject": "s",
+            "email": "u@example.com",
+            "display_name": "U",
+            "roles": ["admin"],
+        }
+    )
+
+    with (
+        patch("app.api.routes.auth.get_oidc_client", return_value=oidc),
+        patch(
+            "app.api.routes.auth.get_settings",
+            return_value=MagicMock(frontend_url="http://fe.local", oidc_issuer_url="iss"),
+        ),
+        patch("app.api.routes.auth.create_session_token", return_value="fake.jwt"),
+        patch("app.core.auth.get_settings", return_value=MagicMock(app_env="development")),
+    ):
+        resp = await client.get("/api/auth/callback?code=abc&state=xyz", follow_redirects=False)
+
+    assert resp.status_code == 307
+    location = resp.headers["location"]
+    assert location == "http://fe.local/"
+    assert "#token" not in location  # the security-critical invariant
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "session_token=fake.jwt" in set_cookie
+    assert "HttpOnly" in set_cookie
+
+
+@pytest.mark.asyncio
 async def test_logout(client: AsyncClient) -> None:
     resp = await client.post("/api/auth/logout")
     assert resp.status_code == 200
     assert resp.json()["message"] == "Logged out successfully"
+    # The HttpOnly session cookie must be cleared on logout.
+    assert "session_token=" in resp.headers.get("set-cookie", "")
 
 
 @pytest.mark.asyncio
-async def test_me_invalid_header(client: AsyncClient) -> None:
+async def test_logout_requires_session(client: AsyncClient) -> None:
+    """OIDC mode: logout without the cookie is rejected (anti logout-CSRF)."""
+    with patch("app.api.dependencies.get_settings", return_value=MagicMock(oidc_enabled=True)):
+        resp = await client.post("/api/auth/logout")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_me_missing_cookie(client: AsyncClient) -> None:
+    """In OIDC mode without the session cookie, /me returns 401."""
     with patch("app.api.dependencies.get_settings") as mock_settings:
         mock_settings.return_value = MagicMock(oidc_enabled=True)
-        resp = await client.get(
-            "/api/auth/me",
-            headers={"Authorization": "Token xyz"},
-        )
+        resp = await client.get("/api/auth/me")
     assert resp.status_code == 401
 
 
@@ -142,9 +206,54 @@ async def test_me_expired_token(client: AsyncClient) -> None:
     ):
         resp = await client.get(
             "/api/auth/me",
-            headers={"Authorization": "Bearer expired-token"},
+            cookies={"session_token": "expired-token"},
         )
     assert resp.status_code == 401
+
+
+# --- session cookie tests ---
+
+
+@pytest.mark.asyncio
+async def test_set_session_cookie_dev_is_httponly_lax_insecure() -> None:
+    """Dev (HTTP): HttpOnly + SameSite=Lax, but not Secure so the cookie sticks."""
+    from fastapi import Response
+
+    with patch("app.core.auth.get_settings", return_value=MagicMock(app_env="development")):
+        resp = Response()
+        set_session_cookie(resp, "the-jwt")
+
+    header = resp.headers["set-cookie"]
+    assert f"{SESSION_COOKIE_NAME}=the-jwt" in header
+    assert "HttpOnly" in header
+    assert "SameSite=lax" in header
+    assert "Secure" not in header
+
+
+@pytest.mark.asyncio
+async def test_set_session_cookie_production_is_secure() -> None:
+    """Production (HTTPS): the cookie must carry the Secure flag."""
+    from fastapi import Response
+
+    with patch("app.core.auth.get_settings", return_value=MagicMock(app_env="production")):
+        resp = Response()
+        set_session_cookie(resp, "the-jwt")
+
+    assert "Secure" in resp.headers["set-cookie"]
+
+
+@pytest.mark.asyncio
+async def test_clear_session_cookie_expires_it() -> None:
+    """Logout must expire the cookie (Max-Age=0)."""
+    from fastapi import Response
+
+    with patch("app.core.auth.get_settings", return_value=MagicMock(app_env="development")):
+        resp = Response()
+        clear_session_cookie(resp)
+
+    header = resp.headers["set-cookie"]
+    assert f"{SESSION_COOKIE_NAME}=" in header
+    assert "Max-Age=0" in header
 
 
 # --- WebSocket ticket tests ---
@@ -251,7 +360,7 @@ async def test_ws_ticket_endpoint_invalid_session(client: AsyncClient) -> None:
     ):
         resp = await client.post(
             "/api/auth/ws-ticket",
-            headers={"Authorization": "Bearer bad-token"},
+            cookies={"session_token": "bad-token"},
         )
     assert resp.status_code == 401
 

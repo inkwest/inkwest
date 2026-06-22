@@ -59,16 +59,20 @@ export function useEgressSocket(sessionId: string | undefined): EgressState {
       // Tail restarts from the file's start, so clear before (re)reading.
       setEvents([]);
 
-      const token = localStorage.getItem('session_token');
+      // Cookie-authed ticket POST (dev mode returns the dev user); the ticket
+      // rides the WS subprotocol since the handshake can't carry the cookie.
       let protocols: string[] = ['inkwest'];
-      if (token) {
-        try {
-          const ticket = await fetchWsTicket();
-          if (unmounted) return;
-          protocols = ['inkwest', `ticket|${ticket}`];
-        } catch {
-          return;
-        }
+      try {
+        const ticket = await fetchWsTicket();
+        if (unmounted) return;
+        protocols = ['inkwest', `ticket|${ticket}`];
+      } catch {
+        // Transient ticket failure (backend blip): retry with backoff like a
+        // dropped socket, rather than silently abandoning the panel.
+        if (unmounted || retries >= MAX_RECONNECT_ATTEMPTS) return;
+        retries++;
+        reconnectTimer = setTimeout(() => void connect(), RECONNECT_DELAY * retries);
+        return;
       }
 
       const ws = new WebSocket(`${WS_URL}/ws/egress/${sessionId}`, protocols);

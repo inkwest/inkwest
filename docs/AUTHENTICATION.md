@@ -63,9 +63,23 @@ every request must carry a valid session JWT obtained through the flow below.
 > returns `400 OIDC authentication is not enabled` — there is no startup
 > validation to catch this.
 
-**Flow:** `/api/auth/login` -> OIDC provider -> `/api/auth/callback` -> returns JWT session token.
+**Flow:** `/api/auth/login` -> OIDC provider -> `/api/auth/callback` -> sets the
+session JWT as an HttpOnly cookie and redirects to the SPA root. The token is
+never placed in the URL fragment or in `localStorage`.
 
-**Session token:** HS256 JWT signed with `SECRET_KEY`, 24h expiry, payload `{sub: user_id, roles: [...]}`.
+**Session token:** HS256 JWT signed with `SECRET_KEY`, 24h expiry, payload
+`{sub: user_id, roles: [...]}`. Delivered as a cookie named `session_token`:
+`HttpOnly` (unreadable by JS — an XSS can't exfiltrate it), `SameSite=Lax`,
+`Path=/`, and `Secure` in production (`APP_ENV=production`). The browser attaches
+it automatically; the SPA sends `credentials: 'include'` on every fetch.
+
+> **Same-site requirement.** `SameSite=Lax` means the browser only sends the
+> cookie when the SPA is *same-site* as the API. The combined prod image serves
+> the SPA same-origin, and dev (`:3000` -> `:8000`) is same-site `localhost`, so
+> both work. A **cross-site** SPA host (e.g. `app.example.com` calling
+> `api.example.org`) will silently withhold the cookie and every request 401s —
+> the startup log warns when `CORS_ORIGINS` is overridden for this reason.
+> Cross-site bearer tokens (the previous scheme) are no longer accepted.
 
 ## Route Protection Matrix
 
@@ -77,7 +91,7 @@ every request must carry a valid session JWT obtained through the flow below.
 | `/api/clusters` (POST/PATCH/DELETE) | Admin | `AdminUser` |
 | `/api/admin/**` | Admin | `AdminUser` |
 | `/ws/chat/{session_id}` | Authenticated | WebSocket auth |
-| `/api/auth/**` | Public | None |
+| `/api/auth/**` | Public | None (except `/me`, `/ws-ticket`, `/logout` → `CurrentUser`) |
 
 ## Dependencies
 
@@ -94,16 +108,16 @@ async def endpoint(user: CurrentUser): ...
 async def admin_endpoint(admin: AdminUser): ...
 ```
 
-- `get_current_user`: returns dev user (single-user mode) or validates JWT (OIDC mode)
+- `get_current_user`: returns dev user (single-user mode) or validates the JWT from the `session_token` cookie (OIDC mode)
 - `require_admin`: chains `get_current_user` + checks `"admin" in user.roles`
 
 ## WebSocket Auth
 
-WebSocket connections use a short-lived ticket (10s TTL) obtained via the session JWT.
-The long-lived session token never touches the WebSocket connection.
+WebSocket connections use a short-lived ticket (10s TTL). The long-lived session
+token never touches the WebSocket connection — only the cookie-authed ticket POST.
 
 ```
-POST /api/auth/ws-ticket  (Authorization: Bearer <session-jwt>)
+POST /api/auth/ws-ticket  (auth via the session_token cookie)
   → { "ticket": "<jwt: sub + type:ws + exp:10s>" }
 
 new WebSocket(url, ['inkwest', `ticket|<mini-jwt>`])
@@ -133,7 +147,7 @@ Admins always have unrestricted access. Non-admin users without matching role ma
 |---|---|---|
 | `/api/auth/status` | GET | Check if OIDC enabled + current auth state |
 | `/api/auth/login` | GET | Redirect to OIDC provider |
-| `/api/auth/callback` | GET | Exchange code for token, create/update user |
-| `/api/auth/logout` | POST | Client-side token discard |
-| `/api/auth/ws-ticket` | POST | Issue short-lived WS ticket (requires Bearer token) |
-| `/api/auth/me` | GET | Get current user info (requires Bearer token) |
+| `/api/auth/callback` | GET | Exchange code, create/update user, set session cookie, redirect to SPA |
+| `/api/auth/logout` | POST | Clear the HttpOnly session cookie (requires the session cookie — anti logout-CSRF) |
+| `/api/auth/ws-ticket` | POST | Issue short-lived WS ticket (requires the session cookie) |
+| `/api/auth/me` | GET | Get current user info (requires the session cookie) |

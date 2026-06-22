@@ -5,11 +5,11 @@ API dependencies for dependency injection.
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import verify_session_token
+from app.core.auth import SESSION_COOKIE_NAME, verify_session_token
 from app.core.config import get_settings
 from app.core.database import async_session_maker
 from app.models.user import User
@@ -48,27 +48,28 @@ async def get_or_create_dev_user(db: AsyncSession) -> User:
 
 
 async def get_current_user(
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    authorization: str | None = Header(None),
 ) -> User:
     """
     Get the current authenticated user.
 
     In single-user mode (OIDC disabled), returns a dev user with admin role.
-    In OIDC mode, validates the JWT from the Authorization header.
+    In OIDC mode, validates the JWT from the HttpOnly session cookie.
     """
     settings = get_settings()
 
     if not settings.oidc_enabled:
         return await get_or_create_dev_user(db)
 
-    if not authorization or not authorization.startswith("Bearer "):
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
+            detail="Missing session cookie",
         )
 
-    payload = verify_session_token(authorization[7:])
+    payload = verify_session_token(token)
     if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

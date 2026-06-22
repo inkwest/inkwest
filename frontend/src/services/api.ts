@@ -14,20 +14,17 @@ export function wsBaseUrl(): string {
   return 'ws://localhost:8000';
 }
 
-function getAuthHeaders(): HeadersInit {
-  const token = localStorage.getItem('session_token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 export async function fetchAPI<T>(
   endpoint: string,
   options?: RequestInit
 ): Promise<T> {
+  // credentials:'include' sends the HttpOnly session cookie cross-origin (dev
+  // SPA :3000 → API :8000); same-origin in the combined prod image.
   const response = await fetch(`${API_URL}${endpoint}`, {
     ...options,
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
-      ...getAuthHeaders(),
       ...options?.headers,
     },
   });
@@ -62,7 +59,7 @@ export async function uploadAttachments(
   for (const f of files) form.append('files', f);
   const response = await fetch(`${API_URL}/api/sessions/${sessionId}/attachments`, {
     method: 'POST',
-    headers: getAuthHeaders(),
+    credentials: 'include',
     body: form,
   });
   if (!response.ok) {
@@ -78,12 +75,12 @@ export async function deleteAttachment(sessionId: string, filename: string): Pro
   });
 }
 
-// Fetch an attachment's bytes with auth (an <img src> can't carry the bearer
-// token), so callers turn the blob into an object URL for thumbnails.
+// Fetch an attachment's bytes with auth (an <img src> can't carry the session
+// cookie cross-origin), so callers turn the blob into an object URL for thumbnails.
 export async function fetchAttachmentBlob(sessionId: string, filename: string): Promise<Blob> {
   const response = await fetch(
     `${API_URL}/api/sessions/${sessionId}/attachments/${encodeURIComponent(filename)}`,
-    { headers: getAuthHeaders() },
+    { credentials: 'include' },
   );
   if (!response.ok) throw new Error(`Failed to load attachment: ${response.status}`);
   return response.blob();
