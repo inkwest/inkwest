@@ -220,3 +220,42 @@ async def test_refresh_no_profiles_is_noop():
     sid = uuid.uuid4()
     cred = MintedCredential(connector="aws", scope="read", expires_at=None, secret={})
     assert await refresh_session_eks(sid, cred) == 0
+
+
+def test_discover_all_reports_progress_per_profile():
+    """progress_cb fires (0, total) up front, then one tick per completed profile."""
+    from app.services import eks_refresh
+
+    profiles = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+    calls: list[tuple[int, int]] = []
+    with patch.object(eks_refresh, "_discover_for_profile", side_effect=lambda p: []):
+        eks_refresh._discover_all(profiles, lambda done, total: calls.append((done, total)))
+    assert calls[0] == (0, 3)
+    assert calls[-1] == (3, 3)
+    assert [d for d, _ in calls] == [0, 1, 2, 3]  # monotonic
+
+
+async def test_schedule_no_profiles_still_runs_on_done():
+    """on_done must fire even with nothing to discover, so a tracker releases its entry."""
+    from app.services import eks_refresh
+
+    fired: list[int] = []
+    cred = MintedCredential(connector="aws", scope="read", expires_at=None, secret={})
+    eks_refresh.schedule_session_eks_refresh(uuid.uuid4(), cred, on_done=lambda: fired.append(1))
+    assert fired == [1]
+
+
+async def test_run_safe_calls_on_done_on_success_and_failure():
+    """The shared progress entry must be released whether discovery succeeds or raises."""
+    from unittest.mock import AsyncMock
+
+    from app.services import eks_refresh
+
+    fired: list[str] = []
+    with patch.object(eks_refresh, "refresh_session_eks", AsyncMock(return_value=2)):
+        await eks_refresh._run_safe(uuid.uuid4(), MagicMock(), None, lambda: fired.append("ok"))
+    assert fired == ["ok"]
+
+    with patch.object(eks_refresh, "refresh_session_eks", AsyncMock(side_effect=RuntimeError())):
+        await eks_refresh._run_safe(uuid.uuid4(), MagicMock(), None, lambda: fired.append("fail"))
+    assert fired == ["ok", "fail"]

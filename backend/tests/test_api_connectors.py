@@ -522,3 +522,222 @@ async def test_grant_from_warm_409_without_warm_grant(
             f"/api/connectors/{mock_session_obj.id}/gitlab/grant-from-warm"
         )
     assert resp.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# Grant progress: STS minting ("granting") → EKS discovery ("discovering")
+# --------------------------------------------------------------------------- #
+_AWS_SEL_EKS = {"profiles": [{"account_id": "111", "role_name": "eks-ro", "name": "acme-eks-ro"}]}
+
+
+def _granted(selection: dict) -> MintedCredential:
+    return MintedCredential(
+        "aws",
+        "read",
+        datetime.now(UTC) + timedelta(hours=1),
+        secret={"profiles": [{"name": "p"}]},
+        selection=selection,
+    )
+
+
+async def _post_select(client: AsyncClient, sid, role_name: str):
+    return await client.post(
+        f"/api/connectors/{sid}/aws/select",
+        json={"selections": [{"account_id": "111", "role_name": role_name}]},
+    )
+
+
+async def test_aws_select_with_eks_role_hands_progress_to_discovery(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """An eks-* pick keeps the progress entry alive (phase "discovering") for the
+    background EKS task, which owns its release via on_done."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL_EKS))
+    )
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh") as eks,
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "eks-ro")
+
+        assert resp.status_code == 200
+        # The mint got a progress callback (drives the "granting" phase).
+        _, sel_kwargs = conn.select_account_roles.call_args
+        assert callable(sel_kwargs["progress_cb"])
+        # The EKS task got both a progress callback and the release hook.
+        _, eks_kwargs = eks.call_args
+        assert callable(eks_kwargs["progress_cb"])
+        assert callable(eks_kwargs["on_done"])
+        # Entry survives the response, flipped to "discovering" (on_done not yet fired).
+        assert c._aws_enum_progress[key]["phase"] == "discovering"
+        # The task's on_done releases the entry.
+        eks_kwargs["on_done"]()
+        assert key not in c._aws_enum_progress
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_eks_role_gate_is_case_insensitive(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """An upper-case "EKS-*" pick must also keep the entry alive (matches _dedup_prefer_eks)."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL_EKS))
+    )
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh"),
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "EKS-Admin")
+        assert resp.status_code == 200
+        assert c._aws_enum_progress[key]["phase"] == "discovering"
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_without_eks_role_releases_progress_immediately(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """A non-eks pick has no cluster RBAC worth waiting on: discovery still runs but
+    untracked, and the progress entry is released before the response returns."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL)))
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh") as eks,
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "ReadOnly")
+
+        assert resp.status_code == 200
+        eks.assert_called_once()
+        # Scheduled without progress tracking (fire-and-forget, as before).
+        _, eks_kwargs = eks.call_args
+        assert "progress_cb" not in eks_kwargs
+        assert "on_done" not in eks_kwargs
+        assert key not in c._aws_enum_progress
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_clears_progress_on_mint_error(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """A failed STS mint must release the entry (no dangling "granting" forever)."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws",
+        select_account_roles=AsyncMock(side_effect=ConnectorError("Account/role not authorized")),
+    )
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh"),
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "eks-ro")
+        assert resp.status_code == 400
+        assert key not in c._aws_enum_progress
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_options_progress_reports_discovering_phase(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """The endpoint echoes the stored phase verbatim (not a hardcoded "enumerating")."""
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    from app.api.routes.connectors import _aws_enum_progress
+
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    _aws_enum_progress[key] = {"phase": "discovering", "done": 2, "total": 5}
+    try:
+        with patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS):
+            resp = await authenticated_client.get(
+                f"/api/connectors/{mock_session_obj.id}/aws/options/progress"
+            )
+    finally:
+        _aws_enum_progress.pop(key, None)
+    assert resp.status_code == 200
+    assert resp.json() == {"phase": "discovering", "done": 2, "total": 5}
+
+
+def test_progress_cb_is_owner_guarded_no_clobber_no_resurrect() -> None:
+    """A superseded owner can neither clobber a newer entry nor resurrect an ended one."""
+    from app.api.routes import connectors as c
+
+    key = ("u", "owner-guard")
+    t1, cb1 = c._begin_enum_progress(key, phase="granting")
+    assert c._aws_enum_progress[key]["phase"] == "granting"
+    t2, _cb2 = c._begin_enum_progress(key, phase="granting")  # a newer grant took over
+    cb1(5, 5)  # stale owner must not clobber the newer entry
+    assert c._aws_enum_progress[key]["token"] is t2
+    assert c._aws_enum_progress[key]["done"] == 0
+    c._end_enum_progress(key, t2)
+    cb1(9, 9)  # late stale tick after release must not resurrect
+    assert key not in c._aws_enum_progress
+
+
+async def test_mint_sts_profiles_reports_progress() -> None:
+    """_mint_sts_profiles fires (0, total) up front then one tick per completed pick."""
+    from app.services.connectors import aws
+
+    picks = [
+        {"account_id": "1", "role_name": "r1", "account_name": "a1"},
+        {"account_id": "2", "role_name": "r2", "account_name": "a2"},
+    ]
+    creds = {
+        "accessKeyId": "AK",
+        "secretAccessKey": "SK",  # pragma: allowlist secret
+        "sessionToken": "ST",
+        "expiration": 1000,
+    }
+    calls: list[tuple[int, int]] = []
+    with (
+        patch.object(aws, "_build_sso_client", return_value=MagicMock()),
+        patch.object(aws, "_get_role_credentials", return_value=creds),
+    ):
+        profiles, _ = await aws._mint_sts_profiles(
+            "tok", picks, "eu-west-1", progress_cb=lambda d, t: calls.append((d, t))
+        )
+    assert len(profiles) == 2
+    assert calls[0] == (0, 2)
+    assert calls[-1] == (2, 2)

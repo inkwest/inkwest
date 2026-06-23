@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import shutil
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from uuid import UUID
@@ -33,32 +34,58 @@ from app.tools.connector_exec import session_kube_dir, write_aws_profiles
 
 logger = logging.getLogger(__name__)
 
+# (done, total) progress callback — fired per profile as discovery completes.
+ProgressCb = Callable[[int, int], None]
+
 # Background tasks are kept referenced so the event loop does not garbage-collect
 # them mid-run (asyncio holds only a weak reference to fire-and-forget tasks).
 _tasks: set[asyncio.Task[None]] = set()
 
 
-def schedule_session_eks_refresh(session_id: UUID, cred: MintedCredential) -> None:
+def schedule_session_eks_refresh(
+    session_id: UUID,
+    cred: MintedCredential,
+    *,
+    progress_cb: ProgressCb | None = None,
+    on_done: Callable[[], None] | None = None,
+) -> None:
     """Fire-and-forget the EKS refresh for a session — never blocks the caller.
 
-    No-op when the credential carries no minted profiles (e.g. still provisional).
+    No-op when the credential carries no minted profiles (e.g. still provisional);
+    ``on_done`` still runs so a caller tracking progress can release its entry.
+    ``progress_cb`` is fired per profile during discovery; ``on_done`` runs once the
+    task settles (success or failure) — used to end the shared grant progress entry.
     """
     if not cred.secret.get("profiles"):
+        if on_done:
+            on_done()
         return
-    task = asyncio.create_task(_run_safe(session_id, cred))
+    task = asyncio.create_task(_run_safe(session_id, cred, progress_cb, on_done))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
 
-async def _run_safe(session_id: UUID, cred: MintedCredential) -> None:
+async def _run_safe(
+    session_id: UUID,
+    cred: MintedCredential,
+    progress_cb: ProgressCb | None = None,
+    on_done: Callable[[], None] | None = None,
+) -> None:
     try:
-        count = await refresh_session_eks(session_id, cred)
+        count = await refresh_session_eks(session_id, cred, progress_cb=progress_cb)
         logger.info("eks_refresh_done", extra={"session_id": str(session_id), "kubeconfigs": count})
     except Exception:  # noqa: BLE001 — background task; failure must not crash the loop
         logger.exception("eks_refresh_failed", extra={"session_id": str(session_id)})
+    finally:
+        # Always release the progress entry — even on discovery failure the UI must
+        # stop waiting (it falls back to closing the popup on the next idle poll).
+        if on_done:
+            on_done()
 
 
-async def refresh_session_eks(session_id: UUID, cred: MintedCredential) -> int:
+async def refresh_session_eks(
+    session_id: UUID, cred: MintedCredential, *, progress_cb: ProgressCb | None = None
+) -> int:
     """Discover EKS clusters per profile and write one kubeconfig each (tmpfs).
 
     Idempotent / relaunchable: the session kube dir is rebuilt from scratch each
@@ -90,7 +117,7 @@ async def refresh_session_eks(session_id: UUID, cred: MintedCredential) -> int:
 
     # One list+describe round-trip set per profile; fan out in threads (the boto3
     # low-level client is thread-safe) to avoid a serial N×latency walk.
-    clusters = await asyncio.to_thread(_discover_all, profiles)
+    clusters = await asyncio.to_thread(_discover_all, profiles, progress_cb)
     # One kubeconfig PER CLUSTER: the same cluster is often reachable via several
     # selected roles in one account; collapse those to a single file.
     clusters = _dedup_prefer_eks(clusters)
@@ -142,11 +169,22 @@ def _dedup_prefer_eks(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(chosen.values())
 
 
-def _discover_all(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _discover_all(
+    profiles: list[dict[str, Any]], progress_cb: ProgressCb | None = None
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    total = len(profiles)
+    done = 0
+    if progress_cb:
+        progress_cb(0, total)
+    # ex.map preserves submission order, so ``done`` counts profiles whose
+    # list+describe round-trip has returned — monotonic, good enough for the bar.
     with ThreadPoolExecutor(max_workers=min(16, len(profiles))) as ex:
         for res in ex.map(_discover_for_profile, profiles):
             out.extend(res)
+            done += 1
+            if progress_cb:
+                progress_cb(done, total)
     return out
 
 

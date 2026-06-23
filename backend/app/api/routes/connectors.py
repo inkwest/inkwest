@@ -72,20 +72,34 @@ _aws_device_pending: dict[tuple[str, str], str] = {}
 _aws_enum_progress: dict[tuple[str, str], dict[str, Any]] = {}
 
 
-def _begin_enum_progress(key: tuple[str, str]) -> tuple[object, EnumProgressCb]:
-    """Publish an initial progress entry and return its (token, callback)."""
-    token = object()
-    _aws_enum_progress[key] = {"phase": "enumerating", "done": 0, "total": 0, "token": token}
+def _progress_cb(key: tuple[str, str], token: object, phase: str) -> EnumProgressCb:
+    """Build an owner-guarded (done, total) publisher for ``phase``.
+
+    Owner-guarded: it only writes while the entry still carries *this* token, so a
+    superseded task (e.g. an EKS discovery still running after a fresh re-grant
+    replaced the entry) goes silent instead of resurrecting or clobbering it.
+    """
 
     def cb(done: int, total: int) -> None:
-        _aws_enum_progress[key] = {
-            "phase": "enumerating",
-            "done": done,
-            "total": total,
-            "token": token,
-        }
+        cur = _aws_enum_progress.get(key)
+        if cur is not None and cur.get("token") is token:
+            _aws_enum_progress[key] = {
+                "phase": phase,
+                "done": done,
+                "total": total,
+                "token": token,
+            }
 
-    return token, cb
+    return cb
+
+
+def _begin_enum_progress(
+    key: tuple[str, str], phase: str = "enumerating"
+) -> tuple[object, EnumProgressCb]:
+    """Publish an initial progress entry and return its (token, callback)."""
+    token = object()
+    _aws_enum_progress[key] = {"phase": phase, "done": 0, "total": 0, "token": token}
+    return token, _progress_cb(key, token, phase)
 
 
 def _end_enum_progress(key: tuple[str, str], token: object) -> None:
@@ -132,7 +146,8 @@ class AwsOptionsResponse(BaseModel):
 
 
 class AwsEnumProgressResponse(BaseModel):
-    # phase: "idle" (no enumeration running) | "enumerating".
+    # phase: "idle" (nothing running) | "enumerating" (SSO account listing) |
+    # "granting" (STS minting) | "discovering" (EKS cluster discovery).
     phase: str
     done: int = 0
     total: int = 0
@@ -267,18 +282,43 @@ async def _apply_aws_selection(
     AWS becomes usable only here (after the pick), so this — not the device step — is
     where the conversation event with the chosen account/role is emitted.
     """
+    # One progress entry spans both visible phases of the grant: STS minting
+    # ("granting") below, then EKS discovery ("discovering") in the background task.
+    # The token lets the slow background task own the entry's release without a
+    # racing re-grant yanking it (see _progress_cb / _end_enum_progress).
+    key = (str(user_id), str(sid))
+    token, prog_cb = _begin_enum_progress(key, phase="granting")
     try:
-        cred = await conn.select_account_roles(provisional, selections=selections)
+        cred = await conn.select_account_roles(
+            provisional, selections=selections, progress_cb=prog_cb
+        )
     except ConnectorError as e:
+        _end_enum_progress(key, token)
         raise HTTPException(status_code=400, detail=str(e)) from e
     await get_credential_store().put(user_id, sid, cred)
     # Build the per-session ~/.aws projection now — the account/role pick is the trigger.
     # On a shared creds volume this is what the sandbox container bind-mounts, so the
     # granted profiles are present before the first turn provisions the sandbox.
     write_aws_profiles(sid, cred)
-    # Discover EKS clusters for the freshly minted profiles and generate one
-    # (tmpfs) kubeconfig each — async, must not block the response.
-    schedule_session_eks_refresh(sid, cred)
+    # Discover EKS clusters for the freshly minted profiles and generate one (tmpfs)
+    # kubeconfig each — async, must not block the response. Only keep the progress
+    # entry alive into discovery when an eks-* role was picked: only those map into a
+    # cluster's RBAC, so a grant without one has no EKS wait worth showing (the UI
+    # then closes on the next idle poll). Other picks still trigger discovery, untracked.
+    # Case-insensitive, matching _dedup_prefer_eks's eks-role heuristic in eks_refresh.
+    want_eks = any(s.get("role_name", "").lower().startswith("eks-") for s in selections)
+    profiles = cred.secret.get("profiles") or []
+    if want_eks and profiles:
+        disc_cb = _progress_cb(key, token, "discovering")
+        # Seed the real profile count so a poll landing in the scheduling gap reads a
+        # determinate "discovering 0/N" — never an ambiguous 0/0 that could read as done.
+        disc_cb(0, len(profiles))
+        schedule_session_eks_refresh(
+            sid, cred, progress_cb=disc_cb, on_done=lambda: _end_enum_progress(key, token)
+        )
+    else:
+        _end_enum_progress(key, token)
+        schedule_session_eks_refresh(sid, cred)
     await _audit(db, user_id=user_id, session_id=sid, connector="aws", action="select", cred=cred)
     await save_session_event(db, sid, "aws", event, targets=_aws_targets(cred))
     return ConnectorStatusResponse.from_status(conn.public_status(cred))
@@ -602,7 +642,9 @@ async def aws_options_progress(
     p = _aws_enum_progress.get((str(current_user.id), str(sid)))
     if not p:
         return AwsEnumProgressResponse(phase="idle")
-    return AwsEnumProgressResponse(phase="enumerating", done=int(p["done"]), total=int(p["total"]))
+    return AwsEnumProgressResponse(
+        phase=str(p["phase"]), done=int(p["done"]), total=int(p["total"])
+    )
 
 
 @router.post("/{session_id}/aws/select", response_model=ConnectorStatusResponse)

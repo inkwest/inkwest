@@ -207,12 +207,14 @@ class AwsConnector(Connector):
         provisional: MintedCredential,
         *,
         selections: list[dict[str, str]],
+        progress_cb: EnumProgressCb | None = None,
     ) -> MintedCredential:
         """Mint STS credentials for several account/role pairs at once.
 
         Each selection is ``{"account_id", "role_name"}``. One AWS profile is built
         per pair; the profiles live in RAM (store) and are projected to a tmpfs
-        ``~/.aws`` file at execution time.
+        ``~/.aws`` file at execution time. ``progress_cb`` (if given) is fired per
+        completed pick to drive the picker's grant progress bar.
         """
         s = get_settings()
         access_token = provisional.secret.get("sso_access_token")
@@ -242,7 +244,9 @@ class AwsConnector(Connector):
                 }
             )
 
-        profiles, min_expiration = await _mint_sts_profiles(access_token, picks, s.aws_sso_region)
+        profiles, min_expiration = await _mint_sts_profiles(
+            access_token, picks, s.aws_sso_region, progress_cb=progress_cb
+        )
         return MintedCredential(
             connector="aws",
             scope=f"{len(profiles)} compte(s)/rôle(s) (read-only)",
@@ -350,7 +354,10 @@ def _build_sso_client(region: str | None) -> Any:
 
 
 async def _mint_sts_profiles(
-    access_token: str, picks: list[dict[str, str]], region: str | None
+    access_token: str,
+    picks: list[dict[str, str]],
+    region: str | None,
+    progress_cb: EnumProgressCb | None = None,
 ) -> tuple[list[dict[str, Any]], float | None]:
     """Mint one STS profile per account/role pick. Returns (profiles, min expiration).
 
@@ -359,19 +366,25 @@ async def _mint_sts_profiles(
     whole batch raises (no partial grant) — matching the original serial behaviour.
     Authorization is the caller's concern: ``select_account_roles`` validates picks
     against the offered list; ``remint_profiles`` replays an already-validated
-    selection.
+    selection. ``progress_cb`` (if given) is fired per completed pick for UI feedback.
     """
     loop = asyncio.get_running_loop()
     sso = await loop.run_in_executor(_STS_EXECUTOR, _build_sso_client, region)
 
+    total = len(picks)
+    done = 0
+    if progress_cb:
+        progress_cb(0, total)
+
     async def mint(pick: dict[str, str]) -> dict[str, Any]:
+        nonlocal done
         account_id = pick["account_id"]
         role_name = pick["role_name"]
         creds = await loop.run_in_executor(
             _STS_EXECUTOR, _get_role_credentials, sso, access_token, account_id, role_name
         )
         account_name = pick.get("account_name", account_id)
-        return {
+        profile = {
             "name": _profile_name(account_name, role_name),
             "account_id": account_id,
             "account_name": account_name,
@@ -382,6 +395,12 @@ async def _mint_sts_profiles(
             "region": region,
             "expiration": creds["expiration"] / 1000,
         }
+        # Increment on completion — asyncio is single-threaded between awaits, so the
+        # counter bump + callback is atomic even though the mints run concurrently.
+        if progress_cb:
+            done += 1
+            progress_cb(done, total)
+        return profile
 
     # return_exceptions=True so one failing pick doesn't leave its siblings as
     # orphaned "exception never retrieved" tasks; we then fail the whole batch.
