@@ -24,7 +24,7 @@ from app.models.base import Base
 from app.models.message import Message
 from app.models.session import Session
 from app.services import messages as messages_mod
-from app.services.message_window import truncate_messages
+from app.services.message_window import prune_orphan_tool_calls, truncate_messages
 from app.services.messages import (
     clear_cli_session_id,
     ensure_session_title,
@@ -117,6 +117,61 @@ def test_truncate_drops_orphaned_leading_tool_result() -> None:
     assert out == [{"role": "assistant", "content": "answer"}]
 
 
+# --- prune_orphan_tool_calls (pure) ---------------------------------------------
+
+
+def test_prune_keeps_paired_tool_use_and_result() -> None:
+    msgs = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1"}]},
+    ]
+    assert prune_orphan_tool_calls(msgs) == msgs
+
+
+def test_prune_drops_dangling_tool_use_keeps_sibling_text() -> None:
+    # Turn interrupted after the assistant emitted tool_use + text, before the
+    # tool_result was persisted; a new user turn followed. The dangling tool_use
+    # must go, but the assistant's text reply stays.
+    msgs = [
+        {"role": "user", "content": "/test-model"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Read"},
+                {"type": "text", "text": "I am Claude."},
+            ],
+        },
+        {"role": "user", "content": "next question"},
+    ]
+    assert prune_orphan_tool_calls(msgs) == [
+        {"role": "user", "content": "/test-model"},
+        {"role": "assistant", "content": [{"type": "text", "text": "I am Claude."}]},
+        {"role": "user", "content": "next question"},
+    ]
+
+
+def test_prune_drops_message_emptied_by_pruning() -> None:
+    # Assistant turn that was ONLY a dangling tool_use → the whole message goes.
+    msgs = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_x", "name": "Read"}]},
+        {"role": "user", "content": "carry on"},
+    ]
+    assert prune_orphan_tool_calls(msgs) == [{"role": "user", "content": "carry on"}]
+
+
+def test_prune_drops_orphan_tool_result() -> None:
+    msgs = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "ghost"}]}]
+    assert prune_orphan_tool_calls(msgs) == []
+
+
+def test_prune_leaves_plain_messages_untouched() -> None:
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+    ]
+    assert prune_orphan_tool_calls(msgs) == msgs
+
+
 # --- get_session_messages -------------------------------------------------------
 
 
@@ -156,10 +211,17 @@ async def test_get_messages_dict_untyped_falls_back_to_text(db: AsyncSession) ->
 
 async def test_get_messages_tool_result_role_mapped_to_user(db: AsyncSession) -> None:
     # tool_result rows are stored for the UI but must be sent to the API as role=user.
+    # Pair it with its tool_use so prune_orphan_tool_calls keeps it (a lone
+    # tool_result is an orphan and is correctly dropped — see the prune tests).
     sid = await _make_session(db)
-    await _add_message(db, sid, "tool_result", [{"type": "tool_result", "content": "out"}])
+    await _add_message(
+        db, sid, "assistant", [{"type": "tool_use", "id": "t1", "name": "Read"}], minute=0
+    )
+    await _add_message(
+        db, sid, "tool_result", [{"type": "tool_result", "tool_use_id": "t1", "content": "out"}], 1
+    )
     out = await get_session_messages(db, sid)
-    assert out[0]["role"] == "user"
+    assert out[-1]["role"] == "user"
 
 
 async def test_get_messages_ordered_by_created_at(db: AsyncSession) -> None:
@@ -189,6 +251,36 @@ async def test_get_messages_excludes_system_events(db: AsyncSession) -> None:
     out = await get_session_messages(db, sid)
     assert [m["content"] for m in out] == ["before", "after"]
     assert all(m["role"] != "system" for m in out)
+
+
+async def test_get_messages_prunes_interrupted_tool_use(db: AsyncSession) -> None:
+    # Reproduces the real failing session: a tool_use turn never got its
+    # tool_result (interrupted), then the user sent more turns. The dangling
+    # tool_use must not reach the API payload, but its sibling text stays.
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "/test-model", minute=0)
+    await _add_message(
+        db,
+        sid,
+        "assistant",
+        [
+            {"type": "tool_use", "id": "toolu_bdrk_1", "name": "Read", "input": {}},
+            {"type": "text", "text": "I am Claude."},
+        ],
+        minute=1,
+    )
+    await _add_message(db, sid, "user", "next", minute=2)
+    out = await get_session_messages(db, sid)
+    assert out == [
+        {"role": "user", "content": "/test-model"},
+        {"role": "assistant", "content": [{"type": "text", "text": "I am Claude."}]},
+        {"role": "user", "content": "next"},
+    ]
+    assert not any(
+        isinstance(m["content"], list)
+        and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in m["content"])
+        for m in out
+    )
 
 
 # --- save_message ---------------------------------------------------------------

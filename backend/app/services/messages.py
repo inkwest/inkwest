@@ -18,6 +18,7 @@ from sqlalchemy.orm import aliased
 from app.models.message import Message
 from app.models.session import Session
 from app.models.skill import Skill
+from app.services.message_window import prune_orphan_tool_calls
 from app.services.pubsub import notify
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,10 @@ async def get_session_messages(
         else:
             logger.warning(f"Unknown content format for message {msg.id}: {type(content)}")
             formatted_messages.append({"role": api_role, "content": str(content)})
+
+    # Strip dangling tool_use / orphan tool_result left by a turn interrupted
+    # mid-tool — replaying them would make the AI API reject the whole request.
+    formatted_messages = prune_orphan_tool_calls(formatted_messages)
 
     logger.debug(f"Loaded {len(formatted_messages)} messages for session {session_id}")
     return formatted_messages
