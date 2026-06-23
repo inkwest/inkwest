@@ -34,18 +34,20 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // After granting an eks-* role we stay open to show EKS discovery, then auto-close.
-  const [grantWaiting, setGrantWaiting] = useState(false);
+  // Lifecycle: 'off' (not watching) → 'watching' (grant done, awaiting first progress)
+  // → 'armed' (a non-idle poll was seen; on the next idle we may close). The
+  // watching/armed split IS the premature-close guard: an idle poll before discovery's
+  // entry is published (or on the wrong replica) must not close until progress is seen.
+  const [watch, setWatch] = useState<'off' | 'watching' | 'armed'>('off');
+  const watching = watch !== 'off';
   const [error, setError] = useState<string | null>(null);
   // One bar for every slow phase: SSO refresh (enumerating) and the grant's STS
   // minting / EKS discovery (granting → discovering). `submitting` is included so the
-  // minting phase is visible too — with many pairs (e.g. 55) the per-pair "granting"
-  // count is the only feedback that the grant is progressing. The backend reports the
-  // phase; done/total scopes the active one.
-  const progress = useAwsEnumProgress(sessionId, refreshing || submitting || grantWaiting);
-  // Arm the discovery-finished close only once we've actually observed progress, so
-  // the first (still-empty) poll after a grant can't close the modal prematurely.
-  const sawProgress = useRef(false);
-  // Timestamp of the first non-idle poll — the moment the bar became visible — so the
+  // minting count is visible too — for many pairs (e.g. 55) the per-pair "granting"
+  // count is the only feedback the grant is progressing. The backend reports the phase;
+  // done/total scopes the active one.
+  const progress = useAwsEnumProgress(sessionId, refreshing || submitting || watching);
+  // Timestamp of the first non-idle poll (the watching → armed transition) so the
   // auto-close can enforce MIN_PROGRESS_MS and avoid a flash on instant discovery.
   const shownAt = useRef(0);
   // Hold onClose in a ref so the auto-close effect doesn't depend on its identity:
@@ -87,47 +89,44 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     if (!isOpen) return;
     setSelected(new Set());
     setQuery('');
-    setGrantWaiting(false);
-    sawProgress.current = false;
+    setWatch('off');
     shownAt.current = 0;
     void load(false);
   }, [isOpen, sessionId, load]);
 
-  // While waiting on EKS discovery, close once the backend goes idle again — but
-  // only after we've seen at least one non-idle poll (sawProgress), so a poll that
-  // lands before the entry is published can't trigger an immediate close. Keep the bar
-  // up for at least MIN_PROGRESS_MS so a fast grant doesn't flash it; if discovery
-  // already ran longer, remaining is 0 and it closes right away. Setting grantWaiting
-  // false before closing also makes a re-run a no-op (single close).
+  // Close once discovery goes idle — but only after a non-idle poll has armed us (so an
+  // early/cross-replica idle can't close prematurely), and keep the bar up at least
+  // MIN_PROGRESS_MS so a fast grant doesn't flash it (remaining is 0 once it's run
+  // longer). Setting watch 'off' before closing makes a re-run a no-op (single close).
   useEffect(() => {
-    if (!grantWaiting) return;
+    if (watch === 'off') return;
     if (progress) {
-      if (!sawProgress.current) {
-        sawProgress.current = true;
+      if (watch === 'watching') {
         shownAt.current = Date.now();
+        setWatch('armed');
       }
       return;
     }
-    if (!sawProgress.current) return;
+    if (watch !== 'armed') return;
     const remaining = Math.max(0, MIN_PROGRESS_MS - (Date.now() - shownAt.current));
     const t = setTimeout(() => {
-      setGrantWaiting(false);
+      setWatch('off');
       onCloseRef.current();
     }, remaining);
     return () => clearTimeout(t);
-  }, [grantWaiting, progress]);
+  }, [watch, progress]);
 
   // Safety net: never leave the picker hung if discovery never reports idle (backend
-  // died, or a cross-replica poll only ever sees "idle" so sawProgress never arms).
-  // Discovery is seconds; this just bounds the worst case.
+  // died, or a cross-replica poll only ever sees "idle" so we never arm). Discovery is
+  // seconds; this just bounds the worst case.
   useEffect(() => {
-    if (!grantWaiting) return;
+    if (watch === 'off') return;
     const t = setTimeout(() => {
-      setGrantWaiting(false);
+      setWatch('off');
       onCloseRef.current();
     }, 90_000);
     return () => clearTimeout(t);
-  }, [grantWaiting]);
+  }, [watch]);
 
   const nameById = useMemo(
     () => Object.fromEntries(accounts.map((a) => [a.account_id, a.account_name])),
@@ -206,7 +205,7 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     setError(null);
     try {
       await selectAwsRoles(sessionId, selections);
-      if (hasEks) setGrantWaiting(true);
+      if (hasEks) setWatch('watching');
       else onClose();
     } catch (e) {
       setError((e as Error).message);
@@ -218,11 +217,11 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
   // Block dismissal while the grant POST is in flight — the Modal closes on
   // Escape/backdrop (and its ✕) unconditionally, so guarding only the Cancel button
   // would be a false lock that lets the user unmount mid-mint. Once minting is done
-  // and we're only watching EKS discovery (grantWaiting), closing is allowed: it just
-  // stops watching — discovery keeps running in the background.
+  // and we're only watching EKS discovery, closing is allowed: it just stops watching
+  // — discovery keeps running in the background.
   const handleClose = () => {
     if (submitting) return;
-    setGrantWaiting(false);
+    setWatch('off');
     onClose();
   };
 
@@ -253,9 +252,9 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           <button
             type="button"
             onClick={() => void load(true)}
-            // grantWaiting too: a refresh mid-discovery would overwrite the shared
-            // progress entry and auto-close the modal out from under the wait.
-            disabled={loading || refreshing || submitting || grantWaiting}
+            // watching too: a refresh mid-discovery would overwrite the shared progress
+            // entry and auto-close the modal out from under the wait.
+            disabled={loading || refreshing || submitting || watching}
             title="Rafraîchir la liste des rôles"
             aria-label="Rafraîchir la liste des rôles"
             className="p-2 rounded-md text-gray-400 hover:text-gray-100 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -324,17 +323,17 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           <span className="text-xs text-gray-500">
             {submitting
               ? `Création de ${selected.size} accès en cours…`
-              : grantWaiting
+              : watching
                 ? 'Découverte des clusters EKS en cours…'
                 : `${selected.size} sélectionné(s)`}
           </span>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={handleClose} disabled={submitting}>
-              {grantWaiting ? 'Fermer' : 'Annuler'}
+              {watching ? 'Fermer' : 'Annuler'}
             </Button>
             <Button
               onClick={handleConfirm}
-              disabled={selected.size === 0 || grantWaiting}
+              disabled={selected.size === 0 || watching}
               isLoading={submitting}
             >
               Donner accès
