@@ -3,23 +3,32 @@ Per-session EKS kubeconfig refresh.
 
 When a user selects AWS account/role pairs for a session (``POST .../aws/select``),
 the backend discovers the EKS clusters reachable with the freshly minted credentials
-and writes **one self-contained kubeconfig per cluster** into the session's tmpfs
-area (``/dev/shm/inkwest/<session_id>/kube``). Nothing is persisted to disk; the
-files are removed on revoke / session end with the rest of the session tmpfs.
+and writes **one self-contained kubeconfig per cluster** into the session's RAM-only
+kube dir — the shared ``<sandbox_creds_root>/<session_id>/kube`` volume when a sandbox
+is configured (bind-mounted read-only into the conv container), else the backend-local
+``/dev/shm/inkwest/<session_id>/kube`` tmpfs.
+
+The kubeconfigs are **published in place** (files staged then renamed in, stale ones
+pruned), under a per-session lock — the dir inode is never swapped, because the conv
+container bind-mounts it and a mount follows the inode. Revoke clears the contents in
+place but keeps the dir (``keep_dirs``); session end cancels any in-flight refresh and
+removes the whole tree.
 
 This is the in-process port of the ``refresh-eks`` shell helper, with the same discovery + one-kubeconfig-per-cluster output, but scoped to a single
-session's profiles, RAM-only, async and idempotent — no ``aws-sso-util``, no
-``~/.kube``, no global ``~/.aws``.
+session's profiles, RAM-only, async and idempotent — no ``aws-sso-util``, no global
+``~/.kube`` / ``~/.aws``.
 
-Each generated kubeconfig uses the standard AWS exec credential plugin
-(``aws eks get-token``); the exec block carries the session's AWS profile and the
-tmpfs ``~/.aws`` file paths, so the file works with the credential-free kubectl
-executor without leaking secrets into the kubeconfig itself.
+Each kubeconfig uses the standard AWS exec credential plugin (``aws eks get-token``);
+the exec block carries the session's AWS profile and the ``~/.aws`` file paths — the
+**in-container** ``<sandbox_home>/.aws`` paths on a sandbox, the backend ``/dev/shm``
+paths otherwise — so it works with the credential-free kubectl executor without
+leaking secrets into the kubeconfig itself.
 """
 
 import asyncio
 import logging
 import os
+import re
 import shutil
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -29,13 +38,18 @@ from uuid import UUID, uuid4
 import yaml
 
 from app.core.config import get_settings
-from app.services.connectors.base import MintedCredential
-from app.tools.connector_exec import session_kube_dir, write_aws_profiles
+from app.services.connectors.base import MintedCredential, ProgressCb
+from app.tools.connector_exec import _write_secure, session_kube_dir, write_aws_profiles
 
 logger = logging.getLogger(__name__)
 
-# (done, total) progress callback — fired per profile as discovery completes.
-ProgressCb = Callable[[int, int], None]
+
+def _safe_seg(value: str) -> str:
+    """Sanitize a path/context segment: the AWS SSO account name is a display string
+    that can contain '/' or spaces, which in a kubeconfig FILENAME would let the rename
+    escape the session dir. Mirror aws._profile_name's allowlist."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
+
 
 # Background refresh tasks, tracked per session: kept referenced so the event loop
 # doesn't GC them mid-run (asyncio holds only a weak ref to fire-and-forget tasks),
@@ -51,24 +65,15 @@ _tasks_by_session: dict[str, set[asyncio.Task[None]]] = {}
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
-# Soft cap: above this, prune locks no one holds before adding a new one. A free lock
-# (no holder, hence no waiters) means nothing is in flight for that session, so a fresh
-# lock is equivalent — this self-bounds the map without a session-end hook on every
-# path (release_session_lock still drops it eagerly on explicit session delete).
-_SESSION_LOCK_SOFT_CAP = 1024
-
-
 def session_lock(session_id: UUID) -> asyncio.Lock:
-    """Get-or-create the per-session refresh/revoke serialisation lock."""
-    key = str(session_id)
-    lock = _session_locks.get(key)
-    if lock is None:
-        if len(_session_locks) >= _SESSION_LOCK_SOFT_CAP:
-            for stale in [k for k, lk in _session_locks.items() if not lk.locked()]:
-                del _session_locks[stale]
-        lock = asyncio.Lock()
-        _session_locks[key] = lock
-    return lock
+    """Get-or-create the per-session refresh/revoke serialisation lock.
+
+    ``setdefault`` (the repo's keyed-lock idiom, cf. connectors/renewal.py) so two
+    concurrent callers for one session always get the *same* lock object — never prune
+    a lock here: a free lock can be one a caller already holds a reference to but hasn't
+    awaited yet, and dropping it would split two ops onto different locks. Bounded by
+    active sessions and dropped eagerly at session end (release_session_lock)."""
+    return _session_locks.setdefault(str(session_id), asyncio.Lock())
 
 
 def release_session_lock(session_id: UUID) -> None:
@@ -214,7 +219,12 @@ async def refresh_session_eks(
             # different regions are distinct entries — without the region they'd collide
             # to one filename and silently drop one. (Today all profiles share the SSO
             # region, so this is latent insurance.)
-            fname = f"eks--{c['account_name']}--{c['region'] or 'noregion'}--{c['cluster']}"
+            # Sanitize each segment: account_name is an org-controlled display string;
+            # a '/' would let the rename below escape the session kube dir.
+            fname = (
+                f"eks--{_safe_seg(c['account_name'])}"
+                f"--{_safe_seg(c['region'] or 'noregion')}--{_safe_seg(c['cluster'])}"
+            )
             desired.add(fname)
             kubeconfig = _build_kubeconfig(c, aws_cli, cred_file, cfg_file)
             _write_secure(
@@ -242,19 +252,6 @@ async def refresh_session_eks(
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return len(clusters)
-
-
-def _write_secure(path: str, content: str, mode: int = 0o600) -> None:
-    # fchmod after open: O_CREAT's mode is ignored when the file already exists, and on
-    # the shared creds volume the toolbox (a different uid) must be able to read it.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    try:
-        os.fchmod(fd, mode)
-    except BaseException:
-        os.close(fd)
-        raise
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
 
 
 def _dedup_prefer_eks(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -306,17 +303,22 @@ def _discover_for_profile(profile: dict[str, Any]) -> list[dict[str, Any]]:
     per-account "no access" skip.
     """
     import boto3
+    from botocore.config import Config
     from botocore.exceptions import BotoCoreError, ClientError
 
     region = profile.get("region")
     account_name = profile.get("account_name") or profile.get("account_id")
     try:
+        # Bounded timeouts + capped retries: discovery runs in a ThreadPoolExecutor that
+        # can't be force-killed, so a hung/slow EKS endpoint must fail fast rather than
+        # pin a worker thread (cancelling the task can't stop an in-flight boto call).
         eks: Any = boto3.client(
             "eks",
             region_name=region,
             aws_access_key_id=profile["access_key_id"],
             aws_secret_access_key=profile["secret_access_key"],
             aws_session_token=profile["session_token"],
+            config=Config(connect_timeout=5, read_timeout=15, retries={"max_attempts": 2}),
         )
         names: list[str] = []
         for page in eks.get_paginator("list_clusters").paginate():
@@ -357,7 +359,8 @@ def _build_kubeconfig(
     session's tmpfs profile. No secret material is embedded — only file paths.
     """
     context_alias = (
-        f"{cluster['account_name']}--{cluster['region'] or 'noregion'}--{cluster['cluster']}"
+        f"{_safe_seg(cluster['account_name'])}"
+        f"--{_safe_seg(cluster['region'] or 'noregion')}--{_safe_seg(cluster['cluster'])}"
     )
     arn = cluster["arn"]
     return {

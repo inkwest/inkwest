@@ -100,9 +100,12 @@ it is cleared wherever that root is:
   clears the `.aws`/`kube` **contents in place** (and sweeps orphaned staging) but keeps
   the dirs, because the conv container may still bind-mount them — dropping the dir would
   detach the live mount, so the agent must see empty (revoked) creds through the same
-  stable inode. Runs under the per-session lock so it can't interleave with a refresh.
-- **Session end** — session delete → `cleanup_aws_files` (full `rmtree`, container gone)
-  + `release_session_lock`.
+  stable inode. Cancels any in-flight refresh first (`cancel_session_refresh`), then
+  clears under the per-session lock so it can't interleave with — or be undone by — a
+  refresh.
+- **Session end** — session delete → `cancel_session_refresh` (stop any running refresh,
+  so it can't recreate the dir after teardown) → `cleanup_aws_files` (full `rmtree`,
+  container gone) under the session lock → `release_session_lock`.
 - Credentials expire lazily from the RAM store; the background sweep keeps the store
   tidy. (Expired STS creds make `eks get-token` fail until the next re-select, which
   regenerates everything.)

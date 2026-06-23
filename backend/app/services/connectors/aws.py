@@ -19,7 +19,6 @@ STS credentials — are capped by the user's own SSO assignments.
 import asyncio
 import logging
 import re
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -32,13 +31,14 @@ from app.services.connectors.base import (
     ConnectorStatus,
     ConnectorType,
     MintedCredential,
+    ProgressCb,
 )
 
 logger = logging.getLogger(__name__)
 
-# Progress callback for account enumeration: (done, total) accounts whose roles
-# have been listed. Lets a long grant report "retrieving N accounts" to the UI.
-EnumProgressCb = Callable[[int, int], None]
+# Account-enumeration progress callback: (done, total) accounts whose roles have been
+# listed. Alias of the canonical base.ProgressCb (kept for existing call sites).
+EnumProgressCb = ProgressCb
 
 # Scope required to enumerate accounts/roles and mint role credentials.
 _SSO_SCOPE = "sso:account:access"

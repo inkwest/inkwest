@@ -784,6 +784,56 @@ async def test_mint_sts_profiles_reports_progress() -> None:
     assert calls[-1] == (2, 2)
 
 
+def test_progress_registry_is_thread_safe_no_resurrect() -> None:
+    """The publish callback fires from worker threads while begin/end run on the loop;
+    _enum_lock must make a cb racing _end unable to resurrect the popped entry."""
+    import threading
+
+    from app.api.routes import connectors as c
+
+    key = ("u", "thread-race")
+    c._aws_enum_progress.pop(key, None)
+    token, cb = c._begin_enum_progress(key, phase="discovering")
+    # A worker thread hammers the owner-guarded publish while the loop thread ends it.
+    worker = threading.Thread(target=lambda: [cb(1, 2) for _ in range(2000)])
+    worker.start()
+    c._end_enum_progress(key, token)
+    worker.join()
+    # Once ended, no racing cb may have re-added the entry (owner check sees it gone).
+    assert key not in c._aws_enum_progress
+
+
+async def test_aws_revoke_cancels_refresh_before_clearing(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """Revoke must cancel any in-flight EKS refresh BEFORE clearing creds, else the
+    refresh could re-publish the kubeconfigs revoke just deleted."""
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    revoked = MintedCredential(
+        "aws", "read", datetime.now(UTC) + timedelta(hours=1), secret={"profiles": [{"name": "p"}]}
+    )
+    store = MagicMock(revoke=AsyncMock(return_value=revoked))
+    conn = MagicMock(type="aws", revoke=AsyncMock())
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="not_connected")
+    order: list[str] = []
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.cancel_session_refresh",
+            AsyncMock(side_effect=lambda *_: order.append("cancel")),
+        ),
+        patch(
+            "app.tools.connector_exec.cleanup_aws_files",
+            side_effect=lambda *a, **k: order.append("clear"),
+        ),
+    ):
+        resp = await authenticated_client.post(f"/api/connectors/{mock_session_obj.id}/aws/revoke")
+    assert resp.status_code == 200
+    assert order == ["cancel", "clear"]  # cancel strictly before clear
+
+
 async def test_aws_revoke_clears_creds_in_place_with_keep_dirs(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:

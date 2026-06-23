@@ -108,8 +108,10 @@ Give access AWS
 ```
 
 **Stockage** : les STS vivent dans le **store RAM** Python (source de vérité). À
-l'exécution, ils sont projetés dans **`/dev/shm`** (tmpfs **RAM**, mode `0600`),
-**jamais sur le disque persistant**, et **supprimés à la révocation**.
+l'exécution, ils sont projetés en tmpfs **RAM** — le volume creds partagé
+`<sandbox_creds_root>/<sid>/.aws` (mode `0644`, monté en lecture seule dans le sandbox
+qui tourne sous un autre uid) avec un sandbox, sinon le `/dev/shm` local du backend
+(mode `0600`) — **jamais sur le disque persistant**, et **supprimés à la révocation**.
 
 Fichiers : `backend/app/services/connectors/aws.py` (device grant + multi-select),
 `backend/app/tools/connector_exec.py` (`write_aws_profiles` / tmpfs),

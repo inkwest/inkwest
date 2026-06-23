@@ -45,7 +45,11 @@ from app.services.connectors.warm import (
     store_gitlab_warm,
     update_aws_warm_options,
 )
-from app.services.eks_refresh import schedule_session_eks_refresh
+from app.services.eks_refresh import (
+    cancel_session_refresh,
+    schedule_session_eks_refresh,
+    session_lock,
+)
 from app.services.messages import save_session_event
 from app.tools.connector_exec import write_aws_profiles
 
@@ -721,13 +725,13 @@ async def revoke(
             # Clear the tmpfs ~/.aws + EKS kubeconfigs IN PLACE: the conv container may
             # still be running with these dirs bind-mounted, so keep the dir inodes
             # (keep_dirs) — the agent then sees empty/revoked creds, and a re-grant in
-            # the same conversation reaches it through the same mount. Hold the session
-            # lock so this can't interleave with an in-flight EKS refresh's publish, and
-            # run the blocking tmpfs I/O off the event loop.
-            # Local imports: avoid a connectors <-> eks_refresh import cycle.
-            from app.services.eks_refresh import session_lock
+            # the same conversation reaches it through the same mount. Cancel any
+            # in-flight refresh FIRST, else its discovery could re-publish the creds we
+            # just cleared (revoke would silently leave creds behind); then clear under
+            # the session lock, off the event loop.
             from app.tools.connector_exec import cleanup_aws_files
 
+            await cancel_session_refresh(sid)
             async with session_lock(sid):
                 await asyncio.to_thread(cleanup_aws_files, sid, keep_dirs=True)
         await _audit(
