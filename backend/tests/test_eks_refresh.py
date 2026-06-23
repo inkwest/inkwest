@@ -322,8 +322,9 @@ async def test_refresh_and_revoke_do_not_interleave_under_lock():
         eks = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
 
         async def revoke_in_place() -> None:
+            # Mirror the real revoke path: cleanup off the loop via to_thread, under lock.
             async with eks_refresh.session_lock(sid):
-                cleanup(sid, keep_dirs=True)
+                await asyncio.to_thread(cleanup, sid, keep_dirs=True)
 
         with patch("boto3.client", return_value=eks):
             await asyncio.gather(refresh_session_eks(sid, _cred()), revoke_in_place())
@@ -363,3 +364,28 @@ async def test_cleanup_keep_dirs_clears_contents_but_preserves_inode():
         assert not os.path.isdir(kube)
     finally:
         cleanup_aws_files(sid)
+
+
+async def test_cancel_session_refresh_cancels_in_flight_task():
+    """Session end must cancel a still-running refresh so it can't recreate the tmpfs
+    after cleanup. The task is tracked per session and dropped once cancelled."""
+    from app.services import eks_refresh
+
+    sid = uuid.uuid4()
+    started = asyncio.Event()
+    blocked = asyncio.Event()  # never set → the stub blocks until cancelled
+
+    async def slow_refresh(session_id, cred, *, progress_cb=None):  # noqa: ANN001, ANN202
+        started.set()
+        await blocked.wait()
+        return 0
+
+    try:
+        with patch.object(eks_refresh, "refresh_session_eks", slow_refresh):
+            eks_refresh.schedule_session_eks_refresh(sid, _cred())
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert str(sid) in eks_refresh._tasks_by_session  # tracked while running
+            await eks_refresh.cancel_session_refresh(sid)
+            assert str(sid) not in eks_refresh._tasks_by_session  # cancelled + dropped
+    finally:
+        eks_refresh._tasks_by_session.pop(str(sid), None)

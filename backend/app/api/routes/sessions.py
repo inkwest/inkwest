@@ -535,12 +535,20 @@ async def delete_session(
     if session.user_id is not None:
         # Local imports: avoid a sessions <-> connectors/eks_refresh import cycle.
         from app.services.connectors.store import get_credential_store
-        from app.services.eks_refresh import release_session_lock
+        from app.services.eks_refresh import (
+            cancel_session_refresh,
+            release_session_lock,
+            session_lock,
+        )
         from app.tools.connector_exec import cleanup_aws_files
 
         await get_credential_store().revoke_session(session.user_id, session.id)
-        # Remove the session tmpfs (~/.aws projection + generated EKS kubeconfigs).
-        cleanup_aws_files(session.id)
+        # Cancel any in-flight EKS refresh first, then remove the session tmpfs (~/.aws
+        # + kubeconfigs) under the session lock — otherwise a refresh mid-publish could
+        # recreate the dir right after cleanup and orphan a tmpfs dir for a dead session.
+        await cancel_session_refresh(session.id)
+        async with session_lock(session.id):
+            cleanup_aws_files(session.id)
         release_session_lock(session.id)  # session gone — drop its refresh/revoke lock
 
     # Cancel any detached turn first — orchestration outlives the socket now, so

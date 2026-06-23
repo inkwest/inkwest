@@ -37,9 +37,11 @@ logger = logging.getLogger(__name__)
 # (done, total) progress callback — fired per profile as discovery completes.
 ProgressCb = Callable[[int, int], None]
 
-# Background tasks are kept referenced so the event loop does not garbage-collect
-# them mid-run (asyncio holds only a weak reference to fire-and-forget tasks).
-_tasks: set[asyncio.Task[None]] = set()
+# Background refresh tasks, tracked per session: kept referenced so the event loop
+# doesn't GC them mid-run (asyncio holds only a weak ref to fire-and-forget tasks),
+# and so session end can cancel a still-running refresh before it recreates the tmpfs
+# dir under a just-removed session (see cancel_session_refresh).
+_tasks_by_session: dict[str, set[asyncio.Task[None]]] = {}
 
 # One lock per session serialises the dir-mutating critical section of a refresh with
 # itself (overlapping re-selects) and with revoke's in-place clear — so they can't
@@ -74,6 +76,21 @@ def release_session_lock(session_id: UUID) -> None:
     _session_locks.pop(str(session_id), None)
 
 
+async def cancel_session_refresh(session_id: UUID) -> None:
+    """Cancel any in-flight EKS refresh for a session and wait for it to unwind.
+
+    Called at session end before the tmpfs is torn down: otherwise a refresh still in
+    its discovery/publish could ``os.makedirs`` the kube dir back *after* cleanup's
+    rmtree, orphaning a tmpfs dir for a session that no longer exists.
+    """
+    tasks = _tasks_by_session.pop(str(session_id), None)
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def schedule_session_eks_refresh(
     session_id: UUID,
     cred: MintedCredential,
@@ -92,9 +109,18 @@ def schedule_session_eks_refresh(
         if on_done:
             on_done()
         return
+    key = str(session_id)
     task = asyncio.create_task(_run_safe(session_id, cred, progress_cb, on_done))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+    _tasks_by_session.setdefault(key, set()).add(task)
+
+    def _discard(t: asyncio.Task[None]) -> None:
+        siblings = _tasks_by_session.get(key)
+        if siblings is not None:
+            siblings.discard(t)
+            if not siblings:
+                _tasks_by_session.pop(key, None)
+
+    task.add_done_callback(_discard)
 
 
 async def _run_safe(
@@ -188,7 +214,7 @@ async def refresh_session_eks(
             # different regions are distinct entries — without the region they'd collide
             # to one filename and silently drop one. (Today all profiles share the SSO
             # region, so this is latent insurance.)
-            fname = f"eks--{c['account_name']}--{c['region']}--{c['cluster']}"
+            fname = f"eks--{c['account_name']}--{c['region'] or 'noregion'}--{c['cluster']}"
             desired.add(fname)
             kubeconfig = _build_kubeconfig(c, aws_cli, cred_file, cfg_file)
             _write_secure(
@@ -330,7 +356,9 @@ def _build_kubeconfig(
     on the exec block so the credential-free kubectl executor can still resolve the
     session's tmpfs profile. No secret material is embedded — only file paths.
     """
-    context_alias = f"{cluster['account_name']}--{cluster['region']}--{cluster['cluster']}"
+    context_alias = (
+        f"{cluster['account_name']}--{cluster['region'] or 'noregion'}--{cluster['cluster']}"
+    )
     arn = cluster["arn"]
     return {
         "apiVersion": "v1",
