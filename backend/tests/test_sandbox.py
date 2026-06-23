@@ -271,11 +271,40 @@ async def test_provision_mounts_squid_confd_only_when_set(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_provision_adds_host_gateway_for_mcp_proxy(tmp_path):
-    """With mcp_proxy_base_url set, the squid container gets --add-host <host>:host-gateway
-    so the sandboxed CLI can reach the backend's MCP proxy through squid."""
+async def test_provision_maps_mcp_proxy_sentinel_to_backend_ip(tmp_path):
+    """Dev (docker-in-docker): the `host.docker.internal` sentinel is mapped to the backend's
+    OWN container IP via --add-host, so the nested squid reaches the backend's MCP proxy via
+    dind NAT. Docker's `host-gateway` would point at dind's dead inner bridge under dind."""
     settings = _settings(tmp_path)
-    settings.mcp_proxy_base_url = "http://inkwest-backend:8000"
+    settings.mcp_proxy_base_url = "http://host.docker.internal:8000"
+    proxy_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        if args[0] == "run" and settings.sandbox_squid_image in args:
+            proxy_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+        patch.object(sandbox.socket, "gethostname", return_value="backend-host"),
+        patch.object(sandbox.socket, "gethostbyname", return_value="172.19.0.4"),
+    ):
+        await sandbox.provision("sid")
+
+    assert "--add-host" in proxy_run
+    assert "host.docker.internal:172.19.0.4" in proxy_run
+    # The dev-only shim must NOT emit the broken host-gateway literal.
+    assert not any(a.endswith(":host-gateway") for a in proxy_run)
+
+
+@pytest.mark.asyncio
+async def test_provision_skips_add_host_for_service_dns_mcp_proxy(tmp_path):
+    """prod/kube: a resolvable Service DNS proxy host is reached via the squid container's own
+    resolver + the allowlist — no --add-host is injected (the dev-only shim never fires)."""
+    settings = _settings(tmp_path)
+    settings.mcp_proxy_base_url = "http://inkwest-backend.inkwest.svc.cluster.local:8000"
     proxy_run: list[str] = []
 
     async def fake_docker(*args, **kwargs):
@@ -290,8 +319,7 @@ async def test_provision_adds_host_gateway_for_mcp_proxy(tmp_path):
     ):
         await sandbox.provision("sid")
 
-    assert "--add-host" in proxy_run
-    assert "inkwest-backend:host-gateway" in proxy_run
+    assert "--add-host" not in proxy_run
 
 
 @pytest.mark.asyncio

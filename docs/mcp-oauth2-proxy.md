@@ -321,22 +321,37 @@ only route out is the per-conversation squid proxy with a domain allowlist
   when unset, oauth MCP injection into `.claude.json` is **silently skipped** (logged at
   debug in `mcp_config.py:_oauth_proxy_servers`), not a startup error — the feature is simply
   not wired. Startup fails fast only on `WEB_CONCURRENCY > 1` (`main.py`).
-- Reachability mechanism: **use the Docker host-gateway** (`--add-host
-  <alias>:host-gateway` on the squid container, backend port published on the host or on
-  the docker bridge). Do **not** attach the backend container to the per-conversation
-  external networks: `_remove_pair()` (`sandbox.py:151-156`) removes only the conv+proxy
-  containers before `network rm`, so a still-attached backend makes every network removal
-  fail silently (`check=False`) on idle reaps and startup sweeps — leaked networks
-  accumulate until Docker's address pool is exhausted and **all** sandbox provisioning
-  fails platform-wide. If host-gateway is unavailable in some deployment, the alternative
-  must add an explicit `network disconnect` step to teardown — the failure mode has to be
-  owned, not left to compose.
+- Reachability mechanism — **`MCP_PROXY_BASE_URL` + the squid allowlist are the contract;
+  the resolution path is topology-specific** (`sandbox.py`, the `mcp_proxy_base_url` block):
+  - **prod / kube:** set `MCP_PROXY_BASE_URL` to the backend's **Service DNS** (e.g.
+    `http://inkwest-backend.<ns>.svc.cluster.local:8000`) or its ingress URL. The squid
+    container resolves it with its own resolver and the allowlist gates it — **no `--add-host`
+    is injected.** This is the native path; nothing host-gateway-shaped is involved.
+  - **local dev (docker-in-docker):** Docker's `host-gateway` magic resolves, *inside dind*,
+    to dind's inner bridge gateway — a dead end (nothing serves the backend there), and there
+    is no Service DNS. So the **sentinel host `host.docker.internal`** is special-cased: the
+    backend maps it (`--add-host host.docker.internal:<backend-own-container-IP>`, IP discovered
+    at provisioning via `socket.gethostbyname(socket.gethostname())`) to its own IP, which the
+    nested squid reaches through dind's NAT. Portable across developers — **no hardcoded compose
+    subnet** (do NOT pin dind's `--host-gateway-ip`; the subnet differs per machine/project).
+    Assumes the backend's primary NIC is on the dind-shared network (true in the compose stack).
+  - Do **not** attach the backend container to the per-conversation external networks instead:
+    `_remove_pair()` removes only the conv+proxy containers before `network rm`, so a
+    still-attached backend makes every network removal fail silently (`check=False`) on idle
+    reaps and startup sweeps — leaked networks accumulate until Docker's address pool is
+    exhausted and **all** sandbox provisioning fails platform-wide.
 - The alias must be added to the squid domain allowlist (`sandbox_squid_conf`), and the
   squid config must be checked for SSE-compatibility: default `read_timeout` (15 min idle)
   will sever quiet long-lived streams — raise it for the backend host entry, and verify
   no response buffering directive applies. Pin both requirements in the squid conf
   shipped for sandboxes.
-- Plain HTTP through squid is fine (no CONNECT needed).
+- Plain HTTP through squid is fine (no CONNECT needed) — **but the proxy's port must be in
+  squid's `Safe_ports`.** `squid.conf` ships `Safe_ports = {80, 443}` and `http_access deny
+  !Safe_ports` runs *before* the domain allow, so a backend served on e.g. `:8000` is
+  rejected (`TCP_DENIED/403`) despite an allowlisted host — the OAuth2 MCP server then
+  silently fails to load and the agent reports "no such connector". Add `acl Safe_ports port
+  <mcp-proxy-port>` alongside the host allow in the conf.d fragment (it accumulates). No-op
+  when the proxy is served on 443.
 - Side effect, by design: every MCP tool call shows up in the per-conversation squid
   access log and therefore in the egress UI — useful traffic audit (consent events go to
   `connector_audit_log`, work item 2). The log records URLs only (the JWT is in a header);
