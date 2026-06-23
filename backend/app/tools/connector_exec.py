@@ -82,7 +82,7 @@ def _aws_session_dir(session_id: UUID) -> str:
 
 
 def session_kube_dir(session_id: UUID) -> str:
-    """Tmpfs dir holding the session's generated EKS kubeconfigs (one file/cluster).
+    """Tmpfs dir holding the session's merged EKS kubeconfig (a single ``config`` file).
 
     A sibling of the ~/.aws projection under the same session root, so the existing
     ``cleanup_aws_files`` teardown removes it too (revoke / session end).
@@ -91,17 +91,14 @@ def session_kube_dir(session_id: UUID) -> str:
 
 
 def session_kubeconfigs(session_id: UUID) -> list[str]:
-    """Absolute paths of the session's generated EKS kubeconfigs (one per cluster).
+    """The session's merged kubeconfig path, or ``[]`` if none has been generated.
 
-    Empty when the EKS refresh produced none (no reachable clusters) or has not run
-    yet — the caller then leaves ``KUBECONFIG`` unset. Sorted for a deterministic
-    merge order (kubectl takes the current-context from the first file).
+    Empty when the EKS refresh produced no reachable clusters or hasn't run yet — the
+    caller then leaves ``KUBECONFIG`` unset. (Returns a list to keep the call site
+    stable; today it's at most one ``config`` file with a context per cluster.)
     """
-    kube_dir = session_kube_dir(session_id)
-    try:
-        return sorted(os.path.join(kube_dir, f) for f in os.listdir(kube_dir))
-    except FileNotFoundError:
-        return []
+    config = os.path.join(session_kube_dir(session_id), "config")
+    return [config] if os.path.isfile(config) else []
 
 
 def _creds_block(name: str, p: dict[str, Any]) -> str:

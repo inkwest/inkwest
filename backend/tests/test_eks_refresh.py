@@ -83,12 +83,13 @@ async def test_refresh_generates_one_kubeconfig_per_cluster_in_tmpfs():
             count = await refresh_session_eks(sid, _cred())
 
         assert count == 1
-        path = os.path.join(session_kube_dir(sid), "eks--acme0--eu-west-1--prod-cluster")
+        path = os.path.join(session_kube_dir(sid), "config")  # single merged kubeconfig
         assert os.path.isfile(path)
-        # Files are mode 0600 (RAM, secret-adjacent).
+        # Mode 0600 (RAM, secret-adjacent) on the backend-local /dev/shm projection.
         assert oct(os.stat(path).st_mode & 0o777) == "0o600"
 
         doc = yaml.safe_load(open(path).read())
+        assert [ctx["name"] for ctx in doc["contexts"]] == ["acme0--eu-west-1--prod-cluster"]
         assert doc["current-context"] == "acme0--eu-west-1--prod-cluster"
         exec_block = doc["users"][0]["user"]["exec"]
         assert exec_block["args"][:4] == ["--region", "eu-west-1", "eks", "get-token"]
@@ -103,7 +104,7 @@ async def test_refresh_generates_one_kubeconfig_per_cluster_in_tmpfs():
         cleanup_aws_files(sid)
 
 
-async def test_refresh_is_idempotent_and_leaves_no_staging_dir():
+async def test_refresh_is_idempotent_and_leaves_no_staging():
     sid = uuid.uuid4()
     eks = _mock_eks({"c1": _cluster_payload("c1")})
     try:
@@ -113,8 +114,8 @@ async def test_refresh_is_idempotent_and_leaves_no_staging_dir():
 
         kube = session_kube_dir(sid)
         assert count == 1
-        assert sorted(os.listdir(kube)) == ["eks--acme0--eu-west-1--c1"]
-        assert not os.path.isdir(f"{kube}.new")  # staging swapped, not left behind
+        assert os.listdir(kube) == ["config"]  # single merged file, re-published in place
+        assert glob.glob(f"{kube}.config.*") == []  # staging consumed, none left behind
     finally:
         cleanup_aws_files(sid)
 
@@ -143,7 +144,7 @@ async def test_cleanup_removes_generated_kubeconfigs():
 
 
 async def test_same_cluster_via_two_roles_dedups_and_prefers_eks_role():
-    """One kubeconfig per cluster; the eks-scoped role wins over a generic one."""
+    """One context per cluster (merged config); the eks-scoped role wins over a generic one."""
     sid = uuid.uuid4()
     base = {
         "account_id": "111111111110",
@@ -174,9 +175,10 @@ async def test_same_cluster_via_two_roles_dedups_and_prefers_eks_role():
             count = await refresh_session_eks(sid, cred)
 
         kube = session_kube_dir(sid)
-        assert count == 1  # one cluster → one file, not two
-        assert os.listdir(kube) == ["eks--acme--eu-west-1--prod"]
-        doc = yaml.safe_load(open(os.path.join(kube, "eks--acme--eu-west-1--prod")).read())
+        assert count == 1  # one cluster → one context, not two
+        assert os.listdir(kube) == ["config"]
+        doc = yaml.safe_load(open(os.path.join(kube, "config")).read())
+        assert [ctx["name"] for ctx in doc["contexts"]] == ["acme--eu-west-1--prod"]
         env = {e["name"]: e["value"] for e in doc["users"][0]["user"]["exec"]["env"]}
         assert env["AWS_PROFILE"] == "acme-eks-readonly-access"  # eks role preferred
     finally:
@@ -205,7 +207,7 @@ async def test_kubeconfig_exec_uses_in_container_aws_paths_in_sandbox(tmp_path):
         ):
             await refresh_session_eks(sid, _cred())
 
-            raw = open(os.path.join(session_kube_dir(sid), "eks--acme0--eu-west-1--c1")).read()
+            raw = open(os.path.join(session_kube_dir(sid), "config")).read()
             env = {
                 e["name"]: e["value"]
                 for e in yaml.safe_load(raw)["users"][0]["user"]["exec"]["env"]
@@ -263,10 +265,15 @@ async def test_run_safe_calls_on_done_on_success_and_failure():
     assert fired == ["ok", "fail"]
 
 
-async def test_refresh_keeps_kube_dir_inode_stable_and_prunes_stale():
+def _contexts(kube: str) -> list[str]:
+    doc = yaml.safe_load(open(os.path.join(kube, "config")).read())
+    return [c["name"] for c in doc["contexts"]]
+
+
+async def test_refresh_keeps_kube_dir_inode_stable_across_republish():
     """The kube dir is bind-mounted read-only into the conv container; a mount follows
-    the inode, so regeneration must publish in place (no dir swap) — else the container
-    keeps seeing the old, empty dir. A re-select with fewer clusters must also prune."""
+    the inode, so regeneration must publish in place (rename the single `config` file,
+    never swap the dir). A re-select with fewer clusters drops the stale context."""
     sid = uuid.uuid4()
     try:
         eks2 = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
@@ -274,25 +281,22 @@ async def test_refresh_keeps_kube_dir_inode_stable_and_prunes_stale():
             await refresh_session_eks(sid, _cred())
         kube = session_kube_dir(sid)
         inode_before = os.stat(kube).st_ino
-        assert sorted(os.listdir(kube)) == [
-            "eks--acme0--eu-west-1--c1",
-            "eks--acme0--eu-west-1--c2",
-        ]
+        assert _contexts(kube) == ["acme0--eu-west-1--c1", "acme0--eu-west-1--c2"]
 
-        # Re-select: only c1 now reachable. Inode must NOT change; c2 must be pruned.
+        # Re-select: only c1 now reachable. Dir inode must NOT change; c2 context drops.
         eks1 = _mock_eks({"c1": _cluster_payload("c1")})
         with patch("boto3.client", return_value=eks1):
             await refresh_session_eks(sid, _cred())
         assert os.stat(kube).st_ino == inode_before  # dir not swapped → mount intact
-        assert sorted(os.listdir(kube)) == ["eks--acme0--eu-west-1--c1"]  # stale c2 dropped
-        assert glob.glob(f"{kube}.new*") == []  # per-call staging cleaned up
+        assert _contexts(kube) == ["acme0--eu-west-1--c1"]  # stale c2 context dropped
+        assert glob.glob(f"{kube}.config.*") == []  # per-call staging cleaned up
     finally:
         cleanup_aws_files(sid)
 
 
 async def test_concurrent_refreshes_use_distinct_staging():
-    """Two refreshes for one session must not share a staging dir (one's rmtree would
-    wipe the other's in-flight files). Distinct random staging => both complete."""
+    """Two refreshes for one session must not share a staging path (one's write would
+    clobber the other's in-flight file). Distinct random staging => both complete."""
     sid = uuid.uuid4()
     try:
         eks = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
@@ -302,11 +306,9 @@ async def test_concurrent_refreshes_use_distinct_staging():
                 refresh_session_eks(sid, _cred()),
             )
         kube = session_kube_dir(sid)
-        assert sorted(os.listdir(kube)) == [
-            "eks--acme0--eu-west-1--c1",
-            "eks--acme0--eu-west-1--c2",
-        ]
-        assert glob.glob(f"{kube}.new*") == []  # no staging left behind by either run
+        assert os.listdir(kube) == ["config"]
+        assert _contexts(kube) == ["acme0--eu-west-1--c1", "acme0--eu-west-1--c2"]
+        assert glob.glob(f"{kube}.config.*") == []  # no staging left behind by either run
     finally:
         cleanup_aws_files(sid)
 
@@ -330,10 +332,9 @@ async def test_refresh_and_revoke_do_not_interleave_under_lock():
             await asyncio.gather(refresh_session_eks(sid, _cred()), revoke_in_place())
 
         kube = session_kube_dir(sid)
-        full = ["eks--acme0--eu-west-1--c1", "eks--acme0--eu-west-1--c2"]
         names = sorted(os.listdir(kube))
-        assert names == [] or names == full  # fully published or fully cleared, not torn
-        assert glob.glob(f"{kube}.new*") == []
+        assert names == [] or names == ["config"]  # fully published or fully cleared, not torn
+        assert glob.glob(f"{kube}.config.*") == []
     finally:
         cleanup(sid)
 
@@ -351,14 +352,14 @@ async def test_cleanup_keep_dirs_clears_contents_but_preserves_inode():
         assert os.listdir(kube)  # populated
 
         # Orphaned staging from a crashed refresh must be swept by the full clean.
-        orphan = f"{kube}.new.deadbeef"
-        os.makedirs(orphan, exist_ok=True)
+        orphan = f"{kube}.config.deadbeef"
+        open(orphan, "w").close()
 
         cleanup_aws_files(sid, keep_dirs=True)
         assert os.path.isdir(kube)  # dir kept
         assert os.stat(kube).st_ino == inode  # same inode → live mount keeps working
         assert os.listdir(kube) == []  # contents cleared (revoked)
-        assert not os.path.isdir(orphan)  # orphaned staging swept
+        assert not os.path.exists(orphan)  # orphaned staging swept
 
         cleanup_aws_files(sid)  # session end: whole dir gone
         assert not os.path.isdir(kube)

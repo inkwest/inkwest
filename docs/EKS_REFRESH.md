@@ -1,10 +1,10 @@
 # Per-session EKS kubeconfig refresh
 
 TL;DR — when a user selects AWS account/role pairs for a session, Inkwest
-automatically discovers the EKS clusters those credentials can reach and writes one
-**kubeconfig per cluster** into the session's RAM-only tmpfs. No disk persistence,
-no `aws-sso-util`, no global `~/.kube`. In-process port of the `refresh-eks` shell
-helper, scoped to a single session.
+automatically discovers the EKS clusters those credentials can reach and writes a
+**single merged kubeconfig** (one context per cluster) into the session's RAM-only
+tmpfs. No disk persistence, no `aws-sso-util`, no global `~/.kube`. In-process port of
+the `refresh-eks` shell helper, scoped to a session.
 
 Builds on the AWS connector and the role filter
 See [`CONNECTOR_AWS_SETUP.md`](./CONNECTOR_AWS_SETUP.md) and
@@ -29,15 +29,17 @@ after, it fires `schedule_session_eks_refresh(session_id, cred)` — a fire-and-
    the cluster's `aws-auth` / access entries, whereas a generic `*ReadOnly` role may
    be able to `DescribeCluster` (so it's discovered) yet have no in-cluster RBAC (its
    token would 403). Ties fall back to selection order, so the choice is deterministic.
-4. Writes one kubeconfig per cluster and publishes them **in place** into the live
-   session kube dir: each file is staged in a per-call sibling dir then renamed into
-   the kube dir (per-file rename within the same tmpfs is atomic), and kubeconfigs for
-   clusters no longer reachable are pruned. The kube dir's **inode is never swapped** —
-   the per-conversation sandbox container bind-mounts it read-only and a bind mount
-   follows the inode, so an `os.replace` of the *directory* would detach the live mount
-   (the agent would keep seeing the pre-swap, empty dir). The publish+prune runs under
-   a per-session lock so an overlapping re-select or a concurrent revoke can't leave a
-   torn set.
+4. Builds **one merged kubeconfig** — a cluster/context/user entry per reachable
+   cluster — and publishes it **in place**: written to a per-call sibling temp on the
+   same tmpfs, then a **single atomic `os.replace`** of the `config` file into the live
+   session kube dir. The kube dir's **inode is never swapped** — the per-conversation
+   sandbox container bind-mounts it read-only and a bind mount follows the inode, so an
+   `os.replace` of the *directory* would detach the live mount (the agent would keep
+   seeing the pre-swap, empty dir). The rename runs under a per-session lock so an
+   overlapping re-select or a concurrent revoke can't interleave; a whole-file swap
+   means the agent never sees a torn set, and stale clusters simply vanish from the
+   regenerated config. `current-context` is the first context by sorted alias
+   (deterministic, not discovery-order dependent).
 
 Input = the session's AWS profiles. An account the selected role cannot reach is
 logged and skipped (it never aborts the whole refresh).
@@ -48,14 +50,15 @@ logged and skipped (it never aborts the whole refresh).
   when a sandbox is configured (bind-mounted read-only into the conv container as
   `~/.kube`); otherwise the backend-local `/dev/shm/inkwest/<session_id>/kube/` tmpfs.
   Off-container (e.g. macOS dev/tests) falls back to a temp dir.
-- **One file per cluster**, named `eks--<account_name>--<region>--<cluster>`. Mode is
-  `0644` (dir `0755`) on the shared creds volume so the toolbox — which runs as a
-  different uid than the backend — can read it through the read-only mount; `0600`
-  (dir `0700`) on the backend-local `/dev/shm` projection. The read-only per-session
-  mount, not the file mode, is the isolation boundary (same rationale as the `~/.aws`
-  projection in `write_aws_profiles`).
-- **Self-contained, secret-free**: each kubeconfig uses the standard AWS exec
-  credential plugin (`aws eks get-token`). The exec block carries the AWS profile name
+- **One file**, `config` (kubectl's default path under the mounted `~/.kube`), holding
+  a context per cluster named `<account_name>--<region>--<cluster>` (segments
+  sanitized). Mode is `0644` (dir `0755`) on the shared creds volume so the toolbox —
+  which runs as a different uid than the backend — can read it through the read-only
+  mount; `0600` (dir `0700`) on the backend-local `/dev/shm` projection. The read-only
+  per-session mount, not the file mode, is the isolation boundary (same rationale as
+  the `~/.aws` projection in `write_aws_profiles`).
+- **Self-contained, secret-free**: every context uses the standard AWS exec
+  credential plugin (`aws eks get-token`). Each exec block carries the AWS profile name
   and the `~/.aws` file paths — **no** access key / secret / session token is ever
   written into the kubeconfig. On a sandbox the paths are the **in-container**
   `<sandbox_home>/.aws/...` (where the creds are bind-mounted), not the backend write
@@ -83,11 +86,10 @@ users:
 ## Async / idempotent
 
 - Non-blocking: discovery runs in a background task off `aws/select`.
-- Idempotent / relaunchable: each run republishes the kube dir's **contents in place**
-  (rename desired files in, prune the rest) under the per-session lock — the dir inode
-  stays stable for the live bind mount, and a re-select never leaves a half-written
-  set. Re-selecting roles simply regenerates the kubeconfigs (and the refreshed
-  `~/.aws`).
+- Idempotent / relaunchable: each run rewrites the single `config` **in place** (one
+  atomic rename) under the per-session lock — the dir inode stays stable for the live
+  bind mount, and a re-select never leaves a half-written set. Re-selecting roles simply
+  regenerates the merged config (and the refreshed `~/.aws`).
 - Failures are logged (`eks_refresh_failed` / `eks_discover_skip`) and never crash
   the event loop or the `aws/select` request.
 

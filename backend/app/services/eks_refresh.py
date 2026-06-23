@@ -29,7 +29,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -183,13 +182,13 @@ async def refresh_session_eks(
     # One list+describe round-trip set per profile; fan out in threads (the boto3
     # low-level client is thread-safe) to avoid a serial N×latency walk.
     clusters = await asyncio.to_thread(_discover_all, profiles, progress_cb)
-    # One kubeconfig PER CLUSTER: the same cluster is often reachable via several
-    # selected roles in one account; collapse those to a single file.
+    # One context per cluster (keyed by ARN): the same cluster is often reachable via
+    # several selected roles in one account; collapse those, preferring the eks-* role.
     clusters = _dedup_prefer_eks(clusters)
 
     aws_cli = settings.aws_cli_path
     dest = session_kube_dir(session_id)
-    # On the shared sandbox creds volume the dir/files must be world-readable: the
+    # On the shared sandbox creds volume the dir/file must be world-readable: the
     # toolbox container reads them through the read-only bind mount as a (potentially)
     # different uid than the backend — same rationale as write_aws_profiles. On the
     # backend-local /dev/shm projection they stay private. The read-only mount + the
@@ -198,59 +197,37 @@ async def refresh_session_eks(
     dir_mode = 0o755 if shared else 0o700
     file_mode = 0o644 if shared else 0o600
     # dest is pre-created at sandbox provisioning and bind-mounted read-only into the
-    # conv container. A bind mount follows the INODE, not the path, so we must NEVER
-    # swap the dir (an os.replace(dir) would detach the live mount — it'd keep seeing
-    # the old, empty inode). Publish in place: stage the files in a sibling dir, then
-    # rename each into `dest` (per-FILE rename within the same tmpfs is atomic and
-    # leaves the dir inode intact), and prune the kubeconfigs no longer reachable.
+    # conv container. A bind mount follows the INODE, not the path, so we never swap the
+    # dir. We write ONE merged kubeconfig (`config`, a context per cluster) and publish
+    # it with a single atomic rename into the stable dir — no per-file churn, no prune,
+    # and a whole-file swap means the agent never sees a torn set.
     os.makedirs(dest, mode=dir_mode, exist_ok=True)
     os.chmod(dest, dir_mode)  # exist_ok skips mode on an existing dir — force it
-    # Per-call staging dir (random suffix): concurrent refreshes for the same session
-    # must not share a staging path — one's rmtree would wipe the other's in-flight
-    # files. Same parent => same tmpfs => per-file rename into dest stays atomic. The
-    # finally removes this call's staging even on error (cleanup_aws_files is the
-    # backstop for any orphan a crash leaves behind).
-    staging = f"{dest}.new.{uuid4().hex}"
-    os.makedirs(staging, mode=0o700, exist_ok=True)
-    try:
-        desired: set[str] = set()
-        for c in clusters:
-            # Region in the name: dedup is keyed by ARN, so two same-named clusters in
-            # different regions are distinct entries — without the region they'd collide
-            # to one filename and silently drop one. (Today all profiles share the SSO
-            # region, so this is latent insurance.)
-            # Sanitize each segment: account_name is an org-controlled display string;
-            # a '/' would let the rename below escape the session kube dir.
-            fname = (
-                f"eks--{_safe_seg(c['account_name'])}"
-                f"--{_safe_seg(c['region'] or 'noregion')}--{_safe_seg(c['cluster'])}"
-            )
-            desired.add(fname)
-            kubeconfig = _build_kubeconfig(c, aws_cli, cred_file, cfg_file)
-            _write_secure(
-                os.path.join(staging, fname), yaml.safe_dump(kubeconfig, sort_keys=False), file_mode
-            )
+    config_path = os.path.join(dest, "config")
 
-        # Publish + prune under the per-session lock so an overlapping re-select or a
-        # concurrent revoke can't interleave a rename and a delete — last writer wins
-        # with a complete set, never a torn one. The lock guards against interleaving,
-        # not against an all-or-nothing failure WITHIN this batch: a per-file os.replace
-        # erroring mid-loop (e.g. tmpfs ENOSPC) leaves dest with a new+old mix and the
-        # error propagates to _run_safe (logged eks_refresh_failed). That's acceptable
-        # for a best-effort background refresh — every file is individually valid and
-        # the next re-select republishes the full set.
+    if not clusters:
+        # No reachable clusters → remove a stale config in place (keep the dir inode).
         async with session_lock(session_id):
-            for fname in desired:
-                os.replace(os.path.join(staging, fname), os.path.join(dest, fname))
-            # Drop kubeconfigs for clusters that vanished since a previous refresh.
-            for name in os.listdir(dest):
-                if name not in desired:
-                    try:
-                        os.remove(os.path.join(dest, name))
-                    except (FileNotFoundError, IsADirectoryError):
-                        pass
+            try:
+                os.remove(config_path)
+            except FileNotFoundError:
+                pass
+        return 0
+
+    # Stage on a sibling temp on the same tmpfs (never inside the mounted dir, so a
+    # half-written file is invisible to the container), then one atomic rename into
+    # place under the per-session lock so it can't interleave with a re-select/revoke.
+    staging = f"{dest}.config.{uuid4().hex}"
+    try:
+        merged = _build_merged_kubeconfig(clusters, aws_cli, cred_file, cfg_file)
+        _write_secure(staging, yaml.safe_dump(merged, sort_keys=False), file_mode)
+        async with session_lock(session_id):
+            os.replace(staging, config_path)
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            os.remove(staging)  # no-op once the rename consumed it
+        except FileNotFoundError:
+            pass
     return len(clusters)
 
 
@@ -349,35 +326,36 @@ def _discover_for_profile(profile: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
-def _build_kubeconfig(
-    cluster: dict[str, Any], aws_cli: str, cred_file: str, cfg_file: str
+def _build_merged_kubeconfig(
+    clusters: list[dict[str, Any]], aws_cli: str, cred_file: str, cfg_file: str
 ) -> dict[str, Any]:
-    """Build a self-contained exec-plugin kubeconfig for one cluster.
+    """Build ONE exec-plugin kubeconfig with a context per reachable cluster.
 
-    Equivalent to ``aws eks update-kubeconfig`` output, plus the AWS file-path env
-    on the exec block so the credential-free kubectl executor can still resolve the
-    session's tmpfs profile. No secret material is embedded — only file paths.
+    Equivalent to merging ``aws eks update-kubeconfig`` output for every cluster, plus
+    the AWS file-path env on each exec block so the credential-free kubectl executor
+    resolves the session's tmpfs profile. No secret material is embedded — only paths.
+    The agent selects a cluster with ``kubectl --context <name>``; current-context is
+    the first context by sorted alias, so it's deterministic (not discovery-ordered).
     """
-    context_alias = (
-        f"{_safe_seg(cluster['account_name'])}"
-        f"--{_safe_seg(cluster['region'] or 'noregion')}--{_safe_seg(cluster['cluster'])}"
-    )
-    arn = cluster["arn"]
-    return {
-        "apiVersion": "v1",
-        "kind": "Config",
-        "clusters": [
+    cfg_clusters: list[dict[str, Any]] = []
+    contexts: list[dict[str, Any]] = []
+    users: list[dict[str, Any]] = []
+    for c in clusters:
+        arn = c["arn"]
+        # Sanitize each segment (account_name is an org-controlled display string) and
+        # region-qualify so two same-named clusters in different regions stay distinct.
+        alias = (
+            f"{_safe_seg(c['account_name'])}"
+            f"--{_safe_seg(c['region'] or 'noregion')}--{_safe_seg(c['cluster'])}"
+        )
+        cfg_clusters.append(
             {
                 "name": arn,
-                "cluster": {
-                    "server": cluster["endpoint"],
-                    "certificate-authority-data": cluster["ca"],
-                },
+                "cluster": {"server": c["endpoint"], "certificate-authority-data": c["ca"]},
             }
-        ],
-        "contexts": [{"name": context_alias, "context": {"cluster": arn, "user": arn}}],
-        "current-context": context_alias,
-        "users": [
+        )
+        contexts.append({"name": alias, "context": {"cluster": arn, "user": arn}})
+        users.append(
             {
                 "name": arn,
                 "user": {
@@ -386,21 +364,29 @@ def _build_kubeconfig(
                         "command": aws_cli,
                         "args": [
                             "--region",
-                            cluster["region"],
+                            c["region"],
                             "eks",
                             "get-token",
                             "--cluster-name",
-                            cluster["cluster"],
+                            c["cluster"],
                             "--output",
                             "json",
                         ],
                         "env": [
-                            {"name": "AWS_PROFILE", "value": cluster["profile"]},
+                            {"name": "AWS_PROFILE", "value": c["profile"]},
                             {"name": "AWS_SHARED_CREDENTIALS_FILE", "value": cred_file},
                             {"name": "AWS_CONFIG_FILE", "value": cfg_file},
                         ],
                     }
                 },
             }
-        ],
+        )
+    contexts.sort(key=lambda ctx: ctx["name"])
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": cfg_clusters,
+        "contexts": contexts,
+        "users": users,
+        "current-context": contexts[0]["name"] if contexts else "",
     }
