@@ -49,11 +49,21 @@ _tasks: set[asyncio.Task[None]] = set()
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
+# Soft cap: above this, prune locks no one holds before adding a new one. A free lock
+# (no holder, hence no waiters) means nothing is in flight for that session, so a fresh
+# lock is equivalent — this self-bounds the map without a session-end hook on every
+# path (release_session_lock still drops it eagerly on explicit session delete).
+_SESSION_LOCK_SOFT_CAP = 1024
+
+
 def session_lock(session_id: UUID) -> asyncio.Lock:
     """Get-or-create the per-session refresh/revoke serialisation lock."""
     key = str(session_id)
     lock = _session_locks.get(key)
     if lock is None:
+        if len(_session_locks) >= _SESSION_LOCK_SOFT_CAP:
+            for stale in [k for k, lk in _session_locks.items() if not lk.locked()]:
+                del _session_locks[stale]
         lock = asyncio.Lock()
         _session_locks[key] = lock
     return lock
@@ -174,7 +184,11 @@ async def refresh_session_eks(
     try:
         desired: set[str] = set()
         for c in clusters:
-            fname = f"eks--{c['account_name']}--{c['cluster']}"
+            # Region in the name: dedup is keyed by ARN, so two same-named clusters in
+            # different regions are distinct entries — without the region they'd collide
+            # to one filename and silently drop one. (Today all profiles share the SSO
+            # region, so this is latent insurance.)
+            fname = f"eks--{c['account_name']}--{c['region']}--{c['cluster']}"
             desired.add(fname)
             kubeconfig = _build_kubeconfig(c, aws_cli, cred_file, cfg_file)
             _write_secure(
@@ -183,7 +197,12 @@ async def refresh_session_eks(
 
         # Publish + prune under the per-session lock so an overlapping re-select or a
         # concurrent revoke can't interleave a rename and a delete — last writer wins
-        # with a complete set, never a torn one.
+        # with a complete set, never a torn one. The lock guards against interleaving,
+        # not against an all-or-nothing failure WITHIN this batch: a per-file os.replace
+        # erroring mid-loop (e.g. tmpfs ENOSPC) leaves dest with a new+old mix and the
+        # error propagates to _run_safe (logged eks_refresh_failed). That's acceptable
+        # for a best-effort background refresh — every file is individually valid and
+        # the next re-select republishes the full set.
         async with session_lock(session_id):
             for fname in desired:
                 os.replace(os.path.join(staging, fname), os.path.join(dest, fname))
@@ -311,7 +330,7 @@ def _build_kubeconfig(
     on the exec block so the credential-free kubectl executor can still resolve the
     session's tmpfs profile. No secret material is embedded — only file paths.
     """
-    context_alias = f"{cluster['account_name']}--{cluster['cluster']}"
+    context_alias = f"{cluster['account_name']}--{cluster['region']}--{cluster['cluster']}"
     arn = cluster["arn"]
     return {
         "apiVersion": "v1",

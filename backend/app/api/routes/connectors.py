@@ -6,6 +6,7 @@ user consent. Responses only ever carry the secret-free :class:`ConnectorStatus`
 projection — credentials live in the in-RAM store and never reach the client.
 """
 
+import asyncio
 import logging
 import secrets
 import uuid
@@ -710,12 +711,14 @@ async def revoke(
             # still be running with these dirs bind-mounted, so keep the dir inodes
             # (keep_dirs) — the agent then sees empty/revoked creds, and a re-grant in
             # the same conversation reaches it through the same mount. Hold the session
-            # lock so this can't interleave with an in-flight EKS refresh's publish.
+            # lock so this can't interleave with an in-flight EKS refresh's publish, and
+            # run the blocking tmpfs I/O off the event loop.
+            # Local imports: avoid a connectors <-> eks_refresh import cycle.
             from app.services.eks_refresh import session_lock
             from app.tools.connector_exec import cleanup_aws_files
 
             async with session_lock(sid):
-                cleanup_aws_files(sid, keep_dirs=True)
+                await asyncio.to_thread(cleanup_aws_files, sid, keep_dirs=True)
         await _audit(
             db, user_id=current_user.id, session_id=sid, connector=connector, action="revoke"
         )

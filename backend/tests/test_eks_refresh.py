@@ -83,13 +83,13 @@ async def test_refresh_generates_one_kubeconfig_per_cluster_in_tmpfs():
             count = await refresh_session_eks(sid, _cred())
 
         assert count == 1
-        path = os.path.join(session_kube_dir(sid), "eks--acme0--prod-cluster")
+        path = os.path.join(session_kube_dir(sid), "eks--acme0--eu-west-1--prod-cluster")
         assert os.path.isfile(path)
         # Files are mode 0600 (RAM, secret-adjacent).
         assert oct(os.stat(path).st_mode & 0o777) == "0o600"
 
         doc = yaml.safe_load(open(path).read())
-        assert doc["current-context"] == "acme0--prod-cluster"
+        assert doc["current-context"] == "acme0--eu-west-1--prod-cluster"
         exec_block = doc["users"][0]["user"]["exec"]
         assert exec_block["args"][:4] == ["--region", "eu-west-1", "eks", "get-token"]
         env = {e["name"]: e["value"] for e in exec_block["env"]}
@@ -113,7 +113,7 @@ async def test_refresh_is_idempotent_and_leaves_no_staging_dir():
 
         kube = session_kube_dir(sid)
         assert count == 1
-        assert sorted(os.listdir(kube)) == ["eks--acme0--c1"]
+        assert sorted(os.listdir(kube)) == ["eks--acme0--eu-west-1--c1"]
         assert not os.path.isdir(f"{kube}.new")  # staging swapped, not left behind
     finally:
         cleanup_aws_files(sid)
@@ -175,8 +175,8 @@ async def test_same_cluster_via_two_roles_dedups_and_prefers_eks_role():
 
         kube = session_kube_dir(sid)
         assert count == 1  # one cluster → one file, not two
-        assert os.listdir(kube) == ["eks--acme--prod"]
-        doc = yaml.safe_load(open(os.path.join(kube, "eks--acme--prod")).read())
+        assert os.listdir(kube) == ["eks--acme--eu-west-1--prod"]
+        doc = yaml.safe_load(open(os.path.join(kube, "eks--acme--eu-west-1--prod")).read())
         env = {e["name"]: e["value"] for e in doc["users"][0]["user"]["exec"]["env"]}
         assert env["AWS_PROFILE"] == "acme-eks-readonly-access"  # eks role preferred
     finally:
@@ -205,7 +205,7 @@ async def test_kubeconfig_exec_uses_in_container_aws_paths_in_sandbox(tmp_path):
         ):
             await refresh_session_eks(sid, _cred())
 
-            raw = open(os.path.join(session_kube_dir(sid), "eks--acme0--c1")).read()
+            raw = open(os.path.join(session_kube_dir(sid), "eks--acme0--eu-west-1--c1")).read()
             env = {
                 e["name"]: e["value"]
                 for e in yaml.safe_load(raw)["users"][0]["user"]["exec"]["env"]
@@ -274,14 +274,17 @@ async def test_refresh_keeps_kube_dir_inode_stable_and_prunes_stale():
             await refresh_session_eks(sid, _cred())
         kube = session_kube_dir(sid)
         inode_before = os.stat(kube).st_ino
-        assert sorted(os.listdir(kube)) == ["eks--acme0--c1", "eks--acme0--c2"]
+        assert sorted(os.listdir(kube)) == [
+            "eks--acme0--eu-west-1--c1",
+            "eks--acme0--eu-west-1--c2",
+        ]
 
         # Re-select: only c1 now reachable. Inode must NOT change; c2 must be pruned.
         eks1 = _mock_eks({"c1": _cluster_payload("c1")})
         with patch("boto3.client", return_value=eks1):
             await refresh_session_eks(sid, _cred())
         assert os.stat(kube).st_ino == inode_before  # dir not swapped → mount intact
-        assert sorted(os.listdir(kube)) == ["eks--acme0--c1"]  # stale c2 dropped
+        assert sorted(os.listdir(kube)) == ["eks--acme0--eu-west-1--c1"]  # stale c2 dropped
         assert glob.glob(f"{kube}.new*") == []  # per-call staging cleaned up
     finally:
         cleanup_aws_files(sid)
@@ -299,10 +302,39 @@ async def test_concurrent_refreshes_use_distinct_staging():
                 refresh_session_eks(sid, _cred()),
             )
         kube = session_kube_dir(sid)
-        assert sorted(os.listdir(kube)) == ["eks--acme0--c1", "eks--acme0--c2"]
+        assert sorted(os.listdir(kube)) == [
+            "eks--acme0--eu-west-1--c1",
+            "eks--acme0--eu-west-1--c2",
+        ]
         assert glob.glob(f"{kube}.new*") == []  # no staging left behind by either run
     finally:
         cleanup_aws_files(sid)
+
+
+async def test_refresh_and_revoke_do_not_interleave_under_lock():
+    """A refresh publishing while a revoke clears in place must serialise on the session
+    lock — the terminal kube set is either fully published or fully cleared, never torn."""
+    from app.services import eks_refresh
+    from app.tools.connector_exec import cleanup_aws_files as cleanup
+
+    sid = uuid.uuid4()
+    try:
+        eks = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
+
+        async def revoke_in_place() -> None:
+            async with eks_refresh.session_lock(sid):
+                cleanup(sid, keep_dirs=True)
+
+        with patch("boto3.client", return_value=eks):
+            await asyncio.gather(refresh_session_eks(sid, _cred()), revoke_in_place())
+
+        kube = session_kube_dir(sid)
+        full = ["eks--acme0--eu-west-1--c1", "eks--acme0--eu-west-1--c2"]
+        names = sorted(os.listdir(kube))
+        assert names == [] or names == full  # fully published or fully cleared, not torn
+        assert glob.glob(f"{kube}.new*") == []
+    finally:
+        cleanup(sid)
 
 
 async def test_cleanup_keep_dirs_clears_contents_but_preserves_inode():

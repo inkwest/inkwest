@@ -533,6 +533,7 @@ async def delete_session(
 
     # Drop any brokered external-access credentials held for this session.
     if session.user_id is not None:
+        # Local imports: avoid a sessions <-> connectors/eks_refresh import cycle.
         from app.services.connectors.store import get_credential_store
         from app.services.eks_refresh import release_session_lock
         from app.tools.connector_exec import cleanup_aws_files
