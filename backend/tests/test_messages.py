@@ -205,6 +205,21 @@ async def test_save_message_persists_and_returns(db: AsyncSession) -> None:
     assert await get_message_count(db, sid) == 1
 
 
+async def test_save_message_persists_engine_and_model_per_turn(db: AsyncSession) -> None:
+    # Engine + model are captured at generation time so an exported turn attributes the
+    # exact engine/model that ran, even after the session pin changes mid-conversation.
+    sid = await _make_session(db)
+    msg = await save_message(
+        db, sid, "assistant", "done", model="claude-opus-4-8", engine="inkwest-agent"
+    )
+    assert msg.model == "claude-opus-4-8"
+    assert msg.engine == "inkwest-agent"
+    # Both default to NULL when not provided (non-assistant rows / pre-column messages).
+    bare = await save_message(db, sid, "user", "hi")
+    assert bare.model is None
+    assert bare.engine is None
+
+
 async def test_save_session_event_persists_structured_system_message(db: AsyncSession) -> None:
     sid = await _make_session(db)
     targets = [{"account_id": "111", "account_name": "acme", "role": "ReadOnly"}]

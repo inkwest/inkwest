@@ -167,6 +167,7 @@ async def orchestrate_chat_converse(
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
     persist_user_message: bool = True,
+    engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Tool-use loop over the Bedrock Converse API. Mirrors orchestrate_chat."""
     if isinstance(session_id, str):
@@ -317,6 +318,7 @@ async def orchestrate_chat_converse(
                 output_tokens=iter_output_tokens,
                 latency_ms=iter_latency_ms,
                 model=model,
+                engine=engine,
             )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")

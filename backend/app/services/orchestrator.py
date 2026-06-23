@@ -105,6 +105,7 @@ async def orchestrate_chat(
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
     persist_user_message: bool = True,
+    engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """
     Main orchestration loop.
@@ -299,6 +300,7 @@ async def orchestrate_chat(
                 thinking_content=thinking_content,
                 latency_ms=iter_latency_ms,
                 model=model,
+                engine=engine,
             )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")

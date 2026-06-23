@@ -63,6 +63,15 @@ class Message(Base):
         String(255),
         nullable=True,
     )
+    # The agentic engine that produced this (assistant) turn (claude-cli |
+    # inkwest-agent, or the provider transport for non-CLI deployments), captured
+    # at generation time. The session engine can be NULL (resolve per turn) or
+    # change mid-chat, so this is the only reliable record of what ran. NULL for
+    # non-assistant rows and for messages predating this column.
+    engine: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
     token_count: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
