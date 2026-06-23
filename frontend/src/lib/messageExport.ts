@@ -126,6 +126,24 @@ function idsLine(meta: ExportFooterMeta): string {
   return `conversation: ${meta.sessionId} · message: ${meta.messageId}`;
 }
 
+/**
+ * Absolute deep link back to the originating turn. Mirrors the
+ * in-app search-hit convention (`/session/<id>?m=<messageId>`, see SessionList):
+ * the route + ChatView already resolve `?m=` to scroll/highlight the message
+ * client-side within the owner-scoped, already-loaded set — no new endpoint, no
+ * IDOR surface. `window.location.origin` makes the pasted footer resolvable from
+ * any target; guarded so a non-browser render (tests/SSR) degrades to a relative
+ * URL instead of throwing.
+ */
+function messageDeepLink(meta: ExportFooterMeta): string {
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  // encodeURIComponent leaves ()' untouched; parens in particular would terminate
+  // the Markdown `[text](url)` target early, so encode them too. Round-trips
+  // cleanly: URLSearchParams/route param decoding restores the original id.
+  const enc = (s: string) => encodeURIComponent(s).replace(/\(/g, '%28').replace(/\)/g, '%29');
+  return `${origin}/session/${enc(meta.sessionId)}?m=${enc(meta.messageId)}`;
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -136,17 +154,21 @@ function escapeHtml(s: string): string {
  */
 export function buildExportMarkdown(body: string, meta: ExportFooterMeta): string {
   const attribution = `_${footerSegments(meta).join(' · ')}_`;
-  const ids = `\`${idsLine(meta)}\``;
+  // Deep link: the ids become the link text so the IDs stay visible
+  // when pasted into a plain editor, while the href carries the resolvable URL.
+  const ids = `[${idsLine(meta)}](${messageDeepLink(meta)})`;
   return `${body.trim()}\n\n---\n${attribution}\n\n${ids}\n`;
 }
 
 function signatureFooterHtml(meta: ExportFooterMeta): string {
   const signature = escapeHtml(footerSegments(meta).join(' · '));
   const ids = escapeHtml(idsLine(meta));
+  // Deep link: wrap the ids in an anchor so a click opens the turn.
+  const href = escapeHtml(messageDeepLink(meta));
   return (
     '<hr style="border:none;border-top:1px solid #cccccc;margin:12px 0;">' +
     `<p style="margin:0;color:#666666;font-size:12px;font-style:italic;">${signature}</p>` +
-    `<p style="margin:4px 0 0;color:#999999;font-size:11px;font-family:monospace;">${ids}</p>`
+    `<p style="margin:4px 0 0;color:#999999;font-size:11px;font-family:monospace;"><a href="${href}" style="color:#0969da;">${ids}</a></p>`
   );
 }
 

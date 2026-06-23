@@ -47,8 +47,21 @@ describe('buildExportMarkdown', () => {
     // Engine precedes the model in the signature.
     expect(out).toContain('Inkwest Agent · Claude Opus 4.8');
     expect(out).toContain(formatFullTimestamp(meta.date));
-    expect(out).toContain('`conversation: sess-1 · message: msg-1`');
+    // The ids are now a deep link: visible text keeps the IDs, the href resolves
+    // to the originating turn via the existing `?m=` scroll/highlight route.
+    expect(out).toContain(`[conversation: sess-1 · message: msg-1](${window.location.origin}/session/sess-1?m=msg-1)`);
     expect(out.endsWith('\n')).toBe(true);
+  });
+
+  it('percent-encodes the ids in the deep-link target (link text stays readable)', () => {
+    const out = buildExportMarkdown('body', { ...meta, sessionId: 'a/b', messageId: 'c d' });
+    expect(out).toContain('[conversation: a/b · message: c d](');
+    expect(out).toContain('/session/a%2Fb?m=c%20d)');
+  });
+
+  it('encodes parentheses so they cannot terminate the Markdown link target early', () => {
+    const out = buildExportMarkdown('body', { ...meta, sessionId: 's(1)', messageId: 'm)2(' });
+    expect(out).toContain('/session/s%281%29?m=m%292%28)');
   });
 
   it('drops the name, engine and model segments when absent (no dangling separators)', () => {
@@ -89,6 +102,8 @@ describe('buildExportHtml', () => {
     expect(html).toContain('Claude Opus 4.8');
     expect(html).toContain('conversation: sess-1 · message: msg-1');
     expect(html).toContain('style=');
+    // The ids paragraph is a deep-link anchor to the originating turn.
+    expect(html).toContain(`<a href="${window.location.origin}/session/sess-1?m=msg-1"`);
   });
 
   it('renders fenced code as a cohesive <pre> block (clean, for capable targets)', async () => {
