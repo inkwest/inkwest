@@ -8,7 +8,16 @@ import { startMcpAuth } from '@/services/api';
  * trips popup blockers. Returns the opened window so the caller can poll until it closes.
  */
 export function openMcpAuthPopup(key: string, onError?: () => void): Window | null {
-  const popup = window.open('about:blank', 'mcp-oauth', 'width=520,height=720');
+  // Mid-size, gently landscape (between square and 16:9), centred on the screen.
+  const w = 820;
+  const h = 600;
+  const left = Math.max(0, Math.round((window.screen.width - w) / 2));
+  const top = Math.max(0, Math.round((window.screen.height - h) / 2));
+  const popup = window.open(
+    'about:blank',
+    'mcp-oauth',
+    `width=${w},height=${h},left=${left},top=${top}`,
+  );
   void (async () => {
     try {
       const { authorize_url } = await startMcpAuth(key);
