@@ -42,7 +42,7 @@ from app.core.telemetry import shutdown_telemetry
 from app.services.app_settings import load_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
-from app.services.mcp_oauth_catalog import oauth_catalog_keys
+from app.services.mcp_oauth_catalog import load_oauth_catalog, oauth_catalog_keys
 from app.services.messages import purge_empty_sessions, reconcile_interrupted_turns
 from app.services.model_catalog import refresh_catalog
 from app.services.model_registry import load_registry
@@ -94,6 +94,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await load_settings(db)
             await refresh_catalog()  # live provider catalog (best-effort, static fallback)
             await load_registry(db)  # admin registry: enabled subset, default, overrides
+            await load_oauth_catalog(db)  # OAuth2 MCP catalog (seeds from env on first run)
         except SQLAlchemyError:
             logger.exception("model_config_load_failed")
             await db.rollback()

@@ -14,6 +14,7 @@ const SAMPLE: adminApi.SystemInfo = {
   oidc_enabled: true,
   sandbox_enabled: true,
   attachments_enabled: false,
+  secret_storage_enabled: true,
   catalog: {
     last_refreshed_at: '2026-06-22T09:55:00+00:00',
     source: 'live',

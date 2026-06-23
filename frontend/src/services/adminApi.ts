@@ -18,6 +18,9 @@ import {
   UserSessionsUsage,
   AuthStatus,
   CurrentUser,
+  McpOauthServer,
+  CreateMcpOauthServerRequest,
+  UpdateMcpOauthServerRequest,
 } from '@/types/admin';
 
 import { API_URL, fetchAPI } from '@/services/api';
@@ -529,10 +532,55 @@ export interface SystemInfo {
   oidc_enabled: boolean;
   sandbox_enabled: boolean;
   attachments_enabled: boolean;
+  /** At-rest encryption for operator secrets configured (SECRETBOX_KEYS). */
+  secret_storage_enabled: boolean;
   /** Model/pricing discovery freshness (reuses the model-settings catalog shape). */
   catalog: CatalogStatus;
 }
 
 export async function getSystemInfo(): Promise<SystemInfo> {
   return fetchAPI('/api/admin/system-info');
+}
+
+// ============================================================================
+// OAuth2 MCP Catalog API
+// ============================================================================
+
+export interface McpOauthMeta {
+  /** At-rest secret encryption configured server-side (SECRETBOX_KEYS). When false, the
+   *  Confidential auth type is disabled (no way to store a client secret). */
+  secret_storage_enabled: boolean;
+}
+
+export async function getMcpOauthMeta(): Promise<McpOauthMeta> {
+  return fetchAPI('/api/admin/mcp-oauth/meta');
+}
+
+export async function getMcpOauthServers(): Promise<McpOauthServer[]> {
+  return fetchAPI('/api/admin/mcp-oauth');
+}
+
+export async function createMcpOauthServer(
+  data: CreateMcpOauthServerRequest,
+): Promise<McpOauthServer[]> {
+  return fetchAPI('/api/admin/mcp-oauth', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateMcpOauthServer(
+  key: string,
+  data: UpdateMcpOauthServerRequest,
+): Promise<McpOauthServer[]> {
+  return fetchAPI(`/api/admin/mcp-oauth/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteMcpOauthServer(key: string): Promise<McpOauthServer[]> {
+  return fetchAPI(`/api/admin/mcp-oauth/${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+  });
 }

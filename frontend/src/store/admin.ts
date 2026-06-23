@@ -15,6 +15,9 @@ import {
   UserUsage,
   ModelUsage,
   CurrentUser,
+  McpOauthServer,
+  CreateMcpOauthServerRequest,
+  UpdateMcpOauthServerRequest,
 } from '@/types/admin';
 import * as adminApi from '@/services/adminApi';
 
@@ -561,6 +564,62 @@ export const useSystemInfoStore = create<SystemInfoState>((set) => ({
     } catch (error) {
       set({ error: (error as Error).message, isLoading: false });
     }
+  },
+
+  clearError: () => set({ error: null }),
+}));
+
+// ============================================================================
+// OAuth2 MCP Catalog Store
+// ============================================================================
+
+interface McpServerState {
+  mcpServers: McpOauthServer[];
+  // Server can store client secrets (SECRETBOX_KEYS set) — gates the Confidential option.
+  secretStorageEnabled: boolean;
+  isLoading: boolean;
+  error: string | null;
+
+  fetchMcpServers: () => Promise<void>;
+  createMcpServer: (data: CreateMcpOauthServerRequest) => Promise<void>;
+  updateMcpServer: (key: string, data: UpdateMcpOauthServerRequest) => Promise<void>;
+  deleteMcpServer: (key: string) => Promise<void>;
+  clearError: () => void;
+}
+
+export const useMcpServerStore = create<McpServerState>((set) => ({
+  mcpServers: [],
+  secretStorageEnabled: false,
+  isLoading: false,
+  error: null,
+
+  fetchMcpServers: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const [mcpServers, meta] = await Promise.all([
+        adminApi.getMcpOauthServers(),
+        adminApi.getMcpOauthMeta(),
+      ]);
+      set({ mcpServers, secretStorageEnabled: meta.secret_storage_enabled, isLoading: false });
+    } catch (error) {
+      set({ error: (error as Error).message, isLoading: false });
+    }
+  },
+
+  // The mutation endpoints return the full refreshed list, so replace state wholesale.
+  createMcpServer: async (data: CreateMcpOauthServerRequest) => {
+    const mcpServers = await adminApi.createMcpOauthServer(data);
+    set({ mcpServers });
+  },
+
+  updateMcpServer: async (key: string, data: UpdateMcpOauthServerRequest) => {
+    const mcpServers = await adminApi.updateMcpOauthServer(key, data);
+    set({ mcpServers });
+  },
+
+  deleteMcpServer: async (key: string) => {
+    const mcpServers = await adminApi.deleteMcpOauthServer(key);
+    set({ mcpServers });
   },
 
   clearError: () => set({ error: null }),

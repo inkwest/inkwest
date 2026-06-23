@@ -33,6 +33,8 @@ dependencies = [
     "boto3>=1.34.0",
     # Generating per-session EKS kubeconfigs (refresh_eks port)
     "PyYAML>=6.0",
+    # libsodium SecretBox (XSalsa20-Poly1305) — at-rest field encryption for operator secrets
+    "PyNaCl>=1.5.0",
 ]
 
 [project.optional-dependencies]

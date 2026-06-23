@@ -190,3 +190,43 @@ export interface CurrentUser {
   oidc_issuer: string;
   is_admin: boolean;
 }
+
+// ============================================================================
+// OAuth2 MCP Catalog
+// ============================================================================
+
+export interface McpOauthServer {
+  key: string;
+  display_name: string | null;
+  url: string;
+  scopes: string[];
+  client_id: string | null;
+  // The raw client_secret is never sent to the browser; this only reports presence.
+  has_secret: boolean;
+  // False when a sealed secret can't be decrypted with the current server keyring — the
+  // panel blocks editing (the server is already out of service); delete/recreate only.
+  editable: boolean;
+  enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CreateMcpOauthServerRequest {
+  key: string;
+  url: string;
+  display_name?: string | null;
+  scopes?: string[];
+  client_id?: string | null;
+  client_secret?: string | null;
+  enabled?: boolean;
+}
+
+export interface UpdateMcpOauthServerRequest {
+  url: string;
+  display_name?: string | null;
+  scopes?: string[];
+  client_id?: string | null;
+  // Omit to keep the stored secret; send "" to clear it.
+  client_secret?: string | null;
+  enabled?: boolean;
+}

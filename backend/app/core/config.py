@@ -247,6 +247,12 @@ class Settings(BaseSettings):
     # deliberate, scoped operator decision — not a blanket private-network opener.
     mcp_oauth_allow_hosts: str = ""
 
+    # At-rest encryption keys for operator secrets (e.g. the OAuth2 MCP catalog client
+    # secret). JSON map {"<version>": "<base64 32-byte key>"}; the highest version seals new
+    # writes, older versions stay to decrypt existing values (rotation). Empty = sealing
+    # disabled (secrets stored as-is). Generate a key with `openssl rand -base64 32`.
+    secretbox_keys: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

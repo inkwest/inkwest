@@ -27,7 +27,7 @@ from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import Session
 from app.models.user import User
-from app.services import model_registry
+from app.services import mcp_oauth_catalog, model_registry
 from app.services.app_settings import (
     BEDROCK_INCLUDE_OPEN_KEY,
     DEFAULT_ENGINE_KEY,
@@ -1151,6 +1151,153 @@ async def delete_model(
 
 
 # =============================================================================
+# OAuth2 MCP Catalog (admin-managed; replaces the MCP_CATALOG_OAUTH2 env var)
+# =============================================================================
+
+
+class McpOauthEntryResponse(BaseModel):
+    """A catalog entry as the admin panel sees it — secret-free."""
+
+    key: str
+    display_name: str | None
+    url: str
+    scopes: list[str]
+    client_id: str | None
+    # The raw client_secret is never serialized; the panel only learns whether one is set.
+    has_secret: bool
+    # False when a sealed secret can't be decrypted with the current keyring — the panel
+    # blocks editing such a server (it's already dropped from service); delete/recreate only.
+    editable: bool
+    enabled: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class McpOauthCreateRequest(BaseModel):
+    """Create an OAuth2 MCP catalog entry."""
+
+    key: str = Field(min_length=1, max_length=128)
+    url: str = Field(min_length=1, max_length=1024)
+    display_name: str | None = Field(default=None, max_length=255)
+    scopes: list[str] = Field(default_factory=list)
+    client_id: str | None = Field(default=None, max_length=512)
+    # Optional (public clients use Dynamic Client Registration and have none).
+    client_secret: str | None = None
+    enabled: bool = True
+
+
+class McpOauthUpdateRequest(BaseModel):
+    """Update an OAuth2 MCP catalog entry (key comes from the path).
+
+    Omit ``client_secret`` to keep the stored one; send ``""`` to clear it.
+    """
+
+    url: str = Field(min_length=1, max_length=1024)
+    display_name: str | None = Field(default=None, max_length=255)
+    scopes: list[str] = Field(default_factory=list)
+    client_id: str | None = Field(default=None, max_length=512)
+    client_secret: str | None = None
+    enabled: bool = True
+
+
+class McpOauthMetaResponse(BaseModel):
+    """Server-side capabilities the MCP catalog form needs to know before submit."""
+
+    # Whether at-rest secret encryption is configured (SECRETBOX_KEYS). When false, the
+    # form disables the Confidential auth type (a client secret can't be stored).
+    secret_storage_enabled: bool
+
+
+@router.get("/mcp-oauth/meta", response_model=McpOauthMetaResponse)
+async def get_mcp_oauth_meta(admin: AdminUser) -> McpOauthMetaResponse:
+    """Report whether the server can store client secrets (gates the Confidential option)."""
+    return McpOauthMetaResponse(secret_storage_enabled=mcp_oauth_catalog.secret_storage_enabled())
+
+
+@router.get("/mcp-oauth", response_model=list[McpOauthEntryResponse])
+async def list_mcp_oauth_servers(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """List the configured OAuth2 MCP servers (incl. disabled). Secrets are not returned."""
+    return await mcp_oauth_catalog.list_oauth_entries(db)
+
+
+@router.post(
+    "/mcp-oauth",
+    response_model=list[McpOauthEntryResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_mcp_oauth_server(
+    body: McpOauthCreateRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Add an OAuth2 MCP server to the catalog."""
+    try:
+        await mcp_oauth_catalog.upsert_oauth_server(
+            db,
+            key=body.key,
+            url=body.url,
+            scopes=body.scopes,
+            client_id=body.client_id,
+            client_secret=body.client_secret,
+            display_name=body.display_name,
+            enabled=body.enabled,
+            create_only=True,
+        )
+    except mcp_oauth_catalog.DuplicateKeyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An MCP server with key '{body.key}' already exists.",
+        ) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    logger.info(f"OAuth2 MCP server added by {admin.email}: {body.key}")
+    return await mcp_oauth_catalog.list_oauth_entries(db)
+
+
+@router.put("/mcp-oauth/{key}", response_model=list[McpOauthEntryResponse])
+async def update_mcp_oauth_server(
+    key: str,
+    body: McpOauthUpdateRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Update an OAuth2 MCP server. Omitting client_secret preserves the stored one."""
+    try:
+        await mcp_oauth_catalog.upsert_oauth_server(
+            db,
+            key=key,
+            url=body.url,
+            scopes=body.scopes,
+            client_id=body.client_id,
+            client_secret=body.client_secret,
+            display_name=body.display_name,
+            enabled=body.enabled,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    logger.info(f"OAuth2 MCP server updated by {admin.email}: {key}")
+    return await mcp_oauth_catalog.list_oauth_entries(db)
+
+
+@router.delete("/mcp-oauth/{key}", response_model=list[McpOauthEntryResponse])
+async def delete_mcp_oauth_server(
+    key: str,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Remove an OAuth2 MCP server from the catalog."""
+    try:
+        await mcp_oauth_catalog.delete_oauth_server(db, key)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    logger.info(f"OAuth2 MCP server deleted by {admin.email}: {key}")
+    return await mcp_oauth_catalog.list_oauth_entries(db)
+
+
+# =============================================================================
 # System Info Endpoint
 # =============================================================================
 
@@ -1177,6 +1324,9 @@ class SystemInfoResponse(BaseModel):
     oidc_enabled: bool
     sandbox_enabled: bool
     attachments_enabled: bool
+    # At-rest encryption for operator secrets (SECRETBOX_KEYS configured). Gates the
+    # Confidential MCP auth type; surfaced so operators can see the deployment's posture.
+    secret_storage_enabled: bool
     # Model/pricing discovery freshness (live vs static, last refresh, fetch health).
     catalog: CatalogStatus
 
@@ -1199,5 +1349,6 @@ async def get_system_info(admin: AdminUser) -> SystemInfoResponse:
         sandbox_enabled=settings.sandbox_enabled,
         # Mirrors /api/config: attachments need the per-conversation sandbox (claude-cli).
         attachments_enabled=settings.sandbox_enabled and settings.ai_provider == "claude-cli",
+        secret_storage_enabled=mcp_oauth_catalog.secret_storage_enabled(),
         catalog=CatalogStatus(**catalog_status()),
     )

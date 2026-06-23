@@ -588,3 +588,124 @@ async def test_delete_discovered_model_rejected(
     resp = await admin_client.request("DELETE", "/api/admin/models/claude-opus-4-8")
     assert resp.status_code == 400
     assert "cannot be deleted" in resp.json()["detail"].lower()
+
+
+# ============================================================================
+# OAuth2 MCP catalog CRUD (admin)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_forbidden_for_non_admin(authenticated_client: AsyncClient) -> None:
+    resp = await authenticated_client.get("/api/admin/mcp-oauth")
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_list_mcp_oauth_returns_entries_secret_free(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    entry = {
+        "key": "notion",
+        "display_name": None,
+        "url": "https://m.example.com/mcp",
+        "scopes": ["mcp:read"],
+        "client_id": None,
+        "has_secret": True,
+        "editable": True,
+        "enabled": True,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+    with patch(
+        "app.api.routes.admin.mcp_oauth_catalog.list_oauth_entries",
+        new=AsyncMock(return_value=[entry]),
+    ):
+        resp = await admin_client.get("/api/admin/mcp-oauth")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body[0]["key"] == "notion" and body[0]["has_secret"] is True
+    assert "client_secret" not in body[0]  # the raw secret is never serialized
+
+
+@pytest.mark.asyncio
+async def test_create_mcp_oauth_server(admin_client: AsyncClient, mock_db: AsyncMock) -> None:
+    with (
+        patch(
+            "app.api.routes.admin.mcp_oauth_catalog.upsert_oauth_server", new=AsyncMock()
+        ) as upsert,
+        patch(
+            "app.api.routes.admin.mcp_oauth_catalog.list_oauth_entries",
+            new=AsyncMock(return_value=[]),
+        ),
+    ):
+        resp = await admin_client.post(
+            "/api/admin/mcp-oauth",
+            json={"key": "gh", "url": "https://gh.example.com/mcp", "scopes": ["repo"]},
+        )
+    assert resp.status_code == 201
+    upsert.assert_awaited_once()
+    assert upsert.await_args.kwargs["key"] == "gh"
+
+
+@pytest.mark.asyncio
+async def test_create_mcp_oauth_duplicate_key_is_409(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    from app.services import mcp_oauth_catalog as cat
+
+    with patch(
+        "app.api.routes.admin.mcp_oauth_catalog.upsert_oauth_server",
+        new=AsyncMock(side_effect=cat.DuplicateKeyError("gh")),
+    ):
+        resp = await admin_client.post(
+            "/api/admin/mcp-oauth", json={"key": "gh", "url": "https://gh.example.com/mcp"}
+        )
+    assert resp.status_code == 409
+    assert "already exists" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_create_mcp_oauth_rejects_bad_url(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    with patch(
+        "app.api.routes.admin.mcp_oauth_catalog.upsert_oauth_server",
+        new=AsyncMock(side_effect=ValueError("MCP server url must be an https:// URL")),
+    ):
+        resp = await admin_client.post(
+            "/api/admin/mcp-oauth", json={"key": "x", "url": "http://insecure/mcp"}
+        )
+    assert resp.status_code == 400
+    assert "https" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_mcp_oauth_is_404(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    with patch(
+        "app.api.routes.admin.mcp_oauth_catalog.delete_oauth_server",
+        new=AsyncMock(side_effect=ValueError("Unknown MCP server key: nope")),
+    ):
+        resp = await admin_client.request("DELETE", "/api/admin/mcp-oauth/nope")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_meta_reports_secret_storage(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    with patch("app.api.routes.admin.mcp_oauth_catalog.secret_storage_enabled", return_value=True):
+        resp = await admin_client.get("/api/admin/mcp-oauth/meta")
+    assert resp.status_code == 200
+    assert resp.json() == {"secret_storage_enabled": True}
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_meta_false_when_unconfigured(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    with patch("app.api.routes.admin.mcp_oauth_catalog.secret_storage_enabled", return_value=False):
+        resp = await admin_client.get("/api/admin/mcp-oauth/meta")
+    assert resp.json() == {"secret_storage_enabled": False}

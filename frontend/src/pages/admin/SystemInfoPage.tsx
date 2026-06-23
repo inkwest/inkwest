@@ -1,4 +1,4 @@
-import { Fragment, useEffect } from 'react';
+import { Fragment, useEffect, type ReactNode } from 'react';
 import { clsx } from 'clsx';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
 import { useSystemInfoStore } from '@/store/admin';
@@ -10,6 +10,8 @@ interface Row {
   mono?: boolean;
   /** Highlight the value as a warning (e.g. a failed catalog fetch). */
   warn?: boolean;
+  /** Faint secondary line under the value (e.g. how to enable a disabled feature). */
+  hint?: ReactNode;
 }
 
 /** Definition list of label/value rows. Values sit in a flexible left-aligned column so
@@ -17,17 +19,19 @@ interface Row {
 function InfoList({ rows }: { rows: Row[] }) {
   return (
     <dl className="grid grid-cols-[8rem_1fr] gap-x-6 gap-y-3 text-sm">
-      {rows.map(({ label, value, mono, warn }) => (
+      {rows.map(({ label, value, mono, warn, hint }) => (
         <Fragment key={label}>
           <dt className="text-gray-400">{label}</dt>
-          <dd
-            className={clsx(
-              'break-all',
-              mono && 'font-mono',
-              warn ? 'text-amber-400' : !value && 'text-gray-500 italic'
-            )}
-          >
-            {value || 'not configured'}
+          <dd className="break-all">
+            <span
+              className={clsx(
+                mono && 'font-mono',
+                warn ? 'text-amber-400' : !value && 'text-gray-500 italic'
+              )}
+            >
+              {value || 'not configured'}
+            </span>
+            {hint && <span className="block text-xs italic text-gray-500 mt-0.5">{hint}</span>}
           </dd>
         </Fragment>
       ))}
@@ -110,6 +114,24 @@ export function SystemInfoPage() {
                   {
                     label: 'Attachments',
                     value: info.attachments_enabled ? 'Enabled' : 'Disabled',
+                  },
+                  {
+                    label: 'Encryption at rest',
+                    value: info.secret_storage_enabled ? 'Enabled' : 'Disabled',
+                    warn: !info.secret_storage_enabled,
+                    hint: info.secret_storage_enabled ? undefined : (
+                      <>
+                        Confidential MCP clients can’t be configured. Set{' '}
+                        <code className="select-all rounded bg-gray-900 px-1 not-italic text-gray-300">
+                          SECRETBOX_KEYS={'{"1":"<key>"}'}
+                        </code>{' '}
+                        (generate:{' '}
+                        <code className="select-all rounded bg-gray-900 px-1 not-italic text-gray-300">
+                          openssl rand -base64 32
+                        </code>
+                        ) and restart.
+                      </>
+                    ),
                   },
                 ]}
               />
