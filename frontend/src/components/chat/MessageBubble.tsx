@@ -11,6 +11,7 @@ import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils
 import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal, PencilLine } from 'lucide-react';
 import { useComposerStore } from '@/store/composer';
 import * as api from '@/services/api';
+import { engineLabel } from '@/lib/engines';
 import {
   messageContentToMarkdown,
   buildExportMarkdown,
@@ -234,9 +235,14 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
     // Prefer the model stored on the turn itself (exact); fall back to the session's
     // currently-resolved choice for older messages saved before per-turn model capture.
     const modelId = message.model ?? currentSession?.model ?? config?.model;
+    // Prefer the engine captured on the turn itself (exact); fall back to the session's
+    // current pin, then the deployment default, for messages saved before per-turn capture.
+    const engineId =
+      message.engine ?? currentSession?.engine ?? config?.default_engine ?? null;
     return {
       conversationName: user?.display_name,
       model: modelId && config ? api.modelLabel(config.available_models, modelId) : modelId ?? null,
+      engine: engineId ? engineLabel(engineId) : null,
       date: message.created_at,
       sessionId: message.session_id,
       messageId: message.id,

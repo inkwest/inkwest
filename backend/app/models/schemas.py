@@ -196,6 +196,8 @@ class MessageResponse(MessageBase):
     attachments: list[dict[str, Any]] | None = None
     # Model that produced this assistant turn (NULL for older/non-assistant rows).
     model: str | None = None
+    # Agentic engine that produced this assistant turn (NULL for older/non-assistant rows).
+    engine: str | None = None
     token_count: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None

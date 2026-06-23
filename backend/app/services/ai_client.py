@@ -16,6 +16,7 @@ from anthropic import AsyncAnthropic, AsyncAnthropicBedrock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.models.session import Session
 from app.services.model_registry import (
@@ -221,11 +222,18 @@ def get_orchestrator():
 
                 logger.info(f"Engine inkwest-agent (sandboxed) for model {model}")
                 orchestrate = orchestrate_chat_inkwest_agent
+                used_engine = INKWEST_AGENT
             else:
                 from app.services.orchestrator_cli import orchestrate_chat_cli
 
                 orchestrate = orchestrate_chat_cli
-            async for event in orchestrate(db=db, session_id=session_id, **kwargs):
+                used_engine = "claude-cli"
+            metrics.set_turn_engine(used_engine)
+            metrics.set_turn_model(model)
+            metrics.chat_turns_total.labels(engine=used_engine, model=model).inc()
+            async for event in orchestrate(
+                db=db, session_id=session_id, engine=used_engine, **kwargs
+            ):
                 yield event
 
         logger.info("Using Claude CLI orchestrator (engine-dispatched)")
@@ -257,7 +265,13 @@ def get_orchestrator():
             )
             orchestrate = orchestrate_chat_converse if is_open else orchestrate_chat
             logger.info(f"Bedrock turn via {'Converse' if is_open else 'Anthropic'}: {model}")
-            async for event in orchestrate(db=db, session_id=session_id, **kwargs):
+            used_engine = "bedrock-converse" if is_open else "bedrock-anthropic"
+            metrics.set_turn_engine(used_engine)
+            metrics.set_turn_model(model)
+            metrics.chat_turns_total.labels(engine=used_engine, model=model).inc()
+            async for event in orchestrate(
+                db=db, session_id=session_id, engine=used_engine, **kwargs
+            ):
                 yield event
 
         return _dispatch_bedrock
@@ -265,4 +279,19 @@ def get_orchestrator():
     from app.services.orchestrator import orchestrate_chat
 
     logger.info(f"Using Anthropic orchestrator with provider: {settings.ai_provider}")
-    return orchestrate_chat
+
+    async def _dispatch_anthropic(
+        db: AsyncSession, session_id: "str | UUID", **kwargs: Any
+    ) -> AsyncIterator[Any]:
+        # Direct Anthropic API: one engine, but resolve the model so the turn counter
+        # carries the same engine+model labels as the other dispatch paths.
+        model = await resolve_session_model(db, session_id)
+        metrics.set_turn_engine("anthropic")
+        metrics.set_turn_model(model)
+        metrics.chat_turns_total.labels(engine="anthropic", model=model).inc()
+        async for event in orchestrate_chat(
+            db=db, session_id=session_id, engine="anthropic", **kwargs
+        ):
+            yield event
+
+    return _dispatch_anthropic

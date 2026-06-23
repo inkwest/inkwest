@@ -12,11 +12,11 @@ describe('formatBuildTime', () => {
     expect(formatBuildTime('not-a-date')).toBe('not-a-date');
   });
 
-  it('humanizes a valid ISO-8601 timestamp', () => {
+  it('renders local-time YYYY-MM-DD HH:MM:SS (24h)', () => {
     const out = formatBuildTime('2026-06-22T10:00:00Z');
     expect(out).not.toBeNull();
     expect(out).not.toContain('Invalid');
-    // Locale/timezone vary in CI, but the year is always rendered.
-    expect(out).toContain('2026');
+    // Local TZ varies in CI, so assert the shape rather than exact value.
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 });

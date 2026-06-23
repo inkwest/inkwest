@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import CurrentUser, check_cluster_access, get_db
 from app.api.routes.chat import close_session_connections
+from app.core import metrics
 from app.core.config import get_settings
 from app.models.cluster import Cluster
 from app.models.message import Message
@@ -199,6 +200,7 @@ async def create_session(
     await db.flush()
     await db.refresh(session)
     await db.commit()
+    metrics.chat_sessions_created_total.inc()
 
     await notify(
         {"type": "session_created", "session_id": str(session.id)}, user_id=str(current_user.id)

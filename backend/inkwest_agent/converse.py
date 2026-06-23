@@ -31,6 +31,11 @@ READ_SKILL_TOOL = "read_skill"
 # skill library can't blow Bedrock's toolSpec description size limit and fail the turn.
 _SKILL_DESC_MAX = 200
 
+# The synthetic clock tool. Open-weight Converse models have no reliable sense of "now"
+# (they guess the year), so an authoritative on-demand wall clock complements the date
+# anchored in the system prompt — accuracy when the model asks, reliability up front.
+CURRENT_DATETIME_TOOL = "current_datetime"
+
 # Bound the call so a hung/credential-stalled Bedrock endpoint can't pin the
 # process: boto3 runs in a worker thread and cannot be cancelled mid-call.
 _BEDROCK_CONFIG = Config(
@@ -246,20 +251,36 @@ def skill_tool_spec(skills: list[SkillSpec]) -> dict[str, Any] | None:
     return _tool_spec(READ_SKILL_TOOL, description, schema)
 
 
+def datetime_tool_spec() -> dict[str, Any]:
+    """Build the synthetic ``current_datetime`` tool (authoritative wall clock).
+
+    No input; returns the agent's current UTC datetime so the model can ground relative
+    ranges and absolute timestamps instead of guessing the date. Always advertised — it's
+    free and every connector (kubectl/AWS/Coralogix) benefits from a correct "now".
+    """
+    description = (
+        "Return the current UTC date and time (ISO 8601). Call this whenever you need "
+        "the current time, today's date, or to build a relative time range (last 24h, "
+        "this week). Use the returned value verbatim — never assume the date or year."
+    )
+    return _tool_spec(CURRENT_DATETIME_TOOL, description, {"type": "object", "properties": {}})
+
+
 def to_converse_tools(
     skills: list[SkillSpec] | None = None,
     mcp_tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Translate the tool surfaces into one Converse toolConfig.
 
-    Base read-only tools (kubectl/connectors) + an optional synthetic ``read_skill`` tool
-    (P1.7 skills) + optional MCP tools already in Converse ``toolSpec`` shape (P1.7 MCP).
-    Skills/MCP re-express claude-cli's native capability surfaces as Converse tools — the
-    loop has no native skill/MCP system.
+    Base read-only tools (kubectl/connectors) + the always-on synthetic ``current_datetime``
+    clock + an optional synthetic ``read_skill`` tool (P1.7 skills) + optional MCP tools
+    already in Converse ``toolSpec`` shape (P1.7 MCP). Skills/MCP/clock re-express
+    capabilities the Converse loop has no native system for.
     """
     tools: list[dict[str, Any]] = [
         _tool_spec(t["name"], t["description"], t["input_schema"]) for t in get_tool_definitions()
     ]
+    tools.append(datetime_tool_spec())
     skill_tool = skill_tool_spec(skills or [])
     if skill_tool is not None:
         tools.append(skill_tool)

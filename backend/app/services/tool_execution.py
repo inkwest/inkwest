@@ -11,11 +11,13 @@ once for all three.
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core import metrics
 from app.services.events import (
     ChatEvent,
     connector_required_event,
@@ -23,6 +25,7 @@ from app.services.events import (
     tool_start_event,
 )
 from app.tools.connector_exec import connector_for_tool, is_needs_auth
+from app.tools.definitions import ALL_TOOL_NAMES
 from app.tools.dispatch import execute_tool
 from app.tools.exec_context import ToolExecContext
 
@@ -104,12 +107,25 @@ async def execute_tool_calls(
             context_name=context_name,
             projected_creds=projected_creds,
         )
+        started_at = time.monotonic()
         try:
             output, is_error = await execute_tool(tool_name, tool_input, tool_ctx)
         except Exception as e:
             logger.exception(f"Exception executing tool {tool_name}")
             output = f"Error executing tool: {str(e)}"
             is_error = True
+        # Label with the RAW model-supplied tool name — including names outside our schema —
+        # deliberately, to observe what tools the model attempts (hallucinations included).
+        # Trade-off accepted: a flood of distinct bogus names would grow label cardinality;
+        # revisit (clamp to a known set) if that shows up in practice.
+        # The duration histogram is per-bucket per-label, so clamp the raw name to the known
+        # set here (a hallucinated name → "unknown") to bound series. The counter
+        # (record_tool_call) keeps the raw name deliberately.
+        dur_tool = tool_name if tool_name in ALL_TOOL_NAMES else "unknown"
+        metrics.tool_duration_seconds.labels(
+            tool=dur_tool, engine=metrics.turn_engine(), model=metrics.turn_model()
+        ).observe(time.monotonic() - started_at)
+        metrics.record_tool_call(tool_name, is_error)
 
         yield tool_result_event(tool_name, output, tool_id, is_error)
 

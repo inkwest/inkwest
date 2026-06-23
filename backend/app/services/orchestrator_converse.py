@@ -167,6 +167,7 @@ async def orchestrate_chat_converse(
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
     persist_user_message: bool = True,
+    engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Tool-use loop over the Bedrock Converse API. Mirrors orchestrate_chat."""
     if isinstance(session_id, str):
@@ -211,6 +212,12 @@ async def orchestrate_chat_converse(
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
     system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
+    # NB: intentionally NO current-date anchor / current_datetime tool here, unlike the
+    # sandboxed inkwest-agent path (orchestrator_inkwest_agent.py + inkwest_agent.clock).
+    # Open-weight vendors — the models that guess the year — are gated behind the
+    # inkwest-agent engine, so they always route to that path; this in-process loop only
+    # ever serves Anthropic-on-Converse, which grounds the date fine. Add both here if the
+    # gating ever changes.
     model = await resolve_session_model(db, session_id)
 
     # A custom row may pin an ARN (provisioned/imported model) as the invoke target.
@@ -311,6 +318,7 @@ async def orchestrate_chat_converse(
                 output_tokens=iter_output_tokens,
                 latency_ms=iter_latency_ms,
                 model=model,
+                engine=engine,
             )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")

@@ -80,3 +80,26 @@ async def test_immediate_cancel_synthesizes_all():
     exec_mock.assert_not_awaited()
     assert [b["tool_use_id"] for b in run.tool_results] == ["toolu_a", "toolu_b"]
     assert all(b["content"] == CANCELLED_TOOL_RESULT for b in run.tool_results)
+
+
+@pytest.mark.asyncio
+async def test_tool_name_recorded_raw_for_metrics():
+    """The raw model-supplied tool name becomes the metric label as-is — kept deliberately
+    (even for names outside our schema) to observe what tools the model attempts."""
+    from prometheus_client import REGISTRY
+
+    name = "probe_" + uuid.uuid4().hex
+    run = ToolRunResult()
+    with patch(
+        "app.services.tool_execution.execute_tool", new=AsyncMock(return_value=("nope", True))
+    ):
+        await _drain(run, [{"id": "t1", "name": name, "input": {}}], None)
+
+    # No dispatcher ran in this unit test, so engine/model context default to "unknown".
+    assert (
+        REGISTRY.get_sample_value(
+            "inkwest_tool_calls_total",
+            {"tool": name, "is_error": "True", "engine": "unknown", "model": "unknown"},
+        )
+        or 0
+    ) >= 1

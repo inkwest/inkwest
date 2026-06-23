@@ -35,6 +35,9 @@ dependencies = [
     "PyYAML>=6.0",
     # libsodium SecretBox (XSalsa20-Poly1305) — at-rest field encryption for operator secrets
     "PyNaCl>=1.5.0",
+    # Prometheus metrics exporter on a dedicated port (app.core.metrics_server). >=0.20:
+    # start_http_server returns (server, thread) so the lifespan can stop it cleanly.
+    "prometheus-client>=0.20.0",
 ]
 
 [project.optional-dependencies]

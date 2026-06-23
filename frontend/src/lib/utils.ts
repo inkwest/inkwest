@@ -7,21 +7,15 @@ export function cn(...inputs: ClassValue[]) {
 
 /**
  * Humanize the backend build timestamp ($CI_JOB_STARTED_AT, ISO-8601) for the
- * version hover. Returns null when there's nothing real to show ("unknown" /
- * empty), and falls back to the raw string for an unparseable value rather than
- * rendering "Invalid Date".
+ * version hover, as local-time `YYYY-MM-DD HH:MM:SS` (24h). Returns null when
+ * there's nothing real to show ("unknown" / empty), and falls back to the raw
+ * string for an unparseable value rather than rendering "Invalid Date".
  */
 export function formatBuildTime(ts: string | null): string | null {
   if (!ts || ts === 'unknown') return null;
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return `${localIsoDate(d)} ${localTime(d)}`;
 }
 
 export function formatDate(date: string): string {

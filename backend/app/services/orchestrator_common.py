@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.services.budget_service import record_usage
 from app.services.messages import update_session_stats
 
@@ -41,6 +42,12 @@ async def finalize_turn(
     Persistence is best-effort: on failure the turn still completes, with
     ``usage_tracking_failed`` flagged in the metadata for the client.
     """
+    # Loop iterations this turn took (API orchestrators only — the CLI/agent run their own
+    # loops elsewhere). finalize_turn runs once per completed turn, so this is the right spot.
+    metrics.orchestration_iterations.labels(engine=metrics.turn_engine(), model=model).observe(
+        iteration
+    )
+
     usage_failed = False
     try:
         await update_session_stats(

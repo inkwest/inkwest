@@ -340,6 +340,58 @@ async def _run_broker(spies, fake_lines, *, cancel_event=None, **kwargs):
 
 class TestOrchestrateInkwestAgent:
     @pytest.mark.asyncio
+    async def test_tool_results_routed_to_metrics(self):
+        """The agent relay counts streamed tool_result events: native → tool_calls_total,
+        mcp__<server>__<tool> → mcp_tool_calls_total (server/tool parsed). Locks the relay
+        wiring, not just record_tool_call's routing in isolation."""
+        from prometheus_client import REGISTRY
+
+        patches, spies = _patch_broker(history=[], entry=None)
+        lines = [
+            json.dumps(
+                {
+                    "type": "tool_result",
+                    "tool_name": "l1_native_probe",
+                    "content": "x",
+                    "tool_use_id": "a",
+                    "is_error": False,
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_result",
+                    "tool_name": "mcp__l1srv__l1tool",
+                    "content": "y",
+                    "tool_use_id": "b",
+                    "is_error": False,
+                }
+            ),
+            json.dumps({"type": "done", "metadata": {}}),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, lines)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        # No dispatcher ran, so engine/model context defaults to "unknown".
+        common = {"engine": "unknown", "model": "unknown", "is_error": "False"}
+        assert (
+            REGISTRY.get_sample_value(
+                "inkwest_tool_calls_total", {"tool": "l1_native_probe", **common}
+            )
+            or 0
+        ) >= 1
+        assert (
+            REGISTRY.get_sample_value(
+                "inkwest_mcp_tool_calls_total", {"server": "l1srv", "tool": "l1tool", **common}
+            )
+            or 0
+        ) >= 1
+
+    @pytest.mark.asyncio
     async def test_turn_spec_assembly(self):
         entry = SimpleNamespace(arn="arn:aws:bedrock:::model/x", options={"max_tokens": 2048})
         patches, spies = _patch_broker(

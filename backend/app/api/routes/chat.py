@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_or_create_dev_user
+from app.core import metrics
 from app.core.auth import extract_ws_ticket, verify_ws_ticket
 from app.core.config import get_settings
 from app.core.database import async_session_maker
@@ -54,6 +55,10 @@ async def connect(session_id: str, websocket: WebSocket) -> None:
     async with _connections_lock:
         active_connections[session_id].add(websocket)
         count = len(active_connections[session_id])
+        active_total = sum(len(s) for s in active_connections.values())
+    metrics.ws_connections_total.inc()
+    # set() to the live total (not inc/dec) so the gauge can't drift on an unpaired path.
+    metrics.ws_connections_active.set(active_total)
     logger.info(
         "WebSocket connected",
         extra={
@@ -71,6 +76,8 @@ async def disconnect(session_id: str, websocket: WebSocket) -> None:
         if not active_connections[session_id]:
             del active_connections[session_id]
         remaining = len(active_connections.get(session_id, set()))
+        active_total = sum(len(s) for s in active_connections.values())
+    metrics.ws_connections_active.set(active_total)
     logger.info(
         "WebSocket disconnected",
         extra={

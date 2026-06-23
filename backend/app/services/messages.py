@@ -95,6 +95,7 @@ async def save_message(
     thinking_content: str | None = None,
     latency_ms: int | None = None,
     model: str | None = None,
+    engine: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
 ) -> Message:
     """
@@ -114,6 +115,7 @@ async def save_message(
         thinking_content: AI reasoning/thinking content if extended thinking enabled
         latency_ms: API call latency in milliseconds
         model: Model that produced this turn (assistant messages) for cost attribution
+        engine: Agentic engine that produced this turn (assistant messages)
 
     Returns:
         Created Message object
@@ -143,6 +145,7 @@ async def save_message(
         thinking_content=thinking_content,
         latency_ms=latency_ms,
         model=model,
+        engine=engine,
         attachments=attachments,
     )
     db.add(message)

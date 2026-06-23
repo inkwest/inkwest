@@ -101,6 +101,8 @@ export interface ExportFooterMeta {
   conversationName?: string | null;
   /** Resolved model label for the session (display name, not the raw id). */
   model?: string | null;
+  /** Resolved agentic engine label (display name) the turn ran on. */
+  engine?: string | null;
   /** Message creation timestamp (ISO) — rendered as the message's own date. */
   date: string;
   sessionId: string;
@@ -114,6 +116,7 @@ function footerSegments(meta: ExportFooterMeta): string[] {
   return [
     'Powered by Inkwest',
     meta.conversationName ? `Conversation with ${meta.conversationName}` : null,
+    meta.engine || null,
     meta.model || null,
     formatFullTimestamp(meta.date),
   ].filter((s): s is string => Boolean(s));

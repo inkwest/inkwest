@@ -23,10 +23,12 @@ sockets to the replica running its turn, or move the buffer to shared storage.
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core import metrics
 from app.core.database import async_session_maker
 from app.services.events import ChatEvent, error_event
 
@@ -110,15 +112,34 @@ class TurnRunner:
             turn.cancel_event.set()
 
     async def _run(self, turn: _Turn, orchestrate: Orchestrator, kwargs: dict[str, Any]) -> None:
+        # chat_turns_total is recorded in the dispatcher (labeled engine+model); here we only
+        # track in-flight saturation, duration and errors (engine-agnostic).
+        metrics.chat_turns_active.inc()
+        started_at = time.monotonic()
+        # Count both a raised exception and an emitted terminal error event (provider API
+        # error, max-iterations) — the orchestrators surface those as events, not raises.
+        errored = False
         try:
             # Own DB session: must outlive the request/WS that triggered the turn.
             async with async_session_maker() as db:
                 async for event in orchestrate(db=db, cancel_event=turn.cancel_event, **kwargs):
+                    if event.type == "error":
+                        errored = True
                     await self._emit(turn, event.to_dict())
         except Exception:
+            errored = True
             logger.exception("Turn failed", extra={"session_id": turn.session_id})
             await self._emit(turn, error_event("An unexpected server error occurred").to_dict())
         finally:
+            # The dispatcher (same task) has set engine+model by now; default 'unknown' if a
+            # turn somehow failed before dispatch.
+            engine, model = metrics.turn_engine(), metrics.turn_model()
+            metrics.chat_turns_active.dec()
+            metrics.turn_duration_seconds.labels(engine=engine, model=model).observe(
+                time.monotonic() - started_at
+            )
+            if errored:
+                metrics.turn_errors_total.labels(engine=engine, model=model).inc()
             async with self._lock:
                 turn.done = True
                 subscribers = list(turn.subscribers)

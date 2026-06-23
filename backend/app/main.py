@@ -38,6 +38,7 @@ from app.api.routes import (
 from app.core.config import get_settings
 from app.core.database import async_session_maker, close_db, init_db
 from app.core.logging import AccessLogMiddleware, access_log_config, get_logger, setup_logging
+from app.core.metrics_server import start_metrics_server, stop_metrics_server
 from app.core.telemetry import shutdown_telemetry
 from app.services.app_settings import load_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
@@ -69,6 +70,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         commit_hash=settings.commit_hash,
         build_timestamp=settings.build_timestamp,
     )
+    # Start the metrics exporter first so the process is scrapeable even while the slow
+    # startup steps below run. Best-effort: a bind clash (e.g. a second uvicorn worker
+    # racing the same port) must degrade metrics, not crash the API.
+    if settings.metrics_enabled:
+        try:
+            start_metrics_server(settings.metrics_port)
+        except OSError:
+            logger.exception("metrics_server_start_failed", port=settings.metrics_port)
     await init_db()
     logger.info("database_initialized")
     # Seed the hardcoded system prompt as the DB default on first startup.
@@ -160,6 +169,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await stop_listener()
     await close_db()
     logger.info("database_closed")
+    if settings.metrics_enabled:
+        stop_metrics_server()
     shutdown_telemetry()
     logger.info("telemetry_shutdown")
 

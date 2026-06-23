@@ -22,10 +22,12 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.constants import MAX_RESPONSE_TOKENS
 from app.services import attachments as attachments_svc
@@ -70,6 +72,7 @@ async def orchestrate_chat_inkwest_agent(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict[str, Any]] | None = None,
     persist_user_message: bool = True,
+    engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Broker one turn through the sandboxed ``inkwest-agent``. Mirrors orchestrate_chat_cli.
 
@@ -150,6 +153,23 @@ async def orchestrate_chat_inkwest_agent(
         f"You are running as the **{model_label}** model (id `{model}`) on the Inkwest "
         "Agent engine (Amazon Bedrock, Converse API). When asked which model or engine "
         "you are, answer with this."
+    )
+
+    # Anchor today's date in the prompt. Open-weight Converse models routinely guess the
+    # year wrong (e.g. emit 2024 timestamps in metric queries) and don't chain a datetime
+    # tool's output into later tool args — yielding empty windows that read as false "no
+    # data" findings. DATE granularity, not second: a per-turn timestamp would make the
+    # system prompt unique every turn and defeat any prompt cache later added to this path
+    # (none today — no cachePoint here yet); a date stays stable within a UTC day and still
+    # fixes the year/month guess. For an exact instant the agent has the synthetic
+    # `current_datetime` tool (see the caveat) — accuracy on demand, reliability up front.
+    today = datetime.now(UTC).date().isoformat()
+    system_prompt += (
+        "\n\n## Current date\n"
+        f"Today's UTC date is **{today}** (captured at turn start). Use it for the "
+        "year/month in timestamps and for relative ranges (today, last 24h, this week). "
+        "This date is approximate — for an exact current instant, or before any "
+        "time-sensitive query, call the `current_datetime` tool and re-check accurately."
     )
 
     # Pre-provide the session's connector creds: build_connector_env renews-on-read and
@@ -304,7 +324,9 @@ async def orchestrate_chat_inkwest_agent(
             nonlocal assistant_blocks, pending_results
             if assistant_blocks:
                 try:
-                    await save_message(db, session_id, "assistant", assistant_blocks, model=model)
+                    await save_message(
+                        db, session_id, "assistant", assistant_blocks, model=model, engine=engine
+                    )
                 except Exception as e:
                     logger.error(f"Failed to save assistant message: {e}")
             if pending_results:
@@ -347,6 +369,11 @@ async def orchestrate_chat_inkwest_agent(
                         }
                     )
                 elif event.type == "tool_result":
+                    # Count agent-side tools here (the agent runs its own executor in the
+                    # unscraped sandbox; the backend only sees the streamed result). Covers
+                    # skill/MCP tools that never touch tool_execution.execute_tool_calls —
+                    # record_tool_call routes mcp__* to the MCP metric.
+                    metrics.record_tool_call(event.tool_name or "unknown", event.is_error)
                     pending_results.append(
                         {
                             "type": "tool_result",

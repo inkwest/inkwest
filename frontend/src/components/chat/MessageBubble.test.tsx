@@ -5,6 +5,7 @@ import type { Message } from '@/types/api';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
+import { useSessionsStore } from '@/store/sessions';
 import { useComposerStore } from '@/store/composer';
 import { formatTimestamp, formatFullTimestamp } from '@/lib/utils';
 
@@ -296,6 +297,62 @@ describe('MessageBubble', () => {
       const copied = writeText.mock.calls[0][0] as string;
       expect(copied).toContain('Claude Haiku 4.5');
       expect(copied).not.toContain('Claude Opus 4.8');
+      vi.unstubAllGlobals();
+    });
+
+    it('includes the engine label in the footer (session pin over deployment default)', async () => {
+      useConfigStore.setState({
+        config: {
+          model: 'claude-opus-4-8',
+          default_engine: 'claude-cli',
+          available_models: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8' }],
+        } as never,
+      });
+      useSessionsStore.setState({ currentSession: { engine: 'inkwest-agent' } as never });
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      const msg: Message = { ...baseMessage, role: 'assistant', content: 'Answer.' };
+      render(<MessageBubble message={msg} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /more copy options/i }));
+      fireEvent.click(screen.getByRole('menuitem', { name: /copy as markdown/i }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain('Inkwest Agent · Claude Opus 4.8');
+      useSessionsStore.setState({ currentSession: null });
+      vi.unstubAllGlobals();
+    });
+
+    it("uses the message's own engine over the session pin in the footer", async () => {
+      useConfigStore.setState({
+        config: {
+          model: 'claude-opus-4-8',
+          default_engine: 'claude-cli',
+          available_models: [{ id: 'claude-opus-4-8', label: 'Claude Opus 4.8' }],
+        } as never,
+      });
+      // Session is now pinned to the CLI, but this older turn ran on the agent — the
+      // footer must reflect the turn, not the session's current pin.
+      useSessionsStore.setState({ currentSession: { engine: 'claude-cli' } as never });
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      const msg: Message = {
+        ...baseMessage,
+        role: 'assistant',
+        content: 'Answer.',
+        engine: 'inkwest-agent',
+      };
+      render(<MessageBubble message={msg} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /more copy options/i }));
+      fireEvent.click(screen.getByRole('menuitem', { name: /copy as markdown/i }));
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain('Inkwest Agent');
+      expect(copied).not.toContain('Claude Code');
+      useSessionsStore.setState({ currentSession: null });
       vi.unstubAllGlobals();
     });
 
