@@ -26,6 +26,7 @@ leaking secrets into the kubeconfig itself.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -340,6 +341,7 @@ def _build_merged_kubeconfig(
     cfg_clusters: list[dict[str, Any]] = []
     contexts: list[dict[str, Any]] = []
     users: list[dict[str, Any]] = []
+    used_aliases: set[str] = set()
     for c in clusters:
         arn = c["arn"]
         # Sanitize each segment (account_name is an org-controlled display string) and
@@ -348,6 +350,13 @@ def _build_merged_kubeconfig(
             f"{_safe_seg(c['account_name'])}"
             f"--{_safe_seg(c['region'] or 'noregion')}--{_safe_seg(c['cluster'])}"
         )
+        # Two distinct ARNs can still collapse to one alias — e.g. two SSO accounts that
+        # share a display name, each with a same-named cluster in the same region. Keep
+        # context names unique (kubectl --context must be unambiguous) by suffixing a
+        # short, stable ARN hash on collision.
+        if alias in used_aliases:
+            alias = f"{alias}--{hashlib.sha1(arn.encode()).hexdigest()[:8]}"
+        used_aliases.add(alias)
         cfg_clusters.append(
             {
                 "name": arn,

@@ -294,6 +294,55 @@ async def test_refresh_keeps_kube_dir_inode_stable_across_republish():
         cleanup_aws_files(sid)
 
 
+async def test_merged_kubeconfig_wires_each_context_to_its_own_cluster():
+    """With multiple clusters in one config, each context's cluster/user refs and the
+    exec --cluster-name must resolve to the RIGHT cluster — no cross-wiring in the merge."""
+    sid = uuid.uuid4()
+    eks = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
+    try:
+        with patch("boto3.client", return_value=eks):
+            await refresh_session_eks(sid, _cred())
+        doc = yaml.safe_load(open(os.path.join(session_kube_dir(sid), "config")).read())
+        cluster_arns = {c["name"] for c in doc["clusters"]}
+        exec_cluster = {}  # arn -> exec --cluster-name
+        for u in doc["users"]:
+            args = u["user"]["exec"]["args"]
+            exec_cluster[u["name"]] = args[args.index("--cluster-name") + 1]
+        assert len(doc["contexts"]) == 2
+        for ctx in doc["contexts"]:
+            arn = ctx["context"]["cluster"]
+            assert ctx["context"]["user"] == arn  # context binds the same arn for cluster+user
+            assert arn in cluster_arns  # cluster ref resolves
+            assert arn in exec_cluster  # user ref resolves
+            assert arn.endswith("cluster/" + exec_cluster[arn])  # exec targets THIS cluster
+    finally:
+        cleanup_aws_files(sid)
+
+
+def test_merged_kubeconfig_disambiguates_colliding_context_aliases():
+    """Two distinct ARNs that sanitize to the same alias (e.g. two same-display-named
+    accounts, each with a same-named cluster in one region) must still get unique context
+    names so `kubectl --context` is unambiguous."""
+    from app.services.eks_refresh import _build_merged_kubeconfig
+
+    base = {
+        "account_name": "acme",
+        "region": "eu-west-1",
+        "cluster": "prod",
+        "endpoint": "https://x",
+        "ca": "Q0E=",
+        "profile": "p",
+    }
+    clusters = [
+        {**base, "arn": "arn:aws:eks:eu-west-1:111111111111:cluster/prod"},
+        {**base, "arn": "arn:aws:eks:eu-west-1:222222222222:cluster/prod"},
+    ]
+    names = [c["name"] for c in _build_merged_kubeconfig(clusters, "aws", "/c", "/cfg")["contexts"]]
+    assert len(names) == len(set(names)) == 2  # unique despite the same base alias
+    assert "acme--eu-west-1--prod" in names
+    assert any(n.startswith("acme--eu-west-1--prod--") for n in names)  # hash-suffixed dup
+
+
 async def test_concurrent_refreshes_use_distinct_staging():
     """Two refreshes for one session must not share a staging path (one's write would
     clobber the other's in-flight file). Distinct random staging => both complete."""

@@ -197,7 +197,7 @@ def cleanup_aws_files(session_id: UUID, *, keep_dirs: bool = False) -> None:
         return
     # Full clean while keeping the bind-mounted dirs: empty `.aws`/`kube` in place
     # (stable inode for the live mount) and drop everything else under <id> — notably
-    # any `kube.new.<hex>` staging an interrupted refresh may have orphaned.
+    # any `kube.config.<hex>` staging an interrupted refresh may have orphaned.
     try:
         entries = os.listdir(base)
     except FileNotFoundError:
