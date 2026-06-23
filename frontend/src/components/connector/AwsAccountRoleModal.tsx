@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
@@ -29,9 +29,20 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // After granting an eks-* role we stay open to show EKS discovery, then auto-close.
+  const [grantWaiting, setGrantWaiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Refresh re-enumerates from the SSO portal (slow) — surface its progress.
-  const refreshProgress = useAwsEnumProgress(sessionId, refreshing);
+  // One bar for every slow phase: SSO refresh (enumerating) and the grant's STS
+  // minting / EKS discovery (granting → discovering). The backend reports the phase.
+  const progress = useAwsEnumProgress(sessionId, refreshing || grantWaiting);
+  // Arm the discovery-finished close only once we've actually observed progress, so
+  // the first (still-empty) poll after a grant can't close the modal prematurely.
+  const sawProgress = useRef(false);
+  // Hold onClose in a ref so the auto-close effect doesn't depend on its identity:
+  // a parent re-render handing a fresh onClose must not re-run the effect and fire a
+  // second close. Kept current every render.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   // load(false): cached list (instant); load(true): force a fresh SSO enumeration.
   const load = useCallback(
@@ -66,8 +77,36 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     if (!isOpen) return;
     setSelected(new Set());
     setQuery('');
+    setGrantWaiting(false);
+    sawProgress.current = false;
     void load(false);
   }, [isOpen, sessionId, load]);
+
+  // While waiting on EKS discovery, close once the backend goes idle again — but
+  // only after we've seen at least one non-idle poll (sawProgress), so a poll that
+  // lands before the entry is published can't trigger an immediate close. Setting
+  // grantWaiting=false before closing also makes a re-run a no-op (single close).
+  useEffect(() => {
+    if (!grantWaiting) return;
+    if (progress) {
+      sawProgress.current = true;
+    } else if (sawProgress.current) {
+      setGrantWaiting(false);
+      onCloseRef.current();
+    }
+  }, [grantWaiting, progress]);
+
+  // Safety net: never leave the picker hung if discovery never reports idle (backend
+  // died, or a cross-replica poll only ever sees "idle" so sawProgress never arms).
+  // Discovery is seconds; this just bounds the worst case.
+  useEffect(() => {
+    if (!grantWaiting) return;
+    const t = setTimeout(() => {
+      setGrantWaiting(false);
+      onCloseRef.current();
+    }, 90_000);
+    return () => clearTimeout(t);
+  }, [grantWaiting]);
 
   const nameById = useMemo(
     () => Object.fromEntries(accounts.map((a) => [a.account_id, a.account_name])),
@@ -138,11 +177,16 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
       const [account_id, role_name] = k.split('::');
       return { account_id, role_name };
     });
+    // An eks-* pick triggers EKS discovery the backend tracks; stay open to show it
+    // (auto-closing when it settles). Any other pick has nothing to wait on — close
+    // immediately, as before. The backend gates the tracked phase on the same prefix.
+    const hasEks = selections.some((s) => s.role_name.toLowerCase().startsWith('eks-'));
     setSubmitting(true);
     setError(null);
     try {
       await selectAwsRoles(sessionId, selections);
-      onClose();
+      if (hasEks) setGrantWaiting(true);
+      else onClose();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -150,11 +194,14 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     }
   };
 
-  // Block dismissal while a grant is in flight — the Modal closes on Escape/backdrop
-  // (and its ✕) unconditionally, so guarding only the Cancel button would be a false
-  // lock that lets the user unmount mid-mint. STS minting is short and atomic.
+  // Block dismissal while the grant POST is in flight — the Modal closes on
+  // Escape/backdrop (and its ✕) unconditionally, so guarding only the Cancel button
+  // would be a false lock that lets the user unmount mid-mint. Once minting is done
+  // and we're only watching EKS discovery (grantWaiting), closing is allowed: it just
+  // stops watching — discovery keeps running in the background.
   const handleClose = () => {
     if (submitting) return;
+    setGrantWaiting(false);
     onClose();
   };
 
@@ -195,10 +242,11 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
         </div>
 
         {loading && <p className="text-gray-400 text-sm shrink-0">Chargement des comptes…</p>}
-        {/* Shown only while actively enumerating; header/footer stay pinned, so its
-            appearance just shortens the scrolling list — no layout jump. */}
-        {refreshProgress && (
-          <div className="mb-2 shrink-0"><AwsEnumProgressBar progress={refreshProgress} /></div>
+        {/* Shown while any phase runs (refresh enumeration, or a grant's minting / EKS
+            discovery); header/footer stay pinned, so its appearance just shortens the
+            scrolling list — no layout jump. */}
+        {progress && (
+          <div className="mb-2 shrink-0"><AwsEnumProgressBar progress={progress} /></div>
         )}
         {error && <p className="text-red-400 text-sm shrink-0">{error}</p>}
         {!loading && grouped.length === 0 && !error && (
@@ -253,13 +301,19 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           <span className="text-xs text-gray-500">
             {submitting
               ? `Création de ${selected.size} accès en cours…`
-              : `${selected.size} sélectionné(s)`}
+              : grantWaiting
+                ? 'Découverte des clusters EKS en cours…'
+                : `${selected.size} sélectionné(s)`}
           </span>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={handleClose} disabled={submitting}>
-              Annuler
+              {grantWaiting ? 'Fermer' : 'Annuler'}
             </Button>
-            <Button onClick={handleConfirm} disabled={selected.size === 0} isLoading={submitting}>
+            <Button
+              onClick={handleConfirm}
+              disabled={selected.size === 0 || grantWaiting}
+              isLoading={submitting}
+            >
               Donner accès
             </Button>
           </div>

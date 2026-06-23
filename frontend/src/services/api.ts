@@ -301,8 +301,9 @@ export async function refreshAwsOptions(
   return fetchAPI(`/api/connectors/${sessionId}/aws/options/refresh`, { method: 'POST' });
 }
 
-// Live progress of the SSO account enumeration (the slow part of a grant/refresh).
-// phase "idle" → nothing running; "enumerating" → done/total accounts processed.
+// Live progress of the slow AWS phases. phase "idle" → nothing running;
+// "enumerating" → SSO accounts listed; "granting" → STS profiles minted;
+// "discovering" → EKS clusters discovered. done/total scopes the active phase.
 export async function getAwsEnumProgress(
   sessionId: string
 ): Promise<{ phase: string; done: number; total: number }> {

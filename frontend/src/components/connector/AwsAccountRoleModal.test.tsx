@@ -5,12 +5,22 @@ import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 vi.mock('@/services/api', () => ({
   getAwsOptions: vi.fn(),
   refreshAwsOptions: vi.fn(),
+  getAwsEnumProgress: vi.fn().mockResolvedValue({ phase: 'idle', done: 0, total: 0 }),
 }));
 
-import { getAwsOptions, refreshAwsOptions } from '@/services/api';
+// The grant goes through the store action; stub it so we can assert the flow.
+const store = vi.hoisted(() => ({ selectAwsRoles: vi.fn() }));
+vi.mock('@/store/connectors', () => ({
+  useConnectorsStore: (selector?: (s: typeof store) => unknown) =>
+    selector ? selector(store) : store,
+}));
+
+import { getAwsOptions, refreshAwsOptions, getAwsEnumProgress } from '@/services/api';
 
 const mockGet = vi.mocked(getAwsOptions);
 const mockRefresh = vi.mocked(refreshAwsOptions);
+const mockProgress = vi.mocked(getAwsEnumProgress);
+const mockSelect = store.selectAwsRoles;
 
 const CACHED = {
   accounts: [{ account_id: '111', account_name: 'acme' }],
@@ -68,5 +78,52 @@ describe('AwsAccountRoleModal refresh', () => {
   it('does not call the API while closed', () => {
     render(<AwsAccountRoleModal sessionId="s1" isOpen={false} onClose={() => {}} />);
     expect(mockGet).not.toHaveBeenCalled();
+  });
+});
+
+const EKS = {
+  accounts: [{ account_id: '111', account_name: 'acme' }],
+  roles: [{ account_id: '111', role_name: 'eks-ro' }],
+};
+
+describe('AwsAccountRoleModal grant', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockProgress.mockResolvedValue({ phase: 'idle', done: 0, total: 0 });
+    mockSelect.mockResolvedValue(undefined);
+  });
+
+  it('closes immediately after granting a non-eks role', async () => {
+    mockGet.mockResolvedValue(CACHED); // ReadOnly only
+    const onClose = vi.fn();
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+    await waitFor(() => expect(screen.getByText('ReadOnly')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('ReadOnly'));
+    fireEvent.click(screen.getByText('Donner accès'));
+
+    await waitFor(() =>
+      expect(mockSelect).toHaveBeenCalledWith('s1', [{ account_id: '111', role_name: 'ReadOnly' }])
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it('stays open after granting an eks-* role, showing the discovery phase', async () => {
+    mockGet.mockResolvedValue(EKS);
+    // Discovery still running, so the modal must not auto-close.
+    mockProgress.mockResolvedValue({ phase: 'discovering', done: 0, total: 1 });
+    const onClose = vi.fn();
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+    await waitFor(() => expect(screen.getByText('eks-ro')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('eks-ro'));
+    fireEvent.click(screen.getByText('Donner accès'));
+
+    await waitFor(() => expect(mockSelect).toHaveBeenCalled());
+    // The eks gate keeps it open and surfaces the EKS discovery state.
+    await waitFor(() =>
+      expect(screen.getByText('Découverte des clusters EKS en cours…')).toBeInTheDocument()
+    );
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
