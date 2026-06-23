@@ -9,6 +9,7 @@ projection — credentials live in the in-RAM store and never reach the client.
 import asyncio
 import logging
 import secrets
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -57,10 +58,15 @@ _MAX_PENDING_STATES = 10000
 # Process RAM (same single-replica constraint as the credential store).
 _aws_device_pending: dict[tuple[str, str], str] = {}
 
-# Live account-enumeration progress, keyed by (user_id, session_id). Written from
-# the enumeration thread, read by the progress poll endpoint (GIL-safe for these
-# int/str fields; a stale read just shows a slightly older count). Entry lives only
-# for the duration of an enumeration — set on start, popped in a finally.
+# Live grant progress (enumerating/granting/discovering), keyed by (user_id,
+# session_id). The poll endpoint only ever reads (a single dict get; entries are
+# replaced wholesale, never mutated in place, so a read gets a consistent snapshot).
+# But the publish callbacks fire from worker threads (enumeration + EKS discovery run
+# via asyncio.to_thread) while begin/end run on the event loop — so the get-check-set
+# in the callbacks and the pop in _end_enum_progress are guarded by _enum_lock to stay
+# atomic across threads (else a thread could resurrect an entry the loop just popped).
+# Entry lives only for the duration of a grant — set on start, popped in a finally.
+_enum_lock = threading.Lock()
 #
 # Process-local, like the credential store: the progress poll must hit the same
 # replica that runs the enumeration, so it relies on the same single-replica /
@@ -82,14 +88,17 @@ def _progress_cb(key: tuple[str, str], token: object, phase: str) -> EnumProgres
     """
 
     def cb(done: int, total: int) -> None:
-        cur = _aws_enum_progress.get(key)
-        if cur is not None and cur.get("token") is token:
-            _aws_enum_progress[key] = {
-                "phase": phase,
-                "done": done,
-                "total": total,
-                "token": token,
-            }
+        # Fired from a worker thread (to_thread enumeration/discovery) — _enum_lock
+        # makes the owner-check + write atomic against the loop's begin/end.
+        with _enum_lock:
+            cur = _aws_enum_progress.get(key)
+            if cur is not None and cur.get("token") is token:
+                _aws_enum_progress[key] = {
+                    "phase": phase,
+                    "done": done,
+                    "total": total,
+                    "token": token,
+                }
 
     return cb
 
@@ -99,15 +108,17 @@ def _begin_enum_progress(
 ) -> tuple[object, EnumProgressCb]:
     """Publish an initial progress entry and return its (token, callback)."""
     token = object()
-    _aws_enum_progress[key] = {"phase": phase, "done": 0, "total": 0, "token": token}
+    with _enum_lock:
+        _aws_enum_progress[key] = {"phase": phase, "done": 0, "total": 0, "token": token}
     return token, _progress_cb(key, token, phase)
 
 
 def _end_enum_progress(key: tuple[str, str], token: object) -> None:
     """Drop the progress entry — but only if we still own it (see token rationale)."""
-    cur = _aws_enum_progress.get(key)
-    if cur is not None and cur.get("token") is token:
-        _aws_enum_progress.pop(key, None)
+    with _enum_lock:
+        cur = _aws_enum_progress.get(key)
+        if cur is not None and cur.get("token") is token:
+            _aws_enum_progress.pop(key, None)
 
 
 # --------------------------------------------------------------------------- #
