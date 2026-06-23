@@ -580,11 +580,52 @@ async def test_aws_select_with_eks_role_hands_progress_to_discovery(
         _, eks_kwargs = eks.call_args
         assert callable(eks_kwargs["progress_cb"])
         assert callable(eks_kwargs["on_done"])
-        # Entry survives the response, flipped to "discovering" (on_done not yet fired).
+        # Entry survives the response, flipped to "discovering" (on_done not yet fired),
+        # seeded with the real profile count so a gap poll reads a determinate 0/N.
         assert c._aws_enum_progress[key]["phase"] == "discovering"
+        assert c._aws_enum_progress[key]["done"] == 0
+        assert c._aws_enum_progress[key]["total"] == 1  # _granted() has one profile
         # The task's on_done releases the entry.
         eks_kwargs["on_done"]()
         assert key not in c._aws_enum_progress
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_mixed_selection_arms_wait_when_any_eks(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """want_eks is any(), not all(): one eks-* among other picks still tracks discovery."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL_EKS))
+    )
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh") as eks,
+        ):
+            resp = await authenticated_client.post(
+                f"/api/connectors/{mock_session_obj.id}/aws/select",
+                json={
+                    "selections": [
+                        {"account_id": "111", "role_name": "ReadOnly"},
+                        {"account_id": "111", "role_name": "eks-ro"},
+                    ]
+                },
+            )
+        assert resp.status_code == 200
+        assert c._aws_enum_progress[key]["phase"] == "discovering"
+        assert "on_done" in eks.call_args.kwargs
     finally:
         c._aws_enum_progress.pop(key, None)
 

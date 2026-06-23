@@ -288,40 +288,55 @@ async def _apply_aws_selection(
     # racing re-grant yanking it (see _progress_cb / _end_enum_progress).
     key = (str(user_id), str(sid))
     token, prog_cb = _begin_enum_progress(key, phase="granting")
+    # Release the entry in a finally unless ownership is handed to the background EKS
+    # task — so it never dangles on ANY pre-handoff failure (ConnectorError, a tmpfs
+    # OSError from write_aws_profiles, a raw boto error from the STS client build,
+    # a DB error in the audit/event writes), not just the explicit ConnectorError.
+    handed_off = False
     try:
-        cred = await conn.select_account_roles(
-            provisional, selections=selections, progress_cb=prog_cb
+        try:
+            cred = await conn.select_account_roles(
+                provisional, selections=selections, progress_cb=prog_cb
+            )
+        except ConnectorError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        await get_credential_store().put(user_id, sid, cred)
+        # Build the per-session ~/.aws projection now — the account/role pick is the
+        # trigger. On a shared creds volume this is what the sandbox container
+        # bind-mounts, so the granted profiles are present before the first turn
+        # provisions the sandbox.
+        write_aws_profiles(sid, cred)
+        # Discover EKS clusters for the freshly minted profiles and generate one (tmpfs)
+        # kubeconfig each — async, must not block the response. Only keep the progress
+        # entry alive into discovery when an eks-* role was picked: only those map into a
+        # cluster's RBAC, so a grant without one has no EKS wait worth showing (the UI
+        # then closes on the next idle poll). Other picks still trigger discovery,
+        # untracked. Case-insensitive prefix match — intentionally narrower than
+        # _dedup_prefer_eks's substring "eks" heuristic: we wait only when the user
+        # explicitly picked an eks-* role.
+        want_eks = any(s.get("role_name", "").lower().startswith("eks-") for s in selections)
+        profiles = cred.secret.get("profiles") or []
+        if want_eks and profiles:
+            disc_cb = _progress_cb(key, token, "discovering")
+            # Seed the real profile count so a poll landing in the scheduling gap reads
+            # a determinate "discovering 0/N" — never an ambiguous 0/0 that reads as done.
+            disc_cb(0, len(profiles))
+            # Ownership of the progress entry transfers to the background task, which
+            # ends it via on_done; the finally below must not also release it.
+            schedule_session_eks_refresh(
+                sid, cred, progress_cb=disc_cb, on_done=lambda: _end_enum_progress(key, token)
+            )
+            handed_off = True
+        else:
+            schedule_session_eks_refresh(sid, cred)
+        await _audit(
+            db, user_id=user_id, session_id=sid, connector="aws", action="select", cred=cred
         )
-    except ConnectorError as e:
-        _end_enum_progress(key, token)
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    await get_credential_store().put(user_id, sid, cred)
-    # Build the per-session ~/.aws projection now — the account/role pick is the trigger.
-    # On a shared creds volume this is what the sandbox container bind-mounts, so the
-    # granted profiles are present before the first turn provisions the sandbox.
-    write_aws_profiles(sid, cred)
-    # Discover EKS clusters for the freshly minted profiles and generate one (tmpfs)
-    # kubeconfig each — async, must not block the response. Only keep the progress
-    # entry alive into discovery when an eks-* role was picked: only those map into a
-    # cluster's RBAC, so a grant without one has no EKS wait worth showing (the UI
-    # then closes on the next idle poll). Other picks still trigger discovery, untracked.
-    # Case-insensitive, matching _dedup_prefer_eks's eks-role heuristic in eks_refresh.
-    want_eks = any(s.get("role_name", "").lower().startswith("eks-") for s in selections)
-    profiles = cred.secret.get("profiles") or []
-    if want_eks and profiles:
-        disc_cb = _progress_cb(key, token, "discovering")
-        # Seed the real profile count so a poll landing in the scheduling gap reads a
-        # determinate "discovering 0/N" — never an ambiguous 0/0 that could read as done.
-        disc_cb(0, len(profiles))
-        schedule_session_eks_refresh(
-            sid, cred, progress_cb=disc_cb, on_done=lambda: _end_enum_progress(key, token)
-        )
-    else:
-        _end_enum_progress(key, token)
-        schedule_session_eks_refresh(sid, cred)
-    await _audit(db, user_id=user_id, session_id=sid, connector="aws", action="select", cred=cred)
-    await save_session_event(db, sid, "aws", event, targets=_aws_targets(cred))
-    return ConnectorStatusResponse.from_status(conn.public_status(cred))
+        await save_session_event(db, sid, "aws", event, targets=_aws_targets(cred))
+        return ConnectorStatusResponse.from_status(conn.public_status(cred))
+    finally:
+        if not handed_off:
+            _end_enum_progress(key, token)
 
 
 # --------------------------------------------------------------------------- #
@@ -625,14 +640,16 @@ async def aws_options_progress(
     session_id: str,
     current_user: CurrentUser,
 ) -> AwsEnumProgressResponse:
-    """Report live account-enumeration progress (drives the picker's progress bar).
+    """Report live AWS grant/refresh progress (drives the picker's progress bar).
 
-    Returns ``phase="idle"`` when nothing is enumerating. Polled on its own ~1s
-    timer while a grant/refresh blocks — for the *whole* device-approval wait, not
-    just the enumeration — so it deliberately skips the session-ownership DB lookup
-    the other routes do: the registry key is scoped to ``current_user.id``, so a
-    user can only ever read their own progress regardless of the session id. The
-    id is still parsed to reject malformed input and to match the canonical key.
+    Covers every slow phase reported on ``AwsEnumProgressResponse``: ``enumerating``
+    (SSO account listing on device-auth/refresh), ``granting`` (STS minting) and
+    ``discovering`` (EKS cluster discovery, which outlives the grant response).
+    Returns ``phase="idle"`` when nothing is running. Polled on its own ~1s timer
+    for the whole span, so it deliberately skips the session-ownership DB lookup the
+    other routes do: the registry key is scoped to ``current_user.id``, so a user can
+    only ever read their own progress regardless of the session id. The id is still
+    parsed to reject malformed input and to match the canonical key.
     """
     _require_enabled()
     try:

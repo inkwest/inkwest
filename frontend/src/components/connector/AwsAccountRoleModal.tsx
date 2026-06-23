@@ -232,7 +232,9 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           <button
             type="button"
             onClick={() => void load(true)}
-            disabled={loading || refreshing || submitting}
+            // grantWaiting too: a refresh mid-discovery would overwrite the shared
+            // progress entry and auto-close the modal out from under the wait.
+            disabled={loading || refreshing || submitting || grantWaiting}
             title="Rafraîchir la liste des rôles"
             aria-label="Rafraîchir la liste des rôles"
             className="p-2 rounded-md text-gray-400 hover:text-gray-100 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
