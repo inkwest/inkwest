@@ -782,3 +782,27 @@ async def test_mint_sts_profiles_reports_progress() -> None:
     assert len(profiles) == 2
     assert calls[0] == (0, 2)
     assert calls[-1] == (2, 2)
+
+
+async def test_aws_revoke_clears_creds_in_place_with_keep_dirs(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """Revoke must clear creds IN PLACE (keep_dirs=True): the conv container may still
+    bind-mount the dirs, and a mount follows the inode — rmtree would detach it."""
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    revoked = MintedCredential(
+        "aws", "read", datetime.now(UTC) + timedelta(hours=1), secret={"profiles": [{"name": "p"}]}
+    )
+    store = MagicMock(revoke=AsyncMock(return_value=revoked))
+    conn = MagicMock(type="aws", revoke=AsyncMock())
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="not_connected")
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.tools.connector_exec.cleanup_aws_files") as cleanup,
+    ):
+        resp = await authenticated_client.post(f"/api/connectors/{mock_session_obj.id}/aws/revoke")
+    assert resp.status_code == 200
+    cleanup.assert_called_once()
+    assert cleanup.call_args.kwargs == {"keep_dirs": True}

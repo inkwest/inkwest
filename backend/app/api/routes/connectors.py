@@ -706,10 +706,16 @@ async def revoke(
         except Exception:  # noqa: BLE001 — revocation is best-effort
             logger.debug("provider revoke failed (best-effort)", extra={"connector": connector})
         if connector == "aws":
-            # Remove the tmpfs ~/.aws projection for this session.
+            # Clear the tmpfs ~/.aws + EKS kubeconfigs IN PLACE: the conv container may
+            # still be running with these dirs bind-mounted, so keep the dir inodes
+            # (keep_dirs) — the agent then sees empty/revoked creds, and a re-grant in
+            # the same conversation reaches it through the same mount. Hold the session
+            # lock so this can't interleave with an in-flight EKS refresh's publish.
+            from app.services.eks_refresh import session_lock
             from app.tools.connector_exec import cleanup_aws_files
 
-            cleanup_aws_files(sid)
+            async with session_lock(sid):
+                cleanup_aws_files(sid, keep_dirs=True)
         await _audit(
             db, user_id=current_user.id, session_id=sid, connector=connector, action="revoke"
         )

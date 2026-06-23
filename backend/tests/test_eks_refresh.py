@@ -7,6 +7,8 @@ on re-run, degrade gracefully when an account is not reachable, and are removed 
 the shared session-tmpfs cleanup.
 """
 
+import asyncio
+import glob
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -259,3 +261,73 @@ async def test_run_safe_calls_on_done_on_success_and_failure():
     with patch.object(eks_refresh, "refresh_session_eks", AsyncMock(side_effect=RuntimeError())):
         await eks_refresh._run_safe(uuid.uuid4(), MagicMock(), None, lambda: fired.append("fail"))
     assert fired == ["ok", "fail"]
+
+
+async def test_refresh_keeps_kube_dir_inode_stable_and_prunes_stale():
+    """The kube dir is bind-mounted read-only into the conv container; a mount follows
+    the inode, so regeneration must publish in place (no dir swap) — else the container
+    keeps seeing the old, empty dir. A re-select with fewer clusters must also prune."""
+    sid = uuid.uuid4()
+    try:
+        eks2 = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
+        with patch("boto3.client", return_value=eks2):
+            await refresh_session_eks(sid, _cred())
+        kube = session_kube_dir(sid)
+        inode_before = os.stat(kube).st_ino
+        assert sorted(os.listdir(kube)) == ["eks--acme0--c1", "eks--acme0--c2"]
+
+        # Re-select: only c1 now reachable. Inode must NOT change; c2 must be pruned.
+        eks1 = _mock_eks({"c1": _cluster_payload("c1")})
+        with patch("boto3.client", return_value=eks1):
+            await refresh_session_eks(sid, _cred())
+        assert os.stat(kube).st_ino == inode_before  # dir not swapped → mount intact
+        assert sorted(os.listdir(kube)) == ["eks--acme0--c1"]  # stale c2 dropped
+        assert glob.glob(f"{kube}.new*") == []  # per-call staging cleaned up
+    finally:
+        cleanup_aws_files(sid)
+
+
+async def test_concurrent_refreshes_use_distinct_staging():
+    """Two refreshes for one session must not share a staging dir (one's rmtree would
+    wipe the other's in-flight files). Distinct random staging => both complete."""
+    sid = uuid.uuid4()
+    try:
+        eks = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
+        with patch("boto3.client", return_value=eks):
+            await asyncio.gather(
+                refresh_session_eks(sid, _cred()),
+                refresh_session_eks(sid, _cred()),
+            )
+        kube = session_kube_dir(sid)
+        assert sorted(os.listdir(kube)) == ["eks--acme0--c1", "eks--acme0--c2"]
+        assert glob.glob(f"{kube}.new*") == []  # no staging left behind by either run
+    finally:
+        cleanup_aws_files(sid)
+
+
+async def test_cleanup_keep_dirs_clears_contents_but_preserves_inode():
+    """Revoke while the container is alive must clear creds in place (stable inode), not
+    rmtree the bind-mounted dirs; the default still drops the whole session dir."""
+    sid = uuid.uuid4()
+    try:
+        eks = _mock_eks({"c1": _cluster_payload("c1")})
+        with patch("boto3.client", return_value=eks):
+            await refresh_session_eks(sid, _cred())
+        kube = session_kube_dir(sid)
+        inode = os.stat(kube).st_ino
+        assert os.listdir(kube)  # populated
+
+        # Orphaned staging from a crashed refresh must be swept by the full clean.
+        orphan = f"{kube}.new.deadbeef"
+        os.makedirs(orphan, exist_ok=True)
+
+        cleanup_aws_files(sid, keep_dirs=True)
+        assert os.path.isdir(kube)  # dir kept
+        assert os.stat(kube).st_ino == inode  # same inode → live mount keeps working
+        assert os.listdir(kube) == []  # contents cleared (revoked)
+        assert not os.path.isdir(orphan)  # orphaned staging swept
+
+        cleanup_aws_files(sid)  # session end: whole dir gone
+        assert not os.path.isdir(kube)
+    finally:
+        cleanup_aws_files(sid)

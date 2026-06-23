@@ -171,11 +171,48 @@ def write_aws_profiles(session_id: UUID, cred: MintedCredential) -> dict[str, st
     }
 
 
-def cleanup_aws_files(session_id: UUID) -> None:
-    """Remove the tmpfs ~/.aws for a session (on revoke / session end)."""
+def cleanup_aws_files(session_id: UUID, *, keep_dirs: bool = False) -> None:
+    """Remove a session's tmpfs ~/.aws projection + generated EKS kubeconfigs.
+
+    ``keep_dirs=True`` (revoke while the sandbox container is still running): clear the
+    CONTENTS of the pre-created ``.aws``/``kube`` dirs in place but keep the dirs
+    themselves. The conv container bind-mounts them read-only and a mount follows the
+    inode, not the path — dropping the dir would detach the live mount, so a later
+    re-grant in the same conversation would never reach the agent. Clearing in place
+    leaves the agent seeing empty (revoked) creds through the same stable inode.
+
+    ``keep_dirs=False`` (session end, container gone): drop the whole session dir.
+    """
     import shutil
 
-    shutil.rmtree(os.path.join(_aws_base(), str(session_id)), ignore_errors=True)
+    def _remove(path: str) -> None:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+
+    base = os.path.join(_aws_base(), str(session_id))
+    if not keep_dirs:
+        shutil.rmtree(base, ignore_errors=True)
+        return
+    # Full clean while keeping the bind-mounted dirs: empty `.aws`/`kube` in place
+    # (stable inode for the live mount) and drop everything else under <id> — notably
+    # any `kube.new.<hex>` staging an interrupted refresh may have orphaned.
+    try:
+        entries = os.listdir(base)
+    except FileNotFoundError:
+        return
+    mounted = {".aws", "kube"}
+    for name in entries:
+        p = os.path.join(base, name)
+        if name in mounted and os.path.isdir(p) and not os.path.islink(p):
+            for child in os.listdir(p):
+                _remove(os.path.join(p, child))
+        else:
+            _remove(p)
 
 
 async def build_connector_env(

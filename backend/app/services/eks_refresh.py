@@ -24,7 +24,7 @@ import shutil
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import yaml
 
@@ -40,6 +40,28 @@ ProgressCb = Callable[[int, int], None]
 # Background tasks are kept referenced so the event loop does not garbage-collect
 # them mid-run (asyncio holds only a weak reference to fire-and-forget tasks).
 _tasks: set[asyncio.Task[None]] = set()
+
+# One lock per session serialises the dir-mutating critical section of a refresh with
+# itself (overlapping re-selects) and with revoke's in-place clear — so they can't
+# interleave a publish and a prune/clear and leave a torn kube set. The credential
+# store is per-replica and refresh/revoke run on one event loop, so a plain dict of
+# asyncio.Locks is enough; entries are dropped at session end (release_session_lock).
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+def session_lock(session_id: UUID) -> asyncio.Lock:
+    """Get-or-create the per-session refresh/revoke serialisation lock."""
+    key = str(session_id)
+    lock = _session_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_locks[key] = lock
+    return lock
+
+
+def release_session_lock(session_id: UUID) -> None:
+    """Drop a session's lock at session end so the map doesn't grow unbounded."""
+    _session_locks.pop(str(session_id), None)
 
 
 def schedule_session_eks_refresh(
@@ -88,9 +110,11 @@ async def refresh_session_eks(
 ) -> int:
     """Discover EKS clusters per profile and write one kubeconfig each (tmpfs).
 
-    Idempotent / relaunchable: the session kube dir is rebuilt from scratch each
-    call via a staged swap, so a re-select never leaves a half-written set. Returns
-    the number of kubeconfig files written.
+    Idempotent / relaunchable: the kube dir's CONTENTS are republished in place each
+    call (files staged then renamed in, stale ones pruned) — the dir inode is never
+    swapped, because the conv container bind-mounts it and a mount follows the inode.
+    The publish/prune is serialised per session (see session_lock) so overlapping
+    re-selects and revoke can't leave a half-written set. Returns the file count.
     """
     profiles = cred.secret.get("profiles") or []
     if not profiles:
@@ -124,25 +148,66 @@ async def refresh_session_eks(
 
     aws_cli = settings.aws_cli_path
     dest = session_kube_dir(session_id)
-    staging = f"{dest}.new"
-    shutil.rmtree(staging, ignore_errors=True)
+    # On the shared sandbox creds volume the dir/files must be world-readable: the
+    # toolbox container reads them through the read-only bind mount as a (potentially)
+    # different uid than the backend — same rationale as write_aws_profiles. On the
+    # backend-local /dev/shm projection they stay private. The read-only mount + the
+    # per-session isolation is the boundary, not the file mode.
+    shared = bool(settings.sandbox_creds_root)
+    dir_mode = 0o755 if shared else 0o700
+    file_mode = 0o644 if shared else 0o600
+    # dest is pre-created at sandbox provisioning and bind-mounted read-only into the
+    # conv container. A bind mount follows the INODE, not the path, so we must NEVER
+    # swap the dir (an os.replace(dir) would detach the live mount — it'd keep seeing
+    # the old, empty inode). Publish in place: stage the files in a sibling dir, then
+    # rename each into `dest` (per-FILE rename within the same tmpfs is atomic and
+    # leaves the dir inode intact), and prune the kubeconfigs no longer reachable.
+    os.makedirs(dest, mode=dir_mode, exist_ok=True)
+    os.chmod(dest, dir_mode)  # exist_ok skips mode on an existing dir — force it
+    # Per-call staging dir (random suffix): concurrent refreshes for the same session
+    # must not share a staging path — one's rmtree would wipe the other's in-flight
+    # files. Same parent => same tmpfs => per-file rename into dest stays atomic. The
+    # finally removes this call's staging even on error (cleanup_aws_files is the
+    # backstop for any orphan a crash leaves behind).
+    staging = f"{dest}.new.{uuid4().hex}"
     os.makedirs(staging, mode=0o700, exist_ok=True)
+    try:
+        desired: set[str] = set()
+        for c in clusters:
+            fname = f"eks--{c['account_name']}--{c['cluster']}"
+            desired.add(fname)
+            kubeconfig = _build_kubeconfig(c, aws_cli, cred_file, cfg_file)
+            _write_secure(
+                os.path.join(staging, fname), yaml.safe_dump(kubeconfig, sort_keys=False), file_mode
+            )
 
-    for c in clusters:
-        kubeconfig = _build_kubeconfig(c, aws_cli, cred_file, cfg_file)
-        path = os.path.join(staging, f"eks--{c['account_name']}--{c['cluster']}")
-        _write_secure(path, yaml.safe_dump(kubeconfig, sort_keys=False))
-
-    # Atomic-ish swap: replace the live dir only once everything is generated.
-    # rename within the same tmpfs is atomic; the brief gap is acceptable since a
-    # refresh only runs on an explicit user re-select.
-    shutil.rmtree(dest, ignore_errors=True)
-    os.replace(staging, dest)
+        # Publish + prune under the per-session lock so an overlapping re-select or a
+        # concurrent revoke can't interleave a rename and a delete — last writer wins
+        # with a complete set, never a torn one.
+        async with session_lock(session_id):
+            for fname in desired:
+                os.replace(os.path.join(staging, fname), os.path.join(dest, fname))
+            # Drop kubeconfigs for clusters that vanished since a previous refresh.
+            for name in os.listdir(dest):
+                if name not in desired:
+                    try:
+                        os.remove(os.path.join(dest, name))
+                    except (FileNotFoundError, IsADirectoryError):
+                        pass
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return len(clusters)
 
 
-def _write_secure(path: str, content: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def _write_secure(path: str, content: str, mode: int = 0o600) -> None:
+    # fchmod after open: O_CREAT's mode is ignored when the file already exists, and on
+    # the shared creds volume the toolbox (a different uid) must be able to read it.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.fchmod(fd, mode)
+    except BaseException:
+        os.close(fd)
+        raise
     with os.fdopen(fd, "w") as f:
         f.write(content)
 
