@@ -31,8 +31,10 @@ backend are swept by label on startup.
 import asyncio
 import os
 import shutil
+import socket
 from collections import defaultdict
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from app.core import metrics
 from app.core.config import get_settings
@@ -272,6 +274,31 @@ async def provision(session_id: str) -> Sandbox:
             proxy_run += ["-v", f"{settings.sandbox_squid_confd}:/conf.d:ro"]
         if settings.sandbox_proxy_dns:
             proxy_run += ["--dns", settings.sandbox_proxy_dns]
+        if settings.mcp_proxy_base_url:
+            # OAuth2 MCP reachability: the toolbox egresses ONLY through squid, so the CLI's
+            # MCP calls to mcp_proxy_base_url must resolve+reach the backend's MCP proxy from
+            # inside the squid container. The host must also be squid-allowlisted (see
+            # docs/mcp-oauth2-proxy.md §5). Never attach the backend to the per-conversation
+            # networks instead — that wedges network teardown. Two topologies:
+            proxy_host = urlparse(settings.mcp_proxy_base_url).hostname
+            if proxy_host == "host.docker.internal":
+                # Local dev runs the backend under docker-in-docker, so Docker's `host-gateway`
+                # magic resolves to dind's INNER bridge gateway (a dead end — nothing serves
+                # :8000 there), and there is no Service DNS. Map the sentinel host to the
+                # backend's OWN container IP, which the nested squid reaches via dind's NAT.
+                # Portable across developers — no hardcoded compose subnet (unlike pinning
+                # dind's --host-gateway-ip). Squid honours /etc/hosts (which --add-host writes).
+                try:
+                    self_ip = socket.gethostbyname(socket.gethostname())
+                    proxy_run += ["--add-host", f"{proxy_host}:{self_ip}"]
+                except OSError as e:
+                    # Degrade to no add-host rather than fail provisioning; OAuth2 MCP just
+                    # won't be reachable (logged so the cause is visible, not silent).
+                    logger.warning("mcp_proxy_self_ip_resolve_failed", error=str(e))
+            elif proxy_host:
+                # prod/kube: proxy_host is a resolvable Service DNS name reached via the
+                # squid container's own resolver + the allowlist — nothing to inject here.
+                pass
         proxy_run += [settings.sandbox_squid_image]
         await _docker(*proxy_run, timeout=settings.sandbox_provision_timeout)
         # Dual-home the proxy so it can resolve + egress to the internet.

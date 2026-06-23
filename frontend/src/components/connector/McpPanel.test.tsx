@@ -1,18 +1,40 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { McpPanel } from './McpPanel';
+import type { McpServerEntry } from '@/services/api';
 
 vi.mock('@/services/api', () => ({
   getMcpCatalog: vi.fn(),
   getSessionMcp: vi.fn(),
   setSessionMcp: vi.fn(),
+  startMcpAuth: vi.fn(),
+  disconnectMcpAuth: vi.fn(),
 }));
 
-import { getMcpCatalog, getSessionMcp, setSessionMcp } from '@/services/api';
+import {
+  getMcpCatalog,
+  getSessionMcp,
+  setSessionMcp,
+  startMcpAuth,
+  disconnectMcpAuth,
+} from '@/services/api';
 
 const mockGetCatalog = vi.mocked(getMcpCatalog);
 const mockGetSession = vi.mocked(getSessionMcp);
 const mockSetSession = vi.mocked(setSessionMcp);
+const mockStartAuth = vi.mocked(startMcpAuth);
+const mockDisconnect = vi.mocked(disconnectMcpAuth);
+
+// Build the catalog response: static `keys` plus the OAuth-aware `servers` superset.
+function cat(keys: string[] = [], oauth: McpServerEntry[] = []) {
+  return {
+    keys,
+    servers: [
+      ...keys.map((k) => ({ key: k, kind: 'static' as const, auth_status: 'static' as const })),
+      ...oauth,
+    ],
+  };
+}
 
 describe('McpPanel', () => {
   beforeEach(() => {
@@ -20,7 +42,7 @@ describe('McpPanel', () => {
   });
 
   it('renders nothing when the catalog is empty', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: [] });
+    mockGetCatalog.mockResolvedValue(cat([]));
     mockGetSession.mockResolvedValue({ enabled: [] });
 
     const { container } = render(<McpPanel sessionId="s1" />);
@@ -29,7 +51,7 @@ describe('McpPanel', () => {
   });
 
   it('can stay visible with an empty catalog without offering configuration', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: [] });
+    mockGetCatalog.mockResolvedValue(cat([]));
     mockGetSession.mockResolvedValue({ enabled: [] });
 
     render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
@@ -44,7 +66,7 @@ describe('McpPanel', () => {
   });
 
   it('keeps configuration available and shows a gray zero count when no catalog server is selected', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: ['coralogix'] });
+    mockGetCatalog.mockResolvedValue(cat(['coralogix']));
     mockGetSession.mockResolvedValue({ enabled: [] });
 
     render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
@@ -60,7 +82,7 @@ describe('McpPanel', () => {
   });
 
   it('shows selected count and only selected servers in the row overlay', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab', 'prometheus'] });
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab', 'prometheus']));
     mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
 
     render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
@@ -71,20 +93,8 @@ describe('McpPanel', () => {
     expect(screen.queryByText('prometheus')).not.toBeInTheDocument();
   });
 
-  it('adds time left to the selected count when the MCP selection has an expiry', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab', 'prometheus'] });
-    mockGetSession.mockResolvedValue({
-      enabled: ['coralogix'],
-      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-    });
-
-    render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
-
-    expect(await screen.findByText(/1\/3 enabled · .* left/)).toBeInTheDocument();
-  });
-
   it('shows selected/total and green styling when servers are enabled', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab'] });
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
     mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
 
     render(<McpPanel sessionId="s1" />);
@@ -98,7 +108,7 @@ describe('McpPanel', () => {
   });
 
   it('shows 0/total and no green styling when nothing is enabled', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab'] });
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
     mockGetSession.mockResolvedValue({ enabled: [] });
 
     render(<McpPanel sessionId="s1" />);
@@ -110,7 +120,7 @@ describe('McpPanel', () => {
   });
 
   it('persists selected servers only when OK is clicked and then closes the modal', async () => {
-    mockGetCatalog.mockResolvedValue({ keys: ['coralogix', 'gitlab'] });
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
     mockGetSession.mockResolvedValue({ enabled: ['coralogix'] });
     mockSetSession.mockResolvedValue({ enabled: ['coralogix', 'gitlab'] });
 
@@ -141,5 +151,97 @@ describe('McpPanel', () => {
       expect(mockSetSession).toHaveBeenCalledWith('s1', ['coralogix', 'gitlab'])
     );
     expect(screen.queryByText('Choose which MCP servers this conversation can use.')).not.toBeInTheDocument();
+  });
+
+  // ---- OAuth servers ----------------------------------------------------- //
+  async function openModalWithOauth(server: McpServerEntry) {
+    mockGetCatalog.mockResolvedValue(cat([], [server]));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+    render(<McpPanel sessionId="s1" />);
+    const btn = await screen.findByRole('button', { name: 'Configure' });
+    fireEvent.click(btn);
+  }
+
+  it('offers Connect for a not_connected oauth server and opens the popup synchronously', async () => {
+    const popup = { closed: true, location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    mockStartAuth.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize?x=1' });
+
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+
+    const connect = await screen.findByRole('button', { name: 'Connect' });
+    fireEvent.click(connect);
+    // Popup must open synchronously in the click handler (before the await) — else blocked.
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockStartAuth).toHaveBeenCalledWith('notion'));
+    await waitFor(() => expect(popup.location.href).toBe('https://as.example.com/authorize?x=1'));
+    openSpy.mockRestore();
+  });
+
+  it('ignores a second Connect click while a poll is already in flight', async () => {
+    // closed:false keeps the poll alive so the in-flight guard stays armed for the 2nd click.
+    const popup = { closed: false, location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    mockStartAuth.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize' });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    const connect = await screen.findByRole('button', { name: 'Connect' });
+    fireEvent.click(connect);
+    fireEvent.click(connect); // double-click: guard must drop this one
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    openSpy.mockRestore();
+  });
+
+  it('drops the key from the session selection BEFORE revoking upstream on Disconnect', async () => {
+    mockGetCatalog.mockResolvedValue(
+      cat([], [{ key: 'notion', kind: 'oauth2', auth_status: 'connected' }])
+    );
+    mockGetSession.mockResolvedValue({ enabled: ['notion'] });
+    mockSetSession.mockResolvedValue({ enabled: [] });
+    mockDisconnect.mockResolvedValue(
+      cat([], [{ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' }])
+    );
+    render(<McpPanel sessionId="s1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
+    // setSessionMcp must have run first, so a failed revoke can't leave it enabled-but-revoked.
+    expect(mockSetSession.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDisconnect.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('enables a connected oauth server into the conversation selection on OK', async () => {
+    mockSetSession.mockResolvedValue({ enabled: ['notion'] });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
+    const checkbox = await screen.findByRole('checkbox'); // only the oauth row has one here
+    expect(checkbox).not.toBeChecked();
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+    await waitFor(() => expect(mockSetSession).toHaveBeenCalledWith('s1', ['notion']));
+  });
+
+  it('disables the enable checkbox until the oauth server is connected', async () => {
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    expect(await screen.findByRole('checkbox')).toBeDisabled();
+  });
+
+  it('shows a needs-auth badge and a Reconnect button for an expired grant', async () => {
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'needs_auth' });
+    expect(await screen.findByText('needs auth')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+  });
+
+  it('shows a connected badge and Disconnect, and disconnects on click', async () => {
+    mockDisconnect.mockResolvedValue(cat([], []));
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
+    expect(await screen.findByText('connected')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
+  });
+
+  it('greys out an unavailable oauth server (sandbox disabled) with no Connect', async () => {
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'unavailable' });
+    expect(await screen.findByText('sandbox required')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
   });
 });

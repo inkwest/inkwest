@@ -8,7 +8,8 @@ export interface ChatEvent {
     | 'error'
     | 'pong'
     | 'stream_resumed'
-    | 'connector_required';
+    | 'connector_required'
+    | 'mcp_auth_required';
   content?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;

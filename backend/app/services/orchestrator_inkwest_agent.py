@@ -35,7 +35,7 @@ from app.services import model_registry
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
 from app.services.budget_service import record_usage
-from app.services.events import ChatEvent, done_event, error_event
+from app.services.events import ChatEvent, done_event, error_event, mcp_auth_required_event
 from app.services.messages import (
     ensure_session_title,
     get_active_skills,
@@ -70,7 +70,7 @@ async def orchestrate_chat_inkwest_agent(
     namespaces: list[str] | None = None,
     user_id: uuid.UUID | None = None,
     cancel_event: asyncio.Event | None = None,
-    attachments: list[dict] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
     persist_user_message: bool = True,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
@@ -226,7 +226,10 @@ async def orchestrate_chat_inkwest_agent(
     container: str | None = None
     try:
         from app.services import sandbox
-        from app.services.agent_mcp_config import remove_agent_mcp_config, write_agent_mcp_config
+        from app.services.agent_mcp_config import (
+            remove_agent_mcp_config,
+            write_agent_mcp_config_with_oauth,
+        )
 
         container = await sandbox.ensure(session_id_str)
 
@@ -241,7 +244,15 @@ async def orchestrate_chat_inkwest_agent(
         # as orchestrate_chat_cli. apply_session_skills writes one SKILL.md per skill; the
         # MCP config is removed on turn end (it can embed creds — see the finally).
         apply_session_skills(session_id_str, active_skills)
-        mcp_config_path = write_agent_mcp_config(session_id_str, enabled_mcp)
+        # Static-catalog servers inject verbatim; enabled OAuth2 servers inject a proxy URL
+        # + mint-stable JWT (engine parity with the claude-cli path). An enabled OAuth2
+        # server with no active grant is skipped — tell the user to reconnect instead of
+        # letting its tools silently vanish from the agent's tool surface.
+        mcp_config_path, mcp_dead = await write_agent_mcp_config_with_oauth(
+            session_id_str, enabled_mcp, user_id=user_id, db=db
+        )
+        for dead_key in mcp_dead:
+            yield mcp_auth_required_event(dead_key, session_id_str)
 
         # Project this turn's attachments onto the spec (P1.8). The files are already in the
         # conversation's durable workdir (the upload route wrote them); they bind-mount at

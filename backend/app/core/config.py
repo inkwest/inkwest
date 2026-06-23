@@ -223,6 +223,36 @@ class Settings(BaseSettings):
     # ==========================================================================
     mcp_catalog: str = ""
 
+    # ==========================================================================
+    # OAuth2 MCP catalog — remote MCP servers that authenticate via the MCP
+    # Authorization spec (OAuth 2.1). Same outer shape as MCP_CATALOG
+    # ({"<key>": "<base64(server-def-json)>"}) but each decoded def is the oauth
+    # kind: {"type":"http","url":"https://…/mcp","scopes":[…],"client_id?":…}.
+    # Kept separate from MCP_CATALOG so static entries (Coralogix, …) are never
+    # entangled with the brokered-OAuth flow. Parsed by app.services.mcp_oauth_catalog.
+    # ==========================================================================
+    mcp_catalog_oauth2: str = ""
+    # Fixed base for the OAuth2 MCP callback (must match what is registered at the
+    # AS / sent in DCR). Falls back to frontend_url, mirroring connector_redirect_base.
+    mcp_oauth_redirect_base: str | None = None
+    # Base URL the sandboxed CLI uses to reach the in-app MCP reverse proxy
+    # (app.api.routes.mcp_proxy). MUST be a host the per-conversation squid allowlists and
+    # can route to the backend (Docker host-gateway alias) — NOT 127.0.0.1 (that is the
+    # toolbox itself). Empty disables oauth-entry injection into .claude.json (Increment 2).
+    mcp_proxy_base_url: str = ""
+    # Explicit allowlist (comma-separated exact hostnames) of OAuth2 MCP servers permitted to
+    # resolve to a non-public address — for internal/VPN-hosted MCP servers behind private DNS.
+    # The SSRF guard still requires https and still IP-pins the connection; this only waives the
+    # public-IP requirement for these exact hosts. Empty = public-only (the safe default). A
+    # deliberate, scoped operator decision — not a blanket private-network opener.
+    mcp_oauth_allow_hosts: str = ""
+
+    # At-rest encryption keys for operator secrets (e.g. the OAuth2 MCP catalog client
+    # secret). JSON map {"<version>": "<base64 32-byte key>"}; the highest version seals new
+    # writes, older versions stay to decrypt existing values (rotation). Empty = sealing
+    # disabled (secrets stored as-is). Generate a key with `openssl rand -base64 32`.
+    secretbox_keys: str = ""
+
     # Prometheus metrics exporter on a DEDICATED port (separate from the API). On by default;
     # serves the global registry (process/Python + the inkwest_* app metrics) at /metrics.
     # The endpoint is UNAUTHENTICATED and binds 0.0.0.0 for in-cluster scraping — restrict

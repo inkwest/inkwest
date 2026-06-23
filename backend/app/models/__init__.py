@@ -5,6 +5,11 @@ from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
 from app.models.cluster import Cluster
 from app.models.connector_audit import ConnectorAuditLog
 from app.models.connector_pending_state import ConnectorPendingState
+from app.models.mcp_oauth_catalog import McpOauthCatalog
+from app.models.mcp_oauth_client import McpOauthClient
+from app.models.mcp_oauth_pending_state import McpOauthPendingState
+from app.models.mcp_user_key import McpUserKey
+from app.models.mcp_user_token import McpUserToken
 from app.models.message import Message
 from app.models.model_registry import ModelRegistry
 from app.models.oidc_pending_state import OidcPendingState
@@ -33,4 +38,9 @@ __all__ = [
     "SystemPrompt",
     "ConnectorPendingState",
     "ConnectorAuditLog",
+    "McpOauthCatalog",
+    "McpOauthClient",
+    "McpOauthPendingState",
+    "McpUserKey",
+    "McpUserToken",
 ]

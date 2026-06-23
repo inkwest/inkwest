@@ -25,6 +25,7 @@ def _settings(tmp_path):
         sandbox_squid_errors="",
         sandbox_squid_confd="",
         sandbox_proxy_dns="",
+        mcp_proxy_base_url="",
         sandbox_env_file="",
         sandbox_sessions_root=str(tmp_path),
         sandbox_creds_root="",
@@ -267,6 +268,58 @@ async def test_provision_mounts_squid_confd_only_when_set(tmp_path):
         settings.sandbox_squid_confd = ""
         await sandbox.provision("sid2")
         assert not any(a.endswith(":/conf.d:ro") for a in proxy_run)
+
+
+@pytest.mark.asyncio
+async def test_provision_maps_mcp_proxy_sentinel_to_backend_ip(tmp_path):
+    """Dev (docker-in-docker): the `host.docker.internal` sentinel is mapped to the backend's
+    OWN container IP via --add-host, so the nested squid reaches the backend's MCP proxy via
+    dind NAT. Docker's `host-gateway` would point at dind's dead inner bridge under dind."""
+    settings = _settings(tmp_path)
+    settings.mcp_proxy_base_url = "http://host.docker.internal:8000"
+    proxy_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        if args[0] == "run" and settings.sandbox_squid_image in args:
+            proxy_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+        patch.object(sandbox.socket, "gethostname", return_value="backend-host"),
+        patch.object(sandbox.socket, "gethostbyname", return_value="172.19.0.4"),
+    ):
+        await sandbox.provision("sid")
+
+    assert "--add-host" in proxy_run
+    assert "host.docker.internal:172.19.0.4" in proxy_run
+    # The dev-only shim must NOT emit the broken host-gateway literal.
+    assert not any(a.endswith(":host-gateway") for a in proxy_run)
+
+
+@pytest.mark.asyncio
+async def test_provision_skips_add_host_for_service_dns_mcp_proxy(tmp_path):
+    """prod/kube: a resolvable Service DNS proxy host is reached via the squid container's own
+    resolver + the allowlist — no --add-host is injected (the dev-only shim never fires)."""
+    settings = _settings(tmp_path)
+    settings.mcp_proxy_base_url = "http://inkwest-backend.inkwest.svc.cluster.local:8000"
+    proxy_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        if args[0] == "run" and settings.sandbox_squid_image in args:
+            proxy_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+    ):
+        await sandbox.provision("sid")
+
+    assert "--add-host" not in proxy_run
 
 
 @pytest.mark.asyncio

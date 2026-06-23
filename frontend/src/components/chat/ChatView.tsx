@@ -13,6 +13,7 @@ import { EgressLog } from './EgressPanel';
 import { MonitoringPanel } from './MonitoringPanel';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
 import { ConnectorInlineNotice } from './ConnectorInlineNotice';
+import { McpInlineNotice } from './McpInlineNotice';
 import { Attachment } from '@/types/api';
 import { cn } from '@/lib/utils';
 
@@ -206,6 +207,7 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
         >
           <div ref={contentRef}>
             {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
+            <McpInlineNotice sessionId={sessionId} />
             <MessageList messages={messages} highlightedId={highlightId} onRetry={onRetryMessage} />
             {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
           </div>

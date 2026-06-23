@@ -31,6 +31,7 @@ EventType = Literal[
     "search_results",  # Web search results for user review
     # Connector events
     "connector_required",  # A tool needs a connector that is not connected/expired
+    "mcp_auth_required",  # An enabled OAuth2 MCP server has no active grant (reconnect)
 ]
 
 
@@ -360,6 +361,20 @@ def connector_required_event(connector: str, session_id: str) -> ChatEvent:
         type="connector_required",
         content=f"Access to {connector} is required for this action.",
         metadata={"connector": connector, "session_id": session_id},
+    )
+
+
+def mcp_auth_required_event(mcp_key: str, session_id: str) -> ChatEvent:
+    """Signal that an enabled OAuth2 MCP server has no active grant — the user must reconnect.
+
+    Emitted when reconciling ``.claude.json`` skips a selected oauth server because its grant
+    is missing/expired/revoked, so the UI shows a "Reconnect" banner instead of the tools
+    silently vanishing.
+    """
+    return ChatEvent(
+        type="mcp_auth_required",
+        content=f"MCP server {mcp_key} needs reconnecting.",
+        metadata={"mcp_key": mcp_key, "session_id": session_id},
     )
 
 

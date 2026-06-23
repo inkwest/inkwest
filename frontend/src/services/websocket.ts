@@ -1,5 +1,6 @@
 import { ChatEvent, SendMessage } from '@/types/events';
 import { fetchWsTicket, wsBaseUrl } from '@/services/api';
+import { dekReply } from '@/lib/mcpDek';
 
 type EventHandler = (event: ChatEvent) => void;
 
@@ -46,13 +47,20 @@ export class ChatWebSocket {
       for (const message of this.pendingSends.splice(0)) {
         this.ws?.send(JSON.stringify(message));
       }
+      // Kick off the MCP DEK handshake (browser-fractioned key custody) so the server can
+      // decrypt this user's MCP token blobs while connected. No-op if no oauth MCP is used.
+      this.sendRaw({ type: 'mcp_dek_open' });
       this.notifyHandlers({ type: 'connected' } as unknown as ChatEvent);
     };
 
     this.ws.onmessage = (event) => {
       try {
-        const data: ChatEvent = JSON.parse(event.data);
-        this.notifyHandlers(data);
+        const data = JSON.parse(event.data);
+        if (typeof data?.type === 'string' && data.type.startsWith('mcp_dek_')) {
+          void this.handleDekMessage(data);
+          return;
+        }
+        this.notifyHandlers(data as ChatEvent);
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
       }
@@ -124,6 +132,27 @@ export class ChatWebSocket {
     }
     console.warn('WebSocket not connected, cannot send message');
     return false;
+  }
+
+  private sendRaw(obj: unknown): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(obj));
+    }
+  }
+
+  /** Drive the MCP DEK handshake. The unwrap/wrap logic lives in `dekReply` (unit-tested). */
+  private async handleDekMessage(data: {
+    type: string;
+    wrapped_dek?: string;
+    wrap_iv?: string;
+    dek?: string;
+  }): Promise<void> {
+    try {
+      const reply = await dekReply(data);
+      if (reply) this.sendRaw(reply);
+    } catch (e) {
+      console.error('MCP DEK handshake failed:', e);
+    }
   }
 
   sendMessage(content: string, attachments?: import('@/types/api').Attachment[]): void {

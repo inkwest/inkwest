@@ -23,10 +23,12 @@ def test_agentic_engines_list_empty():
     assert Settings(agentic_engines="  ,  ").agentic_engines_list == []
 
 
-def test_default_is_claude_cli_only():
+def test_default_is_claude_cli_only(monkeypatch):
     # The shipped CODE default preserves today's behavior: only Claude Code.
-    # _env_file=None so a developer's local .env (which may enable inkwest-agent for
-    # sandbox testing) can't mask the default this test guards.
+    # _env_file=None ignores a developer's local .env, and delenv drops the ambient env var
+    # (the suite sets AGENTIC_ENGINES in conftest for the integration deployment default) so
+    # this guards the true code default, masked by neither source.
+    monkeypatch.delenv("AGENTIC_ENGINES", raising=False)
     assert Settings(_env_file=None).agentic_engines_list == ["claude-cli"]
 
 

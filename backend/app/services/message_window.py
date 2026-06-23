@@ -38,3 +38,62 @@ def _is_tool_result_message(msg: dict[str, Any]) -> bool:
         if isinstance(first, dict) and first.get("type") == "tool_result":
             return True
     return False
+
+
+def prune_orphan_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop ``tool_use`` blocks with no matching ``tool_result`` (and vice versa).
+
+    A turn interrupted *after* the assistant emitted a ``tool_use`` but *before*
+    its ``tool_result`` was persisted leaves a dangling ``tool_use`` in history
+    (e.g. the user sent a new message instead of letting the tool run). Replaying
+    that history makes the Messages/Converse API reject the whole request:
+    "tool_use ids were found without tool_result blocks immediately after". This
+    is the documented false-negative gap in ``reconcile_interrupted_turns`` —
+    streaming orchestrators persist the assistant ``tool_use`` row, so the turn
+    doesn't end on a trailing ``user`` message and the startup sweep can't see it.
+
+    Prunes at the block level so an assistant turn carrying both ``text`` and a
+    dangling ``tool_use`` keeps its text. Symmetric on the other side so a lone
+    ``tool_result`` can't orphan either. Pairing is global (by id), not strictly
+    adjacent — the orchestrators only ever write a ``tool_result`` in the message
+    right after its ``tool_use``, so global presence is equivalent and simpler.
+    A message emptied entirely by pruning is dropped.
+    """
+    result_ids: set[str] = set()
+    use_ids: set[str] = set()
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("id"):
+                use_ids.add(block["id"])
+            elif block.get("type") == "tool_result" and block.get("tool_use_id"):
+                result_ids.add(block["tool_use_id"])
+
+    pruned: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            pruned.append(msg)
+            continue
+        kept = [
+            block
+            for block in content
+            if not (
+                isinstance(block, dict)
+                and (
+                    (block.get("type") == "tool_use" and block.get("id") not in result_ids)
+                    or (
+                        block.get("type") == "tool_result"
+                        and block.get("tool_use_id") not in use_ids
+                    )
+                )
+            )
+        ]
+        if not kept:
+            continue  # whole message was orphaned tool blocks
+        pruned.append(msg if len(kept) == len(content) else {**msg, "content": kept})
+    return pruned

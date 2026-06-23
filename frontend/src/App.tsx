@@ -16,6 +16,7 @@ import {
   RoleMappingsPage,
   UsagePage,
   ModelSettingsPage,
+  McpServersPage,
   SystemInfoPage,
 } from '@/pages/admin';
 import { useSettingsStore } from '@/store/settings';
@@ -112,6 +113,7 @@ function App() {
           <Route path="roles" element={<RoleMappingsPage />} />
           <Route path="usage" element={<UsagePage />} />
           <Route path="model" element={<ModelSettingsPage />} />
+          <Route path="mcp" element={<McpServersPage />} />
           <Route path="system-info" element={<SystemInfoPage />} />
         </Route>
       </Routes>

@@ -10,10 +10,12 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete
 
-from app.core.constants import CONNECTOR_STATE_TTL_SECONDS
+from app.core.constants import CONNECTOR_STATE_TTL_SECONDS, MCP_OAUTH_STATE_TTL_SECONDS
 from app.core.database import async_session_maker
 from app.core.logging import get_logger
 from app.models.connector_pending_state import ConnectorPendingState
+from app.models.mcp_oauth_pending_state import McpOauthPendingState
+from app.services import mcp_oauth
 from app.services.connectors.store import get_credential_store
 from app.services.connectors.warm import get_warm_store
 
@@ -35,15 +37,35 @@ async def _cleanup_loop() -> None:
             removed_warm = await get_warm_store().sweep()
             if removed_warm:
                 logger.info("connector_warm_sweep", removed=removed_warm)
+            # Bound the OAuth2 MCP refresh negative-cache dict (process-local, single worker).
+            swept = mcp_oauth.sweep_refresh_state()
+            if swept:
+                logger.info("mcp_oauth_negcache_sweep", removed=swept)
+            # Backstop: evict any RAM DEK whose socket vanished without a clean disconnect, so
+            # "decryptable only while connected" holds even after a missed close.
+            from app.services.mcp_dek_handshake import sweep_orphaned_deks
+
+            orphaned = await sweep_orphaned_deks()
+            if orphaned:
+                logger.info("mcp_dek_orphan_sweep", removed=orphaned)
             cutoff = datetime.now(UTC) - timedelta(seconds=CONNECTOR_STATE_TTL_SECONDS)
+            mcp_cutoff = datetime.now(UTC) - timedelta(seconds=MCP_OAUTH_STATE_TTL_SECONDS)
             async with async_session_maker() as db:
                 result = await db.execute(
                     delete(ConnectorPendingState).where(ConnectorPendingState.created_at < cutoff)
+                )
+                # Same table-tidy backstop for OAuth2 MCP pending states (auth/start also
+                # sweeps opportunistically, but a low-traffic instance may never call it).
+                mcp_result = await db.execute(
+                    delete(McpOauthPendingState).where(McpOauthPendingState.created_at < mcp_cutoff)
                 )
                 await db.commit()
                 deleted = result.rowcount  # type: ignore[attr-defined]
                 if deleted:
                     logger.info("connector_state_cleanup", deleted=deleted)
+                mcp_deleted = mcp_result.rowcount  # type: ignore[attr-defined]
+                if mcp_deleted:
+                    logger.info("mcp_oauth_state_cleanup", deleted=mcp_deleted)
         except asyncio.CancelledError:
             logger.info("connector_cleanup_cancelled")
             return

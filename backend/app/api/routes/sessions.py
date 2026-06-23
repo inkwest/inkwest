@@ -379,14 +379,16 @@ async def set_session_mcp(
     """
     from app.services.mcp_catalog import catalog_keys
     from app.services.mcp_config import apply_session_mcp_selection
+    from app.services.mcp_oauth_catalog import oauth_catalog_keys
     from app.services.messages import save_session_event
 
     session = await _load_owned_session(session_id, current_user, db)
     previous = list(session.enabled_mcp_servers or [])
 
-    # Dedupe while preserving order; reject anything not in the catalog.
+    # Dedupe while preserving order; reject anything not in either catalog (static or oauth).
     enabled = list(dict.fromkeys(body.enabled))
-    unknown = [k for k in enabled if k not in set(catalog_keys())]
+    known = set(catalog_keys()) | set(oauth_catalog_keys())
+    unknown = [k for k in enabled if k not in known]
     if unknown:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -397,8 +399,9 @@ async def set_session_mcp(
     await db.flush()
     await db.commit()
 
-    # Reconcile the conversation's .claude.json (no-op in non-sandbox mode).
-    apply_session_mcp_selection(str(session_id), enabled)
+    # Reconcile the conversation's .claude.json (no-op in non-sandbox mode). An enabled oauth
+    # server with no active grant is skipped; the reconnect prompt surfaces on the next turn.
+    await apply_session_mcp_selection(str(session_id), enabled, user_id=current_user.id, db=db)
 
     # Surface the change inline in the conversation: one batched event for the servers
     # connected and one for those disconnected (targets carry the structured keys).

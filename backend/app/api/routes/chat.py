@@ -30,6 +30,7 @@ from app.models.cluster import Cluster
 from app.models.session import Session
 from app.models.user import User
 from app.services.ai_client import get_orchestrator
+from app.services.mcp_dek_handshake import handle_dek_message, note_connect, note_disconnect
 from app.services.messages import clear_retry_state, get_retryable_message
 from app.services.turn_runner import TURN_END, turn_runner
 
@@ -236,6 +237,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             )
 
     await connect(session_id, websocket)
+    await note_connect(user_id)
 
     logger.info(
         "Session validated",
@@ -296,6 +298,12 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 logger.info("Stop requested", extra={"session_id": session_id})
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
+            elif msg_type is not None and msg_type.startswith("mcp_dek_"):
+                # Browser-fractioned DEK handshake (see app.services.mcp_dek_handshake):
+                # supplies/derives the per-user key that seals MCP OAuth token blobs.
+                reply = await handle_dek_message(user_id, data)
+                if reply is not None:
+                    await websocket.send_json(reply)
             elif msg_type == "message":
                 content = data.get("content", "").strip()
                 # Descriptors echoed from a prior /attachments upload (claude-cli only).
@@ -425,3 +433,5 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             with suppress(asyncio.CancelledError, Exception):
                 await stream_task
         await disconnect(session_id, websocket)
+        # Drop the in-RAM DEK once the user's last socket closes (connected-only custody).
+        await note_disconnect(user_id)

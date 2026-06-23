@@ -8,6 +8,7 @@ Provides mocks for:
 - API route testing (users, clients)
 """
 
+import os
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -18,6 +19,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# The suite assumes a deployment with BOTH agentic engines enabled (e.g. test_api_config
+# asserts engines == ["claude-cli", "inkwest-agent"]; engine-pin + dispatch tests need the
+# agent runnable). Pin it here so tests are hermetic and don't depend on a gitignored .env;
+# `setdefault` lets an explicit env override still win. Runs before any app import — the app
+# (and its cached Settings) is imported lazily inside fixtures, never at this module's top.
+os.environ.setdefault("AGENTIC_ENGINES", "claude-cli,inkwest-agent")
 
 # ============================================================================
 # Mock Claude API Response Builders

@@ -5,6 +5,7 @@ import { ChatWebSocket } from '@/services/websocket';
 import { ChatEvent } from '@/types/events';
 import { Attachment } from '@/types/api';
 import { useConnectorsStore } from '@/store/connectors';
+import { useMcpStore } from '@/store/mcp';
 import { ConnectorName } from '@/types/connectors';
 
 export function useWebSocket(sessionId: string) {
@@ -148,6 +149,13 @@ export function useWebSocket(sessionId: string) {
           useConnectorsStore.getState().setReauthRequired(connector);
           useConnectorsStore.getState().fetchStatus(sessionId);
         }
+        break;
+      }
+
+      case 'mcp_auth_required': {
+        // An enabled OAuth2 MCP server has no active grant — surface a reconnect banner.
+        const mcpKey = event.metadata?.mcp_key as string | undefined;
+        if (mcpKey) useMcpStore.getState().flagAuthRequired(mcpKey);
         break;
       }
 
