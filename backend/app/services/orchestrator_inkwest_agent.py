@@ -72,6 +72,7 @@ async def orchestrate_chat_inkwest_agent(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict] | None = None,
     persist_user_message: bool = True,
+    engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Broker one turn through the sandboxed ``inkwest-agent``. Mirrors orchestrate_chat_cli.
 
@@ -312,7 +313,9 @@ async def orchestrate_chat_inkwest_agent(
             nonlocal assistant_blocks, pending_results
             if assistant_blocks:
                 try:
-                    await save_message(db, session_id, "assistant", assistant_blocks, model=model)
+                    await save_message(
+                        db, session_id, "assistant", assistant_blocks, model=model, engine=engine
+                    )
                 except Exception as e:
                     logger.error(f"Failed to save assistant message: {e}")
             if pending_results:

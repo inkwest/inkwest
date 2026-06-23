@@ -53,6 +53,7 @@ async def orchestrate_chat_cli(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict] | None = None,
     persist_user_message: bool = True,
+    engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """
     Orchestrate chat using Claude CLI.
@@ -375,7 +376,12 @@ required.
         if content:
             try:
                 await save_message(
-                    db, session_id, "assistant", content, model=actual_model or model_choice
+                    db,
+                    session_id,
+                    "assistant",
+                    content,
+                    model=actual_model or model_choice,
+                    engine=engine,
                 )
             except Exception as e:
                 logger.error(f"Failed to save assistant message: {e}")

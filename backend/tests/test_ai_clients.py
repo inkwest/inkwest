@@ -152,6 +152,7 @@ class TestDispatcherSetsTurnContext:
 
             seen["engine"] = metrics.turn_engine()
             seen["model"] = metrics.turn_model()
+            seen["engine_kwarg"] = kwargs.get("engine")
             return
             yield
 
@@ -173,7 +174,9 @@ class TestDispatcherSetsTurnContext:
                     pass
 
             await asyncio.create_task(run())
-        assert seen == {"engine": "claude-cli", "model": "claude-x"}
+        # The resolved engine is both recorded in metrics context and forwarded to the
+        # orchestrator so it persists on the turn (save_message engine=).
+        assert seen == {"engine": "claude-cli", "model": "claude-x", "engine_kwarg": "claude-cli"}
 
     @pytest.mark.asyncio
     async def test_anthropic_dispatcher_sets_context(self):
@@ -188,6 +191,7 @@ class TestDispatcherSetsTurnContext:
 
             seen["engine"] = metrics.turn_engine()
             seen["model"] = metrics.turn_model()
+            seen["engine_kwarg"] = kwargs.get("engine")
             return
             yield
 
@@ -205,7 +209,47 @@ class TestDispatcherSetsTurnContext:
                     pass
 
             await asyncio.create_task(run())
-        assert seen == {"engine": "anthropic", "model": "claude-y"}
+        assert seen == {"engine": "anthropic", "model": "claude-y", "engine_kwarg": "anthropic"}
+
+    @pytest.mark.asyncio
+    async def test_bedrock_dispatcher_sets_context(self):
+        import asyncio
+
+        from app.services import ai_client
+
+        seen = {}
+
+        async def fake_converse(db, session_id, **kwargs):
+            from app.core import metrics
+
+            seen["engine"] = metrics.turn_engine()
+            seen["model"] = metrics.turn_model()
+            seen["engine_kwarg"] = kwargs.get("engine")
+            return
+            yield
+
+        mock_settings = MagicMock()
+        mock_settings.ai_provider = "bedrock"
+        with (
+            patch.object(ai_client, "get_settings", return_value=mock_settings),
+            patch.object(ai_client, "resolve_session_model", AsyncMock(return_value="llama-x")),
+            # No registry entry → ID heuristic; a non-Claude model routes to Converse.
+            patch.object(ai_client, "get_entry", MagicMock(return_value=None)),
+            patch("app.services.model_catalog.is_anthropic_model", return_value=False),
+            patch("app.services.orchestrator_converse.orchestrate_chat_converse", fake_converse),
+        ):
+            dispatch = ai_client.get_orchestrator()
+
+            async def run():
+                async for _ in dispatch(db=AsyncMock(), session_id="s"):
+                    pass
+
+            await asyncio.create_task(run())
+        assert seen == {
+            "engine": "bedrock-converse",
+            "model": "llama-x",
+            "engine_kwarg": "bedrock-converse",
+        }
 
 
 class TestResolveSessionModelChoice:

@@ -231,7 +231,9 @@ def get_orchestrator():
             metrics.set_turn_engine(used_engine)
             metrics.set_turn_model(model)
             metrics.chat_turns_total.labels(engine=used_engine, model=model).inc()
-            async for event in orchestrate(db=db, session_id=session_id, **kwargs):
+            async for event in orchestrate(
+                db=db, session_id=session_id, engine=used_engine, **kwargs
+            ):
                 yield event
 
         logger.info("Using Claude CLI orchestrator (engine-dispatched)")
@@ -267,7 +269,9 @@ def get_orchestrator():
             metrics.set_turn_engine(used_engine)
             metrics.set_turn_model(model)
             metrics.chat_turns_total.labels(engine=used_engine, model=model).inc()
-            async for event in orchestrate(db=db, session_id=session_id, **kwargs):
+            async for event in orchestrate(
+                db=db, session_id=session_id, engine=used_engine, **kwargs
+            ):
                 yield event
 
         return _dispatch_bedrock
@@ -285,7 +289,9 @@ def get_orchestrator():
         metrics.set_turn_engine("anthropic")
         metrics.set_turn_model(model)
         metrics.chat_turns_total.labels(engine="anthropic", model=model).inc()
-        async for event in orchestrate_chat(db=db, session_id=session_id, **kwargs):
+        async for event in orchestrate_chat(
+            db=db, session_id=session_id, engine="anthropic", **kwargs
+        ):
             yield event
 
     return _dispatch_anthropic

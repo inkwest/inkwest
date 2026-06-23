@@ -32,6 +32,7 @@ describe('messageContentToMarkdown', () => {
 describe('buildExportMarkdown', () => {
   const meta = {
     conversationName: 'Damien Degois',
+    engine: 'Inkwest Agent',
     model: 'Claude Opus 4.8',
     date: '2026-06-11T14:30:00Z',
     sessionId: 'sess-1',
@@ -43,14 +44,20 @@ describe('buildExportMarkdown', () => {
     expect(out).toContain('Here are your pods.');
     expect(out).toContain('Powered by Inkwest');
     expect(out).toContain('Conversation with Damien Degois');
-    expect(out).toContain('Claude Opus 4.8');
+    // Engine precedes the model in the signature.
+    expect(out).toContain('Inkwest Agent · Claude Opus 4.8');
     expect(out).toContain(formatFullTimestamp(meta.date));
     expect(out).toContain('`conversation: sess-1 · message: msg-1`');
     expect(out.endsWith('\n')).toBe(true);
   });
 
-  it('drops the name and model segments when absent (no dangling separators)', () => {
-    const out = buildExportMarkdown('body', { ...meta, conversationName: null, model: null });
+  it('drops the name, engine and model segments when absent (no dangling separators)', () => {
+    const out = buildExportMarkdown('body', {
+      ...meta,
+      conversationName: null,
+      engine: null,
+      model: null,
+    });
     expect(out).not.toContain('Conversation with');
     expect(out).not.toContain('··');
     expect(out).toContain(`_Powered by Inkwest · ${formatFullTimestamp(meta.date)}_`);

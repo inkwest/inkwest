@@ -72,6 +72,8 @@ export interface Message {
   attachments?: Attachment[] | null;
   /** Model that produced this assistant turn; null/undefined for older or non-assistant rows. */
   model?: string | null;
+  /** Agentic engine that produced this assistant turn; null/undefined for older or non-assistant rows. */
+  engine?: string | null;
   status?: MessageStatus;
   error_message?: string;
   is_retryable?: boolean;
