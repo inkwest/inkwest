@@ -18,6 +18,10 @@ function key(accountId: string, roleName: string): string {
   return `${accountId}::${roleName}`;
 }
 
+// Minimum time the discovery bar stays visible before auto-close, so a fast grant
+// doesn't flash it. No extra wait once discovery has already taken longer than this.
+const MIN_PROGRESS_MS = 2000;
+
 // Shown after AWS SSO auth: pick one or MORE account/role pairs (one AWS profile
 // each). Grouped by account name, searchable, full height — there can be many.
 export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
@@ -33,11 +37,17 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
   const [grantWaiting, setGrantWaiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // One bar for every slow phase: SSO refresh (enumerating) and the grant's STS
-  // minting / EKS discovery (granting → discovering). The backend reports the phase.
-  const progress = useAwsEnumProgress(sessionId, refreshing || grantWaiting);
+  // minting / EKS discovery (granting → discovering). `submitting` is included so the
+  // minting phase is visible too — with many pairs (e.g. 55) the per-pair "granting"
+  // count is the only feedback that the grant is progressing. The backend reports the
+  // phase; done/total scopes the active one.
+  const progress = useAwsEnumProgress(sessionId, refreshing || submitting || grantWaiting);
   // Arm the discovery-finished close only once we've actually observed progress, so
   // the first (still-empty) poll after a grant can't close the modal prematurely.
   const sawProgress = useRef(false);
+  // Timestamp of the first non-idle poll — the moment the bar became visible — so the
+  // auto-close can enforce MIN_PROGRESS_MS and avoid a flash on instant discovery.
+  const shownAt = useRef(0);
   // Hold onClose in a ref so the auto-close effect doesn't depend on its identity:
   // a parent re-render handing a fresh onClose must not re-run the effect and fire a
   // second close. Kept current every render.
@@ -79,21 +89,32 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     setQuery('');
     setGrantWaiting(false);
     sawProgress.current = false;
+    shownAt.current = 0;
     void load(false);
   }, [isOpen, sessionId, load]);
 
   // While waiting on EKS discovery, close once the backend goes idle again — but
   // only after we've seen at least one non-idle poll (sawProgress), so a poll that
-  // lands before the entry is published can't trigger an immediate close. Setting
-  // grantWaiting=false before closing also makes a re-run a no-op (single close).
+  // lands before the entry is published can't trigger an immediate close. Keep the bar
+  // up for at least MIN_PROGRESS_MS so a fast grant doesn't flash it; if discovery
+  // already ran longer, remaining is 0 and it closes right away. Setting grantWaiting
+  // false before closing also makes a re-run a no-op (single close).
   useEffect(() => {
     if (!grantWaiting) return;
     if (progress) {
-      sawProgress.current = true;
-    } else if (sawProgress.current) {
+      if (!sawProgress.current) {
+        sawProgress.current = true;
+        shownAt.current = Date.now();
+      }
+      return;
+    }
+    if (!sawProgress.current) return;
+    const remaining = Math.max(0, MIN_PROGRESS_MS - (Date.now() - shownAt.current));
+    const t = setTimeout(() => {
       setGrantWaiting(false);
       onCloseRef.current();
-    }
+    }, remaining);
+    return () => clearTimeout(t);
   }, [grantWaiting, progress]);
 
   // Safety net: never leave the picker hung if discovery never reports idle (backend
