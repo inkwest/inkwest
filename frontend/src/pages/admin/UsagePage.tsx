@@ -261,7 +261,7 @@ export function UsagePage() {
                     <Tooltip
                       contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: 8 }}
                       labelStyle={{ color: '#E5E7EB' }}
-                      formatter={(value?: number, name?: string) => [formatTokens(value ?? 0), name === 'input_tokens' ? 'Input' : 'Output']}
+                      formatter={(value, name) => [formatTokens(Number(value) || 0), name === 'input_tokens' ? 'Input' : 'Output']}
                     />
                     <Legend formatter={(value) => value === 'input_tokens' ? 'Input tokens' : 'Output tokens'} />
                     <Bar dataKey="input_tokens" stackId="tokens" fill="#3B82F6" radius={[0, 0, 0, 0]} />
