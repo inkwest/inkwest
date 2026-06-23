@@ -416,6 +416,115 @@ async def test_cleanup_keep_dirs_clears_contents_but_preserves_inode():
         cleanup_aws_files(sid)
 
 
+async def test_refresh_to_zero_clusters_removes_config_in_place():
+    """A re-select that now finds NO reachable clusters must remove the stale `config`
+    in place — keeping the bind-mounted dir's inode (a mount follows the inode, so an
+    rmtree/recreate here would detach the live mount, the exact bug this design guards)."""
+    sid = uuid.uuid4()
+    try:
+        eks1 = _mock_eks({"c1": _cluster_payload("c1")})
+        with patch("boto3.client", return_value=eks1):
+            await refresh_session_eks(sid, _cred())
+        kube = session_kube_dir(sid)
+        inode = os.stat(kube).st_ino
+        assert os.listdir(kube) == ["config"]
+
+        # Re-select: zero clusters reachable now (role lost access / clusters gone).
+        eks0 = _mock_eks({})
+        with patch("boto3.client", return_value=eks0):
+            count = await refresh_session_eks(sid, _cred())
+        assert count == 0
+        assert os.path.isdir(kube)  # dir kept
+        assert os.stat(kube).st_ino == inode  # NOT swapped → live mount intact
+        assert os.listdir(kube) == []  # stale config removed in place
+        assert glob.glob(f"{kube}.config.*") == []  # no staging left behind
+    finally:
+        cleanup_aws_files(sid)
+
+
+def test_discover_uses_bounded_boto_client():
+    """The EKS client must carry bounded connect/read timeouts + capped retries: discovery
+    runs in a non-killable thread pool, so a hung endpoint has to fail fast rather than pin
+    a worker thread (cancelling the task can't stop an in-flight boto call)."""
+    from app.services import eks_refresh
+
+    captured: dict[str, object] = {}
+
+    def _capture(_service, **kwargs):  # noqa: ANN001, ANN202
+        captured.update(kwargs)
+        return _mock_eks({})
+
+    with patch("boto3.client", side_effect=_capture):
+        eks_refresh._discover_for_profile(
+            {
+                "name": "p",
+                "region": "eu-west-1",
+                "access_key_id": "AKIA_TEST",
+                "secret_access_key": "S",  # pragma: allowlist secret
+                "session_token": "T",  # pragma: allowlist secret
+            }
+        )
+    cfg = captured["config"]
+    assert cfg.connect_timeout == 5
+    assert cfg.read_timeout == 15
+    assert cfg.retries["max_attempts"] == 2  # pin the value, tolerate botocore adding keys
+
+
+def test_safe_seg_neutralizes_path_separators_and_traversal():
+    """_safe_seg guards a security rationale: the SSO account_name is an org-controlled
+    display string that can carry '/', '..' or spaces; none may survive into a path/context
+    segment (a surviving '/' would let a kubeconfig write escape the session dir)."""
+    from app.services.eks_refresh import _safe_seg
+
+    evil = "../../etc/passwd name"
+    safe = _safe_seg(evil)
+    assert "/" not in safe and os.sep not in safe  # no separator survives
+    assert " " not in safe  # spaces neutralised too
+    # Joining the sanitised segment into a base dir can't escape it.
+    assert os.path.dirname(os.path.join("/base", safe)) == "/base"
+
+
+def test_merged_kubeconfig_sanitizes_malicious_account_name():
+    """End-to-end: a malicious account_name must not inject a path separator into the
+    context alias built by _build_merged_kubeconfig."""
+    from app.services.eks_refresh import _build_merged_kubeconfig
+
+    clusters = [
+        {
+            "account_name": "../../evil",
+            "region": "eu-west-1",
+            "cluster": "prod",
+            "endpoint": "https://x",
+            "ca": "Q0E=",
+            "profile": "p",
+            "arn": "arn:aws:eks:eu-west-1:111111111111:cluster/prod",
+        }
+    ]
+    [ctx] = _build_merged_kubeconfig(clusters, "aws", "/c", "/cfg")["contexts"]
+    assert "/" not in ctx["name"]  # no path separator in the context alias
+
+
+def test_merged_kubeconfig_uses_noregion_when_profile_has_no_region():
+    """A profile with no region must alias to 'noregion' rather than emit a literal
+    'None' segment into the context name."""
+    from app.services.eks_refresh import _build_merged_kubeconfig
+
+    clusters = [
+        {
+            "account_name": "acme",
+            "region": None,
+            "cluster": "prod",
+            "endpoint": "https://x",
+            "ca": "Q0E=",
+            "profile": "p",
+            "arn": "arn:aws:eks:eu-west-1:111111111111:cluster/prod",
+        }
+    ]
+    [ctx] = _build_merged_kubeconfig(clusters, "aws", "/c", "/cfg")["contexts"]
+    assert ctx["name"] == "acme--noregion--prod"
+    assert "None" not in ctx["name"]
+
+
 async def test_cancel_session_refresh_cancels_in_flight_task():
     """Session end must cancel a still-running refresh so it can't recreate the tmpfs
     after cleanup. The task is tracked per session and dropped once cancelled."""

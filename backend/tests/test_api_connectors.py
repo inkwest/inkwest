@@ -834,6 +834,39 @@ async def test_aws_revoke_cancels_refresh_before_clearing(
     assert order == ["cancel", "clear"]  # cancel strictly before clear
 
 
+async def test_aws_revoke_clears_creds_under_session_lock(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """The clear must run while holding the per-session lock — not just after the cancel.
+    Otherwise an overlapping re-select could interleave a publish with the revoke's clear
+    and leave a torn kube set. Assert the lock is held during cleanup_aws_files."""
+    from app.services import eks_refresh
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    revoked = MintedCredential(
+        "aws", "read", datetime.now(UTC) + timedelta(hours=1), secret={"profiles": [{"name": "p"}]}
+    )
+    store = MagicMock(revoke=AsyncMock(return_value=revoked))
+    conn = MagicMock(type="aws", revoke=AsyncMock())
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="not_connected")
+    held: list[bool] = []
+
+    # cleanup is called with sid as its first positional arg (under the session lock, via
+    # asyncio.to_thread); query the same keyed lock to confirm it's held at clear time.
+    def _clear(sid_arg, **_kwargs):  # noqa: ANN001, ANN202
+        held.append(eks_refresh.session_lock(sid_arg).locked())
+
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.tools.connector_exec.cleanup_aws_files", side_effect=_clear),
+    ):
+        resp = await authenticated_client.post(f"/api/connectors/{mock_session_obj.id}/aws/revoke")
+    assert resp.status_code == 200
+    assert held == [True]  # lock was held while clearing
+
+
 async def test_aws_revoke_clears_creds_in_place_with_keep_dirs(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:
