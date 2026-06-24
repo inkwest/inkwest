@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ExternalLink, Loader2 } from 'lucide-react';
+import { ExternalLink, Loader2, RotateCcwKey } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useConnectorsStore } from '@/store/connectors';
@@ -201,6 +201,22 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
             );
           })}
           <McpPanel sessionId={sessionId} variant="icon" autoOpen={autoOpenMcp} showWhenEmpty />
+          {canRenew && (
+            <ConnectorIconButton
+              Icon={RotateCcwKey}
+              title="Renew access — re-grant the connectors this session previously had"
+              tone="attention"
+              onClick={handleRenew}
+              busy={renewing}
+              overlayTitle="Renew access"
+              overlayBody={
+                <p className="text-gray-400">
+                  Re-grant the connectors this session previously had (reuses your AWS account/role
+                  selection).
+                </p>
+              }
+            />
+          )}
         </div>
       ) : (
       <div className={cn('flex gap-2', stacked ? 'flex-col items-stretch' : 'items-center flex-wrap')}>
