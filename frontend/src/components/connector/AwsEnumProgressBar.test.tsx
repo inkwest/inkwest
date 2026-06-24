@@ -14,6 +14,10 @@ describe('AwsEnumProgressBar', () => {
 
     rerender(<AwsEnumProgressBar progress={{ phase: 'discovering', done: 2, total: 5 }} />);
     expect(screen.getByText(/Découverte des clusters EKS… 2\/5/)).toBeInTheDocument();
+
+    // Terminal "done" reads as complete for the frame(s) before the picker auto-closes.
+    rerender(<AwsEnumProgressBar progress={{ phase: 'done', done: 3, total: 3 }} />);
+    expect(screen.getByText(/Clusters EKS découverts 3\/3/)).toBeInTheDocument();
   });
 
   it('shows an indeterminate "?" total when total is 0', () => {

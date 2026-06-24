@@ -188,6 +188,36 @@ describe('AwsAccountRoleModal grant', () => {
     }
   });
 
+  it('auto-closes on the terminal "done" even when the active discovery window was missed', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGet.mockResolvedValue(EKS);
+      // The race the backend's terminal state fixes: discovery finished between polls, so
+      // the picker never sees "discovering" — only the lingering "done". It must still close
+      // (the old "saw active → then idle" path would have hung on the 90s safety net here).
+      mockProgress.mockResolvedValue({ phase: 'done', done: 1, total: 1 });
+      const onClose = vi.fn();
+      render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0); // flush initial load
+      });
+      fireEvent.click(screen.getByText('eks-ro'));
+      fireEvent.click(screen.getByText('Donner accès'));
+      // Grant POST + first poll → "done"; close fires within the MIN_PROGRESS_MS floor
+      // (0 here, since no active poll ever armed the floor's start).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2500);
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('idle-only discovery: sawProgress guard holds, then the 90s safety timeout closes', async () => {
     vi.useFakeTimers();
     try {

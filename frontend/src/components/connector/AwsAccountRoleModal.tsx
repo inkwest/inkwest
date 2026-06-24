@@ -94,20 +94,25 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     void load(false);
   }, [isOpen, sessionId, load]);
 
-  // Close once discovery goes idle — but only after a non-idle poll has armed us (so an
-  // early/cross-replica idle can't close prematurely), and keep the bar up at least
-  // MIN_PROGRESS_MS so a fast grant doesn't flash it (remaining is 0 once it's run
-  // longer). Setting watch 'off' before closing makes a re-run a no-op (single close).
+  // Close on the backend's terminal "done" — which it holds for a few seconds after EKS
+  // discovery settles precisely so a poll is guaranteed to catch it, even when discovery
+  // finishes between two polls (the old "saw active → then idle" path lost that race and
+  // hung on the 90s safety net). An *active* phase only arms the MIN_PROGRESS_MS floor so
+  // a fast grant doesn't flash the bar; a plain idle still closes only once armed, so an
+  // early/cross-replica idle can't close prematurely. "done" closes regardless of arming
+  // (we may have missed the active window entirely — that's the whole point). Setting
+  // watch 'off' before closing makes a re-run a no-op (single close).
   useEffect(() => {
     if (watch === 'off') return;
-    if (progress) {
+    const finished = progress?.phase === 'done';
+    if (progress && !finished) {
       if (watch === 'watching') {
         shownAt.current = Date.now();
         setWatch('armed');
       }
       return;
     }
-    if (watch !== 'armed') return;
+    if (!finished && watch !== 'armed') return;
     const remaining = Math.max(0, MIN_PROGRESS_MS - (Date.now() - shownAt.current));
     const t = setTimeout(() => {
       setWatch('off');
