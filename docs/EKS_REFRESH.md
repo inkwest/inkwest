@@ -116,10 +116,15 @@ it is cleared wherever that root is:
 
 - Discovery is scoped to each profile's region (the SSO region). Clusters in other
   regions are not enumerated.
-- Generating the kubeconfigs makes them **available** to the session. Wiring a
-  discovered cluster into an orchestrator's `kubeconfig_path` (so the agent targets
-  it automatically) is a separate concern — today kubectl tools still take an
-  explicitly configured cluster; the agent reaches EKS read-only via `aws_call`.
+- The generated kubeconfig is wired into kubectl on **every** engine. The shell agent
+  gets it via `KUBECONFIG` (`build_connector_env`); the tool-based engines (inkwest-agent,
+  Anthropic/Converse) fall back to it in `tools/dispatch` when no cluster is statically
+  configured — `_resolve_eks_kubeconfig` uses the in-container `KUBECONFIG` for the
+  sandboxed agent, or `session_kubeconfigs` + a freshly projected `~/.aws` for backend-run
+  providers. The agent targets a specific discovered cluster with the kubectl tools'
+  optional `context` argument (its values are surfaced in the inkwest-agent prompt, and the
+  shell agent lists them with `kubectl config get-contexts`). A statically-configured
+  cluster still takes precedence over EKS discovery.
 
 ## Configuration
 

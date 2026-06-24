@@ -46,7 +46,7 @@ from app.services.messages import (
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills, skills_container_root
-from app.tools.connector_exec import build_connector_env
+from app.tools.connector_exec import build_connector_env, session_kube_contexts
 from app.tools.definitions import get_tool_definitions
 from inkwest_agent.protocol import (
     AttachmentSpec,
@@ -131,7 +131,24 @@ async def orchestrate_chat_inkwest_agent(
                 logger.warning(f"Failed to set session title: {e}")
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
-    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
+    # With no statically-configured cluster, surface the EKS clusters discovered from the
+    # user's AWS access: the kubectl tools fall back to this session's generated kubeconfig
+    # (tools/dispatch._resolve_eks_kubeconfig) and a `context` arg targets one. Reflect it
+    # in the cluster label too, so the base prompt doesn't claim "no Kubernetes access".
+    eks_contexts = session_kube_contexts(session_uuid) if kubeconfig_path is None else []
+    effective_cluster_name = cluster_name
+    if cluster_name is None and eks_contexts:
+        effective_cluster_name = f"EKS via AWS access ({len(eks_contexts)} cluster(s))"
+    system_prompt = get_system_prompt(effective_cluster_name, namespaces, base_prompt=base_prompt)
+    if eks_contexts:
+        listed = "\n".join(f"- {c}" for c in eks_contexts)
+        system_prompt += (
+            "\n\n## Kubernetes (EKS) access\n"
+            "kubectl tools are available for the EKS clusters discovered from your AWS "
+            "access. Pass the `context` argument on any kubectl tool to target a specific "
+            "cluster; omit it to use the first one. Do NOT run `aws eks update-kubeconfig` "
+            "— the contexts are already configured. Available contexts:\n" + listed
+        )
 
     model = await resolve_session_model(db, session_id)
     # A custom row may pin an ARN (provisioned/imported model) and a max_tokens override —
