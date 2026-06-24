@@ -3,19 +3,33 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 
 vi.mock('@/services/api', () => ({
+  // Mirror the real ApiError so the modal's `e instanceof api.ApiError` branch works.
+  ApiError: class ApiError extends Error {
+    constructor(public readonly status: number, message: string) {
+      super(message);
+      this.name = 'ApiError';
+    }
+  },
   getAwsOptions: vi.fn(),
   refreshAwsOptions: vi.fn(),
   getAwsEnumProgress: vi.fn().mockResolvedValue({ phase: 'idle', done: 0, total: 0 }),
 }));
 
 // The grant goes through the store action; stub it so we can assert the flow.
-const store = vi.hoisted(() => ({ selectAwsRoles: vi.fn() }));
-vi.mock('@/store/connectors', () => ({
-  useConnectorsStore: (selector?: (s: typeof store) => unknown) =>
-    selector ? selector(store) : store,
+// getState() is used by the modal's 409 auto-recovery path (warm re-grant / device).
+const store = vi.hoisted(() => ({
+  selectAwsRoles: vi.fn(),
+  tryWarmGrant: vi.fn(),
+  startAwsDevice: vi.fn(),
 }));
+vi.mock('@/store/connectors', () => {
+  const hook = (selector?: (s: typeof store) => unknown) =>
+    selector ? selector(store) : store;
+  hook.getState = () => store;
+  return { useConnectorsStore: hook };
+});
 
-import { getAwsOptions, refreshAwsOptions, getAwsEnumProgress } from '@/services/api';
+import { getAwsOptions, refreshAwsOptions, getAwsEnumProgress, ApiError } from '@/services/api';
 
 const mockGet = vi.mocked(getAwsOptions);
 const mockRefresh = vi.mocked(refreshAwsOptions);
@@ -37,6 +51,49 @@ const FRESH = {
 describe('AwsAccountRoleModal refresh', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('recovers from a 409 by silently warm-regranting and reloading the list', async () => {
+    // First options call 409s (no pending auth); warm re-grant succeeds; reload works.
+    mockGet
+      .mockRejectedValueOnce(new ApiError(409, 'No pending AWS authentication; re-initiate'))
+      .mockResolvedValueOnce(CACHED);
+    store.tryWarmGrant.mockResolvedValue(true);
+
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(store.tryWarmGrant).toHaveBeenCalledWith('s1', 'aws', { openPicker: false }),
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText('ReadOnly')).toBeInTheDocument());
+    expect(store.startAwsDevice).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the device flow and closes when there is no warm session', async () => {
+    mockGet.mockRejectedValue(new ApiError(409, 'No pending AWS authentication; re-initiate'));
+    store.tryWarmGrant.mockResolvedValue(false);
+    const onClose = vi.fn();
+
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+    await waitFor(() => expect(store.startAwsDevice).toHaveBeenCalledWith('s1'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it('does not loop: a second 409 after warm re-grant surfaces the error', async () => {
+    // Warm "succeeds" but options keeps 409ing (e.g. already-connected cred) — the
+    // one-shot guard must stop, not retry forever.
+    mockGet.mockRejectedValue(new ApiError(409, 'No pending AWS authentication; re-initiate'));
+    store.tryWarmGrant.mockResolvedValue(true);
+
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={() => {}} />);
+
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    // No third attempt, no device fallback (guard consumed) — settles, doesn't spin.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(store.startAwsDevice).not.toHaveBeenCalled();
   });
 
   it('loads cached options on open, then re-enumerates on refresh click', async () => {

@@ -22,7 +22,6 @@ vi.mock('./MessageList', () => ({ MessageList: () => <div data-testid="message-l
 vi.mock('./ChatInput', () => ({ ChatInput: () => <div data-testid="chat-input" /> }));
 vi.mock('./StreamingMessage', () => ({ StreamingMessage: () => null }));
 vi.mock('./ErrorBanner', () => ({ ErrorBanner: () => null }));
-vi.mock('./FloatingTodoPanel', () => ({ FloatingTodoPanel: () => null }));
 vi.mock('./EgressPanel', () => ({ EgressLog: () => <div data-testid="egress-log" /> }));
 vi.mock('@/components/connector/ConnectorPanel', () => ({ ConnectorPanel: () => null }));
 vi.mock('./ConnectorInlineNotice', () => ({ ConnectorInlineNotice: () => null }));
@@ -59,7 +58,6 @@ describe('ChatView tab bar', () => {
       isStreaming: false,
       isConnected: true,
       streamingBlocks: [],
-      currentTodos: [],
     });
   });
 

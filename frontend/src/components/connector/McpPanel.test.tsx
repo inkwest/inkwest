@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { McpPanel } from './McpPanel';
+import { resetMcpCatalogCache } from './mcpCatalogCache';
 import type { McpServerEntry } from '@/services/api';
 
 vi.mock('@/services/api', () => ({
@@ -39,6 +40,7 @@ function cat(keys: string[] = [], oauth: McpServerEntry[] = []) {
 describe('McpPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetMcpCatalogCache(); // process-wide cache must not leak between tests
   });
 
   it('renders nothing when the catalog is empty', async () => {

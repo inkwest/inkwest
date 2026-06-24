@@ -9,10 +9,10 @@ import { AwsEnumProgressBar } from './AwsEnumProgressBar';
 import { useAwsEnumProgress, EnumProgress } from '@/hooks/useAwsEnumProgress';
 import { ConnectorPermissions } from './ConnectorPermissions';
 import { McpPanel } from './McpPanel';
-import { LABELS, ICONS } from './connectorChrome';
+import { LABELS, ICONS, connectorTone } from './connectorChrome';
+import { ConnectorIconButton } from './ConnectorIconButton';
 import { StateBadge } from './StateBadge';
 import { useConnectorGrant } from './useConnectorGrant';
-import { SessionModelSelect } from '@/components/chat/SessionModelSelect';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -23,7 +23,9 @@ interface Props {
   autoStart?: ConnectorName | null;
   // 'inline' (default) packs connectors on one wrapping row (in-conversation header).
   // 'stacked' puts each connector on its own full-width row (start screen).
-  layout?: 'inline' | 'stacked';
+  // 'icons' renders each connector as a single square toolbar icon (composer bar):
+  // colour = grant state, click = the same "Give access" flow. Hosts the same modals.
+  layout?: 'inline' | 'stacked' | 'icons';
   // Open the MCP picker on mount — used by the start screen after it lazily
   // creates the session from the MCP row (which remounts this panel).
   autoOpenMcp?: boolean;
@@ -33,6 +35,7 @@ interface Props {
 // bounded act of consent; expired credentials prompt a re-grant.
 export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOpenMcp = false }: Props) {
   const stacked = layout === 'stacked';
+  const iconsLayout = layout === 'icons';
   const {
     statuses,
     fetchStatus,
@@ -50,7 +53,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
     renewAll,
     awsAutoSelect,
   } = useConnectorsStore();
-  const { grant, busy, error: startError } = useConnectorGrant(sessionId);
+  const { grant, busy, error: startError, errorConnector } = useConnectorGrant(sessionId);
   const [renewing, setRenewing] = useState(false);
   const [awsModalOpen, setAwsModalOpen] = useState(false);
   // Once the user approves, the still-pending poll blocks on the slow account
@@ -154,12 +157,52 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
   const connectors = Object.keys(LABELS) as ConnectorName[];
   // Only render connectors the backend reports (enabled ones).
   const visible = connectors.filter((c) => statuses[c]);
-  // Connectors disabled entirely: keep the model selector reachable in its own
-  // strip (it renders nothing itself when no session/config is loaded).
-  if (visible.length === 0 && !stacked) return <SessionModelSelect asBar />;
+  // No connectors enabled, non-stacked, non-icons: nothing to show. The icons layout
+  // still renders (the MCP icon may be present even with no AWS/GitLab connectors).
+  if (visible.length === 0 && !stacked && !iconsLayout) return null;
 
   return (
-    <div className={cn('px-4 py-2 bg-gray-900/60', !stacked && 'border-b border-gray-800')}>
+    <div className={iconsLayout ? 'contents' : cn('px-4 py-2 bg-gray-900/60', !stacked && 'border-b border-gray-800')}>
+      {iconsLayout ? (
+        // Composer-toolbar icons: one square per enabled connector + the MCP icon.
+        <div className="flex items-center gap-1.5">
+          {visible.map((c) => {
+            const status = statuses[c];
+            const connected = status.state === 'connected';
+            const failed = errorConnector === c;
+            const label = failed
+              ? `${LABELS[c]} — ${startError}`
+              : connected
+                ? `${LABELS[c]} — connected, click to revoke`
+                : reauthRequired === c
+                  ? `${LABELS[c]} — click to reauthorize`
+                  : `Give ${LABELS[c]} access`;
+            return (
+              <div key={c} className="flex items-center gap-1">
+                <ConnectorIconButton
+                  Icon={ICONS[c]}
+                  title={label}
+                  // A failed grant flags the icon red (the busy spinner just stopped,
+                  // so without this the failure would be invisible) with the error text.
+                  tone={failed ? 'error' : connectorTone(status.state, reauthRequired === c)}
+                  // Toggle: a granted connector revokes, otherwise (re)start the grant flow.
+                  onClick={() => (connected ? revoke(sessionId, c) : grant(c))}
+                  busy={busy === c}
+                  overlayTitle={LABELS[c]}
+                  overlayBadge={<StateBadge state={status.state} expiresAt={status.expires_at} />}
+                  overlayBody={<ConnectorPermissions status={status} />}
+                />
+                {failed && (
+                  <span className="max-w-[14rem] truncate text-xs text-red-400" title={startError ?? undefined}>
+                    {startError}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+          <McpPanel sessionId={sessionId} variant="icon" autoOpen={autoOpenMcp} showWhenEmpty />
+        </div>
+      ) : (
       <div className={cn('flex gap-2', stacked ? 'flex-col items-stretch' : 'items-center flex-wrap')}>
         <span className={cn('text-xs text-gray-500', stacked ? 'mb-0.5' : 'mr-1')}>External access:</span>
         {visible.map((c) => {
@@ -230,9 +273,8 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
         ) : (
           <McpPanel sessionId={sessionId} variant="inline" />
         )}
-        {/* Per-conversation model, right-aligned (start screen has its own picker). */}
-        {!stacked && <SessionModelSelect className="ml-auto" />}
       </div>
+      )}
 
       {/* AWS device authorization — our own centered modal (the AWS page itself
           opens in a tab/popup; it can't be embedded). */}

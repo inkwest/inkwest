@@ -2,18 +2,12 @@ import { useState, useRef, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Check, Menu, User, LogOut, Shield } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
-import { useSettingsStore, TaskListPosition } from '@/store/settings';
+import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { formatTokenCount } from '@/lib/utils';
-
-const TASK_LIST_OPTIONS: { value: TaskListPosition; label: string }[] = [
-  { value: 'hidden', label: 'Hidden' },
-  { value: 'top', label: 'Top right' },
-  { value: 'bottom', label: 'Bottom right' },
-];
 
 export function Header() {
   const navigate = useNavigate();
@@ -24,7 +18,7 @@ export function Header() {
   // store intact so the chat restores as-is when navigating back.
   const storeSession = useSessionsStore((s) => s.currentSession);
   const currentSession = inAdminPanel ? null : storeSession;
-  const { compactToolCards, toggleCompactToolCards, showTimestamps, toggleShowTimestamps, taskListPosition, setTaskListPosition, toggleSidebar } = useSettingsStore();
+  const { compactToolCards, toggleCompactToolCards, showTimestamps, toggleShowTimestamps, wideComposer, toggleWideComposer, toggleSidebar } = useSettingsStore();
   const { user, oidcEnabled, isAuthenticated, logout } = useAuthStore();
   // fetchConfig still primes the shared config (model picker, attachments gate) once
   // the user is authenticated, even though the header no longer renders a model badge.
@@ -132,25 +126,13 @@ export function Header() {
                   <span>Show timestamps</span>
                   {showTimestamps && <Check className="h-4 w-4 text-green-400" />}
                 </button>
-
-                <div className="px-3 py-2">
-                  <span className="text-xs text-gray-500 uppercase tracking-wider">Task list</span>
-                  <div className="mt-1 flex gap-1">
-                    {TASK_LIST_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.value}
-                        onClick={() => setTaskListPosition(opt.value)}
-                        className={`flex-1 px-2 py-1 text-xs rounded ${
-                          taskListPosition === opt.value
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <button
+                  onClick={toggleWideComposer}
+                  className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
+                >
+                  <span>Wide composer</span>
+                  {wideComposer && <Check className="h-4 w-4 text-green-400" />}
+                </button>
               </div>
 
               {(user?.is_admin || oidcEnabled) && (

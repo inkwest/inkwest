@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatInput } from './ChatInput';
 import { useDraftsStore } from '@/store/drafts';
@@ -174,13 +174,15 @@ describe('ChatInput', () => {
     };
 
     const getTextarea = () => screen.getByPlaceholderText(/investigate or analyse/i);
+    // The focus glow and invite/shimmer border live on the composer card (the
+    // borderless textarea sits inside it), so assert against the card wrapper.
+    const getCard = () => getTextarea().closest('.rounded-2xl') as HTMLElement;
 
     it('shows the animated invite border on a new conversation when empty and unfocused', () => {
       render(<ChatInput onSend={onSend} />);
-      const textarea = getTextarea();
       // autoFocus focuses the composer on mount; the invite only shows once blurred.
-      fireEvent.blur(textarea);
-      expect(textarea).toHaveClass('invite-border');
+      fireEvent.blur(getTextarea());
+      expect(getCard()).toHaveClass('invite-border');
     });
 
     it('drops the invite border on focus, leaving only the static glow', () => {
@@ -188,8 +190,8 @@ describe('ChatInput', () => {
       const textarea = getTextarea();
       fireEvent.blur(textarea);
       fireEvent.focus(textarea);
-      expect(textarea).not.toHaveClass('invite-border');
-      expect(textarea.className).toContain('focus:shadow-');
+      expect(getCard()).not.toHaveClass('invite-border');
+      expect(getCard().className).toContain('focus-within:shadow-');
     });
 
     it('keeps the normal border when unfocused with text present', async () => {
@@ -198,24 +200,22 @@ describe('ChatInput', () => {
       const textarea = getTextarea();
       await user.type(textarea, 'draft in progress');
       fireEvent.blur(textarea);
-      expect(textarea).not.toHaveClass('invite-border');
+      expect(getCard()).not.toHaveClass('invite-border');
     });
 
     it('keeps the normal border when the conversation already has messages', () => {
       useChatStore.setState({ messages: [existingMessage] });
       render(<ChatInput onSend={onSend} />);
-      const textarea = getTextarea();
-      fireEvent.blur(textarea);
-      expect(textarea).not.toHaveClass('invite-border');
+      fireEvent.blur(getTextarea());
+      expect(getCard()).not.toHaveClass('invite-border');
     });
 
     it('invites on the start screen even when the store holds a stale session', () => {
       // resetChat only runs in ChatPage, so the start screen can see old messages.
       useChatStore.setState({ messages: [existingMessage] });
       render(<ChatInput onSend={onSend} large />);
-      const textarea = getTextarea();
-      fireEvent.blur(textarea);
-      expect(textarea).toHaveClass('invite-border');
+      fireEvent.blur(getTextarea());
+      expect(getCard()).toHaveClass('invite-border');
     });
   });
 
@@ -346,6 +346,28 @@ describe('ChatInput', () => {
       expect(ta.value).toBe('past');
       // The recall must not clobber the user's own draft in the store.
       expect(useDraftsStore.getState().drafts['s1']).toBe('mydraft');
+    });
+  });
+
+  describe('attachment handoff auto-submit', () => {
+    const att = [{ filename: 'a.png', original_name: 'a.png', content_type: 'image/png', size: 10 }];
+
+    it('auto-submits seeded attachments even with no text', async () => {
+      render(<ChatInput onSend={onSend} sessionId="s1" autoSubmit initialAttachments={att} />);
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith('', att));
+    });
+
+    it('auto-submits a seeded prompt together with its attachments', async () => {
+      render(
+        <ChatInput onSend={onSend} sessionId="s1" autoSubmit initialPrompt="hello" initialAttachments={att} />,
+      );
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith('hello', att));
+    });
+
+    it('does not auto-submit when there is neither text nor attachments', async () => {
+      render(<ChatInput onSend={onSend} sessionId="s1" autoSubmit />);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(onSend).not.toHaveBeenCalled();
     });
   });
 

@@ -4,6 +4,19 @@ import { Cluster, Message, Skill, SearchResponse, Session, SessionWithMessages }
 // image serves the SPA from FastAPI itself, so relative URLs must survive.
 export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
+// Carries the HTTP status so callers can branch on it (e.g. a 409 "re-initiate")
+// rather than string-matching the detail message. Extends Error so existing
+// `(e as Error).message` consumers keep working unchanged.
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 export function wsBaseUrl(): string {
   const configured = import.meta.env.VITE_WS_URL;
   if (configured) return configured;
@@ -37,7 +50,7 @@ export async function fetchAPI<T>(
     } catch {
       // response body not JSON
     }
-    throw new Error(detail);
+    throw new ApiError(response.status, detail);
   }
 
   if (response.status === 204) return undefined as unknown as T;

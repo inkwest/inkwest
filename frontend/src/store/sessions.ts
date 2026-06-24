@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { SearchResponse, Session, SessionWithMessages } from '@/types/api';
+import { Attachment, SearchResponse, Session, SessionWithMessages } from '@/types/api';
 import * as api from '@/services/api';
 import { useDraftsStore } from '@/store/drafts';
 
@@ -10,6 +10,9 @@ interface SessionsState {
   isLoadingSession: boolean;
   error: string | null;
   pendingPrompt: string | null;
+  // Attachments uploaded on the start screen, handed off to the real conversation's
+  // auto-submit (the files live server-side under the just-created session).
+  pendingAttachments: Attachment[] | null;
   searchResults: SearchResponse | null;
   isSearching: boolean;
 
@@ -25,8 +28,9 @@ interface SessionsState {
   setCurrentSession: (session: SessionWithMessages | null) => void;
   moveSession: (fromId: string, toId: string) => void;
   persistSessionOrder: () => Promise<void>;
-  setPendingPrompt: (prompt: string | null) => void;
+  setPendingPrompt: (prompt: string | null, attachments?: Attachment[] | null) => void;
   consumePendingPrompt: () => string | null;
+  consumePendingAttachments: () => Attachment[] | null;
   updateSessionTokens: (id: string, inputTokens: number, outputTokens: number) => void;
   searchGlobal: (query: string) => Promise<void>;
   clearSearch: () => void;
@@ -39,6 +43,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   isLoadingSession: false,
   error: null,
   pendingPrompt: null,
+  pendingAttachments: null,
   searchResults: null,
   isSearching: false,
 
@@ -151,7 +156,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }
   },
 
-  setPendingPrompt: (prompt) => set({ pendingPrompt: prompt }),
+  setPendingPrompt: (prompt, attachments = null) =>
+    set({ pendingPrompt: prompt, pendingAttachments: attachments }),
 
   consumePendingPrompt: () => {
     const prompt = get().pendingPrompt;
@@ -159,6 +165,12 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       set({ pendingPrompt: null });
     }
     return prompt;
+  },
+
+  consumePendingAttachments: () => {
+    const attachments = get().pendingAttachments;
+    if (attachments) set({ pendingAttachments: null });
+    return attachments;
   },
 
   searchGlobal: async (query: string) => {

@@ -13,6 +13,9 @@ export function useConnectorGrant(sessionId: string) {
   const { statuses, initiate, startAwsDevice, requestAwsModal, tryWarmGrant, grantBusy, setGrantBusy } =
     useConnectorsStore();
   const [error, setError] = useState<string | null>(null);
+  // Which connector the current `error` belongs to, so a per-connector surface (the
+  // toolbar icons) can flag exactly the one that failed rather than a global message.
+  const [errorConnector, setErrorConnector] = useState<ConnectorName | null>(null);
 
   const grant = useCallback(
     async (connector: ConnectorName) => {
@@ -29,6 +32,7 @@ export function useConnectorGrant(sessionId: string) {
       if (useConnectorsStore.getState().grantBusy === connector) return;
       setGrantBusy(connector);
       setError(null);
+      setErrorConnector(null);
       try {
         // Warm platform auth (user logged in earlier today) → grant without a login
         // flow: AWS opens the account/role picker directly, GitLab connects silently.
@@ -41,6 +45,7 @@ export function useConnectorGrant(sessionId: string) {
       } catch (e) {
         const detail = e instanceof Error && e.message ? `: ${e.message}` : '';
         setError(`Failed to start ${LABELS[connector]} authorization${detail}`);
+        setErrorConnector(connector);
       } finally {
         setGrantBusy(null);
       }
@@ -48,5 +53,5 @@ export function useConnectorGrant(sessionId: string) {
     [sessionId, statuses, initiate, startAwsDevice, requestAwsModal, tryWarmGrant, setGrantBusy]
   );
 
-  return { grant, busy: grantBusy, error };
+  return { grant, busy: grantBusy, error, errorConnector };
 }

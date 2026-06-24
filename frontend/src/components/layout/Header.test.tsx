@@ -28,7 +28,6 @@ describe('Header', () => {
     useSessionsStore.setState({ currentSession: null });
     useSettingsStore.setState({
       compactToolCards: false,
-      taskListPosition: 'hidden',
       sidebarOpen: true,
     });
     useAuthStore.setState({
