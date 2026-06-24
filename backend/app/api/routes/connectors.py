@@ -6,8 +6,10 @@ user consent. Responses only ever carry the secret-free :class:`ConnectorStatus`
 projection — credentials live in the in-RAM store and never reach the client.
 """
 
+import asyncio
 import logging
 import secrets
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -43,7 +45,11 @@ from app.services.connectors.warm import (
     store_gitlab_warm,
     update_aws_warm_options,
 )
-from app.services.eks_refresh import schedule_session_eks_refresh
+from app.services.eks_refresh import (
+    cancel_session_refresh,
+    schedule_session_eks_refresh,
+    session_lock,
+)
 from app.services.messages import save_session_event
 from app.tools.connector_exec import write_aws_profiles
 
@@ -56,10 +62,15 @@ _MAX_PENDING_STATES = 10000
 # Process RAM (same single-replica constraint as the credential store).
 _aws_device_pending: dict[tuple[str, str], str] = {}
 
-# Live account-enumeration progress, keyed by (user_id, session_id). Written from
-# the enumeration thread, read by the progress poll endpoint (GIL-safe for these
-# int/str fields; a stale read just shows a slightly older count). Entry lives only
-# for the duration of an enumeration — set on start, popped in a finally.
+# Live grant progress (enumerating/granting/discovering), keyed by (user_id,
+# session_id). The poll endpoint only ever reads (a single dict get; entries are
+# replaced wholesale, never mutated in place, so a read gets a consistent snapshot).
+# But the publish callbacks fire from worker threads (enumeration + EKS discovery run
+# via asyncio.to_thread) while begin/end run on the event loop — so the get-check-set
+# in the callbacks and the pop in _end_enum_progress are guarded by _enum_lock to stay
+# atomic across threads (else a thread could resurrect an entry the loop just popped).
+# Entry lives only for the duration of a grant — set on start, popped in a finally.
+_enum_lock = threading.Lock()
 #
 # Process-local, like the credential store: the progress poll must hit the same
 # replica that runs the enumeration, so it relies on the same single-replica /
@@ -72,27 +83,46 @@ _aws_device_pending: dict[tuple[str, str], str] = {}
 _aws_enum_progress: dict[tuple[str, str], dict[str, Any]] = {}
 
 
-def _begin_enum_progress(key: tuple[str, str]) -> tuple[object, EnumProgressCb]:
-    """Publish an initial progress entry and return its (token, callback)."""
-    token = object()
-    _aws_enum_progress[key] = {"phase": "enumerating", "done": 0, "total": 0, "token": token}
+def _progress_cb(key: tuple[str, str], token: object, phase: str) -> EnumProgressCb:
+    """Build an owner-guarded (done, total) publisher for ``phase``.
+
+    Owner-guarded: it only writes while the entry still carries *this* token, so a
+    superseded task (e.g. an EKS discovery still running after a fresh re-grant
+    replaced the entry) goes silent instead of resurrecting or clobbering it.
+    """
 
     def cb(done: int, total: int) -> None:
-        _aws_enum_progress[key] = {
-            "phase": "enumerating",
-            "done": done,
-            "total": total,
-            "token": token,
-        }
+        # Fired from a worker thread (to_thread enumeration/discovery) — _enum_lock
+        # makes the owner-check + write atomic against the loop's begin/end.
+        with _enum_lock:
+            cur = _aws_enum_progress.get(key)
+            if cur is not None and cur.get("token") is token:
+                _aws_enum_progress[key] = {
+                    "phase": phase,
+                    "done": done,
+                    "total": total,
+                    "token": token,
+                }
 
-    return token, cb
+    return cb
+
+
+def _begin_enum_progress(
+    key: tuple[str, str], phase: str = "enumerating"
+) -> tuple[object, EnumProgressCb]:
+    """Publish an initial progress entry and return its (token, callback)."""
+    token = object()
+    with _enum_lock:
+        _aws_enum_progress[key] = {"phase": phase, "done": 0, "total": 0, "token": token}
+    return token, _progress_cb(key, token, phase)
 
 
 def _end_enum_progress(key: tuple[str, str], token: object) -> None:
     """Drop the progress entry — but only if we still own it (see token rationale)."""
-    cur = _aws_enum_progress.get(key)
-    if cur is not None and cur.get("token") is token:
-        _aws_enum_progress.pop(key, None)
+    with _enum_lock:
+        cur = _aws_enum_progress.get(key)
+        if cur is not None and cur.get("token") is token:
+            _aws_enum_progress.pop(key, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +162,8 @@ class AwsOptionsResponse(BaseModel):
 
 
 class AwsEnumProgressResponse(BaseModel):
-    # phase: "idle" (no enumeration running) | "enumerating".
+    # phase: "idle" (nothing running) | "enumerating" (SSO account listing) |
+    # "granting" (STS minting) | "discovering" (EKS cluster discovery).
     phase: str
     done: int = 0
     total: int = 0
@@ -267,21 +298,61 @@ async def _apply_aws_selection(
     AWS becomes usable only here (after the pick), so this — not the device step — is
     where the conversation event with the chosen account/role is emitted.
     """
+    # One progress entry spans both visible phases of the grant: STS minting
+    # ("granting") below, then EKS discovery ("discovering") in the background task.
+    # The token lets the slow background task own the entry's release without a
+    # racing re-grant yanking it (see _progress_cb / _end_enum_progress).
+    key = (str(user_id), str(sid))
+    token, prog_cb = _begin_enum_progress(key, phase="granting")
+    # Release the entry in a finally unless ownership is handed to the background EKS
+    # task — so it never dangles on ANY pre-handoff failure (ConnectorError, a tmpfs
+    # OSError from write_aws_profiles, a raw boto error from the STS client build,
+    # a DB error in the audit/event writes), not just the explicit ConnectorError.
+    handed_off = False
     try:
-        cred = await conn.select_account_roles(provisional, selections=selections)
-    except ConnectorError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    await get_credential_store().put(user_id, sid, cred)
-    # Build the per-session ~/.aws projection now — the account/role pick is the trigger.
-    # On a shared creds volume this is what the sandbox container bind-mounts, so the
-    # granted profiles are present before the first turn provisions the sandbox.
-    write_aws_profiles(sid, cred)
-    # Discover EKS clusters for the freshly minted profiles and generate one
-    # (tmpfs) kubeconfig each — async, must not block the response.
-    schedule_session_eks_refresh(sid, cred)
-    await _audit(db, user_id=user_id, session_id=sid, connector="aws", action="select", cred=cred)
-    await save_session_event(db, sid, "aws", event, targets=_aws_targets(cred))
-    return ConnectorStatusResponse.from_status(conn.public_status(cred))
+        try:
+            cred = await conn.select_account_roles(
+                provisional, selections=selections, progress_cb=prog_cb
+            )
+        except ConnectorError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        await get_credential_store().put(user_id, sid, cred)
+        # Build the per-session ~/.aws projection now — the account/role pick is the
+        # trigger. On a shared creds volume this is what the sandbox container
+        # bind-mounts, so the granted profiles are present before the first turn
+        # provisions the sandbox.
+        write_aws_profiles(sid, cred)
+        # Discover EKS clusters for the freshly minted profiles and generate one (tmpfs)
+        # kubeconfig each — async, must not block the response. Only keep the progress
+        # entry alive into discovery when an eks-* role was picked: only those map into a
+        # cluster's RBAC, so a grant without one has no EKS wait worth showing (the UI
+        # then closes on the next idle poll). Other picks still trigger discovery,
+        # untracked. Case-insensitive prefix match — intentionally narrower than
+        # _dedup_prefer_eks's substring "eks" heuristic: we wait only when the user
+        # explicitly picked an eks-* role.
+        want_eks = any(s.get("role_name", "").lower().startswith("eks-") for s in selections)
+        profiles = cred.secret.get("profiles") or []
+        if want_eks and profiles:
+            disc_cb = _progress_cb(key, token, "discovering")
+            # Seed the real profile count so a poll landing in the scheduling gap reads
+            # a determinate "discovering 0/N" — never an ambiguous 0/0 that reads as done.
+            disc_cb(0, len(profiles))
+            # Ownership of the progress entry transfers to the background task, which
+            # ends it via on_done; the finally below must not also release it.
+            schedule_session_eks_refresh(
+                sid, cred, progress_cb=disc_cb, on_done=lambda: _end_enum_progress(key, token)
+            )
+            handed_off = True
+        else:
+            schedule_session_eks_refresh(sid, cred)
+        await _audit(
+            db, user_id=user_id, session_id=sid, connector="aws", action="select", cred=cred
+        )
+        await save_session_event(db, sid, "aws", event, targets=_aws_targets(cred))
+        return ConnectorStatusResponse.from_status(conn.public_status(cred))
+    finally:
+        if not handed_off:
+            _end_enum_progress(key, token)
 
 
 # --------------------------------------------------------------------------- #
@@ -585,14 +656,16 @@ async def aws_options_progress(
     session_id: str,
     current_user: CurrentUser,
 ) -> AwsEnumProgressResponse:
-    """Report live account-enumeration progress (drives the picker's progress bar).
+    """Report live AWS grant/refresh progress (drives the picker's progress bar).
 
-    Returns ``phase="idle"`` when nothing is enumerating. Polled on its own ~1s
-    timer while a grant/refresh blocks — for the *whole* device-approval wait, not
-    just the enumeration — so it deliberately skips the session-ownership DB lookup
-    the other routes do: the registry key is scoped to ``current_user.id``, so a
-    user can only ever read their own progress regardless of the session id. The
-    id is still parsed to reject malformed input and to match the canonical key.
+    Covers every slow phase reported on ``AwsEnumProgressResponse``: ``enumerating``
+    (SSO account listing on device-auth/refresh), ``granting`` (STS minting) and
+    ``discovering`` (EKS cluster discovery, which outlives the grant response).
+    Returns ``phase="idle"`` when nothing is running. Polled on its own ~1s timer
+    for the whole span, so it deliberately skips the session-ownership DB lookup the
+    other routes do: the registry key is scoped to ``current_user.id``, so a user can
+    only ever read their own progress regardless of the session id. The id is still
+    parsed to reject malformed input and to match the canonical key.
     """
     _require_enabled()
     try:
@@ -602,7 +675,9 @@ async def aws_options_progress(
     p = _aws_enum_progress.get((str(current_user.id), str(sid)))
     if not p:
         return AwsEnumProgressResponse(phase="idle")
-    return AwsEnumProgressResponse(phase="enumerating", done=int(p["done"]), total=int(p["total"]))
+    return AwsEnumProgressResponse(
+        phase=str(p["phase"]), done=int(p["done"]), total=int(p["total"])
+    )
 
 
 @router.post("/{session_id}/aws/select", response_model=ConnectorStatusResponse)
@@ -647,10 +722,18 @@ async def revoke(
         except Exception:  # noqa: BLE001 — revocation is best-effort
             logger.debug("provider revoke failed (best-effort)", extra={"connector": connector})
         if connector == "aws":
-            # Remove the tmpfs ~/.aws projection for this session.
+            # Clear the tmpfs ~/.aws + EKS kubeconfigs IN PLACE: the conv container may
+            # still be running with these dirs bind-mounted, so keep the dir inodes
+            # (keep_dirs) — the agent then sees empty/revoked creds, and a re-grant in
+            # the same conversation reaches it through the same mount. Cancel any
+            # in-flight refresh FIRST, else its discovery could re-publish the creds we
+            # just cleared (revoke would silently leave creds behind); then clear under
+            # the session lock, off the event loop.
             from app.tools.connector_exec import cleanup_aws_files
 
-            cleanup_aws_files(sid)
+            await cancel_session_refresh(sid)
+            async with session_lock(sid):
+                await asyncio.to_thread(cleanup_aws_files, sid, keep_dirs=True)
         await _audit(
             db, user_id=current_user.id, session_id=sid, connector=connector, action="revoke"
         )

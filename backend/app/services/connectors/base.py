@@ -12,12 +12,17 @@ import base64
 import hashlib
 import secrets
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 from uuid import UUID
 
 ConnectorType = Literal["aws", "gitlab"]
+
+# (done, total) progress callback, shared by the AWS enumeration/grant and EKS
+# discovery paths. One canonical alias so the contract has a single name.
+ProgressCb = Callable[[int, int], None]
 
 # Lifecycle state surfaced to the UI. Never carries a secret.
 ConnState = Literal[

@@ -3,67 +3,159 @@ Per-session EKS kubeconfig refresh.
 
 When a user selects AWS account/role pairs for a session (``POST .../aws/select``),
 the backend discovers the EKS clusters reachable with the freshly minted credentials
-and writes **one self-contained kubeconfig per cluster** into the session's tmpfs
-area (``/dev/shm/inkwest/<session_id>/kube``). Nothing is persisted to disk; the
-files are removed on revoke / session end with the rest of the session tmpfs.
+and writes **one self-contained kubeconfig per cluster** into the session's RAM-only
+kube dir — the shared ``<sandbox_creds_root>/<session_id>/kube`` volume when a sandbox
+is configured (bind-mounted read-only into the conv container), else the backend-local
+``/dev/shm/inkwest/<session_id>/kube`` tmpfs.
+
+The kubeconfigs are **published in place** (files staged then renamed in, stale ones
+pruned), under a per-session lock — the dir inode is never swapped, because the conv
+container bind-mounts it and a mount follows the inode. Revoke clears the contents in
+place but keeps the dir (``keep_dirs``); session end cancels any in-flight refresh and
+removes the whole tree.
 
 This is the in-process port of the ``refresh-eks`` shell helper, with the same discovery + one-kubeconfig-per-cluster output, but scoped to a single
-session's profiles, RAM-only, async and idempotent — no ``aws-sso-util``, no
-``~/.kube``, no global ``~/.aws``.
+session's profiles, RAM-only, async and idempotent — no ``aws-sso-util``, no global
+``~/.kube`` / ``~/.aws``.
 
-Each generated kubeconfig uses the standard AWS exec credential plugin
-(``aws eks get-token``); the exec block carries the session's AWS profile and the
-tmpfs ``~/.aws`` file paths, so the file works with the credential-free kubectl
-executor without leaking secrets into the kubeconfig itself.
+Each kubeconfig uses the standard AWS exec credential plugin (``aws eks get-token``);
+the exec block carries the session's AWS profile and the ``~/.aws`` file paths — the
+**in-container** ``<sandbox_home>/.aws`` paths on a sandbox, the backend ``/dev/shm``
+paths otherwise — so it works with the credential-free kubectl executor without
+leaking secrets into the kubeconfig itself.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
-import shutil
+import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import yaml
 
 from app.core.config import get_settings
-from app.services.connectors.base import MintedCredential
-from app.tools.connector_exec import session_kube_dir, write_aws_profiles
+from app.services.connectors.base import MintedCredential, ProgressCb
+from app.tools.connector_exec import _write_secure, session_kube_dir, write_aws_profiles
 
 logger = logging.getLogger(__name__)
 
-# Background tasks are kept referenced so the event loop does not garbage-collect
-# them mid-run (asyncio holds only a weak reference to fire-and-forget tasks).
-_tasks: set[asyncio.Task[None]] = set()
+
+def _safe_seg(value: str) -> str:
+    """Sanitize a path/context segment: the AWS SSO account name is a display string
+    that can contain '/' or spaces, which in a kubeconfig FILENAME would let the rename
+    escape the session dir. Mirror aws._profile_name's allowlist."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
 
 
-def schedule_session_eks_refresh(session_id: UUID, cred: MintedCredential) -> None:
+# Background refresh tasks, tracked per session: kept referenced so the event loop
+# doesn't GC them mid-run (asyncio holds only a weak ref to fire-and-forget tasks),
+# and so session end can cancel a still-running refresh before it recreates the tmpfs
+# dir under a just-removed session (see cancel_session_refresh).
+_tasks_by_session: dict[str, set[asyncio.Task[None]]] = {}
+
+# One lock per session serialises the dir-mutating critical section of a refresh with
+# itself (overlapping re-selects) and with revoke's in-place clear — so they can't
+# interleave a publish and a prune/clear and leave a torn kube set. The credential
+# store is per-replica and refresh/revoke run on one event loop, so a plain dict of
+# asyncio.Locks is enough; entries are dropped at session end (release_session_lock).
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+def session_lock(session_id: UUID) -> asyncio.Lock:
+    """Get-or-create the per-session refresh/revoke serialisation lock.
+
+    ``setdefault`` (the repo's keyed-lock idiom, cf. connectors/renewal.py) so two
+    concurrent callers for one session always get the *same* lock object — never prune
+    a lock here: a free lock can be one a caller already holds a reference to but hasn't
+    awaited yet, and dropping it would split two ops onto different locks. Bounded by
+    active sessions and dropped eagerly at session end (release_session_lock)."""
+    return _session_locks.setdefault(str(session_id), asyncio.Lock())
+
+
+def release_session_lock(session_id: UUID) -> None:
+    """Drop a session's lock at session end so the map doesn't grow unbounded."""
+    _session_locks.pop(str(session_id), None)
+
+
+async def cancel_session_refresh(session_id: UUID) -> None:
+    """Cancel any in-flight EKS refresh for a session and wait for it to unwind.
+
+    Called at session end before the tmpfs is torn down: otherwise a refresh still in
+    its discovery/publish could ``os.makedirs`` the kube dir back *after* cleanup's
+    rmtree, orphaning a tmpfs dir for a session that no longer exists.
+    """
+    tasks = _tasks_by_session.pop(str(session_id), None)
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def schedule_session_eks_refresh(
+    session_id: UUID,
+    cred: MintedCredential,
+    *,
+    progress_cb: ProgressCb | None = None,
+    on_done: Callable[[], None] | None = None,
+) -> None:
     """Fire-and-forget the EKS refresh for a session — never blocks the caller.
 
-    No-op when the credential carries no minted profiles (e.g. still provisional).
+    No-op when the credential carries no minted profiles (e.g. still provisional);
+    ``on_done`` still runs so a caller tracking progress can release its entry.
+    ``progress_cb`` is fired per profile during discovery; ``on_done`` runs once the
+    task settles (success or failure) — used to end the shared grant progress entry.
     """
     if not cred.secret.get("profiles"):
+        if on_done:
+            on_done()
         return
-    task = asyncio.create_task(_run_safe(session_id, cred))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
+    key = str(session_id)
+    task = asyncio.create_task(_run_safe(session_id, cred, progress_cb, on_done))
+    _tasks_by_session.setdefault(key, set()).add(task)
+
+    def _discard(t: asyncio.Task[None]) -> None:
+        siblings = _tasks_by_session.get(key)
+        if siblings is not None:
+            siblings.discard(t)
+            if not siblings:
+                _tasks_by_session.pop(key, None)
+
+    task.add_done_callback(_discard)
 
 
-async def _run_safe(session_id: UUID, cred: MintedCredential) -> None:
+async def _run_safe(
+    session_id: UUID,
+    cred: MintedCredential,
+    progress_cb: ProgressCb | None = None,
+    on_done: Callable[[], None] | None = None,
+) -> None:
     try:
-        count = await refresh_session_eks(session_id, cred)
+        count = await refresh_session_eks(session_id, cred, progress_cb=progress_cb)
         logger.info("eks_refresh_done", extra={"session_id": str(session_id), "kubeconfigs": count})
     except Exception:  # noqa: BLE001 — background task; failure must not crash the loop
         logger.exception("eks_refresh_failed", extra={"session_id": str(session_id)})
+    finally:
+        # Always release the progress entry — even on discovery failure the UI must
+        # stop waiting (it falls back to closing the popup on the next idle poll).
+        if on_done:
+            on_done()
 
 
-async def refresh_session_eks(session_id: UUID, cred: MintedCredential) -> int:
+async def refresh_session_eks(
+    session_id: UUID, cred: MintedCredential, *, progress_cb: ProgressCb | None = None
+) -> int:
     """Discover EKS clusters per profile and write one kubeconfig each (tmpfs).
 
-    Idempotent / relaunchable: the session kube dir is rebuilt from scratch each
-    call via a staged swap, so a re-select never leaves a half-written set. Returns
-    the number of kubeconfig files written.
+    Idempotent / relaunchable: the kube dir's CONTENTS are republished in place each
+    call (files staged then renamed in, stale ones pruned) — the dir inode is never
+    swapped, because the conv container bind-mounts it and a mount follows the inode.
+    The publish/prune is serialised per session (see session_lock) so overlapping
+    re-selects and revoke can't leave a half-written set. Returns the file count.
     """
     profiles = cred.secret.get("profiles") or []
     if not profiles:
@@ -90,34 +182,54 @@ async def refresh_session_eks(session_id: UUID, cred: MintedCredential) -> int:
 
     # One list+describe round-trip set per profile; fan out in threads (the boto3
     # low-level client is thread-safe) to avoid a serial N×latency walk.
-    clusters = await asyncio.to_thread(_discover_all, profiles)
-    # One kubeconfig PER CLUSTER: the same cluster is often reachable via several
-    # selected roles in one account; collapse those to a single file.
+    clusters = await asyncio.to_thread(_discover_all, profiles, progress_cb)
+    # One context per cluster (keyed by ARN): the same cluster is often reachable via
+    # several selected roles in one account; collapse those, preferring the eks-* role.
     clusters = _dedup_prefer_eks(clusters)
 
     aws_cli = settings.aws_cli_path
     dest = session_kube_dir(session_id)
-    staging = f"{dest}.new"
-    shutil.rmtree(staging, ignore_errors=True)
-    os.makedirs(staging, mode=0o700, exist_ok=True)
+    # On the shared sandbox creds volume the dir/file must be world-readable: the
+    # toolbox container reads them through the read-only bind mount as a (potentially)
+    # different uid than the backend — same rationale as write_aws_profiles. On the
+    # backend-local /dev/shm projection they stay private. The read-only mount + the
+    # per-session isolation is the boundary, not the file mode.
+    shared = bool(settings.sandbox_creds_root)
+    dir_mode = 0o755 if shared else 0o700
+    file_mode = 0o644 if shared else 0o600
+    # dest is pre-created at sandbox provisioning and bind-mounted read-only into the
+    # conv container. A bind mount follows the INODE, not the path, so we never swap the
+    # dir. We write ONE merged kubeconfig (`config`, a context per cluster) and publish
+    # it with a single atomic rename into the stable dir — no per-file churn, no prune,
+    # and a whole-file swap means the agent never sees a torn set.
+    os.makedirs(dest, mode=dir_mode, exist_ok=True)
+    os.chmod(dest, dir_mode)  # exist_ok skips mode on an existing dir — force it
+    config_path = os.path.join(dest, "config")
 
-    for c in clusters:
-        kubeconfig = _build_kubeconfig(c, aws_cli, cred_file, cfg_file)
-        path = os.path.join(staging, f"eks--{c['account_name']}--{c['cluster']}")
-        _write_secure(path, yaml.safe_dump(kubeconfig, sort_keys=False))
+    if not clusters:
+        # No reachable clusters → remove a stale config in place (keep the dir inode).
+        async with session_lock(session_id):
+            try:
+                os.remove(config_path)
+            except FileNotFoundError:
+                pass
+        return 0
 
-    # Atomic-ish swap: replace the live dir only once everything is generated.
-    # rename within the same tmpfs is atomic; the brief gap is acceptable since a
-    # refresh only runs on an explicit user re-select.
-    shutil.rmtree(dest, ignore_errors=True)
-    os.replace(staging, dest)
+    # Stage on a sibling temp on the same tmpfs (never inside the mounted dir, so a
+    # half-written file is invisible to the container), then one atomic rename into
+    # place under the per-session lock so it can't interleave with a re-select/revoke.
+    staging = f"{dest}.config.{uuid4().hex}"
+    try:
+        merged = _build_merged_kubeconfig(clusters, aws_cli, cred_file, cfg_file)
+        _write_secure(staging, yaml.safe_dump(merged, sort_keys=False), file_mode)
+        async with session_lock(session_id):
+            os.replace(staging, config_path)
+    finally:
+        try:
+            os.remove(staging)  # no-op once the rename consumed it
+        except FileNotFoundError:
+            pass
     return len(clusters)
-
-
-def _write_secure(path: str, content: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
 
 
 def _dedup_prefer_eks(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -142,11 +254,22 @@ def _dedup_prefer_eks(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(chosen.values())
 
 
-def _discover_all(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _discover_all(
+    profiles: list[dict[str, Any]], progress_cb: ProgressCb | None = None
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    total = len(profiles)
+    done = 0
+    if progress_cb:
+        progress_cb(0, total)
+    # ex.map preserves submission order, so ``done`` counts profiles whose
+    # list+describe round-trip has returned — monotonic, good enough for the bar.
     with ThreadPoolExecutor(max_workers=min(16, len(profiles))) as ex:
         for res in ex.map(_discover_for_profile, profiles):
             out.extend(res)
+            done += 1
+            if progress_cb:
+                progress_cb(done, total)
     return out
 
 
@@ -158,17 +281,22 @@ def _discover_for_profile(profile: dict[str, Any]) -> list[dict[str, Any]]:
     per-account "no access" skip.
     """
     import boto3
+    from botocore.config import Config
     from botocore.exceptions import BotoCoreError, ClientError
 
     region = profile.get("region")
     account_name = profile.get("account_name") or profile.get("account_id")
     try:
+        # Bounded timeouts + capped retries: discovery runs in a ThreadPoolExecutor that
+        # can't be force-killed, so a hung/slow EKS endpoint must fail fast rather than
+        # pin a worker thread (cancelling the task can't stop an in-flight boto call).
         eks: Any = boto3.client(
             "eks",
             region_name=region,
             aws_access_key_id=profile["access_key_id"],
             aws_secret_access_key=profile["secret_access_key"],
             aws_session_token=profile["session_token"],
+            config=Config(connect_timeout=5, read_timeout=15, retries={"max_attempts": 2}),
         )
         names: list[str] = []
         for page in eks.get_paginator("list_clusters").paginate():
@@ -199,32 +327,44 @@ def _discover_for_profile(profile: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
-def _build_kubeconfig(
-    cluster: dict[str, Any], aws_cli: str, cred_file: str, cfg_file: str
+def _build_merged_kubeconfig(
+    clusters: list[dict[str, Any]], aws_cli: str, cred_file: str, cfg_file: str
 ) -> dict[str, Any]:
-    """Build a self-contained exec-plugin kubeconfig for one cluster.
+    """Build ONE exec-plugin kubeconfig with a context per reachable cluster.
 
-    Equivalent to ``aws eks update-kubeconfig`` output, plus the AWS file-path env
-    on the exec block so the credential-free kubectl executor can still resolve the
-    session's tmpfs profile. No secret material is embedded — only file paths.
+    Equivalent to merging ``aws eks update-kubeconfig`` output for every cluster, plus
+    the AWS file-path env on each exec block so the credential-free kubectl executor
+    resolves the session's tmpfs profile. No secret material is embedded — only paths.
+    The agent selects a cluster with ``kubectl --context <name>``; current-context is
+    the first context by sorted alias, so it's deterministic (not discovery-ordered).
     """
-    context_alias = f"{cluster['account_name']}--{cluster['cluster']}"
-    arn = cluster["arn"]
-    return {
-        "apiVersion": "v1",
-        "kind": "Config",
-        "clusters": [
+    cfg_clusters: list[dict[str, Any]] = []
+    contexts: list[dict[str, Any]] = []
+    users: list[dict[str, Any]] = []
+    used_aliases: set[str] = set()
+    for c in clusters:
+        arn = c["arn"]
+        # Sanitize each segment (account_name is an org-controlled display string) and
+        # region-qualify so two same-named clusters in different regions stay distinct.
+        alias = (
+            f"{_safe_seg(c['account_name'])}"
+            f"--{_safe_seg(c['region'] or 'noregion')}--{_safe_seg(c['cluster'])}"
+        )
+        # Two distinct ARNs can still collapse to one alias — e.g. two SSO accounts that
+        # share a display name, each with a same-named cluster in the same region. Keep
+        # context names unique (kubectl --context must be unambiguous) by suffixing a
+        # short, stable ARN hash on collision.
+        if alias in used_aliases:
+            alias = f"{alias}--{hashlib.sha1(arn.encode()).hexdigest()[:8]}"
+        used_aliases.add(alias)
+        cfg_clusters.append(
             {
                 "name": arn,
-                "cluster": {
-                    "server": cluster["endpoint"],
-                    "certificate-authority-data": cluster["ca"],
-                },
+                "cluster": {"server": c["endpoint"], "certificate-authority-data": c["ca"]},
             }
-        ],
-        "contexts": [{"name": context_alias, "context": {"cluster": arn, "user": arn}}],
-        "current-context": context_alias,
-        "users": [
+        )
+        contexts.append({"name": alias, "context": {"cluster": arn, "user": arn}})
+        users.append(
             {
                 "name": arn,
                 "user": {
@@ -233,21 +373,29 @@ def _build_kubeconfig(
                         "command": aws_cli,
                         "args": [
                             "--region",
-                            cluster["region"],
+                            c["region"],
                             "eks",
                             "get-token",
                             "--cluster-name",
-                            cluster["cluster"],
+                            c["cluster"],
                             "--output",
                             "json",
                         ],
                         "env": [
-                            {"name": "AWS_PROFILE", "value": cluster["profile"]},
+                            {"name": "AWS_PROFILE", "value": c["profile"]},
                             {"name": "AWS_SHARED_CREDENTIALS_FILE", "value": cred_file},
                             {"name": "AWS_CONFIG_FILE", "value": cfg_file},
                         ],
                     }
                 },
             }
-        ],
+        )
+    contexts.sort(key=lambda ctx: ctx["name"])
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": cfg_clusters,
+        "contexts": contexts,
+        "users": users,
+        "current-context": contexts[0]["name"] if contexts else "",
     }

@@ -343,6 +343,45 @@ async def test_delete_session(
 
 
 @pytest.mark.asyncio
+async def test_delete_session_cancels_refresh_before_cleanup(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+    mock_user: MagicMock,
+) -> None:
+    """Session end must cancel any in-flight EKS refresh BEFORE tearing down the tmpfs,
+    else a refresh mid-publish recreates the dir after cleanup (orphaned tmpfs)."""
+    mock_session_obj.user_id = str(mock_user.id)
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result_mock)
+    mock_db.flush = AsyncMock()
+    order: list[str] = []
+    with (
+        patch("app.api.routes.sessions.notify", return_value=None),
+        patch(
+            "app.services.connectors.store.get_credential_store",
+            return_value=MagicMock(revoke_session=AsyncMock()),
+        ),
+        patch(
+            "app.services.eks_refresh.cancel_session_refresh",
+            AsyncMock(side_effect=lambda *_: order.append("cancel")),
+        ),
+        patch(
+            "app.tools.connector_exec.cleanup_aws_files",
+            side_effect=lambda *a, **k: order.append("clear"),
+        ),
+        patch(
+            "app.services.eks_refresh.release_session_lock",
+            side_effect=lambda *_: order.append("release"),
+        ),
+    ):
+        resp = await authenticated_client.delete(f"/api/sessions/{mock_session_obj.id}")
+    assert resp.status_code == 204
+    assert order == ["cancel", "clear", "release"]  # cancel strictly before teardown
+
+
+@pytest.mark.asyncio
 async def test_get_session_stats(
     authenticated_client: AsyncClient,
     mock_db: AsyncMock,

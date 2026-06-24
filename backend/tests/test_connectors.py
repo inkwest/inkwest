@@ -460,18 +460,15 @@ async def test_build_connector_env_wires_generated_kubeconfigs():
 
     uid, sid = uuid.uuid4(), uuid.uuid4()
     await get_credential_store().put(uid, sid, _aws_cred_with_profile())
-    # Simulate the EKS refresh having produced two cluster kubeconfigs.
+    # Simulate the EKS refresh having produced the merged kubeconfig.
     kube = session_kube_dir(sid)
     os.makedirs(kube, mode=0o700, exist_ok=True)
-    for fname in ("eks--acme--prod", "eks--acme--stg"):
-        open(os.path.join(kube, fname), "w").close()
+    open(os.path.join(kube, "config"), "w").close()
 
     try:
         env, injected = await build_connector_env(uid, sid)
-        # KUBECONFIG carries every generated file, sorted, colon-joined.
-        assert env["KUBECONFIG"] == ":".join(
-            [os.path.join(kube, "eks--acme--prod"), os.path.join(kube, "eks--acme--stg")]
-        )
+        # KUBECONFIG points at the single merged config.
+        assert env["KUBECONFIG"] == os.path.join(kube, "config")
         assert "aws" in injected and "eks" in injected
         # The agent is told kubectl is ready and must NOT reconfigure it.
         hint = connector_prompt_hint(injected)
@@ -517,16 +514,13 @@ async def test_build_connector_env_projects_in_container_paths(tmp_path):
     with patch.object(connector_exec, "get_settings", return_value=fake_settings):
         kube = session_kube_dir(sid)  # now under creds_root
         os.makedirs(kube, mode=0o755, exist_ok=True)
-        for fname in ("eks--acme--prod", "eks--acme--stg"):
-            open(os.path.join(kube, fname), "w").close()
+        open(os.path.join(kube, "config"), "w").close()
         try:
             env, injected = await build_connector_env(uid, sid)
             assert env["AWS_SHARED_CREDENTIALS_FILE"] == "/home/sandbox/.aws/credentials"
             assert env["AWS_CONFIG_FILE"] == "/home/sandbox/.aws/config"
             assert env["AWS_DEFAULT_REGION"] == "eu-west-1"
-            assert env["KUBECONFIG"] == (
-                "/home/sandbox/.kube/eks--acme--prod:/home/sandbox/.kube/eks--acme--stg"
-            )
+            assert env["KUBECONFIG"] == "/home/sandbox/.kube/config"
             assert "aws" in injected and "eks" in injected
             # Files were written to the shared volume, world-readable for the toolbox.
             cred_file = os.path.join(creds_root, str(sid), ".aws", "credentials")

@@ -522,3 +522,370 @@ async def test_grant_from_warm_409_without_warm_grant(
             f"/api/connectors/{mock_session_obj.id}/gitlab/grant-from-warm"
         )
     assert resp.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# Grant progress: STS minting ("granting") → EKS discovery ("discovering")
+# --------------------------------------------------------------------------- #
+_AWS_SEL_EKS = {"profiles": [{"account_id": "111", "role_name": "eks-ro", "name": "acme-eks-ro"}]}
+
+
+def _granted(selection: dict) -> MintedCredential:
+    return MintedCredential(
+        "aws",
+        "read",
+        datetime.now(UTC) + timedelta(hours=1),
+        secret={"profiles": [{"name": "p"}]},
+        selection=selection,
+    )
+
+
+async def _post_select(client: AsyncClient, sid, role_name: str):
+    return await client.post(
+        f"/api/connectors/{sid}/aws/select",
+        json={"selections": [{"account_id": "111", "role_name": role_name}]},
+    )
+
+
+async def test_aws_select_with_eks_role_hands_progress_to_discovery(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """An eks-* pick keeps the progress entry alive (phase "discovering") for the
+    background EKS task, which owns its release via on_done."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL_EKS))
+    )
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh") as eks,
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "eks-ro")
+
+        assert resp.status_code == 200
+        # The mint got a progress callback (drives the "granting" phase).
+        _, sel_kwargs = conn.select_account_roles.call_args
+        assert callable(sel_kwargs["progress_cb"])
+        # The EKS task got both a progress callback and the release hook.
+        _, eks_kwargs = eks.call_args
+        assert callable(eks_kwargs["progress_cb"])
+        assert callable(eks_kwargs["on_done"])
+        # Entry survives the response, flipped to "discovering" (on_done not yet fired),
+        # seeded with the real profile count so a gap poll reads a determinate 0/N.
+        assert c._aws_enum_progress[key]["phase"] == "discovering"
+        assert c._aws_enum_progress[key]["done"] == 0
+        assert c._aws_enum_progress[key]["total"] == 1  # _granted() has one profile
+        # The task's on_done releases the entry.
+        eks_kwargs["on_done"]()
+        assert key not in c._aws_enum_progress
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_mixed_selection_arms_wait_when_any_eks(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """want_eks is any(), not all(): one eks-* among other picks still tracks discovery."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL_EKS))
+    )
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh") as eks,
+        ):
+            resp = await authenticated_client.post(
+                f"/api/connectors/{mock_session_obj.id}/aws/select",
+                json={
+                    "selections": [
+                        {"account_id": "111", "role_name": "ReadOnly"},
+                        {"account_id": "111", "role_name": "eks-ro"},
+                    ]
+                },
+            )
+        assert resp.status_code == 200
+        assert c._aws_enum_progress[key]["phase"] == "discovering"
+        assert "on_done" in eks.call_args.kwargs
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_eks_role_gate_is_case_insensitive(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """An upper-case "EKS-*" pick must also keep the entry alive (matches _dedup_prefer_eks)."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL_EKS))
+    )
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh"),
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "EKS-Admin")
+        assert resp.status_code == 200
+        assert c._aws_enum_progress[key]["phase"] == "discovering"
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_without_eks_role_releases_progress_immediately(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """A non-eks pick has no cluster RBAC worth waiting on: discovery still runs but
+    untracked, and the progress entry is released before the response returns."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(type="aws", select_account_roles=AsyncMock(return_value=_granted(_AWS_SEL)))
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="connected")
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.write_aws_profiles"),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh") as eks,
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "ReadOnly")
+
+        assert resp.status_code == 200
+        eks.assert_called_once()
+        # Scheduled without progress tracking (fire-and-forget, as before).
+        _, eks_kwargs = eks.call_args
+        assert "progress_cb" not in eks_kwargs
+        assert "on_done" not in eks_kwargs
+        assert key not in c._aws_enum_progress
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_select_clears_progress_on_mint_error(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """A failed STS mint must release the entry (no dangling "granting" forever)."""
+    from app.api.routes import connectors as c
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    store = MagicMock(get=AsyncMock(return_value=_aws_provisional()), put=AsyncMock())
+    conn = MagicMock(
+        type="aws",
+        select_account_roles=AsyncMock(side_effect=ConnectorError("Account/role not authorized")),
+    )
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    c._aws_enum_progress.pop(key, None)
+    try:
+        with (
+            patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+            patch("app.api.routes.connectors.get_connector", return_value=conn),
+            patch("app.api.routes.connectors.get_credential_store", return_value=store),
+            patch("app.api.routes.connectors.schedule_session_eks_refresh"),
+        ):
+            resp = await _post_select(authenticated_client, mock_session_obj.id, "eks-ro")
+        assert resp.status_code == 400
+        assert key not in c._aws_enum_progress
+    finally:
+        c._aws_enum_progress.pop(key, None)
+
+
+async def test_aws_options_progress_reports_discovering_phase(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """The endpoint echoes the stored phase verbatim (not a hardcoded "enumerating")."""
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    from app.api.routes.connectors import _aws_enum_progress
+
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    _aws_enum_progress[key] = {"phase": "discovering", "done": 2, "total": 5}
+    try:
+        with patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS):
+            resp = await authenticated_client.get(
+                f"/api/connectors/{mock_session_obj.id}/aws/options/progress"
+            )
+    finally:
+        _aws_enum_progress.pop(key, None)
+    assert resp.status_code == 200
+    assert resp.json() == {"phase": "discovering", "done": 2, "total": 5}
+
+
+def test_progress_cb_is_owner_guarded_no_clobber_no_resurrect() -> None:
+    """A superseded owner can neither clobber a newer entry nor resurrect an ended one."""
+    from app.api.routes import connectors as c
+
+    key = ("u", "owner-guard")
+    t1, cb1 = c._begin_enum_progress(key, phase="granting")
+    assert c._aws_enum_progress[key]["phase"] == "granting"
+    t2, _cb2 = c._begin_enum_progress(key, phase="granting")  # a newer grant took over
+    cb1(5, 5)  # stale owner must not clobber the newer entry
+    assert c._aws_enum_progress[key]["token"] is t2
+    assert c._aws_enum_progress[key]["done"] == 0
+    c._end_enum_progress(key, t2)
+    cb1(9, 9)  # late stale tick after release must not resurrect
+    assert key not in c._aws_enum_progress
+
+
+async def test_mint_sts_profiles_reports_progress() -> None:
+    """_mint_sts_profiles fires (0, total) up front then one tick per completed pick."""
+    from app.services.connectors import aws
+
+    picks = [
+        {"account_id": "1", "role_name": "r1", "account_name": "a1"},
+        {"account_id": "2", "role_name": "r2", "account_name": "a2"},
+    ]
+    creds = {
+        "accessKeyId": "AK",
+        "secretAccessKey": "SK",  # pragma: allowlist secret
+        "sessionToken": "ST",
+        "expiration": 1000,
+    }
+    calls: list[tuple[int, int]] = []
+    with (
+        patch.object(aws, "_build_sso_client", return_value=MagicMock()),
+        patch.object(aws, "_get_role_credentials", return_value=creds),
+    ):
+        profiles, _ = await aws._mint_sts_profiles(
+            "tok", picks, "eu-west-1", progress_cb=lambda d, t: calls.append((d, t))
+        )
+    assert len(profiles) == 2
+    assert calls[0] == (0, 2)
+    assert calls[-1] == (2, 2)
+
+
+def test_progress_registry_is_thread_safe_no_resurrect() -> None:
+    """The publish callback fires from worker threads while begin/end run on the loop;
+    _enum_lock must make a cb racing _end unable to resurrect the popped entry."""
+    import threading
+
+    from app.api.routes import connectors as c
+
+    key = ("u", "thread-race")
+    c._aws_enum_progress.pop(key, None)
+    token, cb = c._begin_enum_progress(key, phase="discovering")
+    # A worker thread hammers the owner-guarded publish while the loop thread ends it.
+    worker = threading.Thread(target=lambda: [cb(1, 2) for _ in range(2000)])
+    worker.start()
+    c._end_enum_progress(key, token)
+    worker.join()
+    # Once ended, no racing cb may have re-added the entry (owner check sees it gone).
+    assert key not in c._aws_enum_progress
+
+
+async def test_aws_revoke_cancels_refresh_before_clearing(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """Revoke must cancel any in-flight EKS refresh BEFORE clearing creds, else the
+    refresh could re-publish the kubeconfigs revoke just deleted."""
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    revoked = MintedCredential(
+        "aws", "read", datetime.now(UTC) + timedelta(hours=1), secret={"profiles": [{"name": "p"}]}
+    )
+    store = MagicMock(revoke=AsyncMock(return_value=revoked))
+    conn = MagicMock(type="aws", revoke=AsyncMock())
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="not_connected")
+    order: list[str] = []
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch(
+            "app.api.routes.connectors.cancel_session_refresh",
+            AsyncMock(side_effect=lambda *_: order.append("cancel")),
+        ),
+        patch(
+            "app.tools.connector_exec.cleanup_aws_files",
+            side_effect=lambda *a, **k: order.append("clear"),
+        ),
+    ):
+        resp = await authenticated_client.post(f"/api/connectors/{mock_session_obj.id}/aws/revoke")
+    assert resp.status_code == 200
+    assert order == ["cancel", "clear"]  # cancel strictly before clear
+
+
+async def test_aws_revoke_clears_creds_under_session_lock(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """The clear must run while holding the per-session lock — not just after the cancel.
+    Otherwise an overlapping re-select could interleave a publish with the revoke's clear
+    and leave a torn kube set. Assert the lock is held during cleanup_aws_files."""
+    from app.services import eks_refresh
+
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    revoked = MintedCredential(
+        "aws", "read", datetime.now(UTC) + timedelta(hours=1), secret={"profiles": [{"name": "p"}]}
+    )
+    store = MagicMock(revoke=AsyncMock(return_value=revoked))
+    conn = MagicMock(type="aws", revoke=AsyncMock())
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="not_connected")
+    held: list[bool] = []
+
+    # cleanup is called with sid as its first positional arg (under the session lock, via
+    # asyncio.to_thread); query the same keyed lock to confirm it's held at clear time.
+    def _clear(sid_arg, **_kwargs):  # noqa: ANN001, ANN202
+        held.append(eks_refresh.session_lock(sid_arg).locked())
+
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.tools.connector_exec.cleanup_aws_files", side_effect=_clear),
+    ):
+        resp = await authenticated_client.post(f"/api/connectors/{mock_session_obj.id}/aws/revoke")
+    assert resp.status_code == 200
+    assert held == [True]  # lock was held while clearing
+
+
+async def test_aws_revoke_clears_creds_in_place_with_keep_dirs(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """Revoke must clear creds IN PLACE (keep_dirs=True): the conv container may still
+    bind-mount the dirs, and a mount follows the inode — rmtree would detach it."""
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    revoked = MintedCredential(
+        "aws", "read", datetime.now(UTC) + timedelta(hours=1), secret={"profiles": [{"name": "p"}]}
+    )
+    store = MagicMock(revoke=AsyncMock(return_value=revoked))
+    conn = MagicMock(type="aws", revoke=AsyncMock())
+    conn.public_status.return_value = ConnectorStatus(connector="aws", state="not_connected")
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.tools.connector_exec.cleanup_aws_files") as cleanup,
+    ):
+        resp = await authenticated_client.post(f"/api/connectors/{mock_session_obj.id}/aws/revoke")
+    assert resp.status_code == 200
+    cleanup.assert_called_once()
+    assert cleanup.call_args.kwargs == {"keep_dirs": True}

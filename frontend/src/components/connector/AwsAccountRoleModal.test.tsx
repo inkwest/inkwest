@@ -1,16 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { AwsAccountRoleModal } from './AwsAccountRoleModal';
 
 vi.mock('@/services/api', () => ({
   getAwsOptions: vi.fn(),
   refreshAwsOptions: vi.fn(),
+  getAwsEnumProgress: vi.fn().mockResolvedValue({ phase: 'idle', done: 0, total: 0 }),
 }));
 
-import { getAwsOptions, refreshAwsOptions } from '@/services/api';
+// The grant goes through the store action; stub it so we can assert the flow.
+const store = vi.hoisted(() => ({ selectAwsRoles: vi.fn() }));
+vi.mock('@/store/connectors', () => ({
+  useConnectorsStore: (selector?: (s: typeof store) => unknown) =>
+    selector ? selector(store) : store,
+}));
+
+import { getAwsOptions, refreshAwsOptions, getAwsEnumProgress } from '@/services/api';
 
 const mockGet = vi.mocked(getAwsOptions);
 const mockRefresh = vi.mocked(refreshAwsOptions);
+const mockProgress = vi.mocked(getAwsEnumProgress);
+const mockSelect = store.selectAwsRoles;
 
 const CACHED = {
   accounts: [{ account_id: '111', account_name: 'acme' }],
@@ -68,5 +78,142 @@ describe('AwsAccountRoleModal refresh', () => {
   it('does not call the API while closed', () => {
     render(<AwsAccountRoleModal sessionId="s1" isOpen={false} onClose={() => {}} />);
     expect(mockGet).not.toHaveBeenCalled();
+  });
+});
+
+const EKS = {
+  accounts: [{ account_id: '111', account_name: 'acme' }],
+  roles: [{ account_id: '111', role_name: 'eks-ro' }],
+};
+
+describe('AwsAccountRoleModal grant', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockProgress.mockResolvedValue({ phase: 'idle', done: 0, total: 0 });
+    mockSelect.mockResolvedValue(undefined);
+  });
+
+  it('closes immediately after granting a non-eks role', async () => {
+    mockGet.mockResolvedValue(CACHED); // ReadOnly only
+    const onClose = vi.fn();
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+    await waitFor(() => expect(screen.getByText('ReadOnly')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('ReadOnly'));
+    fireEvent.click(screen.getByText('Donner accès'));
+
+    await waitFor(() =>
+      expect(mockSelect).toHaveBeenCalledWith('s1', [{ account_id: '111', role_name: 'ReadOnly' }])
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it('shows the per-pair minting count in the bar while the grant is in flight', async () => {
+    mockGet.mockResolvedValue(CACHED);
+    // Backend reports the "granting" phase during STS minting (e.g. 12 of 55 pairs).
+    mockProgress.mockResolvedValue({ phase: 'granting', done: 12, total: 55 });
+    // Keep the POST pending so `submitting` stays true and the bar keeps polling.
+    let release: () => void = () => {};
+    mockSelect.mockImplementation(
+      () => new Promise<void>((r) => { release = () => r(); })
+    );
+    const onClose = vi.fn();
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+    await waitFor(() => expect(screen.getByText('ReadOnly')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('ReadOnly'));
+    fireEvent.click(screen.getByText('Donner accès'));
+
+    // Minting is visible as a live count, not just the spinner — the point for big grants.
+    await waitFor(() =>
+      expect(screen.getByText(/Création des accès… 12\/55/)).toBeInTheDocument()
+    );
+    // Let the POST finish and flush the follow-up state updates so teardown is clean.
+    await act(async () => {
+      release();
+    });
+  });
+
+  it('stays open after granting an eks-* role, showing the discovery phase', async () => {
+    mockGet.mockResolvedValue(EKS);
+    // Discovery still running, so the modal must not auto-close.
+    mockProgress.mockResolvedValue({ phase: 'discovering', done: 0, total: 1 });
+    const onClose = vi.fn();
+    render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+    await waitFor(() => expect(screen.getByText('eks-ro')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('eks-ro'));
+    fireEvent.click(screen.getByText('Donner accès'));
+
+    await waitFor(() => expect(mockSelect).toHaveBeenCalled());
+    // The eks gate keeps it open and surfaces the EKS discovery state.
+    await waitFor(() =>
+      expect(screen.getByText('Découverte des clusters EKS en cours…')).toBeInTheDocument()
+    );
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('auto-closes after an eks grant once discovery reports idle, honoring the 2s floor', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGet.mockResolvedValue(EKS);
+      mockProgress
+        .mockResolvedValueOnce({ phase: 'discovering', done: 0, total: 1 })
+        .mockResolvedValue({ phase: 'idle', done: 0, total: 0 });
+      const onClose = vi.fn();
+      render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0); // flush initial load
+      });
+      fireEvent.click(screen.getByText('eks-ro'));
+      fireEvent.click(screen.getByText('Donner accès'));
+      // Grant POST + first poll (discovering → arms sawProgress, records shownAt).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(onClose).not.toHaveBeenCalled();
+      // Next poll → idle, but the 2s minimum-display floor keeps it open for now.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(onClose).not.toHaveBeenCalled();
+      // Past the floor → auto-close fires exactly once.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1500);
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('idle-only discovery: sawProgress guard holds, then the 90s safety timeout closes', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGet.mockResolvedValue(EKS);
+      // Never reports non-idle (e.g. cross-replica poll) → sawProgress never arms.
+      mockProgress.mockResolvedValue({ phase: 'idle', done: 0, total: 0 });
+      const onClose = vi.fn();
+      render(<AwsAccountRoleModal sessionId="s1" isOpen onClose={onClose} />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      fireEvent.click(screen.getByText('eks-ro'));
+      fireEvent.click(screen.getByText('Donner accès'));
+      // Several idle polls must NOT close it (guard against premature close).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(onClose).not.toHaveBeenCalled();
+      // The 90s safety net eventually force-closes so the picker never hangs.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
