@@ -10,6 +10,7 @@ import asyncio
 import logging
 import secrets
 import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -82,6 +83,14 @@ _enum_lock = threading.Lock()
 # yank a still-running sibling's progress out from under it.
 _aws_enum_progress: dict[tuple[str, str], dict[str, Any]] = {}
 
+# How long a finished EKS discovery lingers as a terminal "done" entry before the poll
+# endpoint reaps it. EKS discovery for one profile is sub-second and often finishes
+# *between* two of the picker's ~1s progress polls — without a lingering terminal state
+# every poll would only ever see "idle", so the picker couldn't tell "discovery finished"
+# from "nothing ran" and hung on its 90s safety net. A few seconds comfortably outlasts
+# the poll interval, so the next poll is guaranteed to observe "done".
+_ENUM_DONE_GRACE_S = 5.0
+
 
 def _progress_cb(key: tuple[str, str], token: object, phase: str) -> EnumProgressCb:
     """Build an owner-guarded (done, total) publisher for ``phase``.
@@ -125,6 +134,42 @@ def _end_enum_progress(key: tuple[str, str], token: object) -> None:
             _aws_enum_progress.pop(key, None)
 
 
+def _finish_enum_progress(key: tuple[str, str], token: object) -> None:
+    """Flip the entry to a terminal ``done`` that lingers briefly, instead of popping it.
+
+    Called when the background EKS discovery settles. Owner-guarded like
+    ``_end_enum_progress`` — a superseded re-grant (a new token) must not be clobbered.
+    Keeps the last done/total so the bar still reads complete; the poll endpoint reaps
+    the entry once ``_ENUM_DONE_GRACE_S`` has elapsed (see ``_read_enum_progress``).
+    This terminal state is what lets the picker reliably observe completion even when
+    discovery finishes between two ~1s polls."""
+    with _enum_lock:
+        cur = _aws_enum_progress.get(key)
+        if cur is not None and cur.get("token") is token:
+            _aws_enum_progress[key] = {
+                **cur,
+                "phase": "done",
+                "expires_at": time.monotonic() + _ENUM_DONE_GRACE_S,
+            }
+
+
+def _read_enum_progress(key: tuple[str, str]) -> dict[str, Any] | None:
+    """Snapshot the live progress entry, reaping an expired terminal ``done``.
+
+    Under ``_enum_lock`` so the expiry check + pop is atomic against a concurrent
+    re-grant (which replaces the entry wholesale under the same lock): we only ever pop
+    the exact expired entry we just read, never a fresh one written in between."""
+    with _enum_lock:
+        cur = _aws_enum_progress.get(key)
+        if cur is None:
+            return None
+        expires_at = cur.get("expires_at")
+        if expires_at is not None and time.monotonic() >= expires_at:
+            _aws_enum_progress.pop(key, None)
+            return None
+        return cur
+
+
 # --------------------------------------------------------------------------- #
 # Response / request models (secret-free by construction)
 # --------------------------------------------------------------------------- #
@@ -163,7 +208,9 @@ class AwsOptionsResponse(BaseModel):
 
 class AwsEnumProgressResponse(BaseModel):
     # phase: "idle" (nothing running) | "enumerating" (SSO account listing) |
-    # "granting" (STS minting) | "discovering" (EKS cluster discovery).
+    # "granting" (STS minting) | "discovering" (EKS cluster discovery) | "done"
+    # (discovery settled — a terminal state that lingers a few seconds so the picker
+    # observes completion even if it missed the active window; then reaped to "idle").
     phase: str
     done: int = 0
     total: int = 0
@@ -338,9 +385,12 @@ async def _apply_aws_selection(
             # a determinate "discovering 0/N" — never an ambiguous 0/0 that reads as done.
             disc_cb(0, len(profiles))
             # Ownership of the progress entry transfers to the background task, which
-            # ends it via on_done; the finally below must not also release it.
+            # settles it via on_done; the finally below must not also release it. on_done
+            # flips it to a terminal "done" that lingers a few seconds (not an immediate
+            # pop) so the picker reliably observes completion even when discovery finishes
+            # between two polls — otherwise it hangs on its 90s safety net.
             schedule_session_eks_refresh(
-                sid, cred, progress_cb=disc_cb, on_done=lambda: _end_enum_progress(key, token)
+                sid, cred, progress_cb=disc_cb, on_done=lambda: _finish_enum_progress(key, token)
             )
             handed_off = True
         else:
@@ -659,8 +709,9 @@ async def aws_options_progress(
     """Report live AWS grant/refresh progress (drives the picker's progress bar).
 
     Covers every slow phase reported on ``AwsEnumProgressResponse``: ``enumerating``
-    (SSO account listing on device-auth/refresh), ``granting`` (STS minting) and
-    ``discovering`` (EKS cluster discovery, which outlives the grant response).
+    (SSO account listing on device-auth/refresh), ``granting`` (STS minting),
+    ``discovering`` (EKS cluster discovery, which outlives the grant response) and the
+    terminal ``done`` it settles into (lingered briefly, then reaped to ``idle``).
     Returns ``phase="idle"`` when nothing is running. Polled on its own ~1s timer
     for the whole span, so it deliberately skips the session-ownership DB lookup the
     other routes do: the registry key is scoped to ``current_user.id``, so a user can
@@ -672,7 +723,7 @@ async def aws_options_progress(
         sid = uuid.UUID(session_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail="Invalid session id") from e
-    p = _aws_enum_progress.get((str(current_user.id), str(sid)))
+    p = _read_enum_progress((str(current_user.id), str(sid)))
     if not p:
         return AwsEnumProgressResponse(phase="idle")
     return AwsEnumProgressResponse(

@@ -7,6 +7,9 @@ const PHASE_LABELS: Record<string, string> = {
   enumerating: 'Récupération de vos comptes AWS…',
   granting: 'Création des accès…',
   discovering: 'Découverte des clusters EKS…',
+  // Terminal phase the backend lingers on briefly after discovery settles; shown for
+  // the frame(s) before the picker auto-closes so the bar reads complete, not unknown.
+  done: 'Clusters EKS découverts',
 };
 
 // Outlined "shell" container with the fill (+ count) building inside it as the work

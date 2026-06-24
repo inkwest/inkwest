@@ -1,5 +1,6 @@
 """Tests for the connector renewal routes (/renewable, /gitlab/renew, /aws/renew-select)."""
 
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -364,6 +365,40 @@ async def test_aws_options_progress_reports_live_enumeration(
     assert resp.json() == {"phase": "enumerating", "done": 12, "total": 47}
 
 
+async def test_aws_options_progress_serves_done_then_reaps_after_grace(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """A terminal "done" is served while within grace, then reaped to "idle" once it
+    expires — this is what lets the picker observe completion without catching the
+    active window. The expired read also removes the entry (no leak)."""
+    _session_lookup(mock_db, mock_session_obj, mock_user.id)
+    from app.api.routes.connectors import _aws_enum_progress
+
+    key = (str(mock_user.id), str(mock_session_obj.id))
+    url = f"/api/connectors/{mock_session_obj.id}/aws/options/progress"
+    try:
+        # Within grace → the poll reports "done" so the picker can close.
+        _aws_enum_progress[key] = {
+            "phase": "done",
+            "done": 2,
+            "total": 2,
+            "token": object(),
+            "expires_at": time.monotonic() + 100,
+        }
+        with patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS):
+            resp = await authenticated_client.get(url)
+        assert resp.json() == {"phase": "done", "done": 2, "total": 2}
+
+        # Past grace → reaped to "idle" and the entry is dropped on read.
+        _aws_enum_progress[key]["expires_at"] = time.monotonic() - 1
+        with patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS):
+            resp = await authenticated_client.get(url)
+        assert resp.json() == {"phase": "idle", "done": 0, "total": 0}
+        assert key not in _aws_enum_progress
+    finally:
+        _aws_enum_progress.pop(key, None)
+
+
 def test_list_accounts_and_roles_reports_progress() -> None:
     """The enumeration fires progress_cb once per account (total known up front)."""
     from app.services.connectors import aws
@@ -403,6 +438,26 @@ def test_end_enum_progress_only_pops_own_token() -> None:
     assert c._aws_enum_progress[key]["done"] == 3
     c._end_enum_progress(key, t2)
     assert key not in c._aws_enum_progress
+
+
+def test_finish_enum_progress_only_finishes_own_token() -> None:
+    """A stale discovery settling late must not clobber a newer grant's live entry."""
+    from app.api.routes import connectors as c
+
+    key = ("u", "s2")
+    try:
+        t1, cb1 = c._begin_enum_progress(key, phase="discovering")
+        cb1(1, 3)
+        t2, _ = c._begin_enum_progress(key, phase="granting")  # a fresh grant took over
+        c._finish_enum_progress(key, t1)  # the superseded discovery ending late: no-op
+        assert c._aws_enum_progress[key]["phase"] == "granting"
+        assert "expires_at" not in c._aws_enum_progress[key]
+        # The owning token does flip it to the lingering terminal state.
+        c._finish_enum_progress(key, t2)
+        assert c._aws_enum_progress[key]["phase"] == "done"
+        assert c._aws_enum_progress[key]["expires_at"] > time.monotonic()
+    finally:
+        c._aws_enum_progress.pop(key, None)
 
 
 async def test_aws_options_refresh_clears_progress_on_error(
@@ -585,9 +640,14 @@ async def test_aws_select_with_eks_role_hands_progress_to_discovery(
         assert c._aws_enum_progress[key]["phase"] == "discovering"
         assert c._aws_enum_progress[key]["done"] == 0
         assert c._aws_enum_progress[key]["total"] == 1  # _granted() has one profile
-        # The task's on_done releases the entry.
+        # The task's on_done settles the entry into a terminal "done" that lingers a few
+        # seconds (not an immediate pop) so a poll is guaranteed to observe it even when
+        # discovery finishes between two polls. Last seeded counts are preserved.
         eks_kwargs["on_done"]()
-        assert key not in c._aws_enum_progress
+        entry = c._aws_enum_progress[key]
+        assert entry["phase"] == "done"
+        assert (entry["done"], entry["total"]) == (0, 1)
+        assert entry["expires_at"] > time.monotonic()
     finally:
         c._aws_enum_progress.pop(key, None)
 

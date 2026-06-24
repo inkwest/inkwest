@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import * as api from '@/services/api';
 
 export interface EnumProgress {
-  // "enumerating" (SSO account listing) | "granting" (STS minting) |
-  // "discovering" (EKS cluster discovery). Drives the bar's label.
+  // "enumerating" (SSO account listing) | "granting" (STS minting) | "discovering"
+  // (EKS cluster discovery) | "done" (discovery settled — a terminal state the backend
+  // lingers on for a few seconds, then reaps to idle). Drives the bar's label.
   phase: string;
   done: number;
   total: number;
@@ -12,7 +13,8 @@ export interface EnumProgress {
 // Polls AWS grant/enumeration progress (~1s) while `active`. Returns null until the
 // backend reports a non-idle phase, and resets to null when inactive or once the
 // backend goes idle again — so callers render the progress bar only while work is
-// running, and can detect completion by the transition back to null.
+// running. Completion is detected via the terminal "done" phase (which the backend
+// holds briefly so a poll is guaranteed to observe it), not the transition back to null.
 export function useAwsEnumProgress(sessionId: string, active: boolean): EnumProgress | null {
   const [progress, setProgress] = useState<EnumProgress | null>(null);
 

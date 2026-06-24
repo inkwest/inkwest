@@ -303,7 +303,8 @@ export async function refreshAwsOptions(
 
 // Live progress of the slow AWS phases. phase "idle" → nothing running;
 // "enumerating" → SSO accounts listed; "granting" → STS profiles minted;
-// "discovering" → EKS clusters discovered. done/total scopes the active phase.
+// "discovering" → EKS clusters discovered; "done" → discovery settled (terminal, lingers
+// a few seconds then reaped to "idle"). done/total scopes the active phase.
 export async function getAwsEnumProgress(
   sessionId: string
 ): Promise<{ phase: string; done: number; total: number }> {
