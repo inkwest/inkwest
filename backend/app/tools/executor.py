@@ -7,6 +7,7 @@ with proper timeout handling, output truncation, and error management.
 
 import asyncio
 import logging
+import os
 import subprocess
 from typing import Any
 
@@ -28,6 +29,8 @@ async def execute_kubectl(
     kubeconfig: str,
     context: str | None = None,
     timeout: int = DEFAULT_TIMEOUT,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[str, bool]:
     """
     Execute kubectl command.
@@ -38,6 +41,10 @@ async def execute_kubectl(
         kubeconfig: Path to kubeconfig file
         context: Optional kubectl context name
         timeout: Command timeout in seconds
+        extra_env: Extra env vars merged onto the process env for the subprocess. Used
+            to project the session's tmpfs ~/.aws so an EKS kubeconfig's
+            ``aws eks get-token`` exec plugin can mint a token (that env is not in the
+            backend process otherwise). None = inherit the process env unchanged.
 
     Returns:
         Tuple of (output, is_error) where is_error indicates if execution failed
@@ -59,10 +66,21 @@ async def execute_kubectl(
 
     logger.debug(f"Command: {' '.join(cmd)}")
 
+    # Merge extra_env onto the inherited env (None = inherit unchanged, the legacy
+    # statically-configured-cluster path). Credentials ride the env, never argv.
+    run_env = {**os.environ, **extra_env} if extra_env else None
+
     try:
         # Run in thread pool to not block the event loop
         result = await asyncio.wait_for(
-            asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=timeout),
+            asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=run_env,
+            ),
             timeout=timeout + 5,  # Extra buffer for thread overhead
         )
 

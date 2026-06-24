@@ -101,6 +101,26 @@ def session_kubeconfigs(session_id: UUID) -> list[str]:
     return [config] if os.path.isfile(config) else []
 
 
+def session_kube_contexts(session_id: UUID) -> list[str]:
+    """Context names in the session's merged EKS kubeconfig (sorted), or ``[]`` if none.
+
+    Lets a tool-based orchestrator surface the discovered clusters to the agent so it can
+    target one via the kubectl ``context`` argument (the shell agent instead reads them
+    live with ``kubectl config get-contexts``). Best-effort: a missing/half-written file
+    just yields ``[]``.
+    """
+    import yaml
+
+    config = os.path.join(session_kube_dir(session_id), "config")
+    try:
+        with open(config) as f:
+            doc = yaml.safe_load(f) or {}
+    except (FileNotFoundError, OSError, yaml.YAMLError):
+        return []
+    contexts = doc.get("contexts") if isinstance(doc, dict) else None
+    return sorted(c["name"] for c in (contexts or []) if isinstance(c, dict) and c.get("name"))
+
+
 def _creds_block(name: str, p: dict[str, Any]) -> str:
     return (
         f"[{name}]\n"

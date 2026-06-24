@@ -245,6 +245,29 @@ KUBECTL_TOOLS: list[dict[str, Any]] = [
     },
 ]
 
+# Every kubectl tool can target a specific cluster context. AWS access that reaches EKS
+# exposes one context per discovered cluster (named '<account>--<region>--<cluster>');
+# omit to use the session default. Injected once here so all kubectl tools carry the
+# field uniformly — no per-schema repetition, no drift.
+_CONTEXT_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "kubectl context to target — one of the EKS clusters discovered from AWS access "
+        "(named '<account>--<region>--<cluster>'). Omit to use the session's default "
+        "cluster."
+    ),
+}
+
+
+def _inject_context_param() -> None:
+    # A fresh dict per tool (not the shared singleton) so a future in-place edit of one
+    # tool's schema can't leak across all seven; scoped in a function so no loop var leaks.
+    for tool in KUBECTL_TOOLS:
+        tool["input_schema"]["properties"]["context"] = dict(_CONTEXT_PROPERTY)
+
+
+_inject_context_param()
+
 
 # =============================================================================
 # External Access Connector tools

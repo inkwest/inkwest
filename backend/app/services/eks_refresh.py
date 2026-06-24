@@ -47,8 +47,13 @@ logger = logging.getLogger(__name__)
 def _safe_seg(value: str) -> str:
     """Sanitize a path/context segment: the AWS SSO account name is a display string
     that can contain '/' or spaces, which in a kubeconfig FILENAME would let the rename
-    escape the session dir. Mirror aws._profile_name's allowlist."""
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
+    escape the session dir. Mirror aws._profile_name's allowlist.
+
+    Also strip a leading '.'/'-'/'_' (fall back to 'x' if nothing remains) so the assembled
+    context alias always starts alphanumeric — never flag-shaped, never a dotfile, and
+    within tools/validation.CONTEXT_PATTERN so every discovered cluster stays targetable
+    via the kubectl ``context`` argument."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value).lstrip("._-") or "x"
 
 
 # Background refresh tasks, tracked per session: kept referenced so the event loop

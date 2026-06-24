@@ -60,6 +60,13 @@ VERBS_PATTERN = re.compile(r"^[a-z]+(,[a-z]+)*$")
 # Container name follows the same DNS-label rules as a resource name.
 CONTAINER_PATTERN = NAME_PATTERN
 
+# kubectl context name (lands in argv after '--context'). EKS context aliases are
+# '<account>--<region>--<cluster>' with each segment sanitized to [A-Za-z0-9_.-] (see
+# eks_refresh._safe_seg), optionally '--<hash>' on collision; a legacy cluster's
+# context_name shares that charset. Must start with an alphanumeric so a flag-shaped
+# value ('-x') can never smuggle a kubectl flag past the read-only boundary.
+CONTEXT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
 
 def validate_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str | None:
     """
@@ -133,6 +140,12 @@ def validate_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str | Non
     if api_version and not API_VERSION_PATTERN.match(api_version):
         logger.warning(f"Invalid API version: {api_version}")
         return f"Invalid API version format: {api_version}"
+
+    # Validate context (lands in argv after '--context'); reject flag-shaped values.
+    context = tool_input.get("context")
+    if context and not CONTEXT_PATTERN.match(context):
+        logger.warning(f"Invalid context value: {context}")
+        return f"Invalid context: {context}"
 
     # Validate container name (lands in argv after '-c')
     container = tool_input.get("container")
