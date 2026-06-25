@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import * as api from '@/services/api';
 import { ConnectorName, ConnectorStatus, PriorGrant } from '@/types/connectors';
 import { useSessionsStore } from '@/store/sessions';
+import { openConnectorAuthPopup } from '@/lib/connectorConnect';
 
 // Grant/revoke/renew persist a 'system' event message server-side; re-fetch the open
 // session so it appears inline in the stream. Fire-and-forget (the access change must
@@ -36,9 +37,6 @@ interface ConnectorsState {
   // True during a renew: the AWS device poll should auto-apply the saved selection
   // (skip the manual picker) instead of opening the account/role modal.
   awsAutoSelect: boolean;
-  // True when a GitLab OAuth redirect is queued behind an in-progress AWS device
-  // approval; fired once AWS completes (deferred so it doesn't abandon AWS).
-  gitlabReauthPending: boolean;
   // Connector whose grant is currently starting, shared across every surface
   // (header panel + in-conversation notice) so the same grant can't be kicked off
   // twice concurrently from two places.
@@ -118,7 +116,6 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
   awsModalRequested: false,
   renewable: [],
   awsAutoSelect: false,
-  gitlabReauthPending: false,
   grantBusy: null,
 
   fetchStatus: async (sessionId) => {
@@ -146,15 +143,15 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
   },
 
   // Re-grant exactly the previously-granted set (never adds new). GitLab refreshes
-  // silently when its token is still held, otherwise it must re-authorize via an
-  // OAuth redirect; AWS re-runs device approval and the poll auto-applies the saved
-  // selection.
+  // silently when its token is still held; if its token is gone it can't refresh
+  // silently, so we surface its re-auth prompt and the user reconnects via the popup.
+  // AWS re-runs device approval and the poll auto-applies the saved selection.
   //
-  // GitLab's redirect navigates away, so it can't run alongside an AWS device
-  // approval. When both need it, AWS goes first (stays on the page) and the GitLab
-  // redirect is deferred until AWS completes (see pollAwsDevice) — by then AWS is
-  // connected and persisted, so navigating away is safe. When AWS isn't renewing,
-  // GitLab redirects right away.
+  // A GitLab popup never navigates away, so it no longer conflicts with an AWS device
+  // approval — no deferral. But a popup needs a user gesture, which a renewal running
+  // after awaits (or inside the AWS device poll) doesn't have; hence the prompt rather
+  // than auto-opening. The prompt is set BEFORE the AWS branch so it survives the device
+  // flow and is waiting once AWS settles.
   renewAll: async (sessionId) => {
     await get().fetchRenewable(sessionId);
     // Only renew connectors that aren't already connected (mirrors the button gate),
@@ -178,6 +175,9 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
         gitlabNeedsOAuth = true; // token gone → silent refresh impossible
       }
     }
+    // Silent refresh impossible → surface the re-auth prompt; the user clicks to open
+    // the popup (gesture). Set now so it persists through any AWS device approval below.
+    if (gitlabNeedsOAuth) set({ reauthRequired: 'gitlab' });
 
     if (willRenewAws) {
       // Warm SSO token (user logged in to AWS earlier today) → skip the device
@@ -189,21 +189,11 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
         } catch {
           set({ awsModalRequested: true }); // saved selection invalid → manual picker
         }
-        if (gitlabNeedsOAuth) {
-          await get().initiate(sessionId, 'gitlab'); // redirect — navigates away
-          return;
-        }
         await get().fetchStatus(sessionId);
         return;
       }
-      // Defer any GitLab redirect until AWS device approval finishes.
-      set({ awsAutoSelect: true, gitlabReauthPending: gitlabNeedsOAuth });
+      set({ awsAutoSelect: true });
       await get().startAwsDevice(sessionId);
-      return;
-    }
-
-    if (gitlabNeedsOAuth) {
-      await get().initiate(sessionId, 'gitlab'); // OAuth redirect — navigates away
       return;
     }
 
@@ -234,12 +224,42 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
     }
   },
 
-  // OAuth redirect connectors (GitLab). On return the callback page refreshes status.
+  // OAuth connectors (GitLab) grant in a popup so the main window never navigates: open
+  // it (popup-blocker safe), then poll connector status until it's connected, the popup
+  // closes, or a deadline elapses. The backend callback self-closes the popup. Mirrors
+  // McpPanel.connectOauth. Resolves once the flow settles, so the caller's grant-busy
+  // flag stays set ("Waiting for …") for the whole approval.
   initiate: async (sessionId, connector) => {
-    // Remember where to return after the IdP round-trip.
-    sessionStorage.setItem('connector_return_to', `/session/${sessionId}`);
-    const { redirect_url } = await api.initiateConnector(sessionId, connector);
-    window.location.href = redirect_url;
+    const popup = openConnectorAuthPopup(sessionId, connector, () =>
+      set({ error: `Failed to start ${connector} authorization` })
+    );
+    const startedAt = Date.now();
+    const POLL_DEADLINE_MS = 5 * 60 * 1000;
+    await new Promise<void>((resolve) => {
+      const timer = window.setInterval(async () => {
+        // Lightweight status poll — no isLoading toggle, so the panel doesn't flicker
+        // every 2s; also clears a pending re-auth prompt once this connector lands.
+        try {
+          const statuses = indexByConnector(await api.getConnectorStatus(sessionId));
+          set((s) => ({
+            statuses,
+            reauthRequired:
+              s.reauthRequired === connector && statuses[connector]?.state === 'connected'
+                ? null
+                : s.reauthRequired,
+          }));
+        } catch {
+          /* transient; keep polling until the popup closes or the deadline */
+        }
+        const connected = get().statuses[connector]?.state === 'connected';
+        if (connected || !popup || popup.closed || Date.now() - startedAt > POLL_DEADLINE_MS) {
+          window.clearInterval(timer);
+          resolve();
+        }
+      }, 2000);
+    });
+    // Persist the inline "granted" system event once it actually connected.
+    if (get().statuses[connector]?.state === 'connected') reloadConversation(sessionId);
   },
 
   // AWS uses the device grant: get a code + URL, open it, then poll until approved.
@@ -284,22 +304,11 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
         set((s) => ({ statuses: { ...s.statuses, aws }, awsDevice: null, awsAutoSelect: false }));
         await get().fetchStatus(sessionId);
         reloadConversation(sessionId); // AWS "renewed" event now persisted
-        // AWS is now connected & persisted, so it's safe to navigate away to renew
-        // GitLab (a redirect we deferred until the AWS device approval completed).
-        if (get().gitlabReauthPending) {
-          set({ gitlabReauthPending: false });
-          await get().initiate(sessionId, 'gitlab');
-        }
+        // A GitLab renewal needing OAuth was already surfaced as a reauthRequired prompt
+        // in renewAll (its popup needs a user gesture) — nothing to trigger here.
       } catch {
-        // Saved selection invalid → manual picker. Surface a deferred GitLab renewal
-        // as a re-auth prompt the user handles after the manual AWS pick.
-        set((s) => ({
-          awsDevice: null,
-          awsAutoSelect: false,
-          awsModalRequested: true,
-          reauthRequired: s.gitlabReauthPending ? 'gitlab' : s.reauthRequired,
-          gitlabReauthPending: false,
-        }));
+        // Saved selection invalid → manual picker.
+        set({ awsDevice: null, awsAutoSelect: false, awsModalRequested: true });
       }
       return status;
     }
@@ -311,14 +320,9 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
 
   clearAwsDevice: () => {
     closeAwsPopup();
-    // If a GitLab redirect was queued behind AWS and the user cancels AWS, surface
-    // GitLab for a manual reconnect instead of silently dropping it.
-    set((s) => ({
-      awsDevice: null,
-      awsAutoSelect: false,
-      reauthRequired: s.gitlabReauthPending ? 'gitlab' : s.reauthRequired,
-      gitlabReauthPending: false,
-    }));
+    // A GitLab re-auth prompt set alongside this renewal (reauthRequired) is left as-is:
+    // cancelling AWS shouldn't drop a GitLab reconnect the user still needs.
+    set({ awsDevice: null, awsAutoSelect: false });
   },
 
   // Ask the (always-mounted) ConnectorPanel to open the AWS account/role picker.
@@ -359,7 +363,6 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
       awsModalRequested: false,
       renewable: [],
       awsAutoSelect: false,
-      gitlabReauthPending: false,
       grantBusy: null,
     }),
 }));

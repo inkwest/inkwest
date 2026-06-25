@@ -512,6 +512,65 @@ async def test_aws_options_progress_rejects_malformed_session_id(
     assert resp.status_code == 400
 
 
+# --------------------------------------------------------------------------- #
+# OAuth callback: self-closing popup HTML (no full-page redirect)
+# --------------------------------------------------------------------------- #
+def test_popup_html_escapes_and_self_closes() -> None:
+    from app.api.routes import connectors as c
+
+    resp = c._popup_html("<b>x</b> & y", ok=True)
+    body = resp.body.decode()
+    assert resp.status_code == 200
+    assert "window.close()" in body
+    assert "&lt;b&gt;x&lt;/b&gt;" in body  # message HTML-escaped (no reflected markup)
+    assert "<b>x</b>" not in body
+
+
+async def test_oauth_callback_invalid_state_returns_self_closing_html(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """A bad/expired state self-closes the popup (HTML 200), never redirects the page."""
+    result = MagicMock(first=MagicMock(return_value=None))  # no pending-state row
+    mock_db.execute = AsyncMock(return_value=result)
+
+    resp = await authenticated_client.get("/api/connectors/callback?state=nope&code=xyz")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert "window.close()" in resp.text
+
+
+async def test_oauth_callback_success_self_closes_and_warms_refresh_token(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
+) -> None:
+    """A successful GitLab exchange self-closes the popup (the opener polls status) and
+    moves the refresh token to the warm store."""
+    row = MagicMock(
+        code_verifier="v",
+        connector="gitlab",
+        user_id=mock_user.id,
+        session_id=mock_session_obj.id,
+        created_at=datetime.now(UTC),
+    )
+    mock_db.execute = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=row)))
+    cred = MintedCredential(
+        "gitlab", "read", datetime.now(UTC) + timedelta(hours=1), secret={"refresh_token": "rt"}
+    )
+    conn = MagicMock(exchange_code=AsyncMock(return_value=cred))
+    store = MagicMock(put=AsyncMock())
+    with (
+        patch("app.api.routes.connectors.get_settings", return_value=_SETTINGS),
+        patch("app.api.routes.connectors.get_connector", return_value=conn),
+        patch("app.api.routes.connectors.get_credential_store", return_value=store),
+        patch("app.api.routes.connectors.store_gitlab_warm", AsyncMock()) as warm,
+    ):
+        resp = await authenticated_client.get("/api/connectors/callback?state=s&code=c")
+    assert resp.status_code == 200
+    assert "window.close()" in resp.text
+    assert "Connected to gitlab" in resp.text
+    warm.assert_awaited_once()  # refresh token moved to the warm store…
+    assert "refresh_token" not in cred.secret  # …and popped from the session credential
+
+
 async def test_aws_device_poll_enumeration_failure_is_terminal(
     authenticated_client: AsyncClient, mock_db: AsyncMock, mock_user: MagicMock, mock_session_obj
 ) -> None:
