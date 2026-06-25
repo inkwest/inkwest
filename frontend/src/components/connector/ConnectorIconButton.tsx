@@ -19,6 +19,8 @@ interface Props {
   overlayBadge?: ReactNode;
   /** Overlay body (granted permissions / enabled servers). */
   overlayBody?: ReactNode;
+  /** Onboarding-tour anchor (data-tour) so the first-run tour can spotlight this icon. */
+  dataTour?: string;
 }
 
 /**
@@ -37,6 +39,7 @@ export function ConnectorIconButton({
   overlayTitle,
   overlayBadge,
   overlayBody,
+  dataTour,
 }: Props) {
   const button = (
     <button
@@ -45,6 +48,7 @@ export function ConnectorIconButton({
       disabled={disabled || busy}
       aria-label={title}
       title={title}
+      data-tour={dataTour}
       className="group/cbtn flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
     >
       {busy ? (

@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Check, Menu, User, LogOut, Shield } from 'lucide-react';
+import { ArrowLeft, Check, Menu, User, LogOut, Shield, HelpCircle } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
+import { useOnboardingStore } from '@/store/onboarding';
 import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
@@ -180,6 +181,21 @@ export function Header() {
                   <span>Wide composer</span>
                   {wideComposer && <Check className="h-4 w-4 text-green-400" />}
                 </button>
+                {/* Replay the first-run tour. Non-admins only (admins never see it); it
+                    runs on the start screen, so jump there and clear the seen flag. */}
+                {user && !user.is_admin && (
+                  <button
+                    onClick={() => {
+                      setShowMenu(false);
+                      useOnboardingStore.getState().restart();
+                      navigate('/');
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
+                  >
+                    <HelpCircle className="h-4 w-4" />
+                    <span>Replay tutorial</span>
+                  </button>
+                )}
               </div>
 
               {(user?.is_admin || oidcEnabled) && (
