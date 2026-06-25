@@ -254,6 +254,18 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => ({
         const connected = get().statuses[connector]?.state === 'connected';
         if (connected || !popup || popup.closed || Date.now() - startedAt > POLL_DEADLINE_MS) {
           window.clearInterval(timer);
+          // Close the popup from the opener once granted — this is the reliable path.
+          // The callback's own window.close() is best-effort: browsers block a popup
+          // self-closing after the cross-origin OAuth round-trip, and the prod CSP
+          // (script-src 'self') blocks the inline script outright. An opener can always
+          // close a window it opened (same as the AWS flow's closeAwsPopup).
+          if (connected) {
+            try {
+              popup?.close();
+            } catch {
+              /* already closed / cross-origin — nothing to do */
+            }
+          }
           resolve();
         }
       }, 2000);

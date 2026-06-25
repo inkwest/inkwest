@@ -81,7 +81,8 @@ describe('connectorsStore', () => {
     vi.useFakeTimers();
     try {
       // A controllable popup handle: stays open, so resolution hinges on status only.
-      const popup = { closed: false, location: { href: '' } } as unknown as Window;
+      const close = vi.fn();
+      const popup = { closed: false, location: { href: '' }, close } as unknown as Window;
       const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup);
       vi.spyOn(api, 'initiateConnector').mockResolvedValue({
         redirect_url: 'https://gitlab.example/oauth/authorize',
@@ -97,9 +98,12 @@ describe('connectorsStore', () => {
 
       await vi.advanceTimersByTimeAsync(2000); // poll 1 → not connected, keep polling
       expect(useConnectorsStore.getState().statuses.gitlab.state).toBe('not_connected');
+      expect(close).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(2000); // poll 2 → connected → stop + resolve
       await done;
       expect(useConnectorsStore.getState().statuses.gitlab.state).toBe('connected');
+      // The opener closes the popup itself — not relying on the callback's window.close().
+      expect(close).toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
