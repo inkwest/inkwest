@@ -163,6 +163,16 @@ export function McpPanel({
         window.clearInterval(timer);
         pollTimers.current.delete(timer);
         connecting.current.delete(key);
+        // Close the popup from the opener once connected — reliable, unlike the
+        // callback's own window.close() (blocked after the cross-origin round-trip,
+        // and blocked outright by the prod CSP script-src 'self').
+        if (connected) {
+          try {
+            popup?.close();
+          } catch {
+            /* already closed / cross-origin — nothing to do */
+          }
+        }
       }
     }, 2000);
     pollTimers.current.add(timer);
