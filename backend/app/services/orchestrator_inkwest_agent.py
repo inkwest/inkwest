@@ -38,7 +38,6 @@ from app.services.budget_service import record_usage
 from app.services.events import ChatEvent, done_event, error_event, mcp_auth_required_event
 from app.services.messages import (
     ensure_session_title,
-    get_active_skills,
     get_enabled_mcp_servers,
     get_session_messages,
     save_message,
@@ -46,6 +45,7 @@ from app.services.messages import (
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills, skills_container_root
+from app.services.user_preferences import get_effective_skills
 from app.tools.connector_exec import build_connector_env, session_kube_contexts
 from app.tools.definitions import get_tool_definitions
 from inkwest_agent.protocol import (
@@ -235,7 +235,7 @@ async def orchestrate_chat_inkwest_agent(
     # on demand by the agent's read_skill tool. MCP server defs are materialized into a
     # sandbox file whose in-container path rides the spec (set after sandbox.ensure).
     try:
-        active_skills = await get_active_skills(db)
+        active_skills = await get_effective_skills(db, user_id)
     except Exception as e:
         logger.warning("active_skills_load_failed", extra={"error": str(e)})
         active_skills = []

@@ -291,7 +291,7 @@ def _patch_broker(
         ),
         # P1.7 skills + MCP boundaries. Default: no skills, no MCP servers — the
         # skill/MCP-specific tests below override the return values.
-        patch.object(oia, "get_active_skills", AsyncMock(return_value=skills or [])),
+        patch.object(oia, "get_effective_skills", AsyncMock(return_value=skills or [])),
         patch.object(oia, "get_enabled_mcp_servers", AsyncMock(return_value=enabled_mcp or [])),
         patch.object(oia, "apply_session_skills", spies.apply_session_skills),
         patch.object(
@@ -608,8 +608,8 @@ class TestOrchestrateInkwestAgent:
         patches, spies = _patch_broker()
         for p in patches:
             p.start()
-        # Re-point get_active_skills (already patched by the fixture) at a raising mock.
-        oia.get_active_skills.side_effect = RuntimeError("db down")
+        # Re-point get_effective_skills (already patched by the fixture) at a raising mock.
+        oia.get_effective_skills.side_effect = RuntimeError("db down")
         try:
             events = await _run_broker(spies, [json.dumps({"type": "done"})])
         finally:

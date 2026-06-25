@@ -17,6 +17,8 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +29,18 @@ from app.core.slug import slugify
 from app.models.skill import Skill
 
 logger = logging.getLogger(__name__)
+
+
+class MaterializableSkill(Protocol):
+    """Structural type a skill must satisfy to be written to the sandbox.
+
+    Both the admin :class:`app.models.skill.Skill` and the personal
+    :class:`app.models.user_skill.UserSkill` match it, so the effective-skills
+    resolver can feed either to :func:`apply_session_skills` unchanged.
+    """
+
+    name: str
+    content: str
 
 
 def skills_dir(session_id: str) -> str | None:
@@ -54,7 +68,7 @@ def skills_container_root() -> str:
     return f"{get_settings().sandbox_home.rstrip('/')}/.claude/skills"
 
 
-def apply_session_skills(session_id: str, skills: list[Skill]) -> None:
+def apply_session_skills(session_id: str, skills: Sequence[MaterializableSkill]) -> None:
     """Reconcile the conversation's skills dir to ``skills`` (no-op off-sandbox).
 
     Each skill's ``content`` is already a full SKILL.md → written verbatim. Idempotent:
