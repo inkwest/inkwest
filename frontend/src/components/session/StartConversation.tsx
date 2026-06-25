@@ -248,12 +248,17 @@ export function StartConversation() {
                     />
                   ))}
                 </span>
-                <McpPanel
-                  sessionId=""
-                  variant="icon"
-                  onBeforeOpen={handleConfigureMcp}
-                  deferOpen
-                />
+                {/* Explicit, single tour anchor for the MCP icon — data-tour lives here,
+                    not inside McpPanel (which renders in several places), so the tour
+                    matches exactly this one element. */}
+                <span data-tour="mcp" className="flex shrink-0">
+                  <McpPanel
+                    sessionId=""
+                    variant="icon"
+                    onBeforeOpen={handleConfigureMcp}
+                    deferOpen
+                  />
+                </span>
               </>
             )
           }

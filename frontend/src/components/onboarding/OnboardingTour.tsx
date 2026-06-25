@@ -4,9 +4,10 @@ import { useAuthStore } from '@/store/admin';
 import { useOnboardingStore } from '@/store/onboarding';
 
 // First-run guided tour for NON-ADMIN users: spotlights the real composer affordances
-// one by one (connectors → MCP → skills). Built without a tour lib — each step targets
-// live elements by their data-tour anchor and dims everything else around their union
-// rect. Shown once per browser (see useOnboardingStore); admins never see it.
+// one step at a time (attachments → skills → connectors → MCP → model). Built without a
+// tour lib — each step targets live elements by their data-tour anchor (by identity,
+// never by position) and dims everything else around their bounding box. Shown once per
+// browser (see useOnboardingStore); admins never see it.
 
 interface Step {
   // Matches one or more live elements; the spotlight covers their union bounding box.
@@ -89,65 +90,47 @@ export function OnboardingTour() {
 
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<Box | null>(null);
-  // Transitions are armed only by a deliberate step change (Next/Back) — never on the
-  // first placement or on layout-settling remeasures — so the popup appears directly at
-  // step 1 and only glides when the user navigates between steps.
-  const [animate, setAnimate] = useState(false);
-  // Stays invisible until the target's box is stable across frames, so the overlay's
-  // first *visible* paint is already at its final position — the centred composer
-  // re-settles for a frame or two on load, which would otherwise show as a jump.
-  const [ready, setReady] = useState(false);
 
+  // Reliable positioning: measure the CURRENT step's anchor synchronously whenever the
+  // step changes. useLayoutEffect runs after the DOM commit but before paint, so the
+  // layout is final and the very first paint is already correct (no flash, no race).
+  // Re-measure only on real layout changes — window resize/scroll and a ResizeObserver
+  // on the document. No per-frame polling loop: that raced with step changes (a frame
+  // could fire with the previous step's index) and intermittently spotlighted the wrong
+  // control. Anchors are matched by identity (their data-tour name), never by position.
   useLayoutEffect(() => {
     if (!active) return;
-    // Re-measure every frame while the tour is open: the anchored elements are found by
-    // identity (their data-tour name, never by position), and reading their live rect
-    // each frame self-heals against late layout, scrolling, and stale Fast-Refresh DOM.
-    // The sameBox guard keeps it a no-op render unless the box actually moved.
-    let raf = 0;
-    let prev: Box | null = null;
-    let frames = 0;
-    const tick = () => {
+    const measure = () => {
       const box = unionRect(STEPS[index].selector);
       setRect((p) => (sameBox(p, box) ? p : box));
-      frames += 1;
-      // Reveal once the box is stable across two frames (or after a few frames as a
-      // fallback, so a never-settling layout can't keep the tour hidden).
-      if (box && (sameBox(prev, box) || frames >= 4)) setReady(true);
-      prev = box;
-      raf = requestAnimationFrame(tick);
     };
-    tick();
-    return () => cancelAnimationFrame(raf);
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true); // capture: catch nested scrollers
+    let ro: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(measure); // catches reflows that shift the anchor (e.g. async config load)
+      ro.observe(document.documentElement);
+    }
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+      ro?.disconnect();
+    };
   }, [active, index]);
 
-  // On (re)activation — first mount, or a "Replay tutorial" while still mounted — always
-  // restart at step 1, glide disarmed and hidden until re-measured, so a replay never
-  // resumes mid-tour.
+  // On (re)activation — first mount, or a "Replay tutorial" while still mounted — restart
+  // at step 1 so a replay never resumes mid-tour.
   useEffect(() => {
-    if (active) {
-      setIndex(0);
-      setAnimate(false);
-      setReady(false);
-    }
+    if (active) setIndex(0);
   }, [active]);
 
   if (!active) return null;
 
-  const tx = animate ? ' transition-all duration-300 ease-out' : '';
-
   const step = STEPS[index];
   const isLast = index === STEPS.length - 1;
-  // Arm the glide on a real navigation only (see `animate`).
-  const next = () => {
-    if (isLast) return complete();
-    setAnimate(true);
-    setIndex((i) => i + 1);
-  };
-  const back = () => {
-    setAnimate(true);
-    setIndex((i) => Math.max(0, i - 1));
-  };
+  const next = () => (isLast ? complete() : setIndex((i) => i + 1));
+  const back = () => setIndex((i) => Math.max(0, i - 1));
 
   const spot = rect
     ? { top: rect.top - PAD, left: rect.left - PAD, width: rect.width + PAD * 2, height: rect.height + PAD * 2 }
@@ -169,17 +152,13 @@ export function OnboardingTour() {
   }
 
   return createPortal(
-    <div
-      className={`fixed inset-0 z-[1000] transition-opacity duration-150 ${
-        ready ? 'opacity-100' : 'opacity-0'
-      }`}
-    >
+    <div className="fixed inset-0 z-[1000]">
       {/* Click-blocker: the page is driven via the bubble buttons only. */}
       <div className="absolute inset-0" />
       {/* Spotlight: a transparent hole punched out of a full-screen dim via box-shadow. */}
       {spot && (
         <div
-          className={`absolute rounded-xl ring-2 ring-blue-400${tx}`}
+          className="absolute rounded-xl ring-2 ring-blue-400"
           style={{
             top: spot.top,
             left: spot.left,
@@ -196,7 +175,7 @@ export function OnboardingTour() {
       <div
         role="dialog"
         aria-label="Inkwest tutorial"
-        className={`absolute w-80 max-w-[calc(100vw-1rem)] rounded-lg border border-gray-700 bg-gray-900 p-4 shadow-xl${tx}`}
+        className="absolute w-80 max-w-[calc(100vw-1rem)] rounded-lg border border-gray-700 bg-gray-900 p-4 shadow-xl"
         style={bubbleStyle}
       >
         <div className="mb-1 text-xs font-medium text-blue-400">
