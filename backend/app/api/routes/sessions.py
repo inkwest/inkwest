@@ -31,10 +31,20 @@ from app.models.schemas import (
     SessionWithMessages,
 )
 from app.models.session import Session
+from app.models.session_share import SessionShare, ShareStatus
+from app.models.session_share_link import SessionShareLink
 from app.models.system_prompt import SystemPrompt
 from app.services import attachments
 from app.services.model_registry import selectable_models
 from app.services.pubsub import notify
+
+# Access helpers live in app.services.session_access so the chat WebSocket can reuse
+# them without a sessions.py ↔ chat.py import cycle.
+from app.services.session_access import (
+    check_session_access,
+    check_session_owner,
+    is_owner_or_admin,
+)
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -71,15 +81,6 @@ def check_engine_selectable(engine: str | None, model: str | None) -> None:
         )
 
 
-async def check_session_access(session: Session, user: CurrentUser) -> None:
-    """Raise 403 if user doesn't own this session (non-admin)."""
-    if not user.is_admin() and session.user_id and str(session.user_id) != str(user.id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this session",
-        )
-
-
 @router.get("", response_model=SessionList)
 async def list_sessions(
     current_user: CurrentUser,
@@ -91,7 +92,13 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
 ) -> SessionList:
     query = select(Session).options(selectinload(Session.cluster))
-    query = query.where(Session.user_id == str(current_user.id))
+    # The sidebar shows sessions the user owns plus those shared with them via an
+    # accepted invitation (see SessionShare). Pending/declined shares never surface.
+    shared_ids = select(SessionShare.session_id).where(
+        SessionShare.user_id == str(current_user.id),
+        SessionShare.status == ShareStatus.ACCEPTED.value,
+    )
+    query = query.where(or_(Session.user_id == str(current_user.id), Session.id.in_(shared_ids)))
     # Sessions with no interaction yet (created on chat open / MCP setup) are
     # hidden from the sidebar. Filtering here, not just client-side, keeps
     # pagination honest — otherwise invisible empties crowd real ones off page 1.
@@ -124,8 +131,33 @@ async def list_sessions(
     result = await db.execute(query)
     sessions = result.scalars().all()
 
+    # Tag shared-in sessions with the caller's role + owner name. Only query roles
+    # when this page actually contains sessions the caller doesn't own/admin.
+    shared_in = [s.id for s in sessions if not is_owner_or_admin(s, current_user)]
+    my_roles: dict[str, str] = {}
+    if shared_in:
+        roles_result = await db.execute(
+            select(SessionShare.session_id, SessionShare.role).where(
+                SessionShare.user_id == str(current_user.id),
+                SessionShare.session_id.in_(shared_in),
+                SessionShare.status == ShareStatus.ACCEPTED.value,
+            )
+        )
+        my_roles = {str(sid): role for sid, role in roles_result.all()}
+
+    items: list[SessionResponse] = []
+    for s in sessions:
+        resp = SessionResponse.model_validate(s)
+        if is_owner_or_admin(s, current_user):
+            resp.is_owner = True
+        else:
+            resp.is_owner = False
+            resp.shared_role = my_roles.get(str(s.id))
+            resp.owner_display_name = s.user.display_name if s.user else None
+        items.append(resp)
+
     return SessionList(
-        items=[SessionResponse.model_validate(s) for s in sessions],
+        items=items,
         total=total,
         page=page,
         page_size=page_size,
@@ -269,8 +301,34 @@ async def get_session(
             detail=f"Session with ID '{session_id}' not found",
         )
 
-    await check_session_access(session, current_user)
-    return SessionWithMessages.model_validate(session)
+    role = await check_session_access(session, current_user, db)
+    resp = SessionWithMessages.model_validate(session)
+    if role == "owner":
+        resp.is_owner = True
+        # Surface how many people (invited or accepted) + active links it's shared with,
+        # so the owner's Share control can show "Shared·N" without opening the dialog.
+        people = await db.scalar(
+            select(func.count())
+            .select_from(SessionShare)
+            .where(
+                SessionShare.session_id == session.id,
+                SessionShare.status != ShareStatus.DECLINED.value,
+            )
+        )
+        links = await db.scalar(
+            select(func.count())
+            .select_from(SessionShareLink)
+            .where(
+                SessionShareLink.session_id == session.id,
+                SessionShareLink.is_active == True,  # noqa: E712
+            )
+        )
+        resp.share_count = (people or 0) + (links or 0)
+    else:
+        resp.is_owner = False
+        resp.shared_role = role
+        resp.owner_display_name = session.user.display_name if session.user else None
+    return resp
 
 
 @router.patch("/{session_id}", response_model=SessionResponse)
@@ -289,7 +347,7 @@ async def update_session(
             detail=f"Session with ID '{session_id}' not found",
         )
 
-    await check_session_access(session, current_user)
+    check_session_owner(session, current_user)
 
     update_data = session_data.model_dump(exclude_unset=True)
     if "model" in update_data:
@@ -348,7 +406,7 @@ async def _load_owned_session(session_id: UUID, user: CurrentUser, db: AsyncSess
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session with ID '{session_id}' not found",
         )
-    await check_session_access(session, user)
+    check_session_owner(session, user)
     return session
 
 
@@ -526,7 +584,7 @@ async def delete_session(
             detail=f"Session with ID '{session_id}' not found",
         )
 
-    await check_session_access(session, current_user)
+    check_session_owner(session, current_user)
     session.is_archived = True
     await db.flush()
     await db.commit()
@@ -587,7 +645,7 @@ async def get_session_stats(
             detail=f"Session with ID '{session_id}' not found",
         )
 
-    await check_session_access(session, current_user)
+    await check_session_access(session, current_user, db)
 
     return {
         "session_id": str(session.id),
@@ -613,7 +671,7 @@ async def get_failed_messages(
             detail=f"Session with ID '{session_id}' not found",
         )
 
-    await check_session_access(session, current_user)
+    await check_session_access(session, current_user, db)
 
     # KNOWN LIMITATION: a reconciled (interrupted) user message stays
     # error+retryable even if the user later continued the conversation past it,

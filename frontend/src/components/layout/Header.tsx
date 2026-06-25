@@ -7,6 +7,7 @@ import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
+import { devSwitchUser } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
 
 export function Header() {
@@ -25,7 +26,15 @@ export function Header() {
   const { fetchConfig } = useConfigStore();
   const version = useUpdateStore((s) => s.loadedVersion);
   const [showMenu, setShowMenu] = useState(false);
+  const [devName, setDevName] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Dev-only convenience: impersonate a local user (no IdP) to test multi-user
+  // sharing. A full reload re-authenticates REST + every WebSocket as the new user.
+  const handleDevSwitch = async (name: string) => {
+    await devSwitchUser(name.trim());
+    window.location.href = '/';
+  };
 
   // The /api/config endpoint requires auth — fetch only once signed in.
   useEffect(() => {
@@ -105,6 +114,44 @@ export function Header() {
                 <div className="px-3 py-2 border-b border-gray-700">
                   <div className="text-sm text-gray-200 truncate">{user.display_name}</div>
                   <div className="text-xs text-gray-500 truncate">{user.email}</div>
+                </div>
+              )}
+
+              {/* Dev-only (no OIDC): switch the impersonated local user for testing. */}
+              {!oidcEnabled && (
+                <div className="px-3 py-2 border-b border-gray-700 space-y-1.5">
+                  <span className="text-xs text-gray-500 uppercase tracking-wider">
+                    Dev: switch user
+                  </span>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void handleDevSwitch(devName);
+                    }}
+                    className="flex gap-1"
+                  >
+                    <input
+                      value={devName}
+                      onChange={(e) => setDevName(e.target.value)}
+                      placeholder="username (e.g. bob)"
+                      className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      type="submit"
+                      className="px-2 py-1 text-xs rounded bg-blue-600 hover:bg-blue-500 text-white"
+                    >
+                      Switch
+                    </button>
+                  </form>
+                  {/* Only offer the reset when actually impersonating someone else. */}
+                  {user && user.email !== 'dev@localhost' && (
+                    <button
+                      onClick={() => void handleDevSwitch('')}
+                      className="text-xs text-gray-400 hover:text-gray-200"
+                    >
+                      Reset to dev@localhost
+                    </button>
+                  )}
                 </div>
               )}
 

@@ -2,6 +2,7 @@
 API dependencies for dependency injection.
 """
 
+import re
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
@@ -25,20 +26,34 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def get_or_create_dev_user(db: AsyncSession) -> User:
-    """Get or create the default dev user for single-user mode."""
+async def get_or_create_dev_user(
+    db: AsyncSession,
+    *,
+    email: str = "dev@localhost",
+    display_name: str = "Developer",
+    admin: bool = True,
+) -> User:
+    """Get or create a local user for single-user (OIDC-off) mode.
+
+    Defaults to the admin ``dev@localhost``. The kwargs let dev-mode user switching
+    impersonate another local account so the multi-user features can be exercised
+    without an IdP (see ``get_current_user`` + the ``/auth/dev-switch`` endpoint).
+    Unreachable with OIDC enabled, so it cannot widen access in production.
+    """
     settings = get_settings()
-    result = await db.execute(select(User).where(User.email == "dev@localhost"))
+    result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
     if user:
         return user
 
+    # Preserve the canonical dev account's subject; derive others from the local name.
+    subject = "dev-local" if email == "dev@localhost" else f"dev-{email.split('@', 1)[0]}"
     user = User(
-        oidc_subject="dev-local",
+        oidc_subject=subject,
         oidc_issuer="local",
-        email="dev@localhost",
-        display_name="Developer",
-        roles=[settings.oidc_admin_role],
+        email=email,
+        display_name=display_name,
+        roles=[settings.oidc_admin_role] if admin else [],
         is_active=True,
     )
     db.add(user)
@@ -60,6 +75,15 @@ async def get_current_user(
     settings = get_settings()
 
     if not settings.oidc_enabled:
+        # Dev mode: optionally impersonate another local user (e.g. to test sharing
+        # with two identities) via the inkwest_dev_user cookie set by /auth/dev-switch.
+        # The value is treated as a username → <name>@localhost, non-admin.
+        dev_user = request.cookies.get("inkwest_dev_user")
+        name = re.sub(r"[^a-z0-9_-]", "", dev_user.lower())[:32] if dev_user else ""
+        if name and name != "dev":
+            return await get_or_create_dev_user(
+                db, email=f"{name}@localhost", display_name=name, admin=False
+            )
         return await get_or_create_dev_user(db)
 
     token = request.cookies.get(SESSION_COOKIE_NAME)

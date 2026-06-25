@@ -53,3 +53,26 @@ describe('sessionsStore ordering', () => {
     expect(fetchSpy).toHaveBeenCalled();
   });
 });
+
+describe('sessionsStore sharing', () => {
+  it('setShareCount updates the matching list item and currentSession', () => {
+    useSessionsStore.setState({
+      sessions: [session('a'), session('b')],
+      currentSession: { ...session('a'), messages: [], cluster: null },
+    });
+    useSessionsStore.getState().setShareCount('a', 3);
+    expect(useSessionsStore.getState().sessions.find((s) => s.id === 'a')?.share_count).toBe(3);
+    expect(useSessionsStore.getState().currentSession?.share_count).toBe(3);
+    // Untouched sessions are left alone.
+    expect(useSessionsStore.getState().sessions.find((s) => s.id === 'b')?.share_count).toBeUndefined();
+  });
+
+  it('setShareCount leaves currentSession alone when ids differ', () => {
+    useSessionsStore.setState({
+      sessions: [session('a')],
+      currentSession: { ...session('b'), messages: [], cluster: null },
+    });
+    useSessionsStore.getState().setShareCount('a', 5);
+    expect(useSessionsStore.getState().currentSession?.share_count).toBeUndefined();
+  });
+});

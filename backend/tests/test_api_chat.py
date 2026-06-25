@@ -42,7 +42,7 @@ async def test_chat_validate_session_not_found() -> None:
     mock_db = AsyncMock()
     mock_db.get = AsyncMock(return_value=None)
 
-    session, cluster, error = await validate_session(mock_db, "nonexistent")
+    session, cluster, _role, error = await validate_session(mock_db, "nonexistent")
     assert session is None
     assert error == "Session not found"
 
@@ -67,7 +67,7 @@ async def test_chat_validate_session_inactive_cluster() -> None:
         }.get(id)
     )
 
-    session, cluster, error = await validate_session(mock_db, "session-id")
+    session, cluster, _role, error = await validate_session(mock_db, "session-id")
     assert error == "Cluster is not active"
 
 
@@ -90,8 +90,10 @@ async def test_chat_validate_session_access_denied() -> None:
             "session-id": mock_session,
         }.get(id)
     )
+    # No accepted share for this user → get_session_role returns None → access denied.
+    mock_db.scalar = AsyncMock(return_value=None)
 
-    session, cluster, error = await validate_session(mock_db, "session-id", user)
+    session, cluster, _role, error = await validate_session(mock_db, "session-id", user)
     assert error == "Access denied"
 
 
@@ -115,7 +117,7 @@ async def test_chat_validate_session_success() -> None:
         }.get(id)
     )
 
-    session, cluster, error = await validate_session(mock_db, "session-id")
+    session, cluster, _role, error = await validate_session(mock_db, "session-id")
     assert session is mock_session
     assert cluster is mock_cluster
     assert error is None
@@ -133,7 +135,7 @@ async def test_chat_validate_session_without_cluster() -> None:
     mock_db = AsyncMock()
     mock_db.get = AsyncMock(side_effect=lambda model, id: {"session-id": mock_session}.get(id))
 
-    session, cluster, error = await validate_session(mock_db, "session-id")
+    session, cluster, _role, error = await validate_session(mock_db, "session-id")
     assert session is mock_session
     assert cluster is None
     assert error is None

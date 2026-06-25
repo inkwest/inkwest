@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSessionsStore } from '@/store/sessions';
 import { useChatStore } from '@/store/chat';
 import { useUpdateStore } from '@/store/update';
+import { useInvitesStore } from '@/store/invites';
 import { fetchWsTicket, getVersion, wsBaseUrl } from '@/services/api';
 
 const WS_URL = wsBaseUrl();
@@ -18,6 +19,11 @@ export function useSyncSocket() {
   const isStreamingRef = useRef(false);
 
   useEffect(() => {
+    // Seed from current state: zustand's subscribe doesn't fire immediately, so without
+    // this a share_revoked/session_deleted arriving before the first change wouldn't
+    // match the open session and wouldn't navigate the user out.
+    currentSessionRef.current = useSessionsStore.getState().currentSession?.id ?? null;
+    isStreamingRef.current = useChatStore.getState().isStreaming;
     const unsub1 = useSessionsStore.subscribe((state) => {
       currentSessionRef.current = state.currentSession?.id ?? null;
     });
@@ -87,9 +93,42 @@ export function useSyncSocket() {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'pong') return;
+          // A new conversation-share invitation — surface the accept/decline popup.
+          if (data.type === 'share_invite') {
+            useInvitesStore.getState().addInvite({
+              share_id: data.share_id,
+              session_id: data.session_id,
+              session_title: data.session_title ?? null,
+              role: data.role,
+              invited_by_display_name: data.invited_by ?? null,
+              created_at: new Date().toISOString(),
+            });
+            return;
+          }
+          // Access was just revoked — surface a polite notice (with the title).
+          if (data.type === 'share_revoked') {
+            useInvitesStore.getState().addRevokedNotice({
+              sessionId: data.session_id,
+              title: data.session_title ?? null,
+            });
+          }
           fetchSessions();
+          // A share was accepted/declined/revoked — resync the popup list and signal
+          // an open ShareModal (owner) to reload its participant statuses live.
+          if (data.type === 'share_responded' || data.type === 'share_revoked') {
+            useInvitesStore.getState().fetchInvites();
+            useInvitesStore.getState().bumpSharesVersion();
+          }
           const sid = data.session_id;
-          if (data.type === 'session_deleted' && sid === currentSessionRef.current) {
+          // The open conversation went away for this user (deleted, their share was
+          // revoked, or they left it from another tab) — navigate out rather than let
+          // the chat socket loop on retries. session_left carries no popup (self-action).
+          if (
+            (data.type === 'session_deleted' ||
+              data.type === 'share_revoked' ||
+              data.type === 'session_left') &&
+            sid === currentSessionRef.current
+          ) {
             navigate('/');
             return;
           }

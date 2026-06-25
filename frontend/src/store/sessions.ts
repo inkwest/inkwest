@@ -23,6 +23,8 @@ interface SessionsState {
     opts?: { systemPromptId?: string; systemPromptCustom?: string; model?: string; engine?: string }
   ) => Promise<Session>;
   deleteSession: (id: string) => Promise<void>;
+  leaveSession: (id: string) => Promise<void>;
+  setShareCount: (id: string, count: number) => void;
   renameSession: (id: string, title: string) => Promise<void>;
   setSessionModel: (id: string, model: string | null, engine?: string | null) => Promise<void>;
   setCurrentSession: (session: SessionWithMessages | null) => void;
@@ -93,6 +95,28 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   deleteSession: async (id: string) => {
     await api.deleteSession(id);
     // Drop any orphaned draft so it can't resurface on a reused id / clutter storage.
+    useDraftsStore.getState().clearDraft(id);
+    set((state) => ({
+      sessions: state.sessions.filter((s) => s.id !== id),
+      currentSession: state.currentSession?.id === id ? null : state.currentSession,
+    }));
+  },
+
+  // Keep the "Shared·N" count fresh on the open conversation when the owner manages
+  // shares in the dialog (no full refetch needed — the modal already has the numbers).
+  setShareCount: (id: string, count: number) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) => (s.id === id ? { ...s, share_count: count } : s)),
+      currentSession:
+        state.currentSession?.id === id
+          ? { ...state.currentSession, share_count: count }
+          : state.currentSession,
+    })),
+
+  // Leave a conversation shared with you: removes your own access (owner's copy stays).
+  // Mirrors deleteSession's local cleanup; the participant is not the owner.
+  leaveSession: async (id: string) => {
+    await api.leaveShare(id);
     useDraftsStore.getState().clearDraft(id);
     set((state) => ({
       sessions: state.sessions.filter((s) => s.id !== id),

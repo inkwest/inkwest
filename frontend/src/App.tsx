@@ -6,6 +6,7 @@ import { NewSessionPage } from '@/pages/NewSessionPage';
 import { QuickStartPage } from '@/pages/QuickStartPage';
 import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
 import { ConnectorCallbackPage } from '@/pages/ConnectorCallbackPage';
+import { SharedSessionPage } from '@/pages/SharedSessionPage';
 import {
   AdminLayout,
   DashboardPage,
@@ -95,6 +96,9 @@ function App() {
 
         {/* Connector OAuth callback — outside auth guard (hit by the IdP redirect) */}
         <Route path="/connectors/callback" element={<ConnectorCallbackPage />} />
+
+        {/* Public read-only share link — anonymous, outside the auth guard */}
+        <Route path="/shared/:token" element={<SharedSessionPage />} />
 
         {/* Main Chat Routes */}
         <Route path="/" element={<AuthGuard><Layout /></AuthGuard>}>

@@ -50,7 +50,7 @@ export class ChatWebSocket {
       // Kick off the MCP DEK handshake (browser-fractioned key custody) so the server can
       // decrypt this user's MCP token blobs while connected. No-op if no oauth MCP is used.
       this.sendRaw({ type: 'mcp_dek_open' });
-      this.notifyHandlers({ type: 'connected' } as unknown as ChatEvent);
+      this.notifyHandlers({ type: 'connected' });
     };
 
     this.ws.onmessage = (event) => {
@@ -69,12 +69,20 @@ export class ChatWebSocket {
     this.ws.onclose = (event) => {
       console.log('WebSocket closed:', event.code);
       this.stopPingInterval();
-      this.notifyHandlers({ type: 'disconnected' } as unknown as ChatEvent);
+      this.notifyHandlers({ type: 'disconnected' });
 
       if (event.code === 4001) {
         // Session expired/invalid — bounce to root; the AuthGuard re-checks and
         // redirects to login if the cookie is gone.
         window.location.href = '/';
+        return;
+      }
+
+      // Terminal: access to this session is gone, so reconnecting would just loop
+      // on the same rejection (a "Connection error" storm). 4004 access denied /
+      // not found, 4010 session deleted, 4011 share revoked. The sync socket
+      // navigates the user out of the dead session (see useSyncSocket).
+      if (event.code === 4004 || event.code === 4010 || event.code === 4011) {
         return;
       }
 
@@ -161,6 +169,11 @@ export class ChatWebSocket {
 
   sendStop(): void {
     this.send({ type: 'stop' });
+  }
+
+  /** Broadcast this client's typing state to the other participants (best-effort). */
+  sendTyping(state: boolean): void {
+    this.send({ type: 'typing', state });
   }
 
   sendRetry(): boolean {

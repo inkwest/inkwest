@@ -1,3 +1,5 @@
+import { Attachment } from './api';
+
 // WebSocket events
 export interface ChatEvent {
   type:
@@ -9,20 +11,38 @@ export interface ChatEvent {
     | 'pong'
     | 'stream_resumed'
     | 'connector_required'
-    | 'mcp_auth_required';
+    | 'mcp_auth_required'
+    // Local lifecycle frames the service synthesizes for the store:
+    | 'connected'
+    | 'disconnected'
+    // Collaboration frames (broadcast to all of a session's sockets):
+    | 'presence' // who is currently viewing
+    | 'presence_self' // (shared view) tells an anonymous guest its own presence id
+    | 'typing' // a participant's typing state
+    | 'user_message'; // a peer (the owner) sent a turn — echo it for read-only viewers
   content?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   is_error?: boolean;
   metadata?: Record<string, unknown>;
+  // presence
+  users?: Array<{ user_id: string; display_name: string }>;
+  // typing
+  user_id?: string;
+  display_name?: string;
+  state?: boolean;
+  // user_message
+  attachments?: Attachment[] | null;
+  author_user_id?: string;
+  author_display_name?: string;
 }
 
-import { Attachment } from './api';
-
 export interface SendMessage {
-  type: 'message' | 'ping' | 'stop' | 'retry';
+  type: 'message' | 'ping' | 'stop' | 'retry' | 'typing';
   content?: string;
   // Descriptors from a prior /attachments upload, persisted on the user turn and
   // referenced to the agent as @/workdir/<file> (claude-cli only).
   attachments?: Attachment[];
+  // typing
+  state?: boolean;
 }

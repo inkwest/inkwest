@@ -391,6 +391,13 @@ def mock_session_obj(mock_cluster: MagicMock) -> MagicMock:
     session.updated_at = datetime.now(UTC)
     session.cluster = mock_cluster
     session.messages = []
+    # Collaboration markers (SessionResponse): a MagicMock otherwise yields child
+    # mocks that fail bool/str validation. Real ORM rows lack these attrs and fall
+    # back to the schema defaults; the routes set them explicitly per caller.
+    session.is_owner = True
+    session.shared_role = None
+    session.owner_display_name = None
+    session.share_count = 0
     return session
 
 

@@ -43,13 +43,16 @@ export function ChatPage() {
     }
   }, [serverMessages, applyServerMessages]);
 
-  const { sendMessage, stopStreaming, retryMessage } = useWebSocket(sessionId!);
+  const { sendMessage, stopStreaming, retryMessage, sendTyping } = useWebSocket(sessionId!);
 
   const handleSend = (content: string, attachments?: Attachment[]) => {
     sendMessage(content, attachments);
     setInitialPrompt(null);
     setInitialAttachments(null);
   };
+
+  // A session shared *with* this user (is_owner === false) is view-only.
+  const isReadOnly = currentSession?.is_owner === false;
 
   if (isLoadingSession || !currentSession || currentSession.id !== sessionId) {
     return (
@@ -64,6 +67,8 @@ export function ChatPage() {
       onSendMessage={handleSend}
       onStopStreaming={stopStreaming}
       onRetryMessage={retryMessage}
+      onTyping={sendTyping}
+      isReadOnly={isReadOnly}
       initialPrompt={initialPrompt}
       initialAttachments={initialAttachments}
       autoSubmit

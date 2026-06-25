@@ -60,11 +60,45 @@ class TurnRunner:
         # can't race (a subscriber must atomically get the buffer snapshot + the
         # live queue, with no event slipping through the gap).
         self._lock = asyncio.Lock()
+        # Per-session futures resolved when a turn starts, so sockets that connected
+        # before a turn began can wait for the next one and subscribe to it.
+        self._turn_waiters: dict[str, list[asyncio.Future[None]]] = {}
 
     async def is_active(self, session_id: str) -> bool:
         async with self._lock:
             turn = self._turns.get(session_id)
             return turn is not None and not turn.done
+
+    async def wait_for_turn(self, session_id: str) -> None:
+        """Block until a turn is active for the session.
+
+        Returns immediately when one is already running — this closes the
+        lost-wakeup race against ``subscribe`` (a turn that starts between a
+        caller's ``subscribe``→None and this call). Otherwise it resolves when the
+        next turn starts. Lets a passive viewer follow turns that begin after it
+        connected (see chat._follow_turns).
+        """
+        async with self._lock:
+            existing = self._turns.get(session_id)
+            if existing is not None and not existing.done:
+                return
+            fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            self._turn_waiters.setdefault(session_id, []).append(fut)
+        try:
+            await fut
+        finally:
+            # If the socket closed before any turn started (await cancelled), drop our
+            # future so it can't accumulate on a session that never starts another turn
+            # (a left-open shared link is the worst case). start() also pops the list.
+            async with self._lock:
+                waiters = self._turn_waiters.get(session_id)
+                if waiters is not None:
+                    try:
+                        waiters.remove(fut)
+                    except ValueError:
+                        pass
+                    if not waiters:
+                        del self._turn_waiters[session_id]
 
     async def start(
         self,
@@ -83,6 +117,10 @@ class TurnRunner:
                 return False
             turn = _Turn(session_id=session_id, cancel_event=asyncio.Event())
             self._turns[session_id] = turn
+            # Wake sockets waiting for a turn so their follow loop subscribes to it.
+            for fut in self._turn_waiters.pop(session_id, []):
+                if not fut.done():
+                    fut.set_result(None)
         turn.task = asyncio.create_task(self._run(turn, orchestrate, orchestrate_kwargs))
         return True
 
@@ -94,6 +132,11 @@ class TurnRunner:
             turn = self._turns.get(session_id)
             if turn is None or turn.done:
                 return None
+            # Accepted trade-off: the queue is unbounded (unlike pubsub's maxsize=64).
+            # A turn's event count is bounded by the turn itself, and every event is
+            # also kept in turn.buffer for replay, so a slow viewer can be dropped and
+            # recover on reconnect rather than us dropping events mid-stream (which would
+            # corrupt a live render). Revisit if turns ever stream unbounded output.
             queue: asyncio.Queue[Any] = asyncio.Queue()
             turn.subscribers.add(queue)
             return list(turn.buffer), queue

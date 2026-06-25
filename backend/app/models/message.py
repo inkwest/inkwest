@@ -31,6 +31,14 @@ class Message(Base):
         ForeignKey("sessions.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Who sent this user turn, in a shared conversation. NULL = the AI (assistant /
+    # tool_result rows), or a message that predates sharing. SET NULL on user delete
+    # so history survives. Populated on the WS send path (see chat.py / orchestrators).
+    author_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     role: Mapped[str] = mapped_column(
         String(50),
         nullable=False,

@@ -107,7 +107,7 @@ async def websocket_egress(websocket: WebSocket, session_id: str) -> None:
         if user is None:
             await websocket.close(code=4001)  # unauthenticated
             return
-        session, _cluster, error = await validate_session(db, session_id, user)
+        session, _cluster, _role, error = await validate_session(db, session_id, user)
         if error or session is None:
             await websocket.close(code=4004)  # not found / access denied
             return

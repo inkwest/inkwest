@@ -26,15 +26,32 @@ router = APIRouter()
 async def _authenticate_sync_ws(websocket: WebSocket, db: AsyncSession) -> tuple[bool, str | None]:
     """Authenticate the sync WebSocket. Returns (ok, user_id), fail-closed.
 
-    ``user_id`` scopes which events this connection receives. In dev (OIDC off)
-    there is a single user, so it stays None (receive all); under OIDC it is the
-    authenticated user's id so events are isolated per user.
+    ``user_id`` scopes which events this connection receives — always the concrete
+    user's id (the dev user has one too), never None. Scoping is now load-bearing:
+    sharing emits events addressed to a *specific* recipient (e.g. a share_invite to
+    the invitee), so a None-scoped "receive all" socket would wrongly surface another
+    user's invite to the inviter.
     """
     try:
         settings = get_settings()
 
         if not settings.oidc_enabled:
-            return True, None
+            from app.api.dependencies import get_or_create_dev_user
+
+            # Honor the ws-ticket (always sent) so dev-mode user switching scopes
+            # this socket to the impersonated user; else the default dev user.
+            header = websocket.headers.get("sec-websocket-protocol", "")
+            token = extract_ws_ticket(header)
+            if token:
+                payload = verify_ws_ticket(token)
+                sub = payload.get("sub") if payload else None
+                if sub:
+                    result = await db.execute(select(User).where(User.id == sub))
+                    user = result.scalar_one_or_none()
+                    if user is not None and user.is_active:
+                        return True, str(user.id)
+            dev_user = await get_or_create_dev_user(db)
+            return True, str(dev_user.id)
 
         header = websocket.headers.get("sec-websocket-protocol", "")
         token = extract_ws_ticket(header)

@@ -8,20 +8,26 @@ from app.api.routes.sync import _authenticate_sync_ws
 
 
 @pytest.mark.asyncio
-async def test_sync_auth_dev_mode_accepts() -> None:
-    """In dev mode (OIDC disabled), sync WS is accepted."""
+async def test_sync_auth_dev_mode_scopes_to_dev_user() -> None:
+    """In dev mode (OIDC disabled), the sync WS is accepted and scoped to the dev
+    user's concrete id — NOT None — so a share_invite addressed to another user
+    (e.g. a seeded account) is not delivered to the dev user's socket."""
     ws = MagicMock()
     mock_db = AsyncMock()
+    dev = MagicMock()
+    dev.id = "dev-user-id"
 
-    with patch("app.api.routes.sync.get_settings") as mock_settings:
+    with (
+        patch("app.api.routes.sync.get_settings") as mock_settings,
+        patch("app.api.dependencies.get_or_create_dev_user", AsyncMock(return_value=dev)),
+    ):
         settings = MagicMock()
         settings.oidc_enabled = False
         mock_settings.return_value = settings
 
         result = await _authenticate_sync_ws(ws, mock_db)
 
-    # Dev (single user) is unscoped: ok, but no user_id to filter on.
-    assert result == (True, None)
+    assert result == (True, "dev-user-id")
 
 
 @pytest.mark.asyncio

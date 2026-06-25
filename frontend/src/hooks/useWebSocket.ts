@@ -22,18 +22,25 @@ export function useWebSocket(sessionId: string) {
     setIsConnected,
     setError,
     addMessage,
+    addPeerMessage,
     clearMessageError,
+    setPresence,
+    setTyping,
+    clearPresence,
   } = useChatStore();
 
   const handleEvent = useCallback((event: ChatEvent) => {
     switch (event.type) {
-      case 'connected' as unknown as ChatEvent['type']:
+      case 'connected':
         setIsConnected(true);
         setError(null);
         break;
 
-      case 'disconnected' as unknown as ChatEvent['type']:
+      case 'disconnected':
         setIsConnected(false);
+        // Drop the stale roster/typing so a departed peer doesn't linger as
+        // "viewing"/"typing…" until (if ever) a fresh frame arrives.
+        clearPresence();
         break;
 
       case 'stream_resumed':
@@ -154,6 +161,27 @@ export function useWebSocket(sessionId: string) {
         break;
       }
 
+      case 'presence':
+        setPresence(event.users || []);
+        break;
+
+      case 'typing':
+        if (event.user_id) setTyping(event.user_id, event.display_name || '', !!event.state);
+        break;
+
+      case 'user_message':
+        // A peer (the owner) sent a turn — show it live for read-only viewers. The
+        // owner's own client doesn't receive this (the server excludes the sender).
+        addPeerMessage({
+          id: crypto.randomUUID(),
+          session_id: sessionId,
+          role: 'user',
+          content: event.content || '',
+          attachments: event.attachments?.length ? event.attachments : undefined,
+          created_at: new Date().toISOString(),
+        });
+        break;
+
       case 'pong':
         // Keepalive response, no action needed
         break;
@@ -170,6 +198,10 @@ export function useWebSocket(sessionId: string) {
     setIsConnected,
     setError,
     addMessage,
+    addPeerMessage,
+    setPresence,
+    setTyping,
+    clearPresence,
   ]);
 
   useEffect(() => {
@@ -219,6 +251,10 @@ export function useWebSocket(sessionId: string) {
     wsRef.current?.sendStop();
   }, []);
 
+  const sendTyping = useCallback((state: boolean) => {
+    wsRef.current?.sendTyping(state);
+  }, []);
+
   // Re-run an interrupted turn. The failed user message already exists (server-side
   // and in the store), so we don't add a new bubble — we optimistically drop its
   // error UI and let the backend replay it in place. Only mutate the UI if the
@@ -236,6 +272,7 @@ export function useWebSocket(sessionId: string) {
   return {
     sendMessage,
     stopStreaming,
+    sendTyping,
     retryMessage,
     isConnected: useChatStore((s) => s.isConnected),
     isStreaming: useChatStore((s) => s.isStreaming),

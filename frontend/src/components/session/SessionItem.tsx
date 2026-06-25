@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { Trash2, Pencil, Check, X, GripVertical } from 'lucide-react';
+import { Trash2, Pencil, Check, X, GripVertical, LogOut } from 'lucide-react';
 import { Session } from '@/types/api';
 import { formatRelativeTime, formatTokenCount, cn } from '@/lib/utils';
 import { useSessionsStore } from '@/store/sessions';
@@ -29,7 +29,10 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const isActive = sessionId === session.id;
-  const { deleteSession, renameSession } = useSessionsStore();
+  // A session shared *with* this user (is_owner === false) is theirs only to leave —
+  // delete and rename are owner-only and would 403.
+  const isShared = session.is_owner === false;
+  const { deleteSession, leaveSession, renameSession } = useSessionsStore();
   const setSidebarOpen = useSettingsStore((s) => s.setSidebarOpen);
 
   const [isHovered, setIsHovered] = useState(false);
@@ -48,6 +51,15 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
   const handleDelete = async () => {
     const wasActive = isActive;
     await deleteSession(session.id);
+    setShowDeleteConfirm(false);
+    if (wasActive) {
+      navigate('/');
+    }
+  };
+
+  const handleLeave = async () => {
+    const wasActive = isActive;
+    await leaveSession(session.id);
     setShowDeleteConfirm(false);
     if (wasActive) {
       navigate('/');
@@ -139,8 +151,20 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
       >
         <div className="flex items-center justify-between">
           <div className="flex-1 min-w-0 pr-2">
-            <div className="font-medium truncate" title={session.title || 'New conversation'}>
-              {session.title || 'New conversation'}
+            <div className="font-medium truncate flex items-center gap-1.5" title={session.title || 'New conversation'}>
+              <span className="truncate">{session.title || 'New conversation'}</span>
+              {session.is_owner === false && (
+                <span
+                  className="shrink-0 text-[9px] uppercase tracking-wide px-1 py-0.5 rounded bg-blue-900/50 text-blue-300"
+                  title={
+                    session.owner_display_name
+                      ? `Shared by ${session.owner_display_name}`
+                      : 'Shared with you'
+                  }
+                >
+                  Shared
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-1.5 text-xs text-gray-500">
               {session.cluster && (
@@ -179,19 +203,21 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
                   <GripVertical className="w-3.5 h-3.5" />
                 </span>
               )}
-              <button
-                onClick={handleStartRename}
-                className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-600 transition-colors"
-                title="Rename"
-              >
-                <Pencil className="w-3.5 h-3.5" />
-              </button>
+              {!isShared && (
+                <button
+                  onClick={handleStartRename}
+                  className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-600 transition-colors"
+                  title="Rename"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
                 onClick={handleDeleteClick}
                 className="p-1 text-gray-400 hover:text-red-400 rounded hover:bg-gray-600 transition-colors"
-                title="Delete"
+                title={isShared ? 'Leave conversation' : 'Delete'}
               >
-                <Trash2 className="w-3.5 h-3.5" />
+                {isShared ? <LogOut className="w-3.5 h-3.5" /> : <Trash2 className="w-3.5 h-3.5" />}
               </button>
             </div>
           )}
@@ -201,11 +227,15 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
       <ConfirmDialog
         isOpen={showDeleteConfirm}
         onClose={() => setShowDeleteConfirm(false)}
-        onConfirm={handleDelete}
-        title="Delete Session"
-        message="Are you sure you want to delete this session? This action cannot be undone."
-        confirmLabel="Delete"
-        variant="danger"
+        onConfirm={isShared ? handleLeave : handleDelete}
+        title={isShared ? 'Leave conversation' : 'Delete Session'}
+        message={
+          isShared
+            ? 'Leave this shared conversation? It stays available to the owner, who can re-invite you.'
+            : 'Are you sure you want to delete this session? This action cannot be undone.'
+        }
+        confirmLabel={isShared ? 'Leave' : 'Delete'}
+        variant={isShared ? 'default' : 'danger'}
       />
     </>
   );

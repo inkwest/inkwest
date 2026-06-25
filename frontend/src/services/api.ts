@@ -254,9 +254,92 @@ export async function fetchWsTicket(): Promise<string> {
   return ticket;
 }
 
+// Dev-only (OIDC off): impersonate a local user for testing multi-user features.
+// Pass '' to reset to dev@localhost. 404s under OIDC. Callers reload afterwards so
+// REST + every WebSocket re-authenticate as the new identity.
+export async function devSwitchUser(user: string): Promise<{ acting_as: string }> {
+  return fetchAPI(`/api/auth/dev-switch?user=${encodeURIComponent(user)}`);
+}
+
 // Search
 export async function searchGlobal(query: string): Promise<SearchResponse> {
   return fetchAPI(`/api/search?q=${encodeURIComponent(query)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Conversation sharing (read-only): user invites + revokable anonymous links.
+// ---------------------------------------------------------------------------
+import {
+  Participant,
+  PendingInvite,
+  ShareLink,
+  SharedConversation,
+  UserSummary,
+} from '@/types/api';
+
+/** System users the caller can share with (excludes self). Drives the share picker. */
+export async function getShareableUsers(): Promise<UserSummary[]> {
+  return fetchAPI('/api/users');
+}
+
+/** Invite a user to a conversation (read-only). */
+export async function shareSession(sessionId: string, userId: string): Promise<Participant> {
+  return fetchAPI(`/api/sessions/${sessionId}/shares`, {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId }),
+  });
+}
+
+/** Current participants + pending invitees of a conversation (owner only). */
+export async function getSessionShares(sessionId: string): Promise<Participant[]> {
+  return fetchAPI(`/api/sessions/${sessionId}/shares`);
+}
+
+/** Revoke a participant / pending invitee. */
+export async function revokeShare(sessionId: string, userId: string): Promise<void> {
+  await fetchAPI(`/api/sessions/${sessionId}/shares/${userId}`, { method: 'DELETE' });
+}
+
+/** Invitations addressed to the current user (popup recovery on load). */
+export async function getPendingInvites(): Promise<PendingInvite[]> {
+  return fetchAPI('/api/shares/pending');
+}
+
+/** Accept or decline an invitation. */
+export async function respondToInvite(
+  shareId: string,
+  accept: boolean
+): Promise<{ status: string; session_id: string }> {
+  return fetchAPI(`/api/shares/${shareId}/respond`, {
+    method: 'POST',
+    body: JSON.stringify({ accept }),
+  });
+}
+
+/** Mint a revokable anonymous read-only link. */
+export async function createShareLink(sessionId: string, label?: string): Promise<ShareLink> {
+  return fetchAPI(`/api/sessions/${sessionId}/share-links`, {
+    method: 'POST',
+    body: JSON.stringify({ label: label ?? null }),
+  });
+}
+
+export async function getShareLinks(sessionId: string): Promise<ShareLink[]> {
+  return fetchAPI(`/api/sessions/${sessionId}/share-links`);
+}
+
+export async function revokeShareLink(sessionId: string, linkId: string): Promise<void> {
+  await fetchAPI(`/api/sessions/${sessionId}/share-links/${linkId}`, { method: 'DELETE' });
+}
+
+/** Leave a conversation shared with you (removes your own access; owner's copy stays). */
+export async function leaveShare(sessionId: string): Promise<void> {
+  await fetchAPI(`/api/sessions/${sessionId}/share`, { method: 'DELETE' });
+}
+
+/** Public, no-auth read-only view of a conversation via a share-link token. */
+export async function getSharedConversation(token: string): Promise<SharedConversation> {
+  return fetchAPI(`/api/shared/${token}`);
 }
 
 // External access connectors

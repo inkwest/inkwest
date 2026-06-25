@@ -67,6 +67,9 @@ interface ChatState {
   isStreaming: boolean;
   isConnected: boolean;
   error: string | null;
+  // Collaboration: who is currently viewing this conversation, and who is typing.
+  presence: Array<{ user_id: string; display_name: string }>;
+  typingUsers: Array<{ user_id: string; display_name: string }>;
 
   // Actions
   setMessages: (messages: Message[]) => void;
@@ -80,8 +83,19 @@ interface ChatState {
   setIsConnected: (connected: boolean) => void;
   setError: (error: string | null) => void;
   addMessage: (message: Message) => void;
+  // Append a peer's (the owner's) message echoed live to read-only viewers. The id is
+  // client-generated (the wire frame carries no server id), so the guard only skips an
+  // identical re-add, NOT a later server snapshot — that's fine because
+  // applyServerMessages replaces the list wholesale and drops this optimistic row.
+  addPeerMessage: (message: Message) => void;
   // Optimistically drop a failed message's error UI when its turn is retried.
   clearMessageError: (messageId: string) => void;
+  // Collaboration actions
+  setPresence: (presence: Array<{ user_id: string; display_name: string }>) => void;
+  setTyping: (user_id: string, display_name: string, state: boolean) => void;
+  // Drop the live roster + typing on disconnect (a stale "X typing…" would otherwise
+  // stick, since the peer's typing:false / departure frame never arrives).
+  clearPresence: () => void;
   // New actions for inline streaming
   clearStreamingBlocks: () => void;
   // Session lifecycle
@@ -97,6 +111,8 @@ export const useChatStore = create<ChatState>((set) => ({
   isStreaming: false,
   isConnected: false,
   error: null,
+  presence: [],
+  typingUsers: [],
 
   setMessages: (messages) => set({ messages }),
   // Mid-turn, a session refetch (StrictMode double-mount, sync events) can
@@ -183,6 +199,12 @@ export const useChatStore = create<ChatState>((set) => ({
   setError: (error) => set({ error }),
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
+  addPeerMessage: (message) =>
+    set((state) =>
+      state.messages.some((m) => m.id === message.id)
+        ? state
+        : { messages: [...state.messages, message] }
+    ),
   clearMessageError: (messageId) =>
     set((state) => ({
       messages: state.messages.map((m) =>
@@ -192,6 +214,13 @@ export const useChatStore = create<ChatState>((set) => ({
       ),
     })),
   clearStreamingBlocks: () => set({ streamingBlocks: [] }),
+  setPresence: (presence) => set({ presence }),
+  setTyping: (user_id, display_name, state) =>
+    set((s) => {
+      const others = s.typingUsers.filter((u) => u.user_id !== user_id);
+      return { typingUsers: state ? [...others, { user_id, display_name }] : others };
+    }),
+  clearPresence: () => set({ presence: [], typingUsers: [] }),
   resetChat: () =>
     set({
       messages: [],
@@ -201,5 +230,7 @@ export const useChatStore = create<ChatState>((set) => ({
       streamingBlocks: [],
       isStreaming: false,
       error: null,
+      presence: [],
+      typingUsers: [],
     }),
 }));
