@@ -40,7 +40,7 @@ export function useConnectorGrant(sessionId: string) {
         if (connector === 'aws') {
           await startAwsDevice(sessionId); // device grant: code + URL, then polling
         } else {
-          await initiate(sessionId, connector); // OAuth redirect (GitLab)
+          await initiate(sessionId, connector); // OAuth popup (GitLab) — no page navigation
         }
       } catch (e) {
         const detail = e instanceof Error && e.message ? `: ${e.message}` : '';
