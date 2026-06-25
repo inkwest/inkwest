@@ -13,6 +13,7 @@ import { ConnectorIconButton } from '@/components/connector/ConnectorIconButton'
 import { StateBadge } from '@/components/connector/StateBadge';
 import { McpPanel } from '@/components/connector/McpPanel';
 import { ModelEnginePicker } from '@/components/chat/ModelEnginePicker';
+import { OnboardingTour } from '@/components/onboarding/OnboardingTour';
 
 const CUSTOM = '__custom__';
 
@@ -149,6 +150,8 @@ export function StartConversation() {
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-6">
+      {/* First-run guided tour (non-admins only); spotlights the composer affordances. */}
+      <OnboardingTour />
       <div className="w-full max-w-3xl space-y-4">
         <div className="text-center space-y-1">
           <h1 className="text-2xl font-semibold text-gray-100">Start a conversation</h1>
@@ -227,19 +230,24 @@ export function StartConversation() {
               // Pre-session: clicking an icon lazily creates the session, then the
               // ConnectorPanel above takes over (autoStart / autoOpenMcp resume the flow).
               <>
-                {PRESESSION_CONNECTORS.map(({ name, label, Icon }) => (
-                  <ConnectorIconButton
-                    key={name}
-                    Icon={Icon}
-                    title={`Give ${label} access`}
-                    tone="off"
-                    onClick={() => handleGiveAccess(name)}
-                    disabled={customInvalid}
-                    overlayTitle={label}
-                    overlayBadge={<StateBadge state="not_connected" />}
-                    overlayBody={<p className="text-gray-400">No access granted. Click to connect.</p>}
-                  />
-                ))}
+                {/* Single tour anchor around both connector icons — one unambiguous
+                    rect for the onboarding spotlight. Same gap as the toolbar row
+                    (gap-1.5), so wrapping is layout-neutral. */}
+                <span data-tour="connectors" className="flex items-center gap-1.5">
+                  {PRESESSION_CONNECTORS.map(({ name, label, Icon }) => (
+                    <ConnectorIconButton
+                      key={name}
+                      Icon={Icon}
+                      title={`Give ${label} access`}
+                      tone="off"
+                      onClick={() => handleGiveAccess(name)}
+                      disabled={customInvalid}
+                      overlayTitle={label}
+                      overlayBadge={<StateBadge state="not_connected" />}
+                      overlayBody={<p className="text-gray-400">No access granted. Click to connect.</p>}
+                    />
+                  ))}
+                </span>
                 <McpPanel
                   sessionId=""
                   variant="icon"

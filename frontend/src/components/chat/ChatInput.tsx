@@ -669,6 +669,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
                     disabled={disabled || uploading}
                     aria-label="Attach files"
                     title="Attach files"
+                    data-tour="attach"
                     className={toolBtn}
                   >
                     {uploading ? (

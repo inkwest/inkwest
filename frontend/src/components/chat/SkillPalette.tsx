@@ -53,6 +53,7 @@ export function SkillPalette({ onSelect, disabled, className }: Props) {
         disabled={disabled}
         title="Insert a skill"
         aria-label="Insert a skill"
+        data-tour="skills"
         className={cn(
           'flex items-center justify-center px-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed',
           className,

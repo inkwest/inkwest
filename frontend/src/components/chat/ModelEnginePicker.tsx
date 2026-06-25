@@ -219,6 +219,7 @@ export function ModelEnginePicker({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        data-tour="model"
         className={clsx(
           'flex items-center gap-1 cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-500',
           triggerClassName ??

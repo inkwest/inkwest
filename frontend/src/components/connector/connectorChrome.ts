@@ -48,7 +48,7 @@ export function connectorTone(state: ConnectorState, reauthRequired = false): Co
 export const TONE_CLASS: Record<ConnectorTone, string> = {
   on: 'text-emerald-400 group-hover/cbtn:text-emerald-300',
   attention: 'text-amber-400 group-hover/cbtn:text-amber-300',
-  off: 'text-gray-500 group-hover/cbtn:text-gray-300',
+  off: 'text-gray-300 group-hover/cbtn:text-white',
   error: 'text-red-400 group-hover/cbtn:text-red-300',
 };
 
