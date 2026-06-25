@@ -398,3 +398,94 @@ async def test_override_when_already_overridden(
     )
     resp = await authenticated_client.post("/api/me/skills/override/mr-helm-review")
     assert resp.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# Export / import                                                             #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_export_config(authenticated_client: AsyncClient, mock_db: AsyncMock) -> None:
+    prefs = SimpleNamespace(schema_version=1, document={"ui": {"wideComposer": True}})
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            _result(scalar_one_or_none=prefs),
+            _result(scalars_all=[_user_skill(name="a", is_override=True)]),
+        ]
+    )
+    resp = await authenticated_client.get("/api/me/export")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["schema_version"] == 1
+    assert "exported_at" in body
+    assert body["preferences"] == {"ui": {"wideComposer": True}}
+    assert body["skills"][0]["name"] == "a"
+    assert body["skills"][0]["is_override"] is True
+
+
+@pytest.mark.asyncio
+async def test_import_config_upsert(authenticated_client: AsyncClient, mock_db: AsyncMock) -> None:
+    saved = SimpleNamespace(schema_version=1, document={"ui": {"showTimestamps": True}})
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            _result(scalars_all=[]),  # existing user skills
+            _result(scalars_all=[]),  # admin names
+            _result(scalar_one=saved),  # set_preferences upsert returning
+            _result(scalars_all=[_user_skill(name="a")]),  # final skills
+        ]
+    )
+    mock_db.add = MagicMock()
+    mock_db.flush = AsyncMock()
+    payload = {
+        "schema_version": 1,
+        "preferences": {"ui": {"showTimestamps": True}},
+        "skills": [{"name": "a", "content": _SKILL_MD, "is_active": True, "is_override": False}],
+    }
+    resp = await authenticated_client.post("/api/me/import", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["skills"][0]["name"] == "a"
+    mock_db.add.assert_called_once()  # one new skill inserted
+
+
+@pytest.mark.asyncio
+async def test_import_config_replace_all_deletes_existing(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    old = _user_skill(name="old")
+    saved = SimpleNamespace(schema_version=1, document={})
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            _result(scalars_all=[old]),  # existing skills (to be wiped)
+            _result(scalars_all=[]),  # admin names
+            _result(scalar_one=saved),  # set_preferences
+            _result(scalars_all=[_user_skill(name="a")]),  # final
+        ]
+    )
+    mock_db.add = MagicMock()
+    mock_db.delete = AsyncMock()
+    mock_db.flush = AsyncMock()
+    payload = {"schema_version": 1, "preferences": {}, "skills": [{"content": _SKILL_MD}]}
+    resp = await authenticated_client.post("/api/me/import?replace_all=true", json=payload)
+    assert resp.status_code == 200
+    mock_db.delete.assert_awaited_once_with(old)  # old skill wiped first
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_unknown_schema_version(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    mock_db.execute = AsyncMock(side_effect=[_result(scalars_all=[]), _result(scalars_all=[])])
+    payload = {"schema_version": 999, "preferences": {}, "skills": []}
+    resp = await authenticated_client.post("/api/me/import", json=payload)
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_malformed_skill(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    mock_db.execute = AsyncMock(side_effect=[_result(scalars_all=[]), _result(scalars_all=[])])
+    payload = {"schema_version": 1, "preferences": {}, "skills": [{"content": "no frontmatter"}]}
+    resp = await authenticated_client.post("/api/me/import", json=payload)
+    assert resp.status_code == 422

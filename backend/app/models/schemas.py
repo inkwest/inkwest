@@ -189,6 +189,49 @@ class PreferencesResponse(BaseModel):
     skills: list[UserSkillResponse]
 
 
+class ExportSkill(BaseModel):
+    """A personal skill as it appears in an export envelope."""
+
+    name: str
+    content: str
+    is_active: bool
+    is_override: bool
+
+
+class ConfigExport(BaseModel):
+    """The downloadable, versioned config: preferences document + personal skills.
+
+    Re-importable verbatim (POST /api/me/import) — ``replace_all`` is a request flag, not
+    part of the envelope, so a saved export round-trips without edits.
+    """
+
+    schema_version: int
+    exported_at: datetime
+    preferences: dict[str, Any]
+    skills: list[ExportSkill]
+
+
+class ImportSkill(BaseModel):
+    """One skill in an import payload. Only ``content`` (+ optional ``is_active``) is
+    honored: name/description/is_override are re-derived server-side. Extra keys from an
+    export envelope (e.g. ``name``) are ignored, so an export imports unedited."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    content: str = Field(..., min_length=1)
+    is_active: bool = True
+
+
+class ConfigImport(BaseModel):
+    """An import payload — the same shape an export produces (extra keys ignored)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    skills: list[ImportSkill] = Field(default_factory=list)
+
+
 # =============================================================================
 # System Prompt Schemas
 # =============================================================================

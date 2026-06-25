@@ -7,6 +7,7 @@ same name; the admin ``skills`` table and its endpoints are never touched here.
 """
 
 import json
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -19,6 +20,9 @@ from app.core.config import get_settings
 from app.core.skill_md import ParsedSkill, parse_skill_md
 from app.core.slug import slugify
 from app.models.schemas import (
+    ConfigExport,
+    ConfigImport,
+    ExportSkill,
     PreferencesResponse,
     PreferencesUpdate,
     UserSkillCreate,
@@ -27,7 +31,13 @@ from app.models.schemas import (
 )
 from app.models.skill import Skill
 from app.models.user_skill import UserSkill
-from app.services.user_preferences import get_preferences, set_preferences_document
+from app.services.user_preferences import (
+    CONFIG_SCHEMA_VERSION,
+    ConfigImportError,
+    get_preferences,
+    plan_import,
+    set_preferences_document,
+)
 
 router = APIRouter(prefix="/me", tags=["me"])
 
@@ -313,3 +323,101 @@ async def override_admin_skill(
     await _flush_or_conflict(db, admin.name)
     await db.refresh(skill)
     return UserSkillResponse.model_validate(skill)
+
+
+# --------------------------------------------------------------------------- #
+# Export / import (versioned, self-only)                                       #
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/export", response_model=ConfigExport)
+async def export_my_config(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> ConfigExport:
+    """Download the user's preferences + personal skills as a versioned, re-importable doc."""
+    prefs = await get_preferences(db, current_user.id)
+    skills = await _user_skills(db, current_user.id)
+    return ConfigExport(
+        schema_version=CONFIG_SCHEMA_VERSION,
+        exported_at=datetime.now(UTC),
+        preferences=prefs.document if prefs is not None else {},
+        skills=[
+            ExportSkill(
+                name=s.name, content=s.content, is_active=s.is_active, is_override=s.is_override
+            )
+            for s in skills
+        ],
+    )
+
+
+async def _admin_skill_names(db: AsyncSession) -> set[str]:
+    """All admin skill names (for recomputing is_override on import)."""
+    result = await db.execute(select(Skill.name))
+    return set(result.scalars().all())
+
+
+@router.post("/import", response_model=PreferencesResponse)
+async def import_my_config(
+    payload: ConfigImport,
+    current_user: CurrentUser,
+    replace_all: bool = False,
+    db: AsyncSession = Depends(get_db),
+) -> PreferencesResponse:
+    """Apply an exported config to the CURRENT user only.
+
+    Self-only: never touches admin skills or other users. ``replace_all=false`` (default)
+    upserts by name and keeps personal skills absent from the file; ``replace_all=true``
+    first deletes all the user's personal skills. The whole import is validated before any
+    write (atomic within the request transaction) — a bad entry rejects the lot.
+    """
+    existing = await _user_skills(db, current_user.id)
+    try:
+        plan = plan_import(
+            schema_version=payload.schema_version,
+            document=payload.preferences,
+            raw_skills=[(s.content, s.is_active) for s in payload.skills],
+            replace_all=replace_all,
+            existing_active={s.name: s.is_active for s in existing},
+            admin_names=await _admin_skill_names(db),
+        )
+    except ConfigImportError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+
+    # Apply skills, then the preferences document — all in the request transaction, which
+    # get_db commits at the end and rolls back wholesale on any error (atomic import).
+    by_name = {s.name: s for s in existing}
+    if plan.replace_all:
+        for stale in existing:
+            await db.delete(stale)
+        await db.flush()  # release UNIQUE(user_id, name) before re-inserting same names
+        by_name = {}
+
+    for p in plan.skills:
+        row = by_name.get(p.name)
+        if row is not None:
+            row.content = p.content
+            row.description = p.description
+            row.is_active = p.is_active
+            row.is_override = p.is_override
+            row.source_admin_skill_id = None  # an import is not a fork
+        else:
+            db.add(
+                UserSkill(
+                    user_id=current_user.id,
+                    name=p.name,
+                    content=p.content,
+                    description=p.description,
+                    is_active=p.is_active,
+                    is_override=p.is_override,
+                )
+            )
+    await db.flush()
+
+    prefs = await set_preferences_document(db, current_user.id, plan.document)
+    skills = await _user_skills(db, current_user.id)
+    return PreferencesResponse(
+        schema_version=prefs.schema_version,
+        document=prefs.document,
+        skills=[UserSkillResponse.model_validate(s) for s in skills],
+    )
