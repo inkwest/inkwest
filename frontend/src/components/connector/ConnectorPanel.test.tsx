@@ -1,16 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ConnectorPanel } from './ConnectorPanel';
 
 const connectorStore = vi.hoisted(() => ({
   state: {
-    statuses: {},
+    statuses: {} as Record<string, { state: string; expires_at?: string | null }>,
     isLoading: false,
     error: null,
-    reauthRequired: null,
+    reauthRequired: null as null | string,
     awsDevice: null as null | { userCode: string; verificationUri: string; status: string },
     awsModalRequested: false,
-    renewable: [],
+    renewable: [] as Array<{ connector: string }>,
     awsAutoSelect: false,
     grantBusy: null,
     setGrantBusy: vi.fn(),
@@ -52,6 +52,23 @@ vi.mock('./McpPanel', () => ({
   ),
 }));
 
+// Drive the shared grant hook directly so the icons layout can be exercised without
+// running the real device/OAuth flow: we control busy/error/errorConnector per test.
+const grant = vi.hoisted(() => ({
+  fn: vi.fn(),
+  busy: null as null | string,
+  error: null as null | string,
+  errorConnector: null as null | string,
+}));
+vi.mock('./useConnectorGrant', () => ({
+  useConnectorGrant: () => ({
+    grant: grant.fn,
+    busy: grant.busy,
+    error: grant.error,
+    errorConnector: grant.errorConnector,
+  }),
+}));
+
 describe('ConnectorPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,6 +78,9 @@ describe('ConnectorPanel', () => {
     connectorStore.state.awsModalRequested = false;
     connectorStore.state.reauthRequired = null;
     enumProgress.value = null;
+    grant.busy = null;
+    grant.error = null;
+    grant.errorConnector = null;
   });
 
   it('keeps the MCP row mounted in stacked mode while connector statuses are empty', () => {
@@ -92,5 +112,52 @@ describe('ConnectorPanel', () => {
     enumProgress.value = { done: 2, total: 3 };
     rerender(<ConnectorPanel sessionId="s1" />);
     expect(connectorStore.state.closeAwsVerification).toHaveBeenCalledTimes(1);
+  });
+
+  // --- icons layout (composer toolbar) ---
+
+  it('icons layout surfaces a grant error on the connector that failed (H1)', () => {
+    connectorStore.state.statuses = { aws: { state: 'not_connected' } };
+    grant.error = 'Failed to start AWS authorization';
+    grant.errorConnector = 'aws';
+    render(<ConnectorPanel sessionId="s1" layout="icons" />);
+
+    // The failure is visible (red text) and folded into the icon's accessible name,
+    // not swallowed when the spinner stops (the bug H1 was about).
+    expect(screen.getByText('Failed to start AWS authorization')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /AWS — Failed to start AWS authorization/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('icons layout shows a renew icon when a prior grant is renewable, click renews all (H1)', async () => {
+    connectorStore.state.statuses = { aws: { state: 'expired' } };
+    connectorStore.state.renewable = [{ connector: 'aws' }];
+    render(<ConnectorPanel sessionId="s1" layout="icons" />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Renew access/ }));
+    // handleRenew is async (sets a renewing flag around the call); await the effect.
+    await waitFor(() => expect(connectorStore.state.renewAll).toHaveBeenCalledWith('s1'));
+  });
+
+  it('icons layout: no renew icon when nothing is renewable', () => {
+    connectorStore.state.statuses = { aws: { state: 'not_connected' } };
+    render(<ConnectorPanel sessionId="s1" layout="icons" />);
+
+    expect(screen.queryByRole('button', { name: /Renew access/ })).not.toBeInTheDocument();
+  });
+
+  it('icons layout toggles: disconnected connector grants, connected one revokes', () => {
+    connectorStore.state.statuses = {
+      aws: { state: 'not_connected' },
+      gitlab: { state: 'connected' },
+    };
+    render(<ConnectorPanel sessionId="s1" layout="icons" />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Give AWS access/ }));
+    expect(grant.fn).toHaveBeenCalledWith('aws');
+
+    fireEvent.click(screen.getByRole('button', { name: /GitLab — connected, click to revoke/ }));
+    expect(connectorStore.state.revoke).toHaveBeenCalledWith('s1', 'gitlab');
   });
 });

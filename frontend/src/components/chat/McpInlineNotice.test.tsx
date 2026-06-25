@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('@/lib/mcpConnect', () => ({
@@ -11,11 +11,17 @@ vi.mock('@/services/api', () => ({
 import { McpInlineNotice } from './McpInlineNotice';
 import { useMcpStore } from '@/store/mcp';
 import { openMcpAuthPopup } from '@/lib/mcpConnect';
+import { getMcpCatalog } from '@/services/api';
+import { peekMcpCatalog, resetMcpCatalogCache } from '@/components/connector/mcpCatalogCache';
 
 describe('McpInlineNotice', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetMcpCatalogCache();
     useMcpStore.setState({ authRequired: [] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('renders nothing when no MCP server needs auth', () => {
@@ -45,5 +51,22 @@ describe('McpInlineNotice', () => {
     fireEvent.click(btn);
     fireEvent.click(btn); // double-click: the in-flight guard must drop this one
     await waitFor(() => expect(openMcpAuthPopup).toHaveBeenCalledTimes(1));
+  });
+
+  it('a reconnect poll tick primes the shared MCP catalog cache', async () => {
+    vi.useFakeTimers();
+    const fresh = {
+      keys: ['notion'],
+      servers: [{ key: 'notion', kind: 'oauth2' as const, auth_status: 'needs_auth' as const }],
+    };
+    vi.mocked(getMcpCatalog).mockResolvedValue(fresh);
+    useMcpStore.getState().flagAuthRequired('notion');
+    render(<McpInlineNotice />);
+    expect(peekMcpCatalog()).toBeNull(); // cold before the poll
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+    await vi.advanceTimersByTimeAsync(2000); // one poll tick → force-fetch + prime
+    // The live poll routed through loadMcpCatalog(true), so the shared cache is now warm:
+    // a McpPanel remount would render the up-to-date catalog without its own refetch.
+    expect(peekMcpCatalog()).toEqual(fresh);
   });
 });
