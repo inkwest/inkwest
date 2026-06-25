@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { getMcpCatalog } from '@/services/api';
+import { loadMcpCatalog } from '@/components/connector/mcpCatalogCache';
 import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useMcpStore } from '@/store/mcp';
 
@@ -42,11 +42,14 @@ export function McpInlineNotice({ sessionId }: { sessionId?: string }) {
     const startedAt = Date.now();
     const DEADLINE_MS = 5 * 60 * 1000;
     // Poll the catalog (not the popup) until the grant lands or a deadline — so the banner
-    // also clears when the user reconnects via the panel or the popup was blocked.
+    // also clears when the user reconnects via the panel or the popup was blocked. Force a
+    // live fetch each tick (a cached read would never observe the status flip) but route it
+    // through loadMcpCatalog so it also primes the shared cache: a McpPanel remount then sees
+    // the reconnected server without its own refetch.
     const timer = window.setInterval(async () => {
       let connected = false;
       try {
-        const cat = await getMcpCatalog();
+        const cat = await loadMcpCatalog(true);
         connected = cat.servers.find((s) => s.key === key)?.auth_status === 'connected';
       } catch {
         /* transient; keep polling until connected or the deadline */
