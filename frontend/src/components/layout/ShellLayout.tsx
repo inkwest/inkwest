@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { Header } from './Header';
 import { UpdateBanner } from './UpdateBanner';
+import { BackendBanner } from './BackendBanner';
 import { useSettingsStore } from '@/store/settings';
 
 const DEFAULT_WIDTH = 256;
@@ -53,7 +54,8 @@ export function ShellLayout({ sidebar, mainClassName = 'flex-1 overflow-hidden m
 
   return (
     <div className="flex flex-col h-screen bg-gray-900 text-white overflow-hidden">
-      {/* Full-width reload notice pinned to the very top of the window. */}
+      {/* Full-width notices pinned to the very top of the window. */}
+      <BackendBanner />
       <UpdateBanner />
       <div className="flex flex-1 min-h-0">
       {sidebarOpen && (

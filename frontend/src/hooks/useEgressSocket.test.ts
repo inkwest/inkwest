@@ -8,11 +8,15 @@ vi.mock('@/services/api', () => ({
 
 import { fetchWsTicket } from '@/services/api';
 import { useEgressSocket } from './useEgressSocket';
+import { useBackendStore } from '@/store/backend';
 
 const mockTicket = fetchWsTicket as unknown as ReturnType<typeof vi.fn>;
 
 describe('useEgressSocket — ticket auth', () => {
-  beforeEach(() => mockTicket.mockReset());
+  beforeEach(() => {
+    mockTicket.mockReset();
+    useBackendStore.setState({ unavailable: false, retrying: 0, gaveUp: false });
+  });
 
   // The ticket-failure → backoff-reconnect branch is covered deterministically
   // by services/websocket.test.ts (identical catch logic on the chat socket);
@@ -43,5 +47,22 @@ describe('useEgressSocket — ticket auth', () => {
 
     unmount();
     vi.unstubAllGlobals();
+  });
+
+  it('gives up QUIETLY after the 10-min budget — never raises the global reload banner', async () => {
+    vi.useFakeTimers();
+    mockTicket.mockRejectedValue(new Error('ticket down'));
+    const { unmount } = renderHook(() => useEgressSocket('s1'));
+
+    // Drive reconnect attempts across >10 min of virtual time.
+    for (let i = 0; i < 40; i++) {
+      await vi.advanceTimersByTimeAsync(30000);
+    }
+
+    // Egress is secondary: budget spent → stop, but gaveUp must stay false so a
+    // healthy app (chat/sync live) isn't pinned on the red reload banner.
+    expect(useBackendStore.getState().gaveUp).toBe(false);
+    unmount();
+    vi.useRealTimers();
   });
 });

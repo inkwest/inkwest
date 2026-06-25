@@ -1,8 +1,149 @@
 import { Cluster, Message, Skill, SearchResponse, Session, SessionWithMessages } from '@/types/api';
+// Deliberate service→store edge: the retry loop is the single place that knows the
+// backend is unreachable, so it drives the global banner directly via zustand's
+// off-React getState() (no hook/render dependency, no import cycle). Other services
+// stay store-free; this is the one intentional exception.
+import { useBackendStore } from '@/store/backend';
+import { jitteredBackoff } from '@/lib/backoff';
 
 // `??` not `||`: '' (set but empty) means same-origin — the combined prod
 // image serves the SPA from FastAPI itself, so relative URLs must survive.
 export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+
+// AWS/ALB gateway statuses we retry for ANY verb with exponential backoff.
+//   503 = no healthy target / surge-queue full → request never dispatched.
+//   502 = target connection reset mid-request (a pod torn down on deploy) → not
+//         completed by the app.
+//   504 = gateway timeout. In this deployment a 504 overwhelmingly means the
+//         backend is bouncing (slow death during a restart), so we retry it too.
+// CAVEAT: a 504 can also mean the app received the request and was merely slow —
+// so a retried non-idempotent call (POST/PUT/DELETE) could, rarely, be applied
+// twice. A mid-flight network error (connection reset) on a mutation carries the
+// same small risk and is retried under the same rationale. Accepted trade-off for
+// resilience during restarts. (Client-side TIMEOUTS, by contrast, never retry a
+// mutation — see TIMEOUT_SAFE_METHODS — because there the request is far more
+// likely still running server-side.)
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+
+// Methods safe to abort-and-retry on a client-side timeout. A timeout fabricates
+// a failure the server never reported, so retrying it is only safe for idempotent
+// reads — a non-idempotent call (POST/PUT/DELETE) may still be running on the
+// server (e.g. the slow AWS enumerate/STS-mint endpoints), and replaying it could
+// duplicate the side effect. Mutations therefore get NO client timeout: they keep
+// infinite patience and rely on gateway-status / network-error retry instead.
+const TIMEOUT_SAFE_METHODS = new Set(['GET', 'HEAD']);
+
+// Generous cap: ~up to a minute of backend downtime is absorbed silently, after
+// which the error surfaces to the caller so the UI isn't wedged forever.
+const MAX_RETRIES = 12;
+const RETRY_BASE_MS = 500;
+const RETRY_MAX_MS = 5000;
+// Per-attempt ceiling so a hung backend (socket accepted, no response) is treated
+// as a failure and retried instead of hanging forever. Applies to idempotent
+// reads only (see TIMEOUT_SAFE_METHODS); attachment transfers opt out entirely.
+const ATTEMPT_TIMEOUT_MS = 30000;
+// Mutations can't be timeout-RETRIED (duplicate-replay risk), but they shouldn't
+// spin forever on a hung backend either. This is a timeout-to-FAIL: after this
+// long with no response, reject (no replay) so the caller surfaces an error. Set
+// well above the slowest legitimate mutation — the AWS access-token regen +
+// account listing — so a slow-but-alive request is never killed. Attachment
+// uploads opt out entirely (they pass no failTimeoutMs; can legitimately exceed).
+const MUTATION_TIMEOUT_MS = 300000; // 5 minutes
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// fetch wrapper that transparently rides out a backend restart. A retryable
+// gateway status (per verb) or a network/timeout failure means the backend is
+// down or bouncing; we back off and retry, surfacing the state via the global
+// backend store (refcounted: the banner shows while ANY call is backing off).
+// Resolves with the first response that actually came from the app — including
+// 4xx/5xx emitted by the app itself, which the caller handles. `init.signal` (if
+// any) aborts the whole loop immediately (navigation/unmount).
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  opts: { timeoutMs?: number; failTimeoutMs?: number } = {},
+): Promise<Response> {
+  const backend = useBackendStore.getState();
+  const callerSignal = init.signal ?? undefined;
+  const method = (init.method ?? 'GET').toUpperCase();
+  const isSafe = TIMEOUT_SAFE_METHODS.has(method);
+  // Idempotent reads get a per-attempt timeout that ABORTS-AND-RETRIES (a hung
+  // read is safe to replay). Mutations get a much longer timeout-to-FAIL: they
+  // must never be replayed, but should still surface an error instead of spinning
+  // forever on a hung backend.
+  const timeoutMs = opts.timeoutMs && isSafe ? opts.timeoutMs : undefined;
+  const failTimeoutMs = opts.failTimeoutMs && !isSafe ? opts.failTimeoutMs : undefined;
+  let attempt = 0;
+  let holding = false;
+  // Hold a refcount on the global "reconnecting" banner only while THIS call is
+  // actually backing off; released in the outer finally on every exit path.
+  const hold = () => {
+    if (!holding) {
+      holding = true;
+      backend.beginRetry();
+    }
+  };
+  // Flag the backend down and back off, then the loop retries. Shared by the
+  // gateway-status and network/timeout retry paths (identical otherwise).
+  const backoff = async () => {
+    hold();
+    await sleep(jitteredBackoff(attempt++, { baseMs: RETRY_BASE_MS, maxMs: RETRY_MAX_MS }));
+  };
+  try {
+    for (;;) {
+      // Honor a signal that was already aborted before we got here (addEventListener
+      // would never fire for a past 'abort').
+      if (callerSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      // Fresh controller per attempt: fires on timeout, and chains the caller's
+      // signal so an unmount aborts the in-flight request right away.
+      const ctrl = new AbortController();
+      const onCallerAbort = () => ctrl.abort();
+      callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+      const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : undefined;
+      // A fatal (mutation) timeout aborts the fetch but, unlike the retry timeout,
+      // must NOT be replayed — the flag tells the catch to rethrow, not loop.
+      let fatalTimeout = false;
+      const failTimer = failTimeoutMs
+        ? setTimeout(() => {
+            fatalTimeout = true;
+            ctrl.abort();
+          }, failTimeoutMs)
+        : undefined;
+      try {
+        const response = await fetch(url, { ...init, signal: ctrl.signal });
+        if (RETRYABLE_STATUSES.has(response.status) && attempt < MAX_RETRIES) {
+          await backoff();
+          continue;
+        }
+        // A reachable app response (success or app-level error) is ground truth
+        // that the backend is up: clear the banner regardless of other holders.
+        if (!RETRYABLE_STATUSES.has(response.status)) backend.reachable();
+        return response;
+      } catch (e) {
+        // Caller aborted (navigation/unmount): stop, do not retry.
+        if (callerSignal?.aborted) throw e;
+        // Mutation hung past its fail-timeout: surface the error, never replay.
+        if (fatalTimeout) throw e;
+        // Timeout or network failure (connection refused / DNS / TLS, or the hung
+        // backend we just aborted): retry up to the cap, then rethrow.
+        if (attempt < MAX_RETRIES) {
+          await backoff();
+          continue;
+        }
+        throw e;
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (failTimer) clearTimeout(failTimer);
+        callerSignal?.removeEventListener('abort', onCallerAbort);
+      }
+    }
+  } finally {
+    // Release our banner hold on every exit (resolve / give-up / abort) so an
+    // exhausted retry doesn't leave the banner stuck on with no holder.
+    if (holding) backend.endRetry();
+  }
+}
 
 // Carries the HTTP status so callers can branch on it (e.g. a 409 "re-initiate")
 // rather than string-matching the detail message. Extends Error so existing
@@ -33,14 +174,18 @@ export async function fetchAPI<T>(
 ): Promise<T> {
   // credentials:'include' sends the HttpOnly session cookie cross-origin (dev
   // SPA :3000 → API :8000); same-origin in the combined prod image.
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    ...options,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
+  const response = await fetchWithRetry(
+    `${API_URL}${endpoint}`,
+    {
+      ...options,
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
     },
-  });
+    { timeoutMs: ATTEMPT_TIMEOUT_MS, failTimeoutMs: MUTATION_TIMEOUT_MS },
+  );
 
   if (!response.ok) {
     let detail = `API error: ${response.status}`;
@@ -70,7 +215,7 @@ export async function uploadAttachments(
 ): Promise<import('@/types/api').Attachment[]> {
   const form = new FormData();
   for (const f of files) form.append('files', f);
-  const response = await fetch(`${API_URL}/api/sessions/${sessionId}/attachments`, {
+  const response = await fetchWithRetry(`${API_URL}/api/sessions/${sessionId}/attachments`, {
     method: 'POST',
     credentials: 'include',
     body: form,
@@ -91,7 +236,7 @@ export async function deleteAttachment(sessionId: string, filename: string): Pro
 // Fetch an attachment's bytes with auth (an <img src> can't carry the session
 // cookie cross-origin), so callers turn the blob into an object URL for thumbnails.
 export async function fetchAttachmentBlob(sessionId: string, filename: string): Promise<Blob> {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${API_URL}/api/sessions/${sessionId}/attachments/${encodeURIComponent(filename)}`,
     { credentials: 'include' },
   );
@@ -246,10 +391,12 @@ export async function getFailedMessages(sessionId: string): Promise<Message[]> {
   return fetchAPI(`/api/sessions/${sessionId}/failed-messages`);
 }
 
-// WebSocket ticket
-export async function fetchWsTicket(): Promise<string> {
+// WebSocket ticket. `signal` lets a disconnecting socket abort an in-flight
+// ticket fetch (incl. its retry loop) instead of leaving it running for ~1 min.
+export async function fetchWsTicket(signal?: AbortSignal): Promise<string> {
   const { ticket } = await fetchAPI<{ ticket: string }>('/api/auth/ws-ticket', {
     method: 'POST',
+    signal,
   });
   return ticket;
 }
