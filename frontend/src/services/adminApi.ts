@@ -16,12 +16,18 @@ import {
   UserUsage,
   ModelUsage,
   UserSessionsUsage,
+  UsageDateRange,
+  UsageTimeseriesPoint,
   AuthStatus,
   CurrentUser,
   McpOauthServer,
   CreateMcpOauthServerRequest,
   UpdateMcpOauthServerRequest,
 } from '@/types/admin';
+
+// Re-exported so existing `adminApi.UsageDateRange` / `adminApi.UsageTimeseriesPoint`
+// references keep resolving; the canonical home is now @/types/admin.
+export type { UsageDateRange, UsageTimeseriesPoint };
 
 import { API_URL, fetchAPI } from '@/services/api';
 
@@ -132,11 +138,6 @@ export async function updateUserStatus(id: string, data: UpdateUserStatusRequest
 // Usage API
 // ============================================================================
 
-export interface UsageDateRange {
-  startDate?: string;
-  endDate?: string;
-}
-
 function usageParams(period: string, range?: UsageDateRange): string {
   const params = new URLSearchParams({ period });
   if (range?.startDate) params.set('start_date', range.startDate);
@@ -166,14 +167,6 @@ export async function getUsageByUserSessions(
   range?: UsageDateRange,
 ): Promise<UserSessionsUsage> {
   return fetchAPI(`/api/admin/usage/by-user/${userId}/sessions?${usageParams(period, range)}`);
-}
-
-export interface UsageTimeseriesPoint {
-  timestamp: string;
-  input_tokens: number;
-  output_tokens: number;
-  cost_usd: number;
-  request_count: number;
 }
 
 export async function getUsageTimeseries(

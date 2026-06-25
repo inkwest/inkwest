@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Check, Menu, User, LogOut, Shield, HelpCircle } from 'lucide-react';
+import { ArrowLeft, Check, Menu, User, LogOut, Shield, HelpCircle, BarChart3 } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
@@ -155,6 +155,18 @@ export function Header() {
                   )}
                 </div>
               )}
+
+              <div className="p-2 space-y-1 border-b border-gray-700">
+                {/* Self-service usage report — available to every user, not just admins. */}
+                <Link
+                  to="/usage"
+                  onClick={() => setShowMenu(false)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
+                >
+                  <BarChart3 className="h-4 w-4" />
+                  My Usage
+                </Link>
+              </div>
 
               <div className="p-2 space-y-1">
                 <div className="px-3 py-1">
