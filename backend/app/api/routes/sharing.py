@@ -431,8 +431,12 @@ async def get_shared_conversation(
     """Anonymous read-only view of a conversation via a share-link token.
 
     Public — no auth: the token is the credential. Returns the conversation
-    transcript, excluding 'system' event lines (connector/model metadata) so a
-    link never leaks operational detail the owner did not intend to share.
+    transcript via a deliberately narrow projection (see ``SharedMessage``): internal
+    fields (thinking, token counts, model/engine, author ids, error/retry) are never
+    serialized, and 'system' bookkeeping lines are dropped. Note the transcript still
+    includes the assistant's answers and the tool calls/results the owner ran — i.e.
+    the investigation's findings, connector output included. Sharing a link therefore
+    exposes those to anyone holding it; it is not a redacted view.
     """
     link = await db.scalar(
         select(SessionShareLink).where(
