@@ -235,7 +235,6 @@ export function McpPanel({
           tone={anyOn ? 'on' : 'off'}
           onClick={handleOpen}
           disabled={!hasCatalog}
-          dataTour="mcp"
           overlayTitle="MCP servers"
           overlayBadge={
             hasCatalog ? (
