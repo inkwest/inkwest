@@ -76,6 +76,34 @@ describe('connectorsStore', () => {
     useConnectorsStore.getState().requestAwsModal();
     expect(useConnectorsStore.getState().awsModalRequested).toBe(true);
   });
+
+  it('initiate opens an OAuth popup (no page navigation) and resolves once connected', async () => {
+    vi.useFakeTimers();
+    try {
+      // A controllable popup handle: stays open, so resolution hinges on status only.
+      const popup = { closed: false, location: { href: '' } } as unknown as Window;
+      const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup);
+      vi.spyOn(api, 'initiateConnector').mockResolvedValue({
+        redirect_url: 'https://gitlab.example/oauth/authorize',
+      });
+      vi.spyOn(api, 'getConnectorStatus')
+        .mockResolvedValueOnce([{ connector: 'gitlab', state: 'not_connected' }])
+        .mockResolvedValue([{ connector: 'gitlab', state: 'connected' }]);
+
+      const done = useConnectorsStore.getState().initiate('sess-1', 'gitlab');
+      // Opened synchronously inside the action (popup-blocker safe); main window never
+      // navigates — no window.location.href assignment.
+      expect(openSpy).toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2000); // poll 1 → not connected, keep polling
+      expect(useConnectorsStore.getState().statuses.gitlab.state).toBe('not_connected');
+      await vi.advanceTimersByTimeAsync(2000); // poll 2 → connected → stop + resolve
+      await done;
+      expect(useConnectorsStore.getState().statuses.gitlab.state).toBe('connected');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('connectorsStore renewal', () => {
@@ -129,21 +157,22 @@ describe('connectorsStore renewal', () => {
     expect(useConnectorsStore.getState().statuses.gitlab.state).toBe('connected');
   });
 
-  it('renewAll redirects to GitLab OAuth when it cannot refresh silently (no AWS pending)', async () => {
+  it('renewAll surfaces the GitLab re-auth prompt when it cannot refresh silently (no AWS pending)', async () => {
     vi.spyOn(api, 'getRenewable').mockResolvedValue([
       { connector: 'gitlab', live: false, state: 'not_connected' },
     ]);
     vi.spyOn(api, 'gitlabRenew').mockRejectedValue(new Error('409'));
-    const initiate = vi
-      .spyOn(api, 'initiateConnector')
-      .mockResolvedValue({ redirect_url: 'https://gitlab.example/oauth/authorize' });
+    const initiate = vi.spyOn(api, 'initiateConnector');
     vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([]);
 
     await useConnectorsStore.getState().renewAll('sess-1');
-    expect(initiate).toHaveBeenCalledWith('sess-1', 'gitlab');
+    // No auto-redirect/popup (a popup needs a user gesture) — the user reconnects via
+    // the surfaced prompt instead.
+    expect(initiate).not.toHaveBeenCalled();
+    expect(useConnectorsStore.getState().reauthRequired).toBe('gitlab');
   });
 
-  it('renewAll defers the GitLab OAuth redirect until AWS finishes', async () => {
+  it('renewAll surfaces the GitLab re-auth prompt up front when AWS is also renewing', async () => {
     vi.spyOn(api, 'getRenewable').mockResolvedValue([
       { connector: 'gitlab', live: false, state: 'not_connected' },
       { connector: 'aws', live: false, state: 'not_connected' },
@@ -162,14 +191,15 @@ describe('connectorsStore renewal', () => {
     await useConnectorsStore.getState().renewAll('sess-1');
     const s = useConnectorsStore.getState();
     expect(s.awsAutoSelect).toBe(true);
-    expect(s.gitlabReauthPending).toBe(true); // queued, not fired yet
+    // Prompt set BEFORE the AWS device flow so it survives it and is waiting after.
+    expect(s.reauthRequired).toBe('gitlab');
     expect(initiate).not.toHaveBeenCalled();
   });
 
-  it('pollAwsDevice fires the deferred GitLab redirect once AWS renews', async () => {
+  it('pollAwsDevice leaves the GitLab re-auth prompt in place once AWS renews (no auto-open)', async () => {
     useConnectorsStore.setState({
       awsAutoSelect: true,
-      gitlabReauthPending: true,
+      reauthRequired: 'gitlab', // set by renewAll before the device flow
       awsDevice: { userCode: 'X', verificationUri: 'u', status: 'pending' },
     });
     vi.spyOn(api, 'pollAwsDevice').mockResolvedValue({ status: 'needs_selection' });
@@ -177,13 +207,11 @@ describe('connectorsStore renewal', () => {
     vi.spyOn(api, 'getConnectorStatus').mockResolvedValue([
       { connector: 'aws', state: 'connected' },
     ]);
-    const initiate = vi
-      .spyOn(api, 'initiateConnector')
-      .mockResolvedValue({ redirect_url: 'https://gitlab.example/oauth/authorize' });
+    const initiate = vi.spyOn(api, 'initiateConnector');
 
     await useConnectorsStore.getState().pollAwsDevice('sess-1');
-    expect(initiate).toHaveBeenCalledWith('sess-1', 'gitlab');
-    expect(useConnectorsStore.getState().gitlabReauthPending).toBe(false);
+    expect(initiate).not.toHaveBeenCalled();
+    expect(useConnectorsStore.getState().reauthRequired).toBe('gitlab');
   });
 
   it('renewAll starts AWS device auth and arms auto-select', async () => {

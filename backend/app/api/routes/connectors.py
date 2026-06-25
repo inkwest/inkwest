@@ -7,6 +7,7 @@ projection — credentials live in the in-RAM store and never reach the client.
 """
 
 import asyncio
+import html
 import logging
 import secrets
 import threading
@@ -14,10 +15,9 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -483,11 +483,13 @@ async def callback(
     code: str | None = Query(None),
     error: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-) -> RedirectResponse:
-    """OAuth redirect target. Identity comes from the consumed state row, not a JWT."""
-    settings = get_settings()
-    frontend = f"{settings.frontend_url}/connectors/callback"
+) -> HTMLResponse:
+    """OAuth redirect target. Identity comes from the consumed state row, not a JWT.
 
+    Returns a tiny self-closing page (not a redirect): the grant runs in a popup the
+    user opened from the conversation, so the main window never navigates — it polls
+    connector status and reflects the result once the popup closes. Mirrors the MCP
+    OAuth callback (``mcp.oauth_callback``)."""
     # Atomic consume-once + TTL validation (mirrors the OIDC callback).
     row = (
         await db.execute(
@@ -506,27 +508,35 @@ async def callback(
 
     cutoff = datetime.now(UTC) - timedelta(seconds=CONNECTOR_STATE_TTL_SECONDS)
     if row is None or row.created_at < cutoff:
-        return RedirectResponse(url=f"{frontend}#status=error&reason=invalid_or_expired_state")
-    sid_q = f"&session_id={row.session_id}"
+        logger.info("connector_callback_error", extra={"reason": "invalid_or_expired_state"})
+        return _popup_html("Authorization expired or invalid. You can close this window.", ok=False)
+    # Never reflect the AS-supplied `error` / raw exception text into the page — it is
+    # attacker-controllable on this unauthenticated endpoint (reflected-XSS surface). Show
+    # a fixed message; the detail goes to the logs only (mirrors mcp.oauth_callback).
     if error or not code:
-        reason = quote(error or "no_code")
-        return RedirectResponse(
-            url=f"{frontend}#connector={row.connector}&status=error&reason={reason}{sid_q}"
+        logger.info(
+            "connector_callback_error",
+            extra={"connector": row.connector, "reason": error or "no_code"},
+        )
+        return _popup_html(
+            "Authorization was cancelled or failed. You can close this window.", ok=False
         )
 
     conn = get_connector(row.connector)
     if conn is None:
-        return RedirectResponse(url=f"{frontend}#status=error&reason=connector_unavailable")
+        logger.warning(
+            "connector_callback_error",
+            extra={"connector": row.connector, "reason": "connector_unavailable"},
+        )
+        return _popup_html("This connector is unavailable. You can close this window.", ok=False)
 
     try:
         cred = await conn.exchange_code(
             code=code, code_verifier=row.code_verifier, redirect_uri=_redirect_uri()
         )
-    except ConnectorError as e:
+    except ConnectorError:
         logger.warning("connector_exchange_failed", extra={"connector": row.connector})
-        return RedirectResponse(
-            url=f"{frontend}#connector={row.connector}&status=error&reason={quote(str(e))}{sid_q}"
-        )
+        return _popup_html("Connection failed. Please close this window and try again.", ok=False)
 
     if row.connector == "gitlab":
         # The refresh token is user-scoped warm material: it moves to the warm
@@ -547,10 +557,22 @@ async def callback(
         "connector_granted",
         extra={"connector": row.connector, "session_id": str(row.session_id)},
     )
-    result_state = conn.public_status(cred).state
-    return RedirectResponse(
-        url=f"{frontend}#connector={row.connector}&status={result_state}{sid_q}"
+    return _popup_html(f"Connected to {row.connector}. You can close this window.", ok=True)
+
+
+def _popup_html(message: str, *, ok: bool) -> HTMLResponse:
+    """Tiny page that closes the OAuth popup. The opener polls connector status for the
+    result. Mirrors ``mcp._popup_html``."""
+    color = "#16a34a" if ok else "#dc2626"
+    body = (
+        f"<!doctype html><html><head><meta charset='utf-8'><title>Inkwest</title></head>"
+        f"<body style='font-family:sans-serif;background:#111;color:{color};"
+        f"display:flex;align-items:center;justify-content:center;height:100vh'>"
+        f"<p>{html.escape(message)}</p>"
+        f"<script>setTimeout(function(){{window.close()}},1200)</script>"
+        f"</body></html>"
     )
+    return HTMLResponse(content=body)
 
 
 @router.post("/{session_id}/aws/device/start", response_model=AwsDeviceStartResponse)
