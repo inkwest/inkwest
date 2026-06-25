@@ -83,6 +83,9 @@ describe('useConnectorGrant', () => {
 
     expect(result.current.error).toContain('Failed to start AWS authorization');
     expect(result.current.error).toContain('boom');
+    // The failing connector is tagged so a per-connector surface (the icons bar) can
+    // flag exactly the one that errored — the wiring the icons-layout error display reads.
+    expect(result.current.errorConnector).toBe('aws');
     expect(useConnectorsStore.getState().grantBusy).toBeNull();
   });
 });
