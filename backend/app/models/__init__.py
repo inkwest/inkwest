@@ -20,6 +20,8 @@ from app.models.session_share_link import SessionShareLink
 from app.models.skill import Skill
 from app.models.system_prompt import SystemPrompt
 from app.models.user import User
+from app.models.user_preferences import UserPreferences
+from app.models.user_skill import UserSkill
 
 __all__ = [
     "AppSetting",
@@ -42,6 +44,8 @@ __all__ = [
     "OidcPendingState",
     "Skill",
     "SystemPrompt",
+    "UserPreferences",
+    "UserSkill",
     "ConnectorPendingState",
     "ConnectorAuditLog",
     "McpOauthCatalog",
