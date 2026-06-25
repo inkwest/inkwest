@@ -30,17 +30,33 @@ async def test_get_session_role_owner_skips_db(mock_user: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_session_role_admin_is_owner(mock_admin_user: MagicMock) -> None:
+async def test_get_session_role_admin_is_readonly_viewer(mock_admin_user: MagicMock) -> None:
+    """An admin viewing someone else's conversation (e.g. from the usage report) is
+    read-only: role ``viewer``, never ``owner`` — they can watch but not drive turns."""
     from app.services.session_access import get_session_role
 
     session = MagicMock()
     session.id = uuid.uuid4()
     session.user_id = str(uuid.uuid4())  # someone else's session
     db = AsyncMock()
+    db.scalar = AsyncMock(return_value=None)  # admin holds no share
+
+    assert await get_session_role(session, mock_admin_user, db) == "viewer"
+
+
+@pytest.mark.asyncio
+async def test_get_session_role_admin_on_own_session_is_owner(mock_admin_user: MagicMock) -> None:
+    """An admin viewing their *own* conversation is still the owner (full control)."""
+    from app.services.session_access import get_session_role
+
+    session = MagicMock()
+    session.id = uuid.uuid4()
+    session.user_id = str(mock_admin_user.id)
+    db = AsyncMock()
     db.scalar = AsyncMock(return_value=None)
 
     assert await get_session_role(session, mock_admin_user, db) == "owner"
-    db.scalar.assert_not_called()
+    db.scalar.assert_not_called()  # owner short-circuits — no shares lookup
 
 
 @pytest.mark.asyncio
@@ -116,6 +132,30 @@ async def test_get_session_as_editor_participant(
     assert data["is_owner"] is False
     assert data["shared_role"] == "editor"
     assert data["owner_display_name"] == "Owner Person"
+
+
+@pytest.mark.asyncio
+async def test_get_session_as_admin_is_readonly(
+    admin_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+) -> None:
+    """An admin opening someone else's conversation (e.g. via the usage report) gets
+    a read-only payload: is_owner=False, shared_role=viewer — never owner."""
+    mock_session_obj.user_id = str(uuid.uuid4())  # owned by someone else
+    owner = MagicMock()
+    owner.display_name = "Owner Person"
+    mock_session_obj.user = owner
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result_mock)
+    mock_db.scalar = AsyncMock(return_value=None)  # admin holds no share → viewer fallback
+
+    resp = await admin_client.get(f"/api/sessions/{mock_session_obj.id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["is_owner"] is False
+    assert data["shared_role"] == "viewer"
 
 
 @pytest.mark.asyncio

@@ -4,13 +4,14 @@ import { useSharedSocket } from '@/hooks/useSharedSocket';
 import { useChatStore } from '@/store/chat';
 import { MessageList } from '@/components/chat/MessageList';
 import { StreamingMessage } from '@/components/chat/StreamingMessage';
-import { PresenceBar } from '@/components/chat/PresenceBar';
 
 // Public, anonymous, read-only view of a conversation reached via a share link
-// (/shared/:token). No app shell / auth — just the live transcript.
+// (/shared/:token). No app shell / auth — just the live transcript. Presence is
+// intentionally omitted here: a link recipient shouldn't see who else is viewing
+// (the owner still sees guests in the authenticated view).
 export function SharedSessionPage() {
   const { token } = useParams<{ token: string }>();
-  const { status, meta, selfId } = useSharedSocket(token ?? '');
+  const { status, meta } = useSharedSocket(token ?? '');
   const messages = useChatStore((s) => s.messages);
   const isStreaming = useChatStore((s) => s.isStreaming);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -49,8 +50,6 @@ export function SharedSessionPage() {
         </div>
         <span className="text-xs font-semibold text-gray-400">Inkwest</span>
       </header>
-
-      <PresenceBar selfId={selfId} />
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 min-h-0">
         <MessageList messages={messages} />

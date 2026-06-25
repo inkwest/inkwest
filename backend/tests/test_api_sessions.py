@@ -34,13 +34,41 @@ async def test_list_sessions_returns_items(
     count_result.scalar.return_value = 1
     list_result = MagicMock()
     list_result.scalars.return_value.all.return_value = [mock_session_obj]
-    mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
+    share_agg = MagicMock()
+    share_agg.all.return_value = []  # owned session: no shares / links
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result, share_agg, share_agg])
 
     resp = await authenticated_client.get("/api/sessions")
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 1
     assert data["items"][0]["title"] == "Test Session"
+    assert data["items"][0]["share_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_owned_share_count(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+) -> None:
+    """An owned conversation's list entry carries share_count = non-declined people +
+    active links, so the sidebar can flag shared conversations without opening them."""
+    count_result = MagicMock()
+    count_result.scalar.return_value = 1
+    list_result = MagicMock()
+    list_result.scalars.return_value.all.return_value = [mock_session_obj]
+    people_agg = MagicMock()
+    people_agg.all.return_value = [(mock_session_obj.id, 2)]  # 2 invited/accepted
+    link_agg = MagicMock()
+    link_agg.all.return_value = [(mock_session_obj.id, 1)]  # 1 active link
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result, people_agg, link_agg])
+
+    resp = await authenticated_client.get("/api/sessions")
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["is_owner"] is True
+    assert item["share_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -71,7 +99,9 @@ async def test_list_sessions_search_is_word_independent(
     count_result.scalar.return_value = 1
     list_result = MagicMock()
     list_result.scalars.return_value.all.return_value = [mock_session_obj]
-    mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
+    share_agg = MagicMock()
+    share_agg.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result, share_agg, share_agg])
 
     resp = await authenticated_client.get("/api/sessions?search=pod+crash")
     assert resp.status_code == 200
@@ -334,12 +364,42 @@ async def test_delete_session(
     mock_session_obj.user_id = str(mock_user.id)
     result_mock = MagicMock()
     result_mock.scalar_one_or_none.return_value = mock_session_obj
+    result_mock.scalars.return_value.all.return_value = []  # no participants
     mock_db.execute = AsyncMock(return_value=result_mock)
     mock_db.flush = AsyncMock()
 
     with patch("app.api.routes.sessions.notify", return_value=None):
         resp = await authenticated_client.delete(f"/api/sessions/{mock_session_obj.id}")
     assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_delete_session_notifies_shared_participants(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+    mock_user: MagicMock,
+) -> None:
+    """Deleting a shared conversation must notify the owner AND every accepted
+    participant, so it drops from all their sidebars live — not just the owner's."""
+    mock_session_obj.user_id = str(mock_user.id)
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = mock_session_obj
+    result_mock.scalars.return_value.all.return_value = ["bob-id", "carol-id"]
+    mock_db.execute = AsyncMock(return_value=result_mock)
+    mock_db.flush = AsyncMock()
+
+    notify_mock = AsyncMock()
+    with patch("app.api.routes.sessions.notify", notify_mock):
+        resp = await authenticated_client.delete(f"/api/sessions/{mock_session_obj.id}")
+    assert resp.status_code == 204
+
+    notified = {call.kwargs["user_id"] for call in notify_mock.call_args_list}
+    assert notified == {str(mock_user.id), "bob-id", "carol-id"}
+    assert all(
+        c.args[0] == {"type": "session_deleted", "session_id": str(mock_session_obj.id)}
+        for c in notify_mock.call_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -354,6 +414,7 @@ async def test_delete_session_cancels_refresh_before_cleanup(
     mock_session_obj.user_id = str(mock_user.id)
     result_mock = MagicMock()
     result_mock.scalar_one_or_none.return_value = mock_session_obj
+    result_mock.scalars.return_value.all.return_value = []  # no participants
     mock_db.execute = AsyncMock(return_value=result_mock)
     mock_db.flush = AsyncMock()
     order: list[str] = []

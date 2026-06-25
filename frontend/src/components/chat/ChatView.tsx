@@ -277,7 +277,7 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
         </div>
         {isReadOnly ? (
           <div className="shrink-0 border-t border-gray-800 px-4 py-3 text-center text-xs text-gray-500">
-            You are viewing this shared conversation — read-only.
+            You are viewing this conversation — read-only.
           </div>
         ) : (
           // Floating composer overlay. `right-4` keeps it off the messages scrollbar;

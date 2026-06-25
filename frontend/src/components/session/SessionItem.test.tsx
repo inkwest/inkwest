@@ -35,3 +35,34 @@ describe('SessionItem drag source', () => {
     expect(screen.queryByLabelText('Drag to reorder')).not.toBeInTheDocument();
   });
 });
+
+describe('SessionItem shared indicator', () => {
+  function renderWith(overrides: Partial<Session>) {
+    return render(
+      <MemoryRouter>
+        <SessionItem
+          session={{ ...session, ...overrides }}
+          isDragging={false}
+          dragHandleProps={dragHandleProps}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it('flags an owned conversation that is shared with others', () => {
+    renderWith({ is_owner: true, share_count: 3 });
+    expect(screen.getByTitle('Shared with 3')).toBeInTheDocument();
+  });
+
+  it('shows no indicator when an owned conversation is not shared', () => {
+    renderWith({ is_owner: true, share_count: 0 });
+    expect(screen.queryByTitle(/Shared with/)).not.toBeInTheDocument();
+    expect(screen.queryByText('External')).not.toBeInTheDocument();
+  });
+
+  it('marks a conversation shared *with* the user as External, not as shared-out', () => {
+    renderWith({ is_owner: false, owner_display_name: 'Alice', share_count: 0 });
+    expect(screen.getByText('External')).toBeInTheDocument();
+    expect(screen.queryByTitle(/Shared with/)).not.toBeInTheDocument();
+  });
+});

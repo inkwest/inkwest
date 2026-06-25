@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { Trash2, Pencil, Check, X, GripVertical, LogOut } from 'lucide-react';
+import { Trash2, Pencil, Check, X, GripVertical, LogOut, Share2 } from 'lucide-react';
 import { Session } from '@/types/api';
 import { formatRelativeTime, formatTokenCount, cn } from '@/lib/utils';
 import { useSessionsStore } from '@/store/sessions';
@@ -153,7 +153,7 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
           <div className="flex-1 min-w-0 pr-2">
             <div className="font-medium truncate flex items-center gap-1.5" title={session.title || 'New conversation'}>
               <span className="truncate">{session.title || 'New conversation'}</span>
-              {session.is_owner === false && (
+              {session.is_owner === false ? (
                 <span
                   className="shrink-0 text-[9px] uppercase tracking-wide px-1 py-0.5 rounded bg-blue-900/50 text-blue-300"
                   title={
@@ -162,8 +162,20 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
                       : 'Shared with you'
                   }
                 >
-                  Shared
+                  External
                 </span>
+              ) : (
+                // Owned + shared by me: flag it so the owner sees at a glance which
+                // conversations are shared, without opening each one.
+                (session.share_count ?? 0) > 0 && (
+                  <span
+                    className="shrink-0 inline-flex items-center gap-0.5 text-[10px] text-blue-300"
+                    title={`Shared with ${session.share_count}`}
+                  >
+                    <Share2 className="w-3 h-3" />
+                    {session.share_count}
+                  </span>
+                )
               )}
             </div>
             <div className="flex items-center gap-1.5 text-xs text-gray-500">

@@ -43,7 +43,7 @@ from app.services.pubsub import notify
 from app.services.session_access import (
     check_session_access,
     check_session_owner,
-    is_owner_or_admin,
+    is_real_owner,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -132,8 +132,10 @@ async def list_sessions(
     sessions = result.scalars().all()
 
     # Tag shared-in sessions with the caller's role + owner name. Only query roles
-    # when this page actually contains sessions the caller doesn't own/admin.
-    shared_in = [s.id for s in sessions if not is_owner_or_admin(s, current_user)]
+    # when this page actually contains sessions the caller doesn't own. An admin
+    # who was *shared* a conversation is a participant of it, not its owner, so it
+    # is tagged shared-in too (consistent with get_session — see is_real_owner).
+    shared_in = [s.id for s in sessions if not is_real_owner(s, current_user)]
     my_roles: dict[str, str] = {}
     if shared_in:
         roles_result = await db.execute(
@@ -145,11 +147,39 @@ async def list_sessions(
         )
         my_roles = {str(sid): role for sid, role in roles_result.all()}
 
+    # For owned sessions, surface how many people (non-declined) + active links each is
+    # shared with, so the list can flag shared conversations without opening them. Two
+    # grouped aggregates over the whole page — no per-row query. Mirrors get_session.
+    owned_ids = [s.id for s in sessions if is_real_owner(s, current_user)]
+    share_counts: dict[str, int] = {}
+    if owned_ids:
+        people_rows = await db.execute(
+            select(SessionShare.session_id, func.count())
+            .where(
+                SessionShare.session_id.in_(owned_ids),
+                SessionShare.status != ShareStatus.DECLINED.value,
+            )
+            .group_by(SessionShare.session_id)
+        )
+        for sid, n in people_rows.all():
+            share_counts[str(sid)] = n
+        link_rows = await db.execute(
+            select(SessionShareLink.session_id, func.count())
+            .where(
+                SessionShareLink.session_id.in_(owned_ids),
+                SessionShareLink.is_active == True,  # noqa: E712
+            )
+            .group_by(SessionShareLink.session_id)
+        )
+        for sid, n in link_rows.all():
+            share_counts[str(sid)] = share_counts.get(str(sid), 0) + n
+
     items: list[SessionResponse] = []
     for s in sessions:
         resp = SessionResponse.model_validate(s)
-        if is_owner_or_admin(s, current_user):
+        if is_real_owner(s, current_user):
             resp.is_owner = True
+            resp.share_count = share_counts.get(str(s.id), 0)
         else:
             resp.is_owner = False
             resp.shared_role = my_roles.get(str(s.id))
@@ -624,10 +654,22 @@ async def delete_session(
         await sandbox.teardown(str(session.id))
 
     await close_session_connections(str(session.id))
-    await notify(
-        {"type": "session_deleted", "session_id": str(session.id)},
-        user_id=str(session.user_id) if session.user_id else None,
+
+    # Notify the owner AND everyone it was shared with (accepted participants), so the
+    # conversation drops from all their sidebars live and any open viewer is navigated
+    # away. Without the participant fan-out a deleted conversation lingers in their
+    # shared list until they reload (archived sessions are filtered only on refetch).
+    recipients = [str(session.user_id)] if session.user_id else []
+    shared_with = await db.execute(
+        select(SessionShare.user_id).where(
+            SessionShare.session_id == session.id,
+            SessionShare.status == ShareStatus.ACCEPTED.value,
+        )
     )
+    recipients += [str(uid) for uid in shared_with.scalars().all()]
+    payload = {"type": "session_deleted", "session_id": str(session.id)}
+    for recipient_id in recipients:
+        await notify(payload, user_id=recipient_id)
 
 
 @router.get("/{session_id}/stats")

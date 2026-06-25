@@ -16,9 +16,6 @@ export function useSharedSocket(token: string) {
   const [meta, setMeta] = useState<Pick<SharedConversation, 'title' | 'owner_display_name'> | null>(
     null
   );
-  // This guest's own presence id (from the server's presence_self frame), so the
-  // PresenceBar can filter the guest out of its own "who's viewing" roster.
-  const [selfId, setSelfId] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -36,8 +33,6 @@ export function useSharedSocket(token: string) {
       setIsStreaming,
       addMessage,
       addPeerMessage,
-      setPresence,
-      setTyping,
     } = useChatStore.getState();
 
     resetChat();
@@ -110,15 +105,8 @@ export function useSharedSocket(token: string) {
             created_at: new Date().toISOString(),
           });
           break;
-        case 'presence':
-          setPresence(event.users || []);
-          break;
-        case 'presence_self':
-          setSelfId(event.user_id ?? null);
-          break;
-        case 'typing':
-          if (event.user_id) setTyping(event.user_id, event.display_name || '', !!event.state);
-          break;
+        // Presence/typing are intentionally not handled here — the public share view
+        // shows no presence (the guest shouldn't see who else is viewing).
       }
     }
 
@@ -174,5 +162,5 @@ export function useSharedSocket(token: string) {
     };
   }, [token]);
 
-  return { status, meta, selfId };
+  return { status, meta };
 }
