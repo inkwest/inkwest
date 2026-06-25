@@ -93,7 +93,14 @@ async def orchestrate_chat_cli(
     # are used in prod).
     if persist_user_message:
         try:
-            await save_message(db, session_id, "user", user_message, attachments=attachments)
+            await save_message(
+                db,
+                session_id,
+                "user",
+                user_message,
+                attachments=attachments,
+                author_user_id=user_id,
+            )
         except Exception as e:
             logger.error(f"Failed to save user message: {e}")
             yield error_event(f"Failed to save message: {str(e)}")

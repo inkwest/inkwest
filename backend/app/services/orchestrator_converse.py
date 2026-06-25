@@ -199,7 +199,7 @@ async def orchestrate_chat_converse(
     if persist_user_message:
         messages.append({"role": "user", "content": user_message})
         try:
-            await save_message(db, session_id, "user", user_message)
+            await save_message(db, session_id, "user", user_message, author_user_id=user_id)
         except Exception as e:
             logger.error(f"Failed to save user message: {e}")
             yield error_event(f"Failed to save message: {str(e)}")

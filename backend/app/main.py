@@ -31,6 +31,7 @@ from app.api.routes import (
     mcp_proxy,
     metrics,
     sessions,
+    sharing,
     skills,
     sync,
     system_prompts,
@@ -249,6 +250,7 @@ app.include_router(system_prompts.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(metrics.router, prefix="/api")  # Per-conversation sandbox resource metrics
 app.include_router(sessions.search_router, prefix="/api")
+app.include_router(sharing.router, prefix="/api")  # Conversation sharing / collaboration
 app.include_router(auth.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(config.router, prefix="/api")

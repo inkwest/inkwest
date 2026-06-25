@@ -5,6 +5,7 @@ import { ChatPage } from '@/pages/ChatPage';
 import { NewSessionPage } from '@/pages/NewSessionPage';
 import { QuickStartPage } from '@/pages/QuickStartPage';
 import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
+import { SharedSessionPage } from '@/pages/SharedSessionPage';
 import {
   AdminLayout,
   DashboardPage,
@@ -91,6 +92,9 @@ function App() {
       <Routes>
         {/* OIDC callback — outside auth guard */}
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
+
+        {/* Public read-only share link — anonymous, outside the auth guard */}
+        <Route path="/shared/:token" element={<SharedSessionPage />} />
 
         {/* Main Chat Routes */}
         <Route path="/" element={<AuthGuard><Layout /></AuthGuard>}>

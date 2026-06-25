@@ -15,6 +15,8 @@ from app.models.model_registry import ModelRegistry
 from app.models.oidc_pending_state import OidcPendingState
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import ConfirmationMode, Session
+from app.models.session_share import SessionShare, ShareRole, ShareStatus
+from app.models.session_share_link import SessionShareLink
 from app.models.skill import Skill
 from app.models.system_prompt import SystemPrompt
 from app.models.user import User
@@ -25,6 +27,10 @@ __all__ = [
     "Cluster",
     "Session",
     "ConfirmationMode",
+    "SessionShare",
+    "ShareRole",
+    "ShareStatus",
+    "SessionShareLink",
     "Message",
     "ModelRegistry",
     "User",

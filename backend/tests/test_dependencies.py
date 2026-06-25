@@ -26,8 +26,10 @@ async def test_get_current_user_dev_mode() -> None:
         settings.oidc_enabled = False
         mock_settings.return_value = settings
 
-        # Dev mode short-circuits before reading the request cookie.
-        user = await get_current_user(MagicMock(), mock_db)
+        # No impersonation cookie → the default dev user.
+        request = MagicMock()
+        request.cookies = {}
+        user = await get_current_user(request, mock_db)
 
     assert user is dev_user
 

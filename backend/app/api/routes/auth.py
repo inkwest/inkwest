@@ -5,6 +5,7 @@ Handles OIDC login flow and session management.
 """
 
 import logging
+import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -87,9 +88,12 @@ async def get_auth_status(
     mode = settings.login_redirect_mode
 
     if not oidc_client.is_enabled:
-        from app.api.dependencies import get_or_create_dev_user
+        # Cookie-aware so the reported identity matches dev user switching
+        # (/auth/dev-switch) — otherwise the header would still show the default
+        # dev user while the rest of the app acts as the impersonated one.
+        from app.api.dependencies import get_current_user
 
-        user = await get_or_create_dev_user(db)
+        user = await get_current_user(request, db)
         await db.commit()
         return AuthStatusResponse(
             oidc_enabled=False,
@@ -302,6 +306,31 @@ async def get_ws_ticket(current_user: CurrentUser) -> WsTicketResponse:
     """Issue a short-lived JWT ticket for WebSocket authentication."""
     ticket = create_ws_ticket(uuid.UUID(str(current_user.id)))
     return WsTicketResponse(ticket=ticket)
+
+
+@router.get("/dev-switch")
+async def dev_switch(response: Response, user: str = Query("")) -> dict[str, str]:
+    """DEV ONLY (OIDC off): impersonate a local user via a cookie, for testing the
+    multi-user features without an IdP.
+
+    ``?user=bob`` → act as ``bob@localhost`` (a non-admin local account, created on
+    first use); ``?user=`` (empty) → back to the default ``dev@localhost``. Open it
+    in a separate browser profile / incognito window to hold a second identity.
+    Returns 404 when OIDC is enabled, so it never exists in production.
+    """
+    settings = get_settings()
+    if settings.oidc_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    name = re.sub(r"[^a-z0-9_-]", "", user.lower())[:32]
+    secure = settings.app_env == "production"  # always False here (dev), kept for parity
+    if name and name != "dev":
+        response.set_cookie(
+            "inkwest_dev_user", name, httponly=True, secure=secure, samesite="lax", path="/"
+        )
+        return {"acting_as": f"{name}@localhost"}
+    response.delete_cookie("inkwest_dev_user", path="/")
+    return {"acting_as": "dev@localhost"}
 
 
 @router.get("/me", response_model=UserInfoResponse)

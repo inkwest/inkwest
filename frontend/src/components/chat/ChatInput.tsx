@@ -43,6 +43,8 @@ interface Props {
   // the attach button + paste show pre-session. MUST resolve to the new session id so
   // the upload can target it without waiting on a re-render of the `sessionId` prop.
   onBeforeAttach?: () => Promise<string | void>;
+  // Broadcast typing state to other participants (owner only); no-op when omitted.
+  onTyping?: (state: boolean) => void;
 }
 
 // The "/<query>" token immediately left of the cursor (slash at message start or after
@@ -82,8 +84,22 @@ function insertAtCursor(
   };
 }
 
-export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, initialAttachments, autoSubmit, sessionId, large, placeholder, modelControl, connectorControls, onBeforeAttach }: Props) {
+export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, initialAttachments, autoSubmit, sessionId, large, placeholder, modelControl, connectorControls, onBeforeAttach, onTyping }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
+  // Debounced typing signal: emit `true` on edit, then `false` after a short idle
+  // (also cleared on send/unmount) so other participants see "X is typing…".
+  const typingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const signalTyping = useCallback(() => {
+    if (!onTyping) return;
+    onTyping(true);
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+    typingTimer.current = setTimeout(() => onTyping(false), 2500);
+  }, [onTyping]);
+  const stopTyping = useCallback(() => {
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+    onTyping?.(false);
+  }, [onTyping]);
+  useEffect(() => () => stopTyping(), [stopTyping]);
   const setDraft = useDraftsStore((s) => s.setDraft);
   const clearDraft = useDraftsStore((s) => s.clearDraft);
   const composerNonce = useComposerStore((s) => s.nonce);
@@ -354,6 +370,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         size: a.size,
       }));
       onSend(text, descriptors.length ? descriptors : undefined);
+      stopTyping();
       setMessage('');
       attachments.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
       setAttachments([]);
@@ -603,6 +620,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
               updateMessage(e.target.value);
               setCursor(e.target.selectionStart ?? e.target.value.length);
               setHistoryIndex(null); // a manual edit drops out of history recall
+              signalTyping();
             }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}

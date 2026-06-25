@@ -97,6 +97,7 @@ async def save_message(
     model: str | None = None,
     engine: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    author_user_id: str | uuid.UUID | None = None,
 ) -> Message:
     """
     Save a message to the database.
@@ -109,6 +110,7 @@ async def save_message(
         tool_calls: List of tool calls made in this message
         tool_call_id: ID of the tool call this message responds to
         attachments: Files attached to a user turn (descriptor dicts)
+        author_user_id: Who sent this user turn (shared conversations); None = the AI
         token_count: Number of tokens in the message (deprecated, use output_tokens)
         input_tokens: Number of input tokens for this API call
         output_tokens: Number of output tokens for this API call
@@ -122,6 +124,8 @@ async def save_message(
     """
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
+    if isinstance(author_user_id, str):
+        author_user_id = uuid.UUID(author_user_id)
 
     # Normalize content to JSON-serializable format
     if isinstance(content, str):
@@ -147,6 +151,7 @@ async def save_message(
         model=model,
         engine=engine,
         attachments=attachments,
+        author_user_id=author_user_id,
     )
     db.add(message)
     await db.commit()

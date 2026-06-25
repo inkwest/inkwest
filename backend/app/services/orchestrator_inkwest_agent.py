@@ -117,7 +117,12 @@ async def orchestrate_chat_inkwest_agent(
             # Persist attachment descriptors on the user row too (history thumbnails),
             # parity with the claude-cli path. None when there are no files.
             await save_message(
-                db, session_id, "user", user_message, attachments=attachments or None
+                db,
+                session_id,
+                "user",
+                user_message,
+                attachments=attachments or None,
+                author_user_id=user_id,
             )
         except Exception as e:
             logger.error(f"Failed to save user message: {e}")

@@ -42,6 +42,59 @@ export interface Session {
   total_output_tokens?: number;
   created_at: string;
   updated_at: string;
+  /** Collaboration markers (see backend SessionResponse). */
+  is_owner?: boolean;
+  /** 'viewer' when this is a session shared *with* the user; null/undefined when owned. */
+  shared_role?: string | null;
+  /** Display name of the owner, for the "shared by X" hint on shared-in sessions. */
+  owner_display_name?: string | null;
+  /** How many people + active links this conversation is shared with (owner view). */
+  share_count?: number;
+}
+
+// Conversation sharing
+export interface UserSummary {
+  id: string;
+  display_name: string;
+  email: string;
+}
+
+export interface Participant {
+  id: string;
+  session_id: string;
+  user_id: string;
+  display_name: string;
+  email: string;
+  role: string;
+  status: 'pending' | 'accepted' | 'declined';
+  created_at: string;
+  responded_at?: string | null;
+}
+
+export interface PendingInvite {
+  share_id: string;
+  session_id: string;
+  session_title?: string | null;
+  role: string;
+  invited_by_display_name?: string | null;
+  created_at: string;
+}
+
+export interface ShareLink {
+  id: string;
+  token: string;
+  /** Same-origin path of the public viewer; prepend window.location.origin to share. */
+  url: string;
+  label?: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface SharedConversation {
+  session_id: string;
+  title?: string | null;
+  owner_display_name?: string | null;
+  messages: Message[];
 }
 
 export interface SessionWithMessages extends Session {

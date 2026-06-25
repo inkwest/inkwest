@@ -192,6 +192,8 @@ class MessageResponse(MessageBase):
 
     id: UUID
     session_id: UUID
+    # Who sent this user turn in a shared conversation; NULL = the AI or pre-sharing.
+    author_user_id: UUID | None = None
     # Files attached to a user turn (descriptor dicts); NULL/absent otherwise.
     attachments: list[dict[str, Any]] | None = None
     # Model that produced this assistant turn (NULL for older/non-assistant rows).
@@ -275,6 +277,16 @@ class SessionResponse(SessionBase):
     user_id: UUID | None = None
     summary: str | None = None
     is_archived: bool
+    # Collaboration markers, set by the route per caller (default = own session):
+    #   is_owner           — caller owns it (or is admin); False = shared with them
+    #   shared_role        — 'viewer' | 'editor' when shared-in; None when owned
+    #   owner_display_name — the owner's name, for the "shared by X" hint
+    is_owner: bool = True
+    shared_role: str | None = None
+    owner_display_name: str | None = None
+    # How many people + active links this conversation is shared with (owner view only;
+    # 0 when not shared or not the owner). Drives the "Shared·N" state on the Share control.
+    share_count: int = 0
     cluster: ClusterSummary | None = None
     system_prompt_id: UUID | None = None
     system_prompt_custom: str | None = None
@@ -303,6 +315,104 @@ class SessionList(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# =============================================================================
+# Sharing / Collaboration Schemas
+# =============================================================================
+
+
+class UserSummary(BaseModel):
+    """Minimal user info for the share picker (no roles / OIDC subject)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    display_name: str
+    email: str
+
+
+class ShareCreate(BaseModel):
+    """Invite a user to a session. Shares are read-only (view-only); only the owner
+    sends, so no role is accepted."""
+
+    user_id: UUID
+
+
+class ShareRespond(BaseModel):
+    """Accept or decline a pending invitation."""
+
+    accept: bool
+
+
+class ParticipantResponse(BaseModel):
+    """A session participant (or pending invitee), for the owner's share panel.
+
+    Built from a SessionShare row joined to its user — not validated from
+    attributes, since display_name/email come from the joined User.
+    """
+
+    id: UUID  # the share row id
+    session_id: UUID
+    user_id: UUID
+    display_name: str
+    email: str
+    role: str
+    status: str
+    created_at: datetime
+    responded_at: datetime | None = None
+
+
+class PendingInviteResponse(BaseModel):
+    """A pending invitation addressed to the current user (drives the popup)."""
+
+    share_id: UUID
+    session_id: UUID
+    session_title: str | None = None
+    role: str
+    invited_by_display_name: str | None = None
+    created_at: datetime
+
+
+class ShareLinkCreate(BaseModel):
+    """Mint a revokable anonymous read-only share link; optional human label."""
+
+    label: str | None = Field(None, max_length=255)
+
+
+class ShareLinkResponse(BaseModel):
+    """A share link, as returned to the owner. ``url`` is the full shareable URL."""
+
+    id: UUID
+    token: str
+    url: str
+    label: str | None = None
+    is_active: bool
+    created_at: datetime
+
+
+class SharedMessage(BaseModel):
+    """A message on the public read-only share view — a deliberately narrow projection.
+
+    Anonymous link visitors get only what the transcript shows (role + content +
+    timestamp); internal fields carried by MessageResponse (thinking_content, token
+    counts, model/engine, author_user_id, error/retry state) are intentionally NOT
+    exposed on the unauthenticated endpoint.
+    """
+
+    id: UUID
+    role: str
+    content: dict[str, Any] | str | list[Any]
+    created_at: datetime
+
+
+class SharedConversationResponse(BaseModel):
+    """Read-only conversation served to an anonymous link visitor."""
+
+    session_id: UUID
+    title: str | None = None
+    owner_display_name: str | None = None
+    messages: list[SharedMessage] = []
 
 
 # =============================================================================

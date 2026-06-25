@@ -28,10 +28,12 @@ from app.core.config import get_settings
 from app.core.database import async_session_maker
 from app.models.cluster import Cluster
 from app.models.session import Session
+from app.models.session_share_link import SessionShareLink
 from app.models.user import User
 from app.services.ai_client import get_orchestrator
 from app.services.mcp_dek_handshake import handle_dek_message, note_connect, note_disconnect
 from app.services.messages import clear_retry_state, get_retryable_message
+from app.services.session_access import get_session_role
 from app.services.turn_runner import TURN_END, turn_runner
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,140 @@ class ClusterContext:
     display_name: str
     kubeconfig_path: str
     context_name: str | None = None
+
+
+@dataclass(frozen=True)
+class Presence:
+    user_id: str
+    display_name: str
+
+
+# Per-session presence roster: who is currently viewing, keyed by their socket. A
+# user with two tabs maps to two entries but appears once in the broadcast roster.
+# Drives the "who's here" avatars + typing indicators, fanned to all of a session's
+# sockets independently of any active turn. Same single-replica scope as
+# active_connections / turn_runner.
+session_presence: dict[str, dict[WebSocket, Presence]] = defaultdict(dict)
+
+# Anonymous share-link sockets, keyed by token, so revoking a link can kick its
+# live guests (they also live in active_connections / session_presence by session).
+# Single-replica scope (like active_connections / turn_runner): a revoke can only
+# kick guests on THIS replica, so on a multi-replica deployment a guest pinned to
+# another replica would keep streaming until they disconnect. Inkwest runs
+# single-replica, so this holds today; revisit alongside the other in-memory state.
+shared_link_connections: dict[str, set[WebSocket]] = defaultdict(set)
+
+
+async def broadcast_to_session(
+    session_id: str, payload: dict, *, exclude: WebSocket | None = None
+) -> None:
+    """Send a frame to every socket on a session (presence, typing, a peer's new
+    message) — turn-independent. Best-effort per socket; a dead socket is skipped."""
+    async with _connections_lock:
+        targets = [ws for ws in active_connections.get(session_id, set()) if ws is not exclude]
+    for ws in targets:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            pass
+
+
+async def _broadcast_presence(session_id: str) -> None:
+    """Fan the current (deduped) presence roster to all of a session's sockets."""
+    async with _connections_lock:
+        seen: dict[str, str] = {}
+        for pres in session_presence.get(session_id, {}).values():
+            seen[pres.user_id] = pres.display_name
+        roster = [{"user_id": uid, "display_name": dn} for uid, dn in seen.items()]
+    await broadcast_to_session(session_id, {"type": "presence", "users": roster})
+
+
+async def _register_presence_raw(
+    session_id: str, websocket: WebSocket, user_id: str, display_name: str
+) -> None:
+    async with _connections_lock:
+        session_presence[session_id][websocket] = Presence(str(user_id), display_name)
+    await _broadcast_presence(session_id)
+
+
+async def _register_presence(session_id: str, websocket: WebSocket, user: User) -> None:
+    await _register_presence_raw(session_id, websocket, str(user.id), user.display_name)
+
+
+async def _unregister_presence(session_id: str, websocket: WebSocket) -> None:
+    async with _connections_lock:
+        present = session_presence.get(session_id)
+        if present is not None:
+            present.pop(websocket, None)
+            if not present:
+                del session_presence[session_id]
+    await _broadcast_presence(session_id)
+
+
+async def close_user_session_connections(session_id: str, user_id: str) -> None:
+    """Close a specific user's sockets on a session — e.g. their share was revoked."""
+    async with _connections_lock:
+        present = session_presence.get(session_id, {})
+        targets = [ws for ws, pres in present.items() if pres.user_id == str(user_id)]
+    for ws in targets:
+        try:
+            await ws.close(code=4011)  # access revoked
+        except Exception:
+            pass
+
+
+async def close_share_link_connections(token: str) -> None:
+    """Close all anonymous viewers holding a share link — its token was revoked."""
+    async with _connections_lock:
+        targets = list(shared_link_connections.get(token, set()))
+    for ws in targets:
+        try:
+            await ws.close(code=4012)  # share link revoked
+        except Exception:
+            pass
+
+
+async def _pump_turn(
+    websocket: WebSocket, session_id: str, snapshot: list[dict], queue: asyncio.Queue
+) -> None:
+    """Forward an active turn's events (replayed buffer, then live) to a socket."""
+    try:
+        for payload in snapshot:
+            await websocket.send_json(payload)
+        while True:
+            payload = await queue.get()
+            if payload is TURN_END:
+                break
+            await websocket.send_json(payload)
+    finally:
+        await turn_runner.unsubscribe(session_id, queue)
+
+
+async def _follow_turns(websocket: WebSocket, session_id: str) -> None:
+    """Stream the session's turns to a socket for its whole lifetime.
+
+    Attaches to whichever turn is active and to each new one as it starts, pumping
+    each to completion before waiting for the next. Unlike a one-shot attach, this
+    lets a socket that connected BEFORE a turn began still receive it live — the
+    fix for passive viewers (a read-only share viewer, or a participant watching
+    someone else's turn), who never start a turn themselves. Cancelled on close.
+    """
+    while True:
+        sub = await turn_runner.subscribe(session_id)
+        if sub is None:
+            # No active turn — block until the next one starts (or the socket closes,
+            # which cancels this task). wait_for_turn returns at once if one is live.
+            # Accepted edge: a turn that both starts AND finishes within the gap
+            # between wait_for_turn returning and this subscribe() (a sub-millisecond
+            # synchronous/empty turn) is missed live and only shows on reload. Real AI
+            # turns stream for seconds, so the common case always catches the buffer.
+            await turn_runner.wait_for_turn(session_id)
+            continue
+        snapshot, queue = sub
+        # A turn is in progress (fresh or mid-flight): show streaming, then replay
+        # the buffer and forward live events.
+        await websocket.send_json({"type": "stream_resumed"})
+        await _pump_turn(websocket, session_id, snapshot, queue)
 
 
 async def connect(session_id: str, websocket: WebSocket) -> None:
@@ -123,6 +259,18 @@ async def validate_websocket_auth(websocket: WebSocket, db: AsyncSession) -> Use
     settings = get_settings()
 
     if not settings.oidc_enabled:
+        # Honor the ws-ticket if the client sent one (it always does), so dev-mode
+        # user switching carries onto the socket; else the default dev user.
+        header = websocket.headers.get("sec-websocket-protocol", "")
+        token = extract_ws_ticket(header)
+        if token:
+            payload = verify_ws_ticket(token)
+            sub = payload.get("sub") if payload else None
+            if sub:
+                result = await db.execute(select(User).where(User.id == sub))
+                user = result.scalar_one_or_none()
+                if user and user.is_active:
+                    return user
         return await get_or_create_dev_user(db)
 
     header = websocket.headers.get("sec-websocket-protocol", "")
@@ -144,36 +292,42 @@ async def validate_websocket_auth(websocket: WebSocket, db: AsyncSession) -> Use
 
 async def validate_session(
     db: AsyncSession, session_id: str, user: User | None = None
-) -> tuple[Session | None, Cluster | None, str | None]:
+) -> tuple[Session | None, Cluster | None, str | None, str | None]:
     """
-    Validate that a session exists, has an active cluster,
-    and optionally check user ownership.
+    Validate that a session exists, has an active cluster, and that the user may
+    access it. Returns ``(session, cluster, role, error)`` — ``role`` is the
+    caller's effective role (owner | editor | viewer) so the socket can gate what
+    a viewer may do; it is None when there is an error.
     """
     try:
         session = await db.get(Session, session_id)
         if not session:
-            return None, None, "Session not found"
+            return None, None, None, "Session not found"
 
-        if user and session.user_id and not user.is_admin():
-            if str(session.user_id) != str(user.id):
-                return None, None, "Access denied"
+        # Access: owner, admin, or an accepted participant (see session_access).
+        # No-auth dev mode (user is None) keeps full access as "owner".
+        role: str | None = "owner"
+        if user is not None:
+            role = await get_session_role(session, user, db)
+            if role is None:
+                return None, None, None, "Access denied"
 
         # A session may have no cluster: start without a Kube context.
         if session.cluster_id is None:
-            return session, None, None
+            return session, None, role, None
 
         cluster = await db.get(Cluster, session.cluster_id)
         if not cluster:
-            return None, None, "Cluster not found"
+            return None, None, None, "Cluster not found"
 
         if not cluster.is_active:
-            return None, None, "Cluster is not active"
+            return None, None, None, "Cluster is not active"
 
-        return session, cluster, None
+        return session, cluster, role, None
 
     except Exception as e:
         logger.exception(f"Error validating session {session_id}")
-        return None, None, f"Error validating session: {str(e)}"
+        return None, None, None, f"Error validating session: {str(e)}"
 
 
 async def close_session_connections(session_id: str) -> None:
@@ -213,6 +367,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
     # Validate auth and session before accepting the connection
     cluster_ctx: ClusterContext | None = None
     user_id = None
+    user_display_name = ""
+    session_role = "owner"  # owner | editor | viewer — gates what this socket may do
     async with async_session_maker() as db:
         user = await validate_websocket_auth(websocket, db)
         if not user:
@@ -220,13 +376,15 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             return
 
         user_id = user.id
+        user_display_name = user.display_name
         await db.commit()
 
-        session, cluster, error = await validate_session(db, session_id, user)
+        session, cluster, role, error = await validate_session(db, session_id, user)
 
         if error:
             await websocket.close(code=4004)
             return
+        session_role = role or "owner"
 
         # cluster may be None: session runs without a Kube context.
         if cluster is not None:
@@ -237,7 +395,6 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             )
 
     await connect(session_id, websocket)
-    await note_connect(user_id)
 
     logger.info(
         "Session validated",
@@ -248,10 +405,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
     )
 
     # Orchestration runs detached from this socket via the turn_runner, so a turn
-    # survives the client navigating away (and still persists its result). This
-    # socket only (a) starts/stops turns and (b) streams a turn's events. A single
-    # pump task forwards the active turn's buffered + live events to this client;
-    # it's recreated whenever we (re)attach to a turn.
+    # survives the client navigating away (and still persists its result). A single
+    # background task FOLLOWS the session's turns — attaching to whichever turn is
+    # active and to each new one as it begins — so this socket streams turns it did
+    # not itself start (another participant's turn, or, for a read-only viewer, the
+    # owner's). See _follow_turns.
     base_kwargs = {
         "session_id": session_id,
         "cluster_name": cluster_ctx.display_name if cluster_ctx else None,
@@ -259,45 +417,36 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
         "context_name": cluster_ctx.context_name if cluster_ctx else None,
         "user_id": user_id,
     }
-    stream_task: asyncio.Task[None] | None = None
-
-    async def pump(snapshot: list[dict], queue: asyncio.Queue) -> None:
-        """Forward an active turn's events (replayed buffer, then live) to this socket."""
-        try:
-            for payload in snapshot:
-                await websocket.send_json(payload)
-            while True:
-                payload = await queue.get()
-                if payload is TURN_END:
-                    break
-                await websocket.send_json(payload)
-        finally:
-            await turn_runner.unsubscribe(session_id, queue)
-
-    async def attach(send_resumed: bool) -> None:
-        """Subscribe this socket to the session's active turn, if any."""
-        nonlocal stream_task
-        sub = await turn_runner.subscribe(session_id)
-        if sub is None:
-            return
-        snapshot, queue = sub
-        # On reconnect (client navigated back mid-turn) tell the UI to show the
-        # streaming state before we replay the in-progress events.
-        if send_resumed:
-            await websocket.send_json({"type": "stream_resumed"})
-        stream_task = asyncio.create_task(pump(snapshot, queue))
 
     async def receive_loop() -> None:
-        nonlocal stream_task
         while True:
             data = await websocket.receive_json()
             msg_type = data.get("type")
+
+            # Viewers watch only: reject anything that drives or interrupts the turn.
+            if session_role == "viewer" and msg_type in ("message", "retry", "stop"):
+                await websocket.send_json(
+                    {"type": "error", "content": "You have view-only access to this conversation"}
+                )
+                continue
 
             if msg_type == "stop":
                 await turn_runner.cancel(session_id)
                 logger.info("Stop requested", extra={"session_id": session_id})
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
+            elif msg_type == "typing":
+                # Ephemeral "X is typing…" to the other participants (not the sender).
+                await broadcast_to_session(
+                    session_id,
+                    {
+                        "type": "typing",
+                        "user_id": str(user_id),
+                        "display_name": user_display_name,
+                        "state": bool(data.get("state")),
+                    },
+                    exclude=websocket,
+                )
             elif msg_type is not None and msg_type.startswith("mcp_dek_"):
                 # Browser-fractioned DEK handshake (see app.services.mcp_dek_handshake):
                 # supplies/derives the per-user key that seals MCP OAuth token blobs.
@@ -337,7 +486,20 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                         {"type": "error", "content": "A response is already in progress."}
                     )
                     continue
-                await attach(send_resumed=False)
+                # Show the question to the other participants in real time (the sender
+                # already rendered it optimistically). On reload it comes from history
+                # with the same author_user_id, so the two stay consistent.
+                await broadcast_to_session(
+                    session_id,
+                    {
+                        "type": "user_message",
+                        "content": content,
+                        "attachments": attachments,
+                        "author_user_id": str(user_id),
+                        "author_display_name": user_display_name,
+                    },
+                    exclude=websocket,
+                )
             elif msg_type == "retry":
                 # Re-run the latest interrupted turn. The errored user message is
                 # already in history, so we replay it in place
@@ -380,16 +542,23 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                         await clear_retry_state(db, session_id)
                 except Exception:
                     logger.exception("Clear retry state failed", extra={"session_id": session_id})
-                await attach(send_resumed=False)
             else:
                 await websocket.send_json(
                     {"type": "error", "content": f"Unknown message type: {msg_type}"}
                 )
 
+    # Register presence + start the turn-follow loop INSIDE the try, so any failure
+    # here still reaches the finally and releases the connection/presence/DEK we took.
+    # Follow streams the active turn plus every later one (see _follow_turns), so a
+    # passive viewer sees turns it did not start; it runs alongside the receive loop.
+    follow_task: asyncio.Task[None] | None = None
+    dek_held = False
     try:
-        # If a turn is already running for this session, the client is reconnecting
-        # (e.g. navigated back) — attach so it sees the in-progress work live.
-        await attach(send_resumed=True)
+        await note_connect(user_id)
+        dek_held = True
+        # Announce arrival to everyone already in this conversation (and vice versa).
+        await _register_presence(session_id, websocket, user)
+        follow_task = asyncio.create_task(_follow_turns(websocket, session_id))
         await receive_loop()
 
     except WebSocketDisconnect:
@@ -425,13 +594,83 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             pass
 
     finally:
-        # Tear down only this socket's pump — NOT the turn, which keeps running
-        # detached and will persist its result even with no client attached.
-        if stream_task is not None:
-            if not stream_task.done():
-                stream_task.cancel()
+        # Stop following turns for this socket — the turns keep running detached and
+        # still persist their result even with no client attached.
+        if follow_task is not None:
+            follow_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
-                await stream_task
+                await follow_task
         await disconnect(session_id, websocket)
-        # Drop the in-RAM DEK once the user's last socket closes (connected-only custody).
-        await note_disconnect(user_id)
+        # Tell the remaining participants this user's tab left (updates the roster).
+        await _unregister_presence(session_id, websocket)
+        # Drop the in-RAM DEK once the user's last socket closes (connected-only
+        # custody) — only if we actually took it (note_connect ran).
+        if dek_held:
+            await note_disconnect(user_id)
+
+
+@router.websocket("/ws/shared/{token}")
+async def websocket_shared(websocket: WebSocket, token: str) -> None:
+    """Anonymous, read-only live view of a conversation via a share-link token.
+
+    No OIDC — the token is the credential. The guest joins the session's live event
+    stream (turn deltas, a peer 'user_message' echo, presence) but can only ping;
+    every other inbound frame is ignored. Revoking the link closes this socket.
+    """
+    async with async_session_maker() as db:
+        link = await db.scalar(
+            select(SessionShareLink).where(
+                SessionShareLink.token == token,
+                SessionShareLink.is_active == True,  # noqa: E712
+            )
+        )
+        if link is None:
+            await websocket.close(code=4004)  # invalid / revoked
+            return
+        session_id = str(link.session_id)
+        session = await db.get(Session, session_id)
+        if session is None:
+            await websocket.close(code=4004)
+            return
+
+    await connect(session_id, websocket)
+    # Anonymous guests show in the roster as "Guest"; a per-socket id keeps each
+    # guest a distinct chip (and is never tied to a real account).
+    guest_id = f"guest:{id(websocket)}"
+
+    # Register the token/presence entries + start the follow loop INSIDE the try, so a
+    # failure still reaches the finally and frees them. Follow streams the active turn
+    # plus every later one so a guest sees the AI answer live; the loop honors pings only.
+    follow_task: asyncio.Task[None] | None = None
+    try:
+        async with _connections_lock:
+            shared_link_connections[token].add(websocket)
+        await _register_presence_raw(session_id, websocket, guest_id, "Guest")
+        # Tell the guest its own presence id so the client can filter itself out of the
+        # "who's viewing" roster (it has no authenticated user id to match on).
+        await websocket.send_json({"type": "presence_self", "user_id": guest_id})
+        follow_task = asyncio.create_task(_follow_turns(websocket, session_id))
+        while True:
+            data = await websocket.receive_json()
+            # Read-only: keepalive only; ignore anything a malicious client might send.
+            if data.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        logger.info("Shared viewer disconnected", extra={"session_id": session_id})
+    except (json.JSONDecodeError, ValidationError):
+        pass
+    except Exception:
+        logger.exception(f"Shared WebSocket error in session {session_id}")
+    finally:
+        if follow_task is not None:
+            follow_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await follow_task
+        async with _connections_lock:
+            conns = shared_link_connections.get(token)
+            if conns is not None:
+                conns.discard(websocket)
+                if not conns:
+                    del shared_link_connections[token]
+        await disconnect(session_id, websocket)
+        await _unregister_presence(session_id, websocket)
