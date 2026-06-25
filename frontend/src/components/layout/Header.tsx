@@ -1,13 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Check, Menu, User, LogOut, Shield, HelpCircle, BarChart3 } from 'lucide-react';
+import { ArrowLeft, Menu, User, LogOut, Shield, HelpCircle, BarChart3, Settings } from 'lucide-react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
+import { usePreferencesStore } from '@/store/preferences';
 import { useAuthStore } from '@/store/admin';
 import { useOnboardingStore } from '@/store/onboarding';
 import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
+import { SettingsModal } from '@/components/settings/SettingsModal';
 import { devSwitchUser } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
 
@@ -20,13 +22,15 @@ export function Header() {
   // store intact so the chat restores as-is when navigating back.
   const storeSession = useSessionsStore((s) => s.currentSession);
   const currentSession = inAdminPanel ? null : storeSession;
-  const { compactToolCards, toggleCompactToolCards, showTimestamps, toggleShowTimestamps, wideComposer, toggleWideComposer, toggleSidebar } = useSettingsStore();
+  const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
+  const loadPreferences = usePreferencesStore((s) => s.load);
   const { user, oidcEnabled, isAuthenticated, logout } = useAuthStore();
   // fetchConfig still primes the shared config (model picker, attachments gate) once
   // the user is authenticated, even though the header no longer renders a model badge.
   const { fetchConfig } = useConfigStore();
   const version = useUpdateStore((s) => s.loadedVersion);
   const [showMenu, setShowMenu] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [devName, setDevName] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -37,10 +41,14 @@ export function Header() {
     window.location.href = '/';
   };
 
-  // The /api/config endpoint requires auth — fetch only once signed in.
+  // The /api/config endpoint requires auth — fetch only once signed in. Also hydrate the
+  // DB-backed preferences so UI settings sync across devices on login.
   useEffect(() => {
-    if (isAuthenticated) fetchConfig();
-  }, [isAuthenticated, fetchConfig]);
+    if (isAuthenticated) {
+      fetchConfig();
+      void loadPreferences();
+    }
+  }, [isAuthenticated, fetchConfig, loadPreferences]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -169,29 +177,15 @@ export function Header() {
               </div>
 
               <div className="p-2 space-y-1">
-                <div className="px-3 py-1">
-                  <span className="text-xs text-gray-500 uppercase tracking-wider">Settings</span>
-                </div>
                 <button
-                  onClick={toggleCompactToolCards}
-                  className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowSettings(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
                 >
-                  <span>Compact tool cards</span>
-                  {compactToolCards && <Check className="h-4 w-4 text-green-400" />}
-                </button>
-                <button
-                  onClick={toggleShowTimestamps}
-                  className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
-                >
-                  <span>Show timestamps</span>
-                  {showTimestamps && <Check className="h-4 w-4 text-green-400" />}
-                </button>
-                <button
-                  onClick={toggleWideComposer}
-                  className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
-                >
-                  <span>Wide composer</span>
-                  {wideComposer && <Check className="h-4 w-4 text-green-400" />}
+                  <Settings className="h-4 w-4" />
+                  <span>Settings</span>
                 </button>
                 {/* Replay the first-run tour. Non-admins only (admins never see it); it
                     runs on the start screen, so jump there and clear the seen flag. */}
@@ -240,6 +234,8 @@ export function Header() {
           )}
         </div>
       </div>
+
+      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
     </header>
   );
 }
