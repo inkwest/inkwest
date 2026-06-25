@@ -23,7 +23,6 @@ export function useWebSocket(sessionId: string) {
     setError,
     addMessage,
     clearMessageError,
-    markTodosInterrupted,
   } = useChatStore();
 
   const handleEvent = useCallback((event: ChatEvent) => {
@@ -115,10 +114,6 @@ export function useWebSocket(sessionId: string) {
           });
         }
 
-        if (wasStopped) {
-          markTodosInterrupted();
-        }
-
         if (event.metadata) {
           const inp = event.metadata.input_tokens as number | undefined;
           const out = event.metadata.output_tokens as number | undefined;
@@ -175,7 +170,6 @@ export function useWebSocket(sessionId: string) {
     setIsConnected,
     setError,
     addMessage,
-    markTodosInterrupted,
   ]);
 
   useEffect(() => {

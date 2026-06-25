@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentType } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Cloud, Gitlab } from 'lucide-react';
+import { Gitlab } from 'lucide-react';
+import { AwsIcon } from '@/components/icons/BrandIcons';
 import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore, useSystemPromptStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { ConnectorName } from '@/types/connectors';
 import { ChatInput } from '@/components/chat/ChatInput';
+import { Attachment } from '@/types/api';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
+import { ConnectorIconButton } from '@/components/connector/ConnectorIconButton';
+import { StateBadge } from '@/components/connector/StateBadge';
 import { McpPanel } from '@/components/connector/McpPanel';
 import { ModelEnginePicker } from '@/components/chat/ModelEnginePicker';
 
@@ -14,8 +18,12 @@ const CUSTOM = '__custom__';
 
 // Connectors offered before a session exists. The real per-session ConnectorPanel
 // (status-aware, only enabled connectors) takes over the moment the session is created.
-const PRESESSION_CONNECTORS: { name: ConnectorName; label: string; Icon: typeof Cloud }[] = [
-  { name: 'aws', label: 'AWS', Icon: Cloud },
+const PRESESSION_CONNECTORS: {
+  name: ConnectorName;
+  label: string;
+  Icon: ComponentType<{ className?: string }>;
+}[] = [
+  { name: 'aws', label: 'AWS', Icon: AwsIcon },
   { name: 'gitlab', label: 'GitLab', Icon: Gitlab },
 ];
 
@@ -98,14 +106,15 @@ export function StartConversation() {
     return creatingRef.current;
   }, [sessionId, isAdmin, selectedPrompt, customPrompt, selectedModel, selectedEngine, createSession]);
 
-  const handleSend = async (message: string) => {
+  const handleSend = async (message: string, attachments?: Attachment[]) => {
     if (customInvalid) return;
     setError(null);
     try {
       const id = await ensureSession();
       // The session page seeds + auto-submits this once its WebSocket connects;
-      // the text stays recoverable in the composer until it actually sends.
-      setPendingPrompt(message);
+      // the text + any attachments stay recoverable until it actually sends. The
+      // files were already uploaded to this session, so the descriptors travel along.
+      setPendingPrompt(message, attachments ?? null);
       navigate(`/session/${id}`);
     } catch (e) {
       setError(`Could not start the session: ${(e as Error).message}`);
@@ -177,64 +186,6 @@ export function StartConversation() {
           </div>
         )}
 
-        {config && (config.available_models.length > 1 || config.engines.length > 1) && (
-          <div>
-            <label className="block text-sm text-gray-400 mb-2">Model</label>
-            <ModelEnginePicker
-              config={config}
-              model={selectedModel}
-              engine={selectedEngine}
-              onChange={(model, engine) => {
-                setSelectedModel(model);
-                setSelectedEngine(engine);
-              }}
-              triggerClassName="w-full justify-between bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm"
-              menuClassName="left-0 right-0"
-            />
-          </div>
-        )}
-
-        {/* External access + MCP — one row each. Once the session exists, hand off
-            to the real status-aware panel (which renders the MCP row itself). */}
-        {sessionId ? (
-          <div className="rounded-lg border border-gray-700">
-            <ConnectorPanel
-              sessionId={sessionId}
-              autoStart={autoStart}
-              layout="stacked"
-              autoOpenMcp={mcpAutoOpen}
-            />
-          </div>
-        ) : (
-          <div className="flex flex-col gap-1 rounded-lg border border-gray-700 bg-gray-900/60 px-4 py-2">
-            <span className="text-xs text-gray-500 mb-0.5">External access:</span>
-            {PRESESSION_CONNECTORS.map(({ name, label, Icon }) => (
-              <div key={name} className="flex w-full items-center justify-between rounded-md px-2 py-1">
-                <div className="flex items-center gap-2">
-                  <Icon className="h-4 w-4 text-gray-400" />
-                  <span className="text-sm text-gray-200">{label}</span>
-                </div>
-                <button
-                  onClick={() => handleGiveAccess(name)}
-                  disabled={customInvalid}
-                  className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
-                >
-                  Give access
-                </button>
-              </div>
-            ))}
-            {/* MCP servers — same bordered box, lazily creates the session on open.
-                deferOpen: this instance unmounts when the session is created; the
-                post-session ConnectorPanel reopens the picker via autoOpenMcp. */}
-            <McpPanel
-              sessionId={sessionId ?? ''}
-              variant="row"
-              onBeforeOpen={handleConfigureMcp}
-              deferOpen
-            />
-          </div>
-        )}
-
         {error && (
           <div role="alert" className="rounded-md border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">
             {error}
@@ -246,6 +197,58 @@ export function StartConversation() {
           onSend={handleSend}
           disabled={customInvalid}
           placeholder="Describe what you want to investigate or analyse…"
+          sessionId={sessionId ?? undefined}
+          onBeforeAttach={() => ensureSession()}
+          modelControl={
+            config && (config.available_models.length > 1 || config.engines.length > 1) ? (
+              <ModelEnginePicker
+                config={config}
+                model={selectedModel}
+                engine={selectedEngine}
+                onChange={(model, engine) => {
+                  setSelectedModel(model);
+                  setSelectedEngine(engine);
+                }}
+                menuClassName="bottom-full mb-1 right-0 w-96 max-w-[calc(100vw-2rem)]"
+                title="Model for this conversation"
+              />
+            ) : undefined
+          }
+          connectorControls={
+            sessionId ? (
+              // Session exists → the status-aware panel drives grants + hosts the modals.
+              <ConnectorPanel
+                sessionId={sessionId}
+                autoStart={autoStart}
+                layout="icons"
+                autoOpenMcp={mcpAutoOpen}
+              />
+            ) : (
+              // Pre-session: clicking an icon lazily creates the session, then the
+              // ConnectorPanel above takes over (autoStart / autoOpenMcp resume the flow).
+              <>
+                {PRESESSION_CONNECTORS.map(({ name, label, Icon }) => (
+                  <ConnectorIconButton
+                    key={name}
+                    Icon={Icon}
+                    title={`Give ${label} access`}
+                    tone="off"
+                    onClick={() => handleGiveAccess(name)}
+                    disabled={customInvalid}
+                    overlayTitle={label}
+                    overlayBadge={<StateBadge state="not_connected" />}
+                    overlayBody={<p className="text-gray-400">No access granted. Click to connect.</p>}
+                  />
+                ))}
+                <McpPanel
+                  sessionId=""
+                  variant="icon"
+                  onBeforeOpen={handleConfigureMcp}
+                  deferOpen
+                />
+              </>
+            )
+          }
         />
       </div>
     </div>

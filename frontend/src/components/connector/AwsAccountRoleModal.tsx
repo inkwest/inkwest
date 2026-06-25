@@ -55,6 +55,8 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
   // second close. Kept current every render.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  // One-shot guard so a re-initiate (below) that still 409s can't loop forever.
+  const reinitiatedRef = useRef(false);
 
   // load(false): cached list (instant); load(true): force a fresh SSO enumeration.
   const load = useCallback(
@@ -76,7 +78,25 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
           setSelected((prev) => new Set([...prev].filter((k) => live.has(k))));
         }
       } catch (e) {
-        setError((e as Error).message);
+        const msg = (e as Error).message;
+        // The provisional AWS credential expired/cleared between the status read and
+        // this open (options returns 409), so the picker has nothing to list. Recover
+        // automatically (the user otherwise just closes and reopens): a silent warm
+        // re-grant usually re-establishes it; failing that, hand off to the full device
+        // flow. One-shot to avoid a 409 loop.
+        const isReinitiate = e instanceof api.ApiError && e.status === 409;
+        if (!refresh && isReinitiate && !reinitiatedRef.current) {
+          reinitiatedRef.current = true;
+          const store = useConnectorsStore.getState();
+          if (await store.tryWarmGrant(sessionId, 'aws', { openPicker: false })) {
+            await load(false); // credential re-established → the list loads now
+            return;
+          }
+          await store.startAwsDevice(sessionId); // no warm session → device flow takes over
+          onCloseRef.current();
+          return;
+        }
+        setError(msg);
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -91,6 +111,7 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     setQuery('');
     setWatch('off');
     shownAt.current = 0;
+    reinitiatedRef.current = false;
     void load(false);
   }, [isOpen, sessionId, load]);
 

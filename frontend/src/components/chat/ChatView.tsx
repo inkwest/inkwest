@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useChatStore } from '@/store/chat';
 import { useSettingsStore } from '@/store/settings';
@@ -6,9 +6,9 @@ import { useEgressSocket, isBlocked } from '@/hooks/useEgressSocket';
 import { useSessionMetrics } from '@/hooks/useSessionMetrics';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
+import { SessionModelSelect } from './SessionModelSelect';
 import { StreamingMessage } from './StreamingMessage';
 import { ErrorBanner } from './ErrorBanner';
-import { FloatingTodoPanel } from './FloatingTodoPanel';
 import { EgressLog } from './EgressPanel';
 import { MonitoringPanel } from './MonitoringPanel';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
@@ -22,17 +22,36 @@ interface Props {
   onStopStreaming?: () => void;
   onRetryMessage?: (messageId: string) => void;
   initialPrompt?: string | null;
+  // Attachments handed off from the start screen, seeded into the composer alongside
+  // initialPrompt so the auto-submit carries them.
+  initialAttachments?: Attachment[] | null;
   // Auto-submit initialPrompt once the composer is enabled (WS connected).
   autoSubmit?: boolean;
   sessionId?: string;
 }
 
-export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initialPrompt, autoSubmit, sessionId }: Props) {
-  const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks, currentTodos } = useChatStore();
+export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initialPrompt, initialAttachments, autoSubmit, sessionId }: Props) {
+  const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks } = useChatStore();
   const compact = useSettingsStore((s) => s.compactToolCards);
+  const wideComposer = useSettingsStore((s) => s.wideComposer);
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
+  // The floating composer overlaps the scroll area; pad the messages by its measured
+  // height so the last one always clears it, even as the composer grows with text.
+  const composerRef = useRef<HTMLDivElement>(null);
+  const [composerH, setComposerH] = useState(0);
+  // useLayoutEffect: set the height before paint so the bottom padding is correct on
+  // the very first render — the on-load scroll-to-bottom then lands past the composer
+  // instead of leaving the last message hidden under it.
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setComposerH(el.offsetHeight));
+    ro.observe(el);
+    setComposerH(el.offsetHeight);
+    return () => ro.disconnect();
+  }, []);
 
   // Deep-link from a search hit: `?m=<messageId>` scrolls that message into view and
   // highlights it briefly. The param is consumed (cleared) once handled so new messages
@@ -81,7 +100,13 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
     if (isAtBottomRef.current) {
       scrollToBottom('smooth');
     }
-  }, [messages, streamingMessage, streamingBlocks, currentTodos, targetMessageId, scrollToBottom]);
+  }, [messages, streamingMessage, streamingBlocks, targetMessageId, scrollToBottom]);
+
+  // The composer's measured height feeds the bottom padding; when it settles (on load:
+  // 0 → real) or grows, re-pin to the bottom so the last message stays clear of it.
+  useEffect(() => {
+    if (!targetMessageId && isAtBottomRef.current) scrollToBottom('auto');
+  }, [composerH, targetMessageId, scrollToBottom]);
 
   // Scroll to and highlight a search-linked message once the conversation has loaded (it
   // loads asynchronously for a cold-opened session). The `m` param is consumed as soon as
@@ -197,13 +222,16 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
         </button>
       </div>
 
-      {/* Chat stays mounted (just hidden) on the other tabs, to preserve scroll + state. */}
-      <div className={cn('flex-1 flex flex-col min-h-0', (showEgress || showMonitoring) && 'hidden')}>
-        {sessionId && <ConnectorPanel sessionId={sessionId} />}
+      {/* Chat stays mounted (just hidden) on the other tabs, to preserve scroll + state.
+          The messages area fills the full height (its scrollbar spans the whole
+          conversation) and the composer floats over the bottom as an overlay — the
+          last messages clear it via the scroll area's bottom padding. */}
+      <div className={cn('relative flex-1 flex flex-col min-h-0', (showEgress || showMonitoring) && 'hidden')}>
         <div
           ref={containerRef}
           onScroll={handleScroll}
           className="flex-1 overflow-y-auto overflow-x-hidden p-4 min-h-0"
+          style={{ paddingBottom: composerH + 32 }}
         >
           <div ref={contentRef}>
             {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
@@ -212,13 +240,32 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
             {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
           </div>
         </div>
-        <ChatInput onSend={onSendMessage} onStop={onStopStreaming} disabled={!isConnected} isStreaming={isStreaming} initialPrompt={initialPrompt} autoSubmit={autoSubmit} sessionId={sessionId} />
+        {/* Floating composer overlay. `right-4` keeps it off the messages scrollbar.
+            The composer card is frosted glass (semi-transparent + backdrop-blur), so
+            messages show through softly behind it without a hard dock or a shadow bar.
+            pointer-events-none on the gutter lets scroll pass through to the messages. */}
+        <div className="pointer-events-none absolute bottom-0 left-0 right-4">
+          <div ref={composerRef} className="pointer-events-auto">
+            <div className={cn('mx-auto', wideComposer ? 'max-w-none' : 'max-w-[72rem]')}>
+              <ChatInput
+                onSend={onSendMessage}
+                onStop={onStopStreaming}
+                disabled={!isConnected}
+                isStreaming={isStreaming}
+                initialPrompt={initialPrompt}
+                autoSubmit={autoSubmit}
+                initialAttachments={initialAttachments}
+                sessionId={sessionId}
+                modelControl={<SessionModelSelect />}
+                connectorControls={sessionId ? <ConnectorPanel sessionId={sessionId} layout="icons" /> : undefined}
+              />
+            </div>
+          </div>
+        </div>
       </div>
 
       {showEgress && <EgressLog events={egress.events} connected={egress.connected} />}
       {showMonitoring && <MonitoringPanel samples={metrics.samples} status={metrics.status} />}
-
-      <FloatingTodoPanel />
     </div>
   );
 }

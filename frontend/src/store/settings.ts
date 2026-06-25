@@ -1,12 +1,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type TaskListPosition = 'hidden' | 'top' | 'bottom';
-
 interface SettingsState {
   compactToolCards: boolean;
   showTimestamps: boolean;
-  taskListPosition: TaskListPosition;
+  // Composer width in chat: false = comfortable reading width, true = full width.
+  wideComposer: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
 
@@ -14,7 +13,7 @@ interface SettingsState {
   toggleCompactToolCards: () => void;
   setShowTimestamps: (show: boolean) => void;
   toggleShowTimestamps: () => void;
-  setTaskListPosition: (position: TaskListPosition) => void;
+  toggleWideComposer: () => void;
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
   setSidebarWidth: (width: number) => void;
@@ -25,7 +24,7 @@ export const useSettingsStore = create<SettingsState>()(
     (set) => ({
       compactToolCards: true,
       showTimestamps: true,
-      taskListPosition: 'bottom',
+      wideComposer: false,
       sidebarOpen: false,
       sidebarWidth: 256,
 
@@ -35,7 +34,8 @@ export const useSettingsStore = create<SettingsState>()(
       setShowTimestamps: (show) => set({ showTimestamps: show }),
       toggleShowTimestamps: () =>
         set((state) => ({ showTimestamps: !state.showTimestamps })),
-      setTaskListPosition: (position) => set({ taskListPosition: position }),
+      toggleWideComposer: () =>
+        set((state) => ({ wideComposer: !state.wideComposer })),
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       setSidebarWidth: (width) => set({ sidebarWidth: Math.min(480, Math.max(200, width)) }),
@@ -45,7 +45,7 @@ export const useSettingsStore = create<SettingsState>()(
       partialize: (state) => ({
         compactToolCards: state.compactToolCards,
         showTimestamps: state.showTimestamps,
-        taskListPosition: state.taskListPosition,
+        wideComposer: state.wideComposer,
         sidebarWidth: state.sidebarWidth,
       }),
     }

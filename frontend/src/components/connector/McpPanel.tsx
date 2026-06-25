@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { Plug } from 'lucide-react';
+import { McpIcon } from '@/components/icons/BrandIcons';
+import { ConnectorIconButton } from './ConnectorIconButton';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import {
   disconnectMcpAuth,
-  getMcpCatalog,
   getSessionMcp,
   setSessionMcp,
   type McpServerEntry,
 } from '@/services/api';
 import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useSessionsStore } from '@/store/sessions';
+import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCache';
 
 interface Props {
   sessionId: string;
@@ -20,7 +21,8 @@ interface Props {
   onBeforeOpen?: () => Promise<void> | void;
   // 'inline' (default): connector-style item in the in-conversation connector bar.
   // 'row': full-width connector-style item (start screen, stacked layout).
-  variant?: 'inline' | 'row';
+  // 'icon': single square toolbar icon (composer bar) — tone + click-to-configure.
+  variant?: 'inline' | 'row' | 'icon';
   // Open the modal as soon as this becomes true. Used to reopen after the start
   // screen lazily creates the session (which remounts this component).
   autoOpen?: boolean;
@@ -47,8 +49,10 @@ export function McpPanel({
   deferOpen = false,
   showWhenEmpty = false,
 }: Props) {
-  const [catalog, setCatalog] = useState<string[]>([]);
-  const [oauthServers, setOauthServers] = useState<McpServerEntry[]>([]);
+  const [catalog, setCatalog] = useState<string[]>(() => peekMcpCatalog()?.keys ?? []);
+  const [oauthServers, setOauthServers] = useState<McpServerEntry[]>(
+    () => peekMcpCatalog()?.servers.filter((s) => s.kind === 'oauth2') ?? []
+  );
   const [enabled, setEnabled] = useState<Set<string>>(new Set());
   const [draftEnabled, setDraftEnabled] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState(autoOpen);
@@ -69,7 +73,7 @@ export function McpPanel({
     let cancelled = false;
     const load = async () => {
       try {
-        const cat = await getMcpCatalog();
+        const cat = await loadMcpCatalog();
         if (cancelled) return;
         setCatalog(cat.keys);
         setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
@@ -131,7 +135,9 @@ export function McpPanel({
 
   const refreshOauth = async (): Promise<McpServerEntry[]> => {
     try {
-      const cat = await getMcpCatalog();
+      // Force-refresh: an OAuth connect just changed server state, so bypass the TTL.
+      const cat = await loadMcpCatalog(true);
+      setCatalog(cat.keys);
       const oauth = cat.servers.filter((s) => s.kind === 'oauth2');
       setOauthServers(oauth);
       return oauth;
@@ -175,6 +181,8 @@ export function McpPanel({
         setDraftEnabled(set);
       }
       const cat = await disconnectMcpAuth(key);
+      primeMcpCatalog(cat); // keep the shared cache in sync so a remount isn't stale
+      setCatalog(cat.keys);
       setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
     } catch {
       setError('Failed to disconnect MCP server');
@@ -208,43 +216,78 @@ export function McpPanel({
 
   return (
     <>
-      <div
-        className={`group relative flex items-center gap-2 rounded-md px-2 py-1 ${
-          variant === 'row' ? 'w-full justify-between' : ''
-        }`}
-      >
-        <div className="flex items-center gap-2">
-          <Plug className="h-4 w-4 text-gray-400" />
-          <span className="text-sm text-gray-200">MCP servers</span>
-          {hasCatalog ? (
-            <Badge variant={anyOn ? 'success' : 'default'}>{badgeText}</Badge>
-          ) : (
-            <Badge variant="default">none</Badge>
+      {variant === 'icon' ? (
+        // Toolbar icon: same green/gray tone scheme as the connector icons; click
+        // opens the same config modal as the "Configure" link.
+        <ConnectorIconButton
+          Icon={McpIcon}
+          title={hasCatalog ? `MCP servers — ${badgeText} (click to configure)` : 'MCP servers — none configured'}
+          tone={anyOn ? 'on' : 'off'}
+          onClick={handleOpen}
+          disabled={!hasCatalog}
+          overlayTitle="MCP servers"
+          overlayBadge={
+            hasCatalog ? (
+              <Badge variant={anyOn ? 'success' : 'default'}>{badgeText}</Badge>
+            ) : (
+              <Badge variant="default">none</Badge>
+            )
+          }
+          overlayBody={
+            !hasCatalog ? (
+              <div className="text-gray-400">No MCP servers configured.</div>
+            ) : enabledKeys.length > 0 ? (
+              <ul className="space-y-1 text-gray-400">
+                {enabledKeys.map((key) => (
+                  <li key={key}>
+                    <span className="truncate text-gray-300">{key}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-gray-400">No servers enabled.</div>
+            )
+          }
+        />
+      ) : (
+        <div
+          className={`group relative flex items-center gap-2 rounded-md px-2 py-1 ${
+            variant === 'row' ? 'w-full justify-between' : ''
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <McpIcon className="h-4 w-4 text-gray-400" />
+            <span className="text-sm text-gray-200">MCP servers</span>
+            {hasCatalog ? (
+              <Badge variant={anyOn ? 'success' : 'default'}>{badgeText}</Badge>
+            ) : (
+              <Badge variant="default">none</Badge>
+            )}
+          </div>
+          {hasCatalog && (
+            <button
+              onClick={handleOpen}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              Configure
+            </button>
           )}
+          <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-60 rounded-md border border-gray-700 bg-gray-800 p-2 text-xs shadow-lg group-hover:block">
+            <div className="mb-1 font-medium text-gray-300">Permissions</div>
+            {enabledKeys.length > 0 ? (
+              <ul className="space-y-1 text-gray-400">
+                {enabledKeys.map((key) => (
+                  <li key={key}>
+                    <span className="truncate text-gray-300">{key}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-gray-400">No access granted</div>
+            )}
+          </div>
         </div>
-        {hasCatalog && (
-          <button
-            onClick={handleOpen}
-            className="text-xs text-blue-400 hover:text-blue-300"
-          >
-            Configure
-          </button>
-        )}
-        <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-60 rounded-md border border-gray-700 bg-gray-800 p-2 text-xs shadow-lg group-hover:block">
-          <div className="mb-1 font-medium text-gray-300">Permissions</div>
-          {enabledKeys.length > 0 ? (
-            <ul className="space-y-1 text-gray-400">
-              {enabledKeys.map((key) => (
-                <li key={key}>
-                  <span className="truncate text-gray-300">{key}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="text-gray-400">No access granted</div>
-          )}
-        </div>
-      </div>
+      )}
 
       <Modal isOpen={open && hasCatalog} onClose={handleClose} title="MCP servers" size="sm">
         <p className="text-sm text-gray-400 mb-3">

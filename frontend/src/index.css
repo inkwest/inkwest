@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Modals center over the content area (right of the sidebar) on desktop so they sit
+   in the chat region, not the whole window. On mobile the sidebar is an overlay, so
+   the stage spans full width. `--modal-left` is set inline to the live sidebar width. */
+.modal-stage { left: 0; }
+@media (min-width: 768px) {
+  .modal-stage { left: var(--modal-left, 0); }
+}
+
 @keyframes flash-btn {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -20,7 +28,9 @@
 .shimmer-border {
   border-color: transparent !important;
   background:
-    linear-gradient(rgb(55 65 81), rgb(55 65 81)) padding-box,
+    /* gray-800 padding-box fill to match the composer card (bg-gray-800/90) the
+       animated border wraps — keeps the card colour steady while the rim sweeps. */
+    linear-gradient(rgb(31 41 55), rgb(31 41 55)) padding-box,
     linear-gradient(
       110deg,
       rgb(75 85 99) 35%,
@@ -47,11 +57,11 @@
 
 /* "Fancy invite to prompt": slow low-contrast hue drifting around the border of a
    pristine new-conversation composer. Same padding-box/border-box trick as
-   .shimmer-border so the gray-700 fill stays opaque under the gradient border. */
+   .shimmer-border so the gray-800 card fill stays opaque under the gradient border. */
 .invite-border {
   border-color: transparent !important;
   background:
-    linear-gradient(rgb(55 65 81), rgb(55 65 81)) padding-box,
+    linear-gradient(rgb(31 41 55), rgb(31 41 55)) padding-box,
     conic-gradient(
       from var(--invite-angle),
       rgb(75 85 99),

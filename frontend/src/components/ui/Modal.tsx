@@ -1,7 +1,8 @@
-import { HTMLAttributes, forwardRef, useEffect } from 'react';
+import { HTMLAttributes, forwardRef, useEffect, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { clsx } from 'clsx';
 import { X } from 'lucide-react';
+import { useSettingsStore } from '@/store/settings';
 
 export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
   isOpen: boolean;
@@ -23,6 +24,10 @@ export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
 
 export const Modal = forwardRef<HTMLDivElement, ModalProps>(
   ({ className, isOpen, onClose, title, size = 'md', align = 'center', bodyClassName, children, ...props }, ref) => {
+    // Center over the content area, not the whole window: offset the stage by the live
+    // sidebar width (+4px resize handle) on desktop. The .modal-stage CSS only applies
+    // the offset at md+, so mobile (overlay sidebar) stays full-width.
+    const sidebarWidth = useSettingsStore((s) => s.sidebarWidth);
     useEffect(() => {
       const handleEscape = (e: KeyboardEvent) => {
         // Consume Escape here so the topmost overlay wins — otherwise it bubbles to the
@@ -73,7 +78,10 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
     };
 
     return createPortal(
-      <div className="fixed inset-0 z-50 overflow-y-auto">
+      <div
+        className="modal-stage fixed inset-y-0 right-0 z-50 overflow-y-auto"
+        style={{ '--modal-left': `${sidebarWidth + 4}px` } as CSSProperties}
+      >
         <div className={clsx('flex min-h-full justify-center p-4', alignments[align])}>
           <div
             className="fixed inset-0 bg-black/70 transition-opacity"
