@@ -51,7 +51,8 @@ from app.services.engines import (
     inkwest_agent_enabled,
 )
 from app.services.model_catalog import bedrock_include_open, catalog_status, refresh_catalog
-from app.services.sandbox import hard_ceiling
+from app.services.sandbox import hard_ceiling, list_sandboxes
+from app.services.sandbox import terminate as terminate_sandbox
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -1270,6 +1271,81 @@ async def update_sandbox_settings(
         f"max_sessions_per_user={body.max_sessions_per_user}"
     )
     return _sandbox_settings_response()
+
+
+class ActiveSandbox(BaseModel):
+    """One running conversation sandbox (container pair) as seen by the Docker daemon."""
+
+    session_id: str
+    user_id: str | None
+    # Resolved owner email when the user is still known; falls back to the raw id otherwise.
+    user_email: str | None
+    status: str  # docker status line, e.g. "Up 3 minutes" (conveys uptime)
+    in_use: int  # live turns; 0 = idle (reapable) or an orphan the registry forgot
+
+
+class ActiveSandboxesResponse(BaseModel):
+    count: int  # number of running conversation sandboxes (one per container pair)
+    sandboxes: list[ActiveSandbox]
+
+
+# A wedged/unreachable Docker daemon must surface as a clear upstream failure, not a 500 or
+# (worse) a fake "0 sandboxes" — sandbox.list_sandboxes/terminate raise on daemon errors.
+# OSError subsumes the daemon-hang case (builtin TimeoutError is an OSError subclass) plus a
+# missing/unexecutable docker binary (FileNotFoundError/PermissionError); RuntimeError is the
+# non-zero-exit signal _docker raises under check=True.
+_DOCKER_ERRORS = (RuntimeError, OSError)
+_DOCKER_UNAVAILABLE = "Sandbox Docker daemon is unreachable or unresponsive."
+
+
+@router.get("/sandboxes", response_model=ActiveSandboxesResponse)
+async def get_active_sandboxes(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> ActiveSandboxesResponse:
+    """List the conversation sandboxes currently running in the Docker/dind daemon."""
+    try:
+        infos = await list_sandboxes()
+    except _DOCKER_ERRORS as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=_DOCKER_UNAVAILABLE) from e
+    # One batched lookup to turn owner UUIDs into emails (the label only carries the id).
+    user_ids = {i.user_id for i in infos if i.user_id}
+    emails: dict[str, str] = {}
+    if user_ids:
+        rows = (await db.execute(select(User).where(cast(User.id, Text).in_(user_ids)))).scalars()
+        emails = {str(u.id): u.email for u in rows}
+    return ActiveSandboxesResponse(
+        count=len(infos),
+        sandboxes=[
+            ActiveSandbox(
+                session_id=i.session_id,
+                user_id=i.user_id,
+                user_email=emails.get(i.user_id) if i.user_id else None,
+                status=i.status,
+                in_use=i.in_use,
+            )
+            for i in infos
+        ],
+    )
+
+
+@router.delete("/sandboxes/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def terminate_active_sandbox(session_id: UUID, admin: AdminUser) -> None:
+    """Terminate a running conversation sandbox (kill its container pair).
+
+    Soft teardown: the containers/networks are removed but the durable session dir is
+    kept, so the conversation can cold-start and resume on its owner's next turn. Force:
+    unlike the idle reaper it kills the pair even mid-turn (that turn's ``docker exec``
+    fails and the turn errors out). Idempotent — terminating an unknown/already-gone id
+    is a no-op (still 204). ``session_id`` is a UUID, so it can't address arbitrary
+    containers outside the ``inkwest_conv_/proxy_<tag>`` namespace. A wedged daemon
+    yields 502 rather than a silent 500.
+    """
+    try:
+        killed = await terminate_sandbox(str(session_id))
+    except _DOCKER_ERRORS as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=_DOCKER_UNAVAILABLE) from e
+    logger.info(f"Sandbox {session_id} terminated by admin {admin.email}: killed={killed}")
 
 
 class BudgetSettingsResponse(BaseModel):
