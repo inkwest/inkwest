@@ -27,6 +27,9 @@ BEDROCK_INCLUDE_OPEN_KEY = "bedrock_include_open"
 # The engine the default model runs on when a session pins neither (the admin's
 # Engine·Model default). Unset = resolve heuristically (engines.engine_for_turn).
 DEFAULT_ENGINE_KEY = "default_engine"
+# Per-user concurrent-sandbox ceiling (admin override of settings.sandbox_max_sessions_per_user).
+# Unset = fall back to the env default. See app.services.sandbox._max_sessions_per_user.
+SANDBOX_MAX_SESSIONS_PER_USER_KEY = "sandbox_max_sessions_per_user"
 
 _settings: dict[str, str] = {}
 # Serializes writes so concurrent admin saves can't leave the in-memory copy
@@ -47,6 +50,17 @@ def get_bool_setting(key: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in _TRUE
+
+
+def get_int_setting(key: str, default: int) -> int:
+    """Get an integer setting; unset/empty/non-numeric falls back to ``default``."""
+    raw = _settings.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 async def load_settings(db: AsyncSession) -> None:

@@ -226,7 +226,16 @@ required.
             from app.services import sandbox
             from app.services.mcp_config import apply_session_mcp_selection
 
-            container = await sandbox.ensure(session_id_str)
+            uid = str(user_id) if user_id else None
+            # Reap the user's oldest idle pairs first; refuse if they're at the hard ceiling
+            # with every conversation busy. Caught here (not the generic handler below) so the
+            # user gets the plain "too many conversations" message, not "Unexpected error".
+            try:
+                await sandbox.enforce_user_sandbox_cap(uid, session_id_str)
+            except sandbox.SandboxCapExceededError as e:
+                yield error_event(str(e))
+                return
+            container = await sandbox.ensure(session_id_str, uid)
             work_dir = "/workdir"
             # Reconcile the conversation's enabled MCP servers into its .claude.json
             # before the CLI starts (the CLI reads its config at launch). Done every
