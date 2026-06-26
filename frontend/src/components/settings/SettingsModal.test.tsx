@@ -35,9 +35,9 @@ describe('SettingsModal', () => {
 
   it('renders the three tabs', async () => {
     render(<SettingsModal isOpen onClose={() => {}} />);
-    expect(screen.getByText('Display')).toBeInTheDocument();
-    expect(screen.getByText('Personal Skills')).toBeInTheDocument();
-    expect(screen.getByText('Import / Export')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Display' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Skills' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import / Export' })).toBeInTheDocument();
   });
 
   it('toggling a display setting persists via saveUi', async () => {

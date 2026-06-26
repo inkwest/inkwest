@@ -24,8 +24,8 @@ export function SkillsPage() {
       <div>
         <h1 className="text-2xl font-bold">Skills</h1>
         <p className="text-gray-400 mt-1">
-          Manage skills — reusable prompts triggered via /&lt;slug&gt; in the chat (and
-          auto-invokable by Claude)
+          Manage skills — reusable prompts triggered via /&lt;slug&gt; in the chat (or
+          auto-invoked by the agent)
         </p>
       </div>
 
