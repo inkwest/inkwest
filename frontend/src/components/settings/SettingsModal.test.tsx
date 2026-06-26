@@ -59,4 +59,13 @@ describe('SettingsModal', () => {
     render(<SettingsModal isOpen={false} onClose={() => {}} />);
     expect(screen.queryByText('Display')).not.toBeInTheDocument();
   });
+
+  it('gates the body until preferences finish loading', () => {
+    // load() stubbed so `loaded` stays false → no writer (toggle) is reachable, which would
+    // otherwise PUT a document missing skills.disabled_admin and drop the user's choices.
+    usePreferencesStore.setState({ loaded: false, load: vi.fn() });
+    render(<SettingsModal isOpen onClose={() => {}} />);
+    expect(screen.getByText('Display')).toBeInTheDocument(); // tabs still show
+    expect(screen.queryByText('Wide composer')).not.toBeInTheDocument(); // body gated
+  });
 });

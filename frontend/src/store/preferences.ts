@@ -104,6 +104,11 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         // One-time migration: server has no UI settings yet → seed it from the local cache.
         document = { ...resp.document, ui: uiFromCache() };
         await updateMyPreferences(document);
+        // The migration adds a second await; re-check so a write during it isn't clobbered.
+        if (get().writeSeq !== seq) {
+          set({ loading: false, loaded: true });
+          return;
+        }
       }
       set({
         loaded: true,

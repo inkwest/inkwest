@@ -49,9 +49,19 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         ))}
       </div>
 
-      {tab === 'display' && <DisplayTab />}
-      {tab === 'skills' && <SkillsTab adminSkills={adminSkills} />}
-      {tab === 'io' && <ImportExportTab />}
+      {/* Gate writes on a completed load: editing before the server document arrives would
+          PUT a document missing skills.disabled_admin and silently drop the user's choices. */}
+      {!prefs.loaded ? (
+        <div className="flex items-center justify-center py-12">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+        </div>
+      ) : (
+        <>
+          {tab === 'display' && <DisplayTab />}
+          {tab === 'skills' && <SkillsTab adminSkills={adminSkills} />}
+          {tab === 'io' && <ImportExportTab />}
+        </>
+      )}
     </Modal>
   );
 }
