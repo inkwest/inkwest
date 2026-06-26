@@ -28,9 +28,28 @@ interface EgressState {
   disabled: boolean; // sandbox feature is off (server closed with 4003)
 }
 
-/** squid denials surface as TCP_DENIED and/or a 4xx/5xx status on the line. */
+/**
+ * A real squid *block*: the access-control list refused the host, so squid never
+ * contacted the upstream — logged as `TCP_DENIED` (with `HIER_NONE`). This is the
+ * only thing the policy actually denied.
+ *
+ * Note: a 4xx/5xx status alone is NOT a block. A line like `TCP_TUNNEL/503 …
+ * HIER_DIRECT/<ip>` means squid established the tunnel and the upstream (or the
+ * connection to it) failed — an error unrelated to egress policy. Those are
+ * classified by {@link isError}, not here.
+ */
 export function isBlocked(e: EgressEvent): boolean {
-  return e.decision.includes('DENIED') || e.status.startsWith('4') || e.status.startsWith('5');
+  return e.decision.includes('DENIED');
+}
+
+/**
+ * A non-block failure: squid forwarded the request but the upstream returned/raised a
+ * 4xx/5xx. For HTTPS (CONNECT) this only fires on squid-generated tunnel failures
+ * (502/503/504), since the tunnelled inner status is invisible to squid; a genuine
+ * upstream 4xx/5xx is only seen — and flagged here — on plain-HTTP traffic.
+ */
+export function isError(e: EgressEvent): boolean {
+  return !isBlocked(e) && (e.status.startsWith('4') || e.status.startsWith('5'));
 }
 
 /**
