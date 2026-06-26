@@ -29,12 +29,14 @@ from app.api.routes import (
     health,
     mcp,
     mcp_proxy,
+    me,
     metrics,
     sessions,
     sharing,
     skills,
     sync,
     system_prompts,
+    usage,
 )
 from app.core.config import get_settings
 from app.core.database import async_session_maker, close_db, init_db
@@ -246,6 +248,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 app.include_router(health.router)
 app.include_router(clusters.router, prefix="/api")
 app.include_router(skills.router, prefix="/api")
+app.include_router(me.router, prefix="/api")  # Current-user prefs + personal skills
 app.include_router(system_prompts.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(metrics.router, prefix="/api")  # Per-conversation sandbox resource metrics
@@ -253,6 +256,7 @@ app.include_router(sessions.search_router, prefix="/api")
 app.include_router(sharing.router, prefix="/api")  # Conversation sharing / collaboration
 app.include_router(auth.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(usage.router, prefix="/api")  # Self-service usage reports (/api/me/usage)
 app.include_router(config.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")

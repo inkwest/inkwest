@@ -291,7 +291,7 @@ def _patch_broker(
         ),
         # P1.7 skills + MCP boundaries. Default: no skills, no MCP servers — the
         # skill/MCP-specific tests below override the return values.
-        patch.object(oia, "get_active_skills", AsyncMock(return_value=skills or [])),
+        patch.object(oia, "get_effective_skills", AsyncMock(return_value=skills or [])),
         patch.object(oia, "get_enabled_mcp_servers", AsyncMock(return_value=enabled_mcp or [])),
         patch.object(oia, "apply_session_skills", spies.apply_session_skills),
         patch.object(
@@ -429,8 +429,8 @@ class TestOrchestrateInkwestAgent:
             {"name": "kubectl_get", "exec_profile": "agent"},
         ]
         assert spec["creds_path"] == "/home/agent/.aws"
-        # sandbox lease taken and released
-        spies.ensure.assert_awaited_once_with(SESSION_ID)
+        # sandbox lease taken (with the owner, for the per-user cap) and released
+        spies.ensure.assert_awaited_once_with(SESSION_ID, str(USER_ID))
         spies.release.assert_awaited_once_with(SESSION_ID)
         # P1.7: no skills, no MCP servers in the default fixture → empty skills, no root,
         # no mcp_config_path; the MCP config is still removed (cleanup is unconditional —
@@ -446,6 +446,31 @@ class TestOrchestrateInkwestAgent:
         # turn) + turn-end cleanup in finally. Both target this session.
         assert spies.remove_agent_mcp_config.call_count == 2
         assert all(c.args == (SESSION_ID,) for c in spies.remove_agent_mcp_config.call_args_list)
+
+    async def test_refuses_turn_at_hard_cap(self):
+        """When enforce_user_sandbox_cap raises, the turn is refused with a user-facing
+        error and no sandbox is provisioned."""
+        from app.services.sandbox import SandboxCapExceededError
+
+        patches, spies = _patch_broker()
+        patches.append(
+            patch(
+                "app.services.sandbox.enforce_user_sandbox_cap",
+                AsyncMock(side_effect=SandboxCapExceededError(active=8, hard_cap=7)),
+            )
+        )
+        for p in patches:
+            p.start()
+        try:
+            events = await _run_broker(spies, [json.dumps({"type": "done"})])
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert any(
+            e.type == "error" and "Too many conversations" in (e.content or "") for e in events
+        )
+        spies.ensure.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_attachments_and_modalities_projected_to_turn_spec(self):
@@ -583,8 +608,8 @@ class TestOrchestrateInkwestAgent:
         patches, spies = _patch_broker()
         for p in patches:
             p.start()
-        # Re-point get_active_skills (already patched by the fixture) at a raising mock.
-        oia.get_active_skills.side_effect = RuntimeError("db down")
+        # Re-point get_effective_skills (already patched by the fixture) at a raising mock.
+        oia.get_effective_skills.side_effect = RuntimeError("db down")
         try:
             events = await _run_broker(spies, [json.dumps({"type": "done"})])
         finally:

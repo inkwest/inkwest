@@ -1,6 +1,8 @@
 import { ChatEvent, SendMessage } from '@/types/events';
 import { fetchWsTicket, wsBaseUrl } from '@/services/api';
 import { dekReply } from '@/lib/mcpDek';
+import { jitteredBackoff, createReconnectBudget, RECONNECT_BUDGET_MS } from '@/lib/backoff';
+import { useBackendStore } from '@/store/backend';
 
 type EventHandler = (event: ChatEvent) => void;
 
@@ -9,12 +11,25 @@ export class ChatWebSocket {
   private sessionId: string;
   private handlers: Set<EventHandler> = new Set();
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  // Chat reconnects faster than the sync/egress loops (3000) because a live chat
+  // stream is the most latency-sensitive socket — a dropped frame mid-answer is
+  // the most visible to the user.
   private reconnectDelay = 1000;
+  // No attempt cap: a backend deploy/restart can outlast any fixed count, so we
+  // keep reconnecting until it returns (or the budget is spent / disconnect()).
+  // The delay is capped so backoff plateaus instead of growing unbounded.
+  private maxReconnectDelay = 30000;
   private pingInterval: number | null = null;
   private reconnectTimer: number | null = null;
   private _disconnected = false;
+  // Wall-clock give-up budget; reset on a successful open.
+  private reconnectBudget = createReconnectBudget(RECONNECT_BUDGET_MS);
+  private ticketAbort: AbortController | null = null;
   private pendingSends: SendMessage[] = [];
+  // Cap the offline queue: a user typing through a long outage must not grow it
+  // without bound. At the cap, new sends are rejected (see send()) rather than
+  // evicting already-queued messages.
+  private maxPendingSends = 50;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -26,16 +41,18 @@ export class ChatWebSocket {
     // The ticket POST is cookie-authed (dev mode returns the dev user); the WS
     // handshake can't carry the cookie reliably, so it rides the subprotocol.
     let protocols: string[] = ['inkwest'];
+    this.ticketAbort = new AbortController();
     try {
-      const ticket = await fetchWsTicket();
+      const ticket = await fetchWsTicket(this.ticketAbort.signal);
       if (this._disconnected) return;
       protocols = ['inkwest', `ticket|${ticket}`];
     } catch {
       if (this._disconnected) return;
       this.notifyHandlers({ type: 'error', content: 'Failed to authenticate connection' });
-      if (this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.scheduleReconnect();
-      }
+      // Reconnect on a failed ticket POST too (backend redeploy / auth-gateway
+      // blip). scheduleReconnect owns both the give-up decision (budget) and the
+      // 'reconnecting' state, so this path can't strand the UI on "Reconnecting…".
+      this.scheduleReconnect();
       return;
     }
     this.ws = new WebSocket(`${wsUrl}/ws/chat/${this.sessionId}`, protocols);
@@ -43,6 +60,9 @@ export class ChatWebSocket {
     this.ws.onopen = () => {
       console.log('WebSocket connected');
       this.reconnectAttempts = 0;
+      this.reconnectBudget.reset(); // recovered — grant a fresh give-up budget
+      // A live socket is proof the backend is reachable — clear the global banner.
+      useBackendStore.getState().reachable();
       this.startPingInterval();
       for (const message of this.pendingSends.splice(0)) {
         this.ws?.send(JSON.stringify(message));
@@ -80,14 +100,22 @@ export class ChatWebSocket {
 
       // Terminal: access to this session is gone, so reconnecting would just loop
       // on the same rejection (a "Connection error" storm). 4004 access denied /
-      // not found, 4010 session deleted, 4011 share revoked. The sync socket
+      // not found, 4010 session deleted, 4011 access revoked. The sync socket
       // navigates the user out of the dead session (see useSyncSocket).
       if (event.code === 4004 || event.code === 4010 || event.code === 4011) {
+        this.notifyHandlers({ type: 'reconnecting', state: false });
         return;
       }
 
-      if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+      // No attempt cap: a backend deploy/restart can outlast any fixed count, so
+      // keep reconnecting on any non-clean, non-terminal close (delay is capped).
+      if (event.code !== 1000) {
         this.scheduleReconnect();
+      } else {
+        // Clean close (1000) — no retry pending. Drop any lingering "Reconnecting…"
+        // state so the flat "Disconnected" badge stands. (Exhaustion give-up lives in
+        // scheduleReconnect's budget check, not here.)
+        this.notifyHandlers({ type: 'reconnecting', state: false });
       }
     };
 
@@ -101,9 +129,29 @@ export class ChatWebSocket {
   }
 
   private scheduleReconnect(): void {
+    if (this.reconnectBudget.expired()) {
+      // Budget spent: give up QUIETLY. Chat is per-session and remounts on
+      // navigation (fresh budget), and the chat view surfaces its own connection
+      // error — so it must not raise the GLOBAL reload banner. That is the sync
+      // socket's job (the app-wide heartbeat); see useSyncSocket.
+      //
+      // Surface the give-up to the chat UI so its badge drops "Reconnecting…" back
+      // to "Disconnected" instead of spinning forever with no retry pending. This is
+      // the single give-up point for both socket-close and ticket-fetch exhaustion.
+      this.notifyHandlers({ type: 'reconnecting', state: false });
+      return;
+    }
     this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    const delay = jitteredBackoff(this.reconnectAttempts - 1, {
+      baseMs: this.reconnectDelay,
+      maxMs: this.maxReconnectDelay,
+    });
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+
+    // A retry is now pending — surface it so the UI distinguishes a transient blip
+    // from a terminal disconnect. Cleared by the next 'connected' (onopen), the
+    // budget give-up above, or a terminal/clean close in onclose.
+    this.notifyHandlers({ type: 'reconnecting', state: true });
 
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
@@ -135,6 +183,11 @@ export class ChatWebSocket {
     if (message.type === 'message') {
       // Never silently drop a user message during a connect/reconnect window —
       // park it and flush on open. Pings/stops are meaningless on a dead socket.
+      // At the cap, reject THIS send (return false) rather than evicting an
+      // already-queued earlier message: the caller already treats false as
+      // "not delivered live", so it gets an honest signal, and messages the user
+      // was previously told were queued are not silently discarded.
+      if (this.pendingSends.length >= this.maxPendingSends) return false;
       this.pendingSends.push(message);
       return false;
     }
@@ -192,6 +245,8 @@ export class ChatWebSocket {
   disconnect(): void {
     this._disconnected = true;
     this.pendingSends = [];
+    // Abort an in-flight ticket fetch (and its retry loop) so it doesn't linger.
+    this.ticketAbort?.abort();
     this.stopPingInterval();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);

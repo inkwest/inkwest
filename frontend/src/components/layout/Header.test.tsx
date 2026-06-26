@@ -7,6 +7,8 @@ import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
+import { usePreferencesStore } from '@/store/preferences';
+import * as api from '@/services/api';
 
 vi.mock('@/components/chat/ConnectionStatus', () => ({
   ConnectionStatus: () => <div data-testid="connection-status">Connected</div>,
@@ -41,6 +43,9 @@ describe('Header', () => {
     });
     // Stub fetchConfig so the mount effect never hits the network.
     useConfigStore.setState({ config: null, fetchConfig: vi.fn() });
+    // Stub the prefs hydrate (mount effect) + the modal's admin-skill fetch.
+    usePreferencesStore.setState({ loaded: true, load: vi.fn(), skills: [], disabledAdmin: [], document: {} });
+    vi.spyOn(api, 'getSkills').mockResolvedValue([]);
   });
 
   it('renders Inkwest branding', () => {
@@ -129,9 +134,21 @@ describe('Header', () => {
     renderHeader();
 
     await user.click(screen.getByTitle('Profile & Settings'));
-    expect(screen.getByText('Compact tool cards')).toBeInTheDocument();
+    // Display toggles moved into the Settings modal; the menu now offers a Settings entry.
+    expect(screen.getByText('Settings')).toBeInTheDocument();
     expect(screen.getByText('Dev User')).toBeInTheDocument();
     expect(screen.getByText('dev@localhost')).toBeInTheDocument();
+  });
+
+  it('opens the Settings modal from the menu', async () => {
+    const user = userEvent.setup();
+    renderHeader();
+
+    await user.click(screen.getByTitle('Profile & Settings'));
+    await user.click(screen.getByText('Settings'));
+    // The modal is open when its tabs are visible.
+    expect(await screen.findByText('Display')).toBeInTheDocument();
+    expect(screen.getByText('Import / Export')).toBeInTheDocument();
   });
 
   it('shows admin link for admin users', async () => {

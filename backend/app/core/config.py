@@ -202,6 +202,13 @@ class Settings(BaseSettings):
     sandbox_cpu_limit: str = "1.0"  # docker run --cpus, per container
     sandbox_memory_limit: str = "1g"  # docker run --memory, per container
     sandbox_pids_limit: int = 512  # docker run --pids-limit, per container
+    # Per-user ceiling on concurrent conversation sandboxes (each = conv + squid
+    # container pair). When a user's new turn would exceed it, their oldest IDLE
+    # sandbox(es) are soft-reaped (durable dir kept → cold-start later); in-use ones
+    # are never killed, so an all-busy user runs briefly over-cap. 0 = unlimited. This
+    # is only the boot default — the live value is admin-tunable (app_settings) without
+    # a restart; see app.services.sandbox._max_sessions_per_user.
+    sandbox_max_sessions_per_user: int = 5
 
     # File attachments uploaded into a conversation's /workdir and referenced to the
     # agent as @/workdir/<file>. Sandbox/claude-cli only (the only orchestrator with a
@@ -213,6 +220,13 @@ class Settings(BaseSettings):
         "png,jpg,jpeg,gif,webp,svg,pdf,txt,md,log,json,yaml,yml,"
         "csv,tsv,toml,ini,conf,xml,html,sh,py,js,ts,go,sql"
     )
+
+    # Per-user preferences + personal skills quotas. Soft caps, server-
+    # enforced: they bound the agent's per-turn context (every active personal skill
+    # is materialized into the sandbox) and host storage. Tunable per deployment.
+    user_skills_max_count: int = 50  # max ACTIVE personal skills per user
+    user_skill_max_bytes: int = 64 * 1024  # max SKILL.md size, per personal skill
+    user_prefs_doc_max_bytes: int = 256 * 1024  # max serialized preferences document
 
     # ==========================================================================
     # MCP catalog — the set of MCP servers users may enable per conversation.

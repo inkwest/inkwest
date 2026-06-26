@@ -894,3 +894,182 @@ async def test_dev_switch_404_under_oidc(authenticated_client: AsyncClient) -> N
 
         resp = await authenticated_client.get("/api/auth/dev-switch?user=bob")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Anonymous share-link live-event sanitization (_sanitize_shared_event)
+#
+# The public viewer's live socket must mirror the narrow REST projection: it may
+# see the answer text and tool I/O, but never internal reasoning or per-turn
+# token/cost metadata. Whitelist semantics — unknown types are withheld.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "thinking", "content": "secret chain-of-thought"},
+        {"type": "reasoning", "content": "deciding what to do next"},
+        {"type": "status_update", "metadata": {"total_tokens": 1234}},
+        {"type": "budget_warning", "content": "Budget 'team': 80% used"},
+        {"type": "tool_proposal", "tool_name": "kubectl", "tool_input": {}},
+        {"type": "search_proposal", "content": "why I want to search"},
+        {"type": "confirm_request", "content": "approve?"},
+        {"type": "session_info", "metadata": {"cli_session_id": "abc"}},
+        {"type": "connector_required", "metadata": {"connector": "aws"}},
+        {"type": "mcp_auth_required", "metadata": {"mcp_key": "x"}},
+        {"type": "error", "content": "boto3 AccessDenied for arn:aws:iam::123"},
+        {"type": "search_results", "metadata": {"results": [{"url": "x"}]}},
+        {"type": "some_future_event", "content": "unknown"},
+    ],
+)
+def test_sanitize_shared_event_drops_internal_events(payload: dict) -> None:
+    from app.api.routes.chat import _sanitize_shared_event
+
+    assert _sanitize_shared_event(payload) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "text_delta", "content": "the answer"},
+        {"type": "tool_start", "tool_name": "kubectl", "tool_input": {"args": "get pods"}},
+        {"type": "tool_result", "tool_name": "kubectl", "content": "pod/foo Running"},
+    ],
+)
+def test_sanitize_shared_event_passes_presentational_events(payload: dict) -> None:
+    from app.api.routes.chat import _sanitize_shared_event
+
+    # Forwarded verbatim — these are exactly what the REST transcript already shows.
+    assert _sanitize_shared_event(payload) == payload
+
+
+def test_sanitize_shared_event_strips_done_metadata() -> None:
+    from app.api.routes.chat import _sanitize_shared_event
+
+    # The authenticated `done` carries token/iteration/latency metadata the public
+    # viewer must not see; only the `stopped` lifecycle flag survives.
+    out = _sanitize_shared_event(
+        {
+            "type": "done",
+            "metadata": {"input_tokens": 100, "output_tokens": 50, "iterations": 3},
+        }
+    )
+    assert out == {"type": "done"}
+
+    stopped = _sanitize_shared_event(
+        {"type": "done", "metadata": {"stopped": True, "output_tokens": 50}}
+    )
+    assert stopped == {"type": "done", "metadata": {"stopped": True}}
+
+
+# ---------------------------------------------------------------------------
+# Anonymous share-link broadcast sanitization (_sanitize_guest_broadcast)
+#
+# The session-wide broadcast path (presence, typing, a peer's message echo) must
+# not leak authenticated participants' identities to a public guest socket.
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_guest_broadcast_strips_user_message_author() -> None:
+    from app.api.routes.chat import _sanitize_guest_broadcast
+
+    # The guest must see the live question, but never who authored it.
+    out = _sanitize_guest_broadcast(
+        {
+            "type": "user_message",
+            "content": "what's failing?",
+            "attachments": [{"name": "log.txt"}],
+            "author_user_id": "11111111-1111-1111-1111-111111111111",
+            "author_display_name": "Alice",
+        }
+    )
+    # Exact-equality already proves no author_user_id / author_display_name survived.
+    assert out == {
+        "type": "user_message",
+        "content": "what's failing?",
+        "attachments": [{"name": "log.txt"}],
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "presence", "users": [{"user_id": "u", "display_name": "Alice"}]},
+        {"type": "typing", "user_id": "u", "display_name": "Alice", "state": True},
+        {"type": "some_future_broadcast", "user_id": "u"},
+    ],
+)
+def test_sanitize_guest_broadcast_drops_identity_frames(payload: dict) -> None:
+    from app.api.routes.chat import _sanitize_guest_broadcast
+
+    assert _sanitize_guest_broadcast(payload) is None
+
+
+@pytest.mark.asyncio
+async def test_pump_turn_sanitizes_guest_stream() -> None:
+    """Wiring: _pump_turn applies the sanitizer to both the replayed buffer and live queue."""
+    from app.api.routes import chat
+
+    ws = MagicMock()
+    ws.send_json = AsyncMock()
+    queue: asyncio.Queue = asyncio.Queue()
+    snapshot = [
+        {"type": "thinking", "content": "secret chain-of-thought"},
+        {"type": "text_delta", "content": "hello"},
+    ]
+    await queue.put({"type": "done", "metadata": {"input_tokens": 99}})
+    await queue.put(chat.TURN_END)
+
+    with patch.object(chat.turn_runner, "unsubscribe", new=AsyncMock()):
+        await chat._pump_turn(ws, "sid", snapshot, queue, chat._sanitize_shared_event)
+
+    sent = [c.args[0] for c in ws.send_json.call_args_list]
+    assert {"type": "text_delta", "content": "hello"} in sent
+    assert {"type": "done"} in sent  # token metadata stripped
+    assert all(p.get("type") != "thinking" for p in sent)  # reasoning withheld
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_session_sanitizes_only_guest_sockets() -> None:
+    """Wiring: a guest socket on a session gets the sanitized projection; members get raw."""
+    from app.api.routes import chat
+
+    guest = MagicMock()
+    guest.send_json = AsyncMock()
+    member = MagicMock()
+    member.send_json = AsyncMock()
+    sid = "broadcast-test-session"
+
+    chat.active_connections[sid].update({guest, member})
+    chat.guest_connections.add(guest)
+    try:
+        # presence: dropped for the guest, delivered verbatim to the member.
+        await chat.broadcast_to_session(
+            sid, {"type": "presence", "users": [{"user_id": "u", "display_name": "Alice"}]}
+        )
+        guest.send_json.assert_not_called()
+        member.send_json.assert_awaited_once()
+
+        # user_message: stripped of author for the guest, full for the member.
+        guest.send_json.reset_mock()
+        member.send_json.reset_mock()
+        await chat.broadcast_to_session(
+            sid,
+            {
+                "type": "user_message",
+                "content": "hi",
+                "attachments": [],
+                "author_user_id": "u",
+                "author_display_name": "Alice",
+            },
+        )
+        assert guest.send_json.call_args.args[0] == {
+            "type": "user_message",
+            "content": "hi",
+            "attachments": [],
+        }
+        assert member.send_json.call_args.args[0]["author_display_name"] == "Alice"
+    finally:
+        chat.guest_connections.discard(guest)
+        chat.active_connections.pop(sid, None)

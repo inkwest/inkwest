@@ -171,6 +171,21 @@ export interface UserSessionsUsage {
   sessions: SessionUsage[];
 }
 
+// Shared by the admin reports (adminApi.ts) and the self-service reports
+// (usageApi.ts) — neutral home so neither client depends on the other.
+export interface UsageDateRange {
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface UsageTimeseriesPoint {
+  timestamp: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  request_count: number;
+}
+
 // ============================================================================
 // Auth Types
 // ============================================================================

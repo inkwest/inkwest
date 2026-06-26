@@ -28,6 +28,58 @@ export interface Skill {
   created_at: string;
 }
 
+// Personal (per-user) skill — mirrors Skill plus the override provenance fields.
+export interface UserSkill {
+  id: string;
+  name: string;
+  slug: string;
+  argument_hint?: string | null;
+  content: string;
+  description?: string | null;
+  is_active: boolean;
+  // True when this personal skill shadows an admin skill of the same name (badge).
+  is_override: boolean;
+  source_admin_skill_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// UI settings carried in the preferences document (migrated off localStorage).
+export interface UiPreferences {
+  compactToolCards?: boolean;
+  showTimestamps?: boolean;
+  wideComposer?: boolean;
+  sidebarWidth?: number;
+}
+
+// The versioned per-user preferences document. The backend only interprets
+// `skills.disabled_admin`; `ui` is opaque storage owned by the frontend.
+export interface PreferencesDocument {
+  ui?: UiPreferences;
+  skills?: { disabled_admin?: string[] };
+}
+
+export interface PreferencesResponse {
+  schema_version: number;
+  document: PreferencesDocument;
+  skills: UserSkill[];
+}
+
+export interface ExportedSkill {
+  name: string;
+  content: string;
+  is_active: boolean;
+  is_override: boolean;
+}
+
+// The downloadable/importable config envelope (GET /api/me/export shape).
+export interface ConfigExport {
+  schema_version: number;
+  exported_at: string;
+  preferences: PreferencesDocument;
+  skills: ExportedSkill[];
+}
+
 // Session types
 export interface Session {
   id: string;

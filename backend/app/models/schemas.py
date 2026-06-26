@@ -118,6 +118,121 @@ class SkillList(BaseModel):
 
 
 # =============================================================================
+# User Preferences & Personal Skills Schemas
+# =============================================================================
+
+
+class UserSkillCreate(BaseModel):
+    """Create a personal skill from a single SKILL.md document (frontmatter + body).
+
+    Same shape as ``SkillCreate`` — name/description/arguments come from the frontmatter
+    so the admin CRUD UI is reused verbatim for personal skills.
+    """
+
+    content: str = Field(..., min_length=1)
+
+
+class UserSkillUpdate(BaseModel):
+    """Update a personal skill. ``content`` is the full SKILL.md; ``is_active`` toggles."""
+
+    content: str | None = Field(None, min_length=1)
+    is_active: bool | None = None
+
+
+class UserSkillResponse(BaseModel):
+    """A personal skill. Mirrors ``SkillResponse`` (so the shared CRUD component renders
+    it) plus the override provenance fields."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    content: str
+    description: str | None = None
+    is_active: bool
+    # True when this personal skill shadows an admin skill of the same name (badge).
+    is_override: bool = False
+    # The admin skill this was forked from, when known (provenance only).
+    source_admin_skill_id: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def slug(self) -> str:
+        """The ``/<slug>`` trigger. ``name`` is already the normalized slug."""
+        return slugify(self.name)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def argument_hint(self) -> str | None:
+        """Argument hint parsed from the SKILL.md frontmatter; None if absent."""
+        return frontmatter_argument_hint(self.content)
+
+
+class PreferencesUpdate(BaseModel):
+    """Replace the preferences document (UI settings + ``skills.disabled_admin``).
+
+    The document is opaque to the backend except for ``skills.disabled_admin``; the
+    route enforces only a size quota, not a deep schema.
+    """
+
+    document: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreferencesResponse(BaseModel):
+    """The current user's full preferences: the versioned document plus their personal
+    skills (one round-trip for the Settings modal)."""
+
+    schema_version: int
+    document: dict[str, Any]
+    skills: list[UserSkillResponse]
+
+
+class ExportSkill(BaseModel):
+    """A personal skill as it appears in an export envelope."""
+
+    name: str
+    content: str
+    is_active: bool
+    is_override: bool
+
+
+class ConfigExport(BaseModel):
+    """The downloadable, versioned config: preferences document + personal skills.
+
+    Re-importable verbatim (POST /api/me/import) — ``replace_all`` is a request flag, not
+    part of the envelope, so a saved export round-trips without edits.
+    """
+
+    schema_version: int
+    exported_at: datetime
+    preferences: dict[str, Any]
+    skills: list[ExportSkill]
+
+
+class ImportSkill(BaseModel):
+    """One skill in an import payload. Only ``content`` (+ optional ``is_active``) is
+    honored: name/description/is_override are re-derived server-side. Extra keys from an
+    export envelope (e.g. ``name``) are ignored, so an export imports unedited."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    content: str = Field(..., min_length=1)
+    is_active: bool = True
+
+
+class ConfigImport(BaseModel):
+    """An import payload — the same shape an export produces (extra keys ignored)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    skills: list[ImportSkill] = Field(default_factory=list)
+
+
+# =============================================================================
 # System Prompt Schemas
 # =============================================================================
 

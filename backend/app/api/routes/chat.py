@@ -13,8 +13,10 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -72,17 +74,50 @@ session_presence: dict[str, dict[WebSocket, Presence]] = defaultdict(dict)
 # single-replica, so this holds today; revisit alongside the other in-memory state.
 shared_link_connections: dict[str, set[WebSocket]] = defaultdict(set)
 
+# Flat set of every anonymous share-link socket, so a session-wide broadcast can tell
+# guests apart and project each frame down to the public-safe subset before sending.
+# Mutated under _connections_lock alongside shared_link_connections.
+guest_connections: set[WebSocket] = set()
+
+
+def _sanitize_guest_broadcast(payload: dict) -> dict | None:
+    """Project a session broadcast down to what an anonymous share-link guest may see.
+
+    Turn events go through ``_sanitize_shared_event``; this guards the *broadcast* path
+    (presence, typing, a peer's message echo), which otherwise leaks the real identities
+    of authenticated participants to the public viewer. Returns the frame to forward, or
+    ``None`` to drop it. The only broadcast a guest legitimately needs is the live
+    question text — stripped of who authored it, mirroring the REST projection.
+    """
+    if payload.get("type") == "user_message":
+        # Guest sees the question live, never the author (identity omitted by SharedMessage).
+        return {
+            "type": "user_message",
+            "content": payload.get("content", ""),
+            "attachments": payload.get("attachments", []),
+        }
+    # presence (roster names/ids), typing (who's typing), and anything else: withhold.
+    return None
+
 
 async def broadcast_to_session(
     session_id: str, payload: dict, *, exclude: WebSocket | None = None
 ) -> None:
     """Send a frame to every socket on a session (presence, typing, a peer's new
-    message) — turn-independent. Best-effort per socket; a dead socket is skipped."""
+    message) — turn-independent. Best-effort per socket; a dead socket is skipped.
+
+    Anonymous share-link guests receive a sanitized projection (``_sanitize_guest_broadcast``)
+    so a session broadcast never leaks authenticated participants' identities to a public link."""
     async with _connections_lock:
         targets = [ws for ws in active_connections.get(session_id, set()) if ws is not exclude]
+        guest_targets = [ws for ws in targets if ws in guest_connections]
+    guest_payload = _sanitize_guest_broadcast(payload) if guest_targets else None
     for ws in targets:
+        out = guest_payload if ws in guest_connections else payload
+        if out is None:
+            continue
         try:
-            await ws.send_json(payload)
+            await ws.send_json(out)
         except Exception:
             pass
 
@@ -142,23 +177,67 @@ async def close_share_link_connections(token: str) -> None:
             pass
 
 
+# Live turn events an anonymous share-link viewer may receive. Whitelist (not
+# blacklist) so any newly added event type is withheld by default — the public
+# viewer must never see the internal detail the unauthenticated REST projection
+# (SharedMessage) deliberately omits: model reasoning (`thinking`/`reasoning`),
+# per-turn token/cost/iteration metadata, or interactive/connector prompts. Only
+# the answer text and the tool I/O the transcript already shows are forwarded.
+_SHARED_VIEWER_EVENTS = frozenset({"text_delta", "tool_start", "tool_result", "done"})
+
+
+def _sanitize_shared_event(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Project a live turn event down to what a public share-link viewer may see.
+
+    Returns the (possibly trimmed) payload to forward, or ``None`` to drop it, keeping
+    the live view aligned with the REST projection (see ``SharedMessage``). ``done`` is
+    stripped to its lifecycle signal because its metadata carries token counts /
+    iterations / latency that the authenticated viewer sees but the public one must not.
+    """
+    etype = payload.get("type")
+    if etype not in _SHARED_VIEWER_EVENTS:
+        return None
+    if etype == "done":
+        # Keep only `stopped` (drives the "stopped" badge); drop usage/cost metadata.
+        if payload.get("metadata", {}).get("stopped"):
+            return {"type": "done", "metadata": {"stopped": True}}
+        return {"type": "done"}
+    return payload
+
+
 async def _pump_turn(
-    websocket: WebSocket, session_id: str, snapshot: list[dict], queue: asyncio.Queue
+    websocket: WebSocket,
+    session_id: str,
+    snapshot: list[dict],
+    queue: asyncio.Queue,
+    sanitize: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> None:
-    """Forward an active turn's events (replayed buffer, then live) to a socket."""
+    """Forward an active turn's events (replayed buffer, then live) to a socket.
+
+    ``sanitize`` (set for anonymous share viewers) projects/drops each event before
+    it leaves the server; authenticated sockets pass ``None`` and receive everything.
+    """
     try:
         for payload in snapshot:
-            await websocket.send_json(payload)
+            out = sanitize(payload) if sanitize else payload
+            if out is not None:
+                await websocket.send_json(out)
         while True:
             payload = await queue.get()
             if payload is TURN_END:
                 break
-            await websocket.send_json(payload)
+            out = sanitize(payload) if sanitize else payload
+            if out is not None:
+                await websocket.send_json(out)
     finally:
         await turn_runner.unsubscribe(session_id, queue)
 
 
-async def _follow_turns(websocket: WebSocket, session_id: str) -> None:
+async def _follow_turns(
+    websocket: WebSocket,
+    session_id: str,
+    sanitize: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+) -> None:
     """Stream the session's turns to a socket for its whole lifetime.
 
     Attaches to whichever turn is active and to each new one as it starts, pumping
@@ -182,7 +261,7 @@ async def _follow_turns(websocket: WebSocket, session_id: str) -> None:
         # A turn is in progress (fresh or mid-flight): show streaming, then replay
         # the buffer and forward live events.
         await websocket.send_json({"type": "stream_resumed"})
-        await _pump_turn(websocket, session_id, snapshot, queue)
+        await _pump_turn(websocket, session_id, snapshot, queue, sanitize)
 
 
 async def connect(session_id: str, websocket: WebSocket) -> None:
@@ -643,13 +722,21 @@ async def websocket_shared(websocket: WebSocket, token: str) -> None:
     # plus every later one so a guest sees the AI answer live; the loop honors pings only.
     follow_task: asyncio.Task[None] | None = None
     try:
+        # Flag as a guest BEFORE registering presence: _register_presence_raw broadcasts
+        # the roster to every socket incl. this one, and the guest flag is what makes that
+        # frame get dropped for the guest. Set it first or the first presence leaks.
         async with _connections_lock:
             shared_link_connections[token].add(websocket)
+            guest_connections.add(websocket)
         await _register_presence_raw(session_id, websocket, guest_id, "Guest")
         # Tell the guest its own presence id so the client can filter itself out of the
         # "who's viewing" roster (it has no authenticated user id to match on).
         await websocket.send_json({"type": "presence_self", "user_id": guest_id})
-        follow_task = asyncio.create_task(_follow_turns(websocket, session_id))
+        # Anonymous viewer: sanitize live events to the public-safe subset (see
+        # _sanitize_shared_event) so the stream never leaks what the REST view omits.
+        follow_task = asyncio.create_task(
+            _follow_turns(websocket, session_id, _sanitize_shared_event)
+        )
         while True:
             data = await websocket.receive_json()
             # Read-only: keepalive only; ignore anything a malicious client might send.
@@ -667,6 +754,7 @@ async def websocket_shared(websocket: WebSocket, token: str) -> None:
             with suppress(asyncio.CancelledError, Exception):
                 await follow_task
         async with _connections_lock:
+            guest_connections.discard(websocket)
             conns = shared_link_connections.get(token)
             if conns is not None:
                 conns.discard(websocket)

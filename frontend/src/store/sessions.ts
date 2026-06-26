@@ -3,6 +3,17 @@ import { Attachment, SearchResponse, Session, SessionWithMessages } from '@/type
 import * as api from '@/services/api';
 import { useDraftsStore } from '@/store/drafts';
 
+// Mirror the backend's ensure_session_title (messages.py): first 60 chars,
+// breaking at a word boundary if it lands reasonably far in. Kept in sync so the
+// optimistic sidebar title matches the canonical server title (no reconcile flicker).
+function deriveSessionTitle(message: string): string {
+  const text = message.trim();
+  if (text.length <= 60) return text;
+  const truncated = text.slice(0, 60);
+  const lastSpace = truncated.lastIndexOf(' ');
+  return (lastSpace > 40 ? truncated.slice(0, lastSpace) : truncated) + '...';
+}
+
 interface SessionsState {
   sessions: Session[];
   currentSession: SessionWithMessages | null;
@@ -25,6 +36,7 @@ interface SessionsState {
   deleteSession: (id: string) => Promise<void>;
   leaveSession: (id: string) => Promise<void>;
   setShareCount: (id: string, count: number) => void;
+  ensureSessionTitle: (id: string, firstMessage: string) => void;
   renameSession: (id: string, title: string) => Promise<void>;
   setSessionModel: (id: string, model: string | null, engine?: string | null) => Promise<void>;
   setCurrentSession: (session: SessionWithMessages | null) => void;
@@ -123,6 +135,26 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       currentSession: state.currentSession?.id === id ? null : state.currentSession,
     }));
   },
+
+  // Optimistically title a brand-new conversation from its first user message so it
+  // surfaces in the sidebar immediately (the sidebar hides title-less sessions). The
+  // server's title-set NOTIFY can be missed when the sync socket hasn't subscribed yet
+  // as the first turn starts; this is independent of that round-trip. No-op once titled
+  // (mirrors ensure_session_title) — a later fetchSessions reconciles the canonical title.
+  ensureSessionTitle: (id, firstMessage) =>
+    set((state) => {
+      const target = state.sessions.find((s) => s.id === id);
+      if (!target || target.title) return state;
+      const title = deriveSessionTitle(firstMessage);
+      if (!title) return state;
+      return {
+        sessions: state.sessions.map((s) => (s.id === id ? { ...s, title } : s)),
+        currentSession:
+          state.currentSession?.id === id
+            ? { ...state.currentSession, title }
+            : state.currentSession,
+      };
+    }),
 
   renameSession: async (id: string, title: string) => {
     const updated = await api.updateSession(id, { title });

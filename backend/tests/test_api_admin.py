@@ -709,3 +709,65 @@ async def test_mcp_oauth_meta_false_when_unconfigured(
     with patch("app.api.routes.admin.mcp_oauth_catalog.secret_storage_enabled", return_value=False):
         resp = await admin_client.get("/api/admin/mcp-oauth/meta")
     assert resp.json() == {"secret_storage_enabled": False}
+
+
+@pytest.fixture
+def reset_app_settings():
+    from app.services import app_settings
+
+    yield
+    app_settings._settings = {}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_settings_forbidden_for_non_admin(
+    authenticated_client: AsyncClient,
+) -> None:
+    resp = await authenticated_client.get("/api/admin/settings/sandbox")
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_settings_default(admin_client: AsyncClient) -> None:
+    resp = await admin_client.get("/api/admin/settings/sandbox")
+    assert resp.status_code == 200
+    data = resp.json()
+    # No override set -> effective equals the env default (5).
+    assert data["max_sessions_per_user"] == 5
+    assert data["default_max_sessions_per_user"] == 5
+    # Hard ceiling: cap 5 + max(2, 5//4=1) = 7.
+    assert data["hard_ceiling"] == 7
+
+
+@pytest.mark.asyncio
+async def test_update_sandbox_settings(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_app_settings: None
+) -> None:
+    from app.services import app_settings
+
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+    resp = await admin_client.put("/api/admin/settings/sandbox", json={"max_sessions_per_user": 12})
+    assert resp.status_code == 200
+    assert resp.json()["max_sessions_per_user"] == 12
+    mock_db.commit.assert_awaited()
+    # Effective immediately in memory (no restart).
+    assert app_settings.get_int_setting(app_settings.SANDBOX_MAX_SESSIONS_PER_USER_KEY, 0) == 12
+
+
+@pytest.mark.asyncio
+async def test_update_sandbox_settings_allows_zero_unlimited(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_app_settings: None
+) -> None:
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+    resp = await admin_client.put("/api/admin/settings/sandbox", json={"max_sessions_per_user": 0})
+    assert resp.status_code == 200
+    assert resp.json()["max_sessions_per_user"] == 0
+
+
+@pytest.mark.asyncio
+async def test_update_sandbox_settings_rejects_negative(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    resp = await admin_client.put("/api/admin/settings/sandbox", json={"max_sessions_per_user": -1})
+    assert resp.status_code == 422
+    mock_db.commit.assert_not_awaited()
