@@ -35,6 +35,12 @@ export class ChatWebSocket {
       this.notifyHandlers({ type: 'error', content: 'Failed to authenticate connection' });
       if (this.reconnectAttempts < this.maxReconnectAttempts) {
         this.scheduleReconnect();
+      } else {
+        // Retries exhausted on the ticket POST too (e.g. a session that expired
+        // mid-idle, or an auth-gateway blip spanning the backoff window). Mirror
+        // the onclose give-up branch so isReconnecting can't stick true — otherwise
+        // the UI spins "Reconnecting…" forever with no retry actually pending.
+        this.notifyHandlers({ type: 'reconnecting', state: false });
       }
       return;
     }
@@ -83,11 +89,16 @@ export class ChatWebSocket {
       // not found, 4010 session deleted, 4011 share revoked. The sync socket
       // navigates the user out of the dead session (see useSyncSocket).
       if (event.code === 4004 || event.code === 4010 || event.code === 4011) {
+        this.notifyHandlers({ type: 'reconnecting', state: false });
         return;
       }
 
       if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.scheduleReconnect();
+      } else {
+        // Clean close, or retries exhausted — no further attempt is pending. Drop
+        // any lingering "Reconnecting…" state so the flat "Disconnected" badge stands.
+        this.notifyHandlers({ type: 'reconnecting', state: false });
       }
     };
 
@@ -104,6 +115,12 @@ export class ChatWebSocket {
     this.reconnectAttempts++;
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+
+    // A retry is now pending — surface it so the UI distinguishes a transient blip
+    // from a terminal disconnect. Cleared by the next 'connected' (onopen) or, if
+    // retries run out, the 'reconnecting' state:false from the give-up branches in
+    // onclose / the ticket-fetch catch.
+    this.notifyHandlers({ type: 'reconnecting', state: true });
 
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;

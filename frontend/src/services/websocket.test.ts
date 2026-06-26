@@ -78,6 +78,66 @@ describe('ChatWebSocket.connect — ticket auth', () => {
     expect(FakeWS.instances[0].protocols).toEqual(['inkwest', 'ticket|TICKET456']);
   });
 
+  it("emits 'reconnecting' state:true when a dropped socket schedules a retry", async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect();
+    const sock = FakeWS.instances[0];
+    sock.onopen?.();
+    sock.onclose?.({ code: 1006 }); // abnormal close → backoff retry
+
+    expect(events).toContainEqual({ type: 'reconnecting', state: true });
+  });
+
+  it("emits 'reconnecting' state:false on a clean close (no retry pending)", async () => {
+    mockTicket.mockResolvedValue('T');
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect();
+    FakeWS.instances[0].onclose?.({ code: 1000 });
+
+    expect(events).toContainEqual({ type: 'reconnecting', state: false });
+    expect(events).not.toContainEqual({ type: 'reconnecting', state: true });
+  });
+
+  it("emits 'reconnecting' state:false on a terminal close code (no retry)", async () => {
+    mockTicket.mockResolvedValue('T');
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect();
+    FakeWS.instances[0].onclose?.({ code: 4011 }); // share revoked — do not loop
+
+    expect(events).toContainEqual({ type: 'reconnecting', state: false });
+    expect(events).not.toContainEqual({ type: 'reconnecting', state: true });
+  });
+
+  it("emits a final 'reconnecting' state:false when ticket retries are exhausted", async () => {
+    // Regression guard: the ticket POST failing through every retry (expired
+    // session, auth-gateway outage spanning the backoff window) must end in a
+    // give-up, not a stuck "Reconnecting…" with no attempt actually pending.
+    vi.useFakeTimers();
+    mockTicket.mockRejectedValue(new Error('401'));
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect(); // attempt #1 fails → schedules retry
+    // Drive every backoff timer (1+2+4+8+16s) through to the give-up.
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(FakeWS.instances).toHaveLength(0); // never got past the ticket
+    const reconnecting = events.filter((e) => e.type === 'reconnecting');
+    expect(reconnecting.at(-1)).toEqual({ type: 'reconnecting', state: false });
+  });
+
   it('does not reconnect after disconnect() even if a ticket fetch was in flight', async () => {
     vi.useFakeTimers();
     mockTicket.mockRejectedValue(new Error('401'));

@@ -13,6 +13,7 @@ import { PresenceBar } from './PresenceBar';
 import { ShareModal } from './ShareModal';
 import { StreamingMessage } from './StreamingMessage';
 import { ErrorBanner } from './ErrorBanner';
+import { ReconnectingBanner } from './ReconnectingBanner';
 import { EgressLog } from './EgressPanel';
 import { MonitoringPanel } from './MonitoringPanel';
 import { ConnectorPanel } from '@/components/connector/ConnectorPanel';
@@ -39,7 +40,7 @@ interface Props {
 }
 
 export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initialPrompt, initialAttachments, autoSubmit, sessionId, isReadOnly, onTyping }: Props) {
-  const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks } = useChatStore();
+  const { messages, streamingMessage, isStreaming, isConnected, isReconnecting, streamingBlocks } = useChatStore();
   const compact = useSettingsStore((s) => s.compactToolCards);
   const wideComposer = useSettingsStore((s) => s.wideComposer);
   // Share lives on the conversation toolbar (this tab row). Owner only — a session
@@ -191,6 +192,7 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
   return (
     <div className="flex-1 flex flex-col h-full relative min-h-0 overflow-hidden">
       <ErrorBanner />
+      {isReconnecting && <ReconnectingBanner />}
 
       {/* Always render the bar so its height is stable from first paint — the egress
           socket connects a beat after load (ws-ticket fetch + handshake), so gating the

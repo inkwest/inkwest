@@ -15,6 +15,7 @@ export interface ChatEvent {
     // Local lifecycle frames the service synthesizes for the store:
     | 'connected'
     | 'disconnected'
+    | 'reconnecting' // a retry is pending (state:true) / retries exhausted (state:false)
     // Collaboration frames (broadcast to all of a session's sockets):
     | 'presence' // who is currently viewing
     | 'presence_self' // (shared view) tells an anonymous guest its own presence id

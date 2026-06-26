@@ -66,6 +66,10 @@ interface ChatState {
   streamingBlocks: StreamingBlock[];
   isStreaming: boolean;
   isConnected: boolean;
+  // A dropped socket is auto-retrying (exponential backoff) — distinct from a
+  // terminal disconnect so the UI can show "Reconnecting…" rather than a flat
+  // "Disconnected" during a transient blip.
+  isReconnecting: boolean;
   error: string | null;
   // Collaboration: who is currently viewing this conversation, and who is typing.
   presence: Array<{ user_id: string; display_name: string }>;
@@ -81,6 +85,7 @@ interface ChatState {
   clearToolResults: () => void;
   setIsStreaming: (streaming: boolean) => void;
   setIsConnected: (connected: boolean) => void;
+  setIsReconnecting: (reconnecting: boolean) => void;
   setError: (error: string | null) => void;
   addMessage: (message: Message) => void;
   // Append a peer's (the owner's) message echoed live to read-only viewers. The id is
@@ -110,6 +115,7 @@ export const useChatStore = create<ChatState>((set) => ({
   streamingBlocks: [],
   isStreaming: false,
   isConnected: false,
+  isReconnecting: false,
   error: null,
   presence: [],
   typingUsers: [],
@@ -196,6 +202,7 @@ export const useChatStore = create<ChatState>((set) => ({
   clearToolResults: () => set({ toolResults: [] }),
   setIsStreaming: (streaming) => set({ isStreaming: streaming }),
   setIsConnected: (connected) => set({ isConnected: connected }),
+  setIsReconnecting: (reconnecting) => set({ isReconnecting: reconnecting }),
   setError: (error) => set({ error }),
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
