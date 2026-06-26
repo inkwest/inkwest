@@ -27,6 +27,7 @@ from app.api.routes import (
     connectors,
     egress,
     health,
+    llm_proxy,
     mcp,
     mcp_proxy,
     me,
@@ -262,6 +263,8 @@ app.include_router(connectors.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
 # /api/mcp-proxy/{key}/{path} — auth is the internal proxy JWT, not get_current_user.
 app.include_router(mcp_proxy.router, prefix="/api")
+# /api/llm-proxy/model/{id}/{op} — auth is the internal broker JWT, not get_current_user.
+app.include_router(llm_proxy.router, prefix="/api")
 app.include_router(chat.router)  # WebSocket routes (no prefix needed)
 app.include_router(sync.router)  # Session sync WebSocket
 app.include_router(egress.router)  # Per-conversation squid egress log WebSocket

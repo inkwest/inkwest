@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     aws_region: str | None = None
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
+    # Real Bedrock API key (bearer) the LLM auth broker swaps the sandbox's internal JWT
+    # for (app.api.routes.llm_proxy). Read from the backend process env
+    # AWS_BEARER_TOKEN_BEDROCK — the SAME var name that used to ride sandbox_env_file INTO
+    # the sandbox. When llm_broker_enabled is on it lives ONLY in the backend process: both
+    # the Claude CLI and boto3 send it to Bedrock as `Authorization: Bearer …` (no SigV4),
+    # so the broker is a pure header swap. Unset = broker route returns 503 (not configured).
+    aws_bearer_token_bedrock: str | None = None
 
     # Claude CLI settings (for local development without API costs)
     claude_cli_path: str = "claude"  # Path to claude binary
@@ -264,6 +271,18 @@ class Settings(BaseSettings):
     # public-IP requirement for these exact hosts. Empty = public-only (the safe default). A
     # deliberate, scoped operator decision — not a blanket private-network opener.
     mcp_oauth_allow_hosts: str = ""
+
+    # ==========================================================================
+    # LLM auth broker (claude-cli provider only) — zero model secret in the sandbox.
+    # On: the broker route (app.api.routes.llm_proxy) verifies a short-lived internal JWT
+    # minted per turn, swaps it for the backend-held aws_bearer_token_bedrock, and forwards
+    # to real Bedrock. The sandbox holds only the JWT + the broker base URL (which rides the
+    # SAME host as mcp_proxy_base_url, inheriting its squid allowlist + host-gateway --add-host
+    # — no new egress rule). Off (default): today's behavior — the real bearer rides
+    # sandbox_env_file into the sandbox. Rollback = flip this off + restore the bearer in
+    # sandbox_env_file (see docs/HANDOFF-llm-broker-plan.md §Security/reversibility).
+    # ==========================================================================
+    llm_broker_enabled: bool = False
 
     # At-rest encryption keys for operator secrets (e.g. the OAuth2 MCP catalog client
     # secret). JSON map {"<version>": "<base64 32-byte key>"}; the highest version seals new
