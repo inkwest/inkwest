@@ -76,3 +76,48 @@ describe('sessionsStore sharing', () => {
     expect(useSessionsStore.getState().currentSession?.share_count).toBeUndefined();
   });
 });
+
+describe('sessionsStore ensureSessionTitle', () => {
+  function untitled(id: string): Session {
+    return { ...session(id), title: undefined } as Session;
+  }
+
+  it('titles an untitled session from its first message', () => {
+    useSessionsStore.setState({ sessions: [untitled('a')], currentSession: null });
+    useSessionsStore.getState().ensureSessionTitle('a', '  Investigate the GitLab 500s  ');
+    expect(useSessionsStore.getState().sessions[0].title).toBe('Investigate the GitLab 500s');
+  });
+
+  it('truncates a long message at a word boundary (mirrors the backend)', () => {
+    useSessionsStore.setState({ sessions: [untitled('a')], currentSession: null });
+    const long =
+      'Why are the production payment workers crashing during the nightly batch reconciliation job';
+    useSessionsStore.getState().ensureSessionTitle('a', long);
+    const title = useSessionsStore.getState().sessions[0].title!;
+    expect(title.endsWith('...')).toBe(true);
+    expect(title.length).toBeLessThanOrEqual(63);
+    expect(long.startsWith(title.slice(0, -3))).toBe(true);
+  });
+
+  it('is a no-op once the session already has a title', () => {
+    useSessionsStore.setState({ sessions: [session('a')], currentSession: null });
+    useSessionsStore.getState().ensureSessionTitle('a', 'a different first message');
+    expect(useSessionsStore.getState().sessions[0].title).toBe('a');
+  });
+
+  it('is a no-op for an unknown id or empty message', () => {
+    useSessionsStore.setState({ sessions: [untitled('a')], currentSession: null });
+    useSessionsStore.getState().ensureSessionTitle('zzz', 'hello');
+    useSessionsStore.getState().ensureSessionTitle('a', '   ');
+    expect(useSessionsStore.getState().sessions[0].title).toBeUndefined();
+  });
+
+  it('also titles currentSession when ids match', () => {
+    useSessionsStore.setState({
+      sessions: [untitled('a')],
+      currentSession: { ...untitled('a'), messages: [], cluster: null },
+    });
+    useSessionsStore.getState().ensureSessionTitle('a', 'first message');
+    expect(useSessionsStore.getState().currentSession?.title).toBe('first message');
+  });
+});

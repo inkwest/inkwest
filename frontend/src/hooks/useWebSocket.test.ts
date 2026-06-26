@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useWebSocket } from './useWebSocket';
 import { useChatStore } from '@/store/chat';
+import { useSessionsStore } from '@/store/sessions';
 import { ChatWebSocket } from '@/services/websocket';
-import type { Message } from '@/types/api';
+import type { Message, Session } from '@/types/api';
 
 const failedMessage: Message = {
   id: 'm1',
@@ -121,6 +122,20 @@ describe('useWebSocket', () => {
     });
 
     expect(useChatStore.getState().isStreaming).toBe(true);
+  });
+
+  it('sendMessage optimistically titles an untitled session (sidebar surfacing)', () => {
+    useSessionsStore.setState({
+      sessions: [{ id: 'session-1', title: undefined } as Session],
+      currentSession: null,
+    });
+    const { result } = renderHook(() => useWebSocket('session-1'));
+
+    act(() => {
+      result.current.sendMessage('Investigate the GitLab 500s');
+    });
+
+    expect(useSessionsStore.getState().sessions[0].title).toBe('Investigate the GitLab 500s');
   });
 
   it('retryMessage clears the error and starts streaming when the frame is sent', () => {

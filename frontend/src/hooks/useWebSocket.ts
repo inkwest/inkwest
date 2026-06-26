@@ -253,6 +253,11 @@ export function useWebSocket(sessionId: string) {
         created_at: new Date().toISOString(),
       });
 
+      // Surface a brand-new conversation in the sidebar the instant its first message
+      // goes out — the sidebar hides untitled sessions, and the server's title NOTIFY
+      // can be missed if the sync socket isn't subscribed yet. No-op once titled.
+      useSessionsStore.getState().ensureSessionTitle(sessionId, content);
+
       // Send via WebSocket
       wsRef.current.sendMessage(content, attachments);
       setIsStreaming(true);
