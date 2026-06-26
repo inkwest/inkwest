@@ -297,17 +297,17 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
       <Modal
         isOpen={!!awsDevice}
         onClose={clearAwsDevice}
-        title="Autorisation AWS"
+        title="AWS authorization"
         size="sm"
       >
         {awsDevice?.status === 'error' ? (
           <div className="space-y-4">
             <p className="text-red-400 text-sm">
-              Échec de l'autorisation AWS{awsDevice.detail ? ` : ${awsDevice.detail}` : ''}.
+              AWS authorization failed{awsDevice.detail ? `: ${awsDevice.detail}` : ''}.
             </p>
             <div className="flex justify-end">
               <Button variant="ghost" onClick={clearAwsDevice}>
-                Fermer
+                Close
               </Button>
             </div>
           </div>
@@ -316,7 +316,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
             <div className="space-y-4 text-sm text-gray-300">
               {awsRenewProfiles.length > 0 && (
                 <div className="rounded-md border border-gray-700 bg-gray-800/60 p-2">
-                  <div className="text-xs text-gray-400 mb-1">Accès renouvelé&nbsp;:</div>
+                  <div className="text-xs text-gray-400 mb-1">Renewed access:</div>
                   <ul className="space-y-0.5">
                     {awsRenewProfiles.map((p) => (
                       <li key={p.name} className="text-xs text-gray-200">
@@ -330,19 +330,20 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
                   prompt for the account-retrieval progress. */}
               {!enumProgress && (
                 <>
-                  <p>
-                    1. Ouvre la page de vérification AWS, 2. vérifie que le code affiché
-                    correspond, puis approuve.
-                  </p>
+                  <ol className="list-decimal space-y-1 pl-5">
+                    <li>Open the AWS verification page.</li>
+                    <li>Check that the code shown matches.</li>
+                    <li>Approve.</li>
+                  </ol>
                   <div className="text-center">
-                    <div className="text-xs text-gray-500 mb-1">Code de vérification</div>
+                    <div className="text-xs text-gray-500 mb-1">Verification code</div>
                     <div className="font-mono text-2xl tracking-widest text-gray-100">
                       {awsDevice.userCode}
                     </div>
                   </div>
                   <Button onClick={openAwsVerification} className="w-full">
                     <ExternalLink className="h-4 w-4 mr-2" />
-                    Ouvrir la page AWS
+                    Open the AWS page
                   </Button>
                 </>
               )}
@@ -350,11 +351,11 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
               <div className="flex items-start justify-between gap-2">
                 <div className="text-xs text-gray-500">
                   {enumProgress ? (
-                    'Accès approuvé. Récupération de vos comptes…'
+                    'Access approved. Retrieving your accounts…'
                   ) : (
                     <>
-                      En attente d'approbation…
-                      <div>Cette fenêtre se fermera automatiquement une fois l'accès accordé.</div>
+                      Waiting for approval…
+                      <div>This window will close automatically once access is granted.</div>
                     </>
                   )}
                 </div>
@@ -362,7 +363,7 @@ export function ConnectorPanel({ sessionId, autoStart, layout = 'inline', autoOp
                   onClick={clearAwsDevice}
                   className="shrink-0 text-xs text-gray-400 underline hover:text-gray-200"
                 >
-                  Annuler
+                  Cancel
                 </button>
               </div>
             </div>

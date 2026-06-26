@@ -256,7 +256,7 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
     <Modal
       isOpen={isOpen}
       onClose={handleClose}
-      title="Sélection des comptes & rôles AWS"
+      title="Select AWS accounts & roles"
       size="lg"
       align="top"
       bodyClassName="flex flex-col overflow-hidden"
@@ -268,12 +268,12 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Rechercher un compte ou un rôle…"
+            placeholder="Search for an account or a role…"
             disabled={submitting}
             className="flex-1 bg-gray-800 text-gray-100 text-sm rounded-md px-3 py-2 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
           />
           <Button variant="secondary" size="sm" onClick={toggleAllVisible} disabled={visibleKeys.length === 0 || submitting}>
-            {allVisibleSelected ? 'Tout décocher' : 'Tout cocher'}
+            {allVisibleSelected ? 'Uncheck all' : 'Check all'}
           </Button>
           <button
             type="button"
@@ -281,15 +281,15 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
             // watching too: a refresh mid-discovery would overwrite the shared progress
             // entry and auto-close the modal out from under the wait.
             disabled={loading || refreshing || submitting || watching}
-            title="Rafraîchir la liste des rôles"
-            aria-label="Rafraîchir la liste des rôles"
+            title="Refresh the role list"
+            aria-label="Refresh the role list"
             className="p-2 rounded-md text-gray-400 hover:text-gray-100 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
           </button>
         </div>
 
-        {loading && <p className="text-gray-400 text-sm shrink-0">Chargement des comptes…</p>}
+        {loading && <p className="text-gray-400 text-sm shrink-0">Loading accounts…</p>}
         {/* Shown while any phase runs (refresh enumeration, or a grant's minting / EKS
             discovery); header/footer stay pinned, so its appearance just shortens the
             scrolling list — no layout jump. */}
@@ -299,7 +299,7 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
         {error && <p className="text-red-400 text-sm shrink-0">{error}</p>}
         {!loading && grouped.length === 0 && !error && (
           <p className="text-gray-400 text-sm">
-            {query ? 'Aucun résultat pour cette recherche.' : 'Aucun compte/rôle disponible pour ton SSO.'}
+            {query ? 'No results for this search.' : 'No account/role available for your SSO.'}
           </p>
         )}
 
@@ -317,7 +317,7 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
                     {account.account_name}{' '}
                     <span className="text-gray-500 font-normal">({account.account_id})</span>
                   </span>
-                  <span className="text-xs text-blue-400">{allOn ? 'tout décocher' : 'tout cocher'}</span>
+                  <span className="text-xs text-blue-400">{allOn ? 'uncheck all' : 'check all'}</span>
                 </button>
                 <div className="px-3 pb-2 space-y-1">
                   {accountRoles.map((r) => {
@@ -348,21 +348,21 @@ export function AwsAccountRoleModal({ sessionId, isOpen, onClose }: Props) {
         <div className="flex items-center justify-between gap-2 pt-3 border-t border-gray-800 mt-2 shrink-0">
           <span className="text-xs text-gray-500">
             {submitting
-              ? `Création de ${selected.size} accès en cours…`
+              ? `Creating ${selected.size} access grant(s)…`
               : watching
-                ? 'Découverte des clusters EKS en cours…'
-                : `${selected.size} sélectionné(s)`}
+                ? 'Discovering EKS clusters…'
+                : `${selected.size} selected`}
           </span>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={handleClose} disabled={submitting}>
-              {watching ? 'Fermer' : 'Annuler'}
+              {watching ? 'Close' : 'Cancel'}
             </Button>
             <Button
               onClick={handleConfirm}
               disabled={selected.size === 0 || watching}
               isLoading={submitting}
             >
-              Donner accès
+              Grant access
             </Button>
           </div>
         </div>

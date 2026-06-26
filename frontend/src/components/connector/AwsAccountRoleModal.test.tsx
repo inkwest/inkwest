@@ -109,7 +109,7 @@ describe('AwsAccountRoleModal refresh', () => {
     expect(mockRefresh).not.toHaveBeenCalled();
 
     // Refresh button forces a fresh enumeration.
-    fireEvent.click(screen.getByLabelText('Rafraîchir la liste des rôles'));
+    fireEvent.click(screen.getByLabelText('Refresh the role list'));
     await waitFor(() => expect(mockRefresh).toHaveBeenCalledWith('s1'));
     await waitFor(() => expect(screen.getByText('Admin')).toBeInTheDocument());
   });
@@ -124,12 +124,12 @@ describe('AwsAccountRoleModal refresh', () => {
     // Check both roles → counter shows 2.
     fireEvent.click(screen.getByText('Admin'));
     fireEvent.click(screen.getByText('ReadOnly'));
-    expect(screen.getByText('2 sélectionné(s)')).toBeInTheDocument();
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
 
     // Refresh: Admin disappears → only ReadOnly stays selected.
-    fireEvent.click(screen.getByLabelText('Rafraîchir la liste des rôles'));
+    fireEvent.click(screen.getByLabelText('Refresh the role list'));
     await waitFor(() => expect(screen.queryByText('Admin')).not.toBeInTheDocument());
-    expect(screen.getByText('1 sélectionné(s)')).toBeInTheDocument();
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
   });
 
   it('does not call the API while closed', () => {
@@ -157,7 +157,7 @@ describe('AwsAccountRoleModal grant', () => {
 
     await waitFor(() => expect(screen.getByText('ReadOnly')).toBeInTheDocument());
     fireEvent.click(screen.getByText('ReadOnly'));
-    fireEvent.click(screen.getByText('Donner accès'));
+    fireEvent.click(screen.getByText('Grant access'));
 
     await waitFor(() =>
       expect(mockSelect).toHaveBeenCalledWith('s1', [{ account_id: '111', role_name: 'ReadOnly' }])
@@ -179,11 +179,11 @@ describe('AwsAccountRoleModal grant', () => {
 
     await waitFor(() => expect(screen.getByText('ReadOnly')).toBeInTheDocument());
     fireEvent.click(screen.getByText('ReadOnly'));
-    fireEvent.click(screen.getByText('Donner accès'));
+    fireEvent.click(screen.getByText('Grant access'));
 
     // Minting is visible as a live count, not just the spinner — the point for big grants.
     await waitFor(() =>
-      expect(screen.getByText(/Création des accès… 12\/55/)).toBeInTheDocument()
+      expect(screen.getByText(/Creating access… 12\/55/)).toBeInTheDocument()
     );
     // Let the POST finish and flush the follow-up state updates so teardown is clean.
     await act(async () => {
@@ -200,12 +200,12 @@ describe('AwsAccountRoleModal grant', () => {
 
     await waitFor(() => expect(screen.getByText('eks-ro')).toBeInTheDocument());
     fireEvent.click(screen.getByText('eks-ro'));
-    fireEvent.click(screen.getByText('Donner accès'));
+    fireEvent.click(screen.getByText('Grant access'));
 
     await waitFor(() => expect(mockSelect).toHaveBeenCalled());
     // The eks gate keeps it open and surfaces the EKS discovery state.
     await waitFor(() =>
-      expect(screen.getByText('Découverte des clusters EKS en cours…')).toBeInTheDocument()
+      expect(screen.getByText('Discovering EKS clusters…')).toBeInTheDocument()
     );
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -224,7 +224,7 @@ describe('AwsAccountRoleModal grant', () => {
         await vi.advanceTimersByTimeAsync(0); // flush initial load
       });
       fireEvent.click(screen.getByText('eks-ro'));
-      fireEvent.click(screen.getByText('Donner accès'));
+      fireEvent.click(screen.getByText('Grant access'));
       // Grant POST + first poll (discovering → arms sawProgress, records shownAt).
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
@@ -260,7 +260,7 @@ describe('AwsAccountRoleModal grant', () => {
         await vi.advanceTimersByTimeAsync(0); // flush initial load
       });
       fireEvent.click(screen.getByText('eks-ro'));
-      fireEvent.click(screen.getByText('Donner accès'));
+      fireEvent.click(screen.getByText('Grant access'));
       // Grant POST + first poll → "done"; close fires within the MIN_PROGRESS_MS floor
       // (0 here, since no active poll ever armed the floor's start).
       await act(async () => {
@@ -288,7 +288,7 @@ describe('AwsAccountRoleModal grant', () => {
         await vi.advanceTimersByTimeAsync(0);
       });
       fireEvent.click(screen.getByText('eks-ro'));
-      fireEvent.click(screen.getByText('Donner accès'));
+      fireEvent.click(screen.getByText('Grant access'));
       // Several idle polls must NOT close it (guard against premature close).
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5000);

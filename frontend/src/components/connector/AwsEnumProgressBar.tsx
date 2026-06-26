@@ -4,12 +4,12 @@ import { EnumProgress } from '@/hooks/useAwsEnumProgress';
 // minting and EKS discovery (the two halves of a grant). Unknown phase falls back
 // to a neutral label rather than rendering an empty string.
 const PHASE_LABELS: Record<string, string> = {
-  enumerating: 'Récupération de vos comptes AWS…',
-  granting: 'Création des accès…',
-  discovering: 'Découverte des clusters EKS…',
+  enumerating: 'Retrieving your AWS accounts…',
+  granting: 'Creating access…',
+  discovering: 'Discovering EKS clusters…',
   // Terminal phase the backend lingers on briefly after discovery settles; shown for
   // the frame(s) before the picker auto-closes so the bar reads complete, not unknown.
-  done: 'Clusters EKS découverts',
+  done: 'EKS clusters discovered',
 };
 
 // Outlined "shell" container with the fill (+ count) building inside it as the work
@@ -19,7 +19,7 @@ const PHASE_LABELS: Record<string, string> = {
 export function AwsEnumProgressBar({ progress }: { progress: EnumProgress | null }) {
   const determinate = !!progress && progress.total > 0;
   const pct = progress ? (determinate ? Math.round((progress.done / progress.total) * 100) : 100) : 0;
-  const label = progress ? (PHASE_LABELS[progress.phase] ?? 'Traitement en cours…') : '';
+  const label = progress ? (PHASE_LABELS[progress.phase] ?? 'Processing…') : '';
   return (
     <div className="relative h-5 w-full overflow-hidden rounded-full border border-gray-600 bg-gray-900">
       <div
