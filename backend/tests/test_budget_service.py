@@ -95,6 +95,28 @@ class TestBudgetStatus:
         assert "85%" in status.warning_message
 
 
+class TestBudgetEnumMapping:
+    """The Postgres enum types (budgettype/budgetperiod) were created with the
+    lowercase enum *values* ('user'), not the member names ('USER'). The model must
+    bind the values via values_callable, or every insert/filter raises
+    InvalidTextRepresentationError ('invalid input value for enum ...')."""
+
+    def test_budget_type_enum_binds_lowercase_values(self):
+        from app.models.budget import Budget
+
+        assert set(Budget.__table__.c.budget_type.type.enums) == {"global", "user", "role"}
+
+    def test_period_enum_binds_lowercase_values(self):
+        from app.models.budget import Budget
+
+        assert set(Budget.__table__.c.period.type.enums) == {
+            "hourly",
+            "daily",
+            "weekly",
+            "monthly",
+        }
+
+
 class TestUsageSummary:
     """Tests for UsageSummary named tuple."""
 
@@ -147,6 +169,149 @@ class TestBudgetServiceIntegration:
 
             assert status.is_allowed is True
             assert status.budget_name is None
+
+    @pytest.mark.asyncio
+    async def test_check_budget_default_cap_under_limit(self):
+        """No budget row + default monthly cap, under limit → allowed, action=block."""
+        from app.services import budget_service
+        from app.services.budget_service import check_budget
+
+        usage = UsageSummary(
+            total_input_tokens=1000,
+            total_output_tokens=500,
+            total_tokens=1500,
+            total_cost_usd=Decimal("1.00"),
+            request_count=3,
+        )
+        with (
+            patch.object(budget_service, "is_budget_enabled", return_value=True),
+            patch.object(budget_service, "get_applicable_budget", AsyncMock(return_value=None)),
+            patch.object(
+                budget_service, "default_monthly_cost_limit", return_value=Decimal("5.00")
+            ),
+            patch.object(budget_service, "get_usage_for_period", AsyncMock(return_value=usage)),
+        ):
+            status = await check_budget(AsyncMock(), user_id=uuid4())
+
+        assert status.is_allowed is True
+        assert status.budget_name == "default"
+        assert status.hard_limit_action == "block"
+        assert status.remaining_cost_usd == Decimal("4.00")
+
+    @pytest.mark.asyncio
+    async def test_check_budget_default_cap_exceeded_blocks(self):
+        """No budget row + default monthly cap, over limit → blocked with block action."""
+        from app.services import budget_service
+        from app.services.budget_service import check_budget
+
+        usage = UsageSummary(
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_tokens=0,
+            total_cost_usd=Decimal("6.00"),
+            request_count=10,
+        )
+        with (
+            patch.object(budget_service, "is_budget_enabled", return_value=True),
+            patch.object(budget_service, "get_applicable_budget", AsyncMock(return_value=None)),
+            patch.object(
+                budget_service, "default_monthly_cost_limit", return_value=Decimal("5.00")
+            ),
+            patch.object(budget_service, "get_usage_for_period", AsyncMock(return_value=usage)),
+        ):
+            status = await check_budget(AsyncMock(), user_id=uuid4())
+
+        assert status.is_allowed is False
+        assert status.hard_limit_action == "block"
+        assert status.budget_name == "default"
+
+    @pytest.mark.asyncio
+    async def test_check_budget_no_default_cap_allows(self):
+        """No budget row and no default cap configured → unlimited allow."""
+        from app.services import budget_service
+        from app.services.budget_service import check_budget
+
+        with (
+            patch.object(budget_service, "is_budget_enabled", return_value=True),
+            patch.object(budget_service, "get_applicable_budget", AsyncMock(return_value=None)),
+            patch.object(budget_service, "default_monthly_cost_limit", return_value=None),
+        ):
+            status = await check_budget(AsyncMock(), user_id=uuid4())
+
+        assert status.is_allowed is True
+        assert status.budget_name is None
+
+    @pytest.mark.asyncio
+    async def test_check_budget_cost_enforced_when_both_limits_set(self):
+        """Regression: a budget with BOTH token and cost caps must enforce cost.
+
+        The previous implementation returned at the token branch and never checked
+        cost, so an under-token / over-cost user was wrongly allowed.
+        """
+        from app.services import budget_service
+        from app.services.budget_service import check_budget
+
+        budget = MagicMock(
+            name="team",  # note: MagicMock(name=...) sets the mock's repr, not .name
+            max_total_tokens=10_000,
+            max_cost_usd=Decimal("1.00"),
+            period=BudgetPeriod.DAILY,
+            soft_limit_percent=80,
+            hard_limit_action="block",
+        )
+        budget.name = "team"
+        usage = UsageSummary(
+            total_input_tokens=400,
+            total_output_tokens=100,
+            total_tokens=500,  # well under the 10k token cap
+            total_cost_usd=Decimal("2.00"),  # but over the $1 cost cap
+            request_count=5,
+        )
+        with (
+            patch.object(budget_service, "is_budget_enabled", return_value=True),
+            patch.object(budget_service, "get_applicable_budget", AsyncMock(return_value=budget)),
+            patch.object(budget_service, "get_usage_for_period", AsyncMock(return_value=usage)),
+        ):
+            status = await check_budget(AsyncMock(), user_id=uuid4())
+
+        assert status.is_allowed is False
+        assert status.hard_limit_action == "block"
+        assert "Cost limit" in status.warning_message
+
+    @pytest.mark.asyncio
+    async def test_check_budget_warn_action_not_blocking_in_status(self):
+        """A 'warn' budget over limit still reports is_allowed=False but action=warn.
+
+        The request path only blocks when hard_limit_action == 'block', so a warn
+        budget surfaces the overage for reporting without barring the turn.
+        """
+        from app.services import budget_service
+        from app.services.budget_service import check_budget
+
+        budget = MagicMock(
+            max_total_tokens=None,
+            max_cost_usd=Decimal("1.00"),
+            period=BudgetPeriod.MONTHLY,
+            soft_limit_percent=80,
+            hard_limit_action="warn",
+        )
+        budget.name = "soft"
+        usage = UsageSummary(
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_tokens=0,
+            total_cost_usd=Decimal("2.00"),
+            request_count=1,
+        )
+        with (
+            patch.object(budget_service, "is_budget_enabled", return_value=True),
+            patch.object(budget_service, "get_applicable_budget", AsyncMock(return_value=budget)),
+            patch.object(budget_service, "get_usage_for_period", AsyncMock(return_value=usage)),
+        ):
+            status = await check_budget(AsyncMock(), user_id=uuid4())
+
+        assert status.is_allowed is False
+        assert status.hard_limit_action == "warn"
 
     @pytest.mark.asyncio
     async def test_record_usage(self):

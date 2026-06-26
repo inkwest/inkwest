@@ -16,9 +16,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.core.config import get_settings
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
+from app.services.app_settings import (
+    BUDGET_ENABLED_KEY,
+    DEFAULT_MONTHLY_COST_LIMIT_USD_KEY,
+    get_bool_setting,
+    get_float_setting,
+)
 from app.services.model_registry import calculate_cost, default_model
 
 logger = logging.getLogger(__name__)
+
+# Action applied to the zero-config default cap (no Budget row) — a true ceiling.
+DEFAULT_LIMIT_ACTION = "block"
+DEFAULT_SOFT_LIMIT_PERCENT = 80
 
 
 class BudgetStatus(NamedTuple):
@@ -30,6 +40,23 @@ class BudgetStatus(NamedTuple):
     usage_percent: float
     warning_message: str | None
     budget_name: str | None
+    # What to do at 100% (block | warn | notify) — drives request-path enforcement.
+    # Trailing default keeps existing 6-arg constructions (and reporting) working.
+    hard_limit_action: str | None = None
+
+
+def is_budget_enabled() -> bool:
+    """Whether spend budgets are enforced. Admin app-setting overrides the env default."""
+    return get_bool_setting(BUDGET_ENABLED_KEY, get_settings().budget_enabled)
+
+
+def default_monthly_cost_limit() -> Decimal | None:
+    """Per-user default monthly USD cap, or None when unset (<= 0 = no default cap)."""
+    value = get_float_setting(
+        DEFAULT_MONTHLY_COST_LIMIT_USD_KEY,
+        get_settings().default_monthly_cost_limit_usd,
+    )
+    return Decimal(str(value)) if value and value > 0 else None
 
 
 class UsageSummary(NamedTuple):
@@ -121,16 +148,21 @@ async def get_applicable_budget(
     Returns:
         Most applicable Budget or None
     """
-    # Try user-specific budget first
+    # Try user-specific budget first. Tolerate duplicates (nothing stops an admin
+    # creating two active user/global budgets): pick the newest deterministically
+    # rather than letting scalar_one_or_none() raise — a raise here would be caught
+    # upstream and fail open, silently disabling enforcement.
     if user_id:
         result = await db.execute(
-            select(Budget).where(
+            select(Budget)
+            .where(
                 Budget.budget_type == BudgetType.USER,
                 Budget.target_id == user_id,
                 Budget.is_active == True,  # noqa: E712
             )
+            .order_by(Budget.created_at.desc())
         )
-        user_budget = result.scalar_one_or_none()
+        user_budget = result.scalars().first()
         if user_budget:
             return user_budget
 
@@ -149,14 +181,99 @@ async def get_applicable_budget(
         if role_budget:
             return role_budget
 
-    # Fall back to global budget
+    # Fall back to global budget (newest wins if duplicates exist — see note above).
     result = await db.execute(
-        select(Budget).where(
+        select(Budget)
+        .where(
             Budget.budget_type == BudgetType.GLOBAL,
             Budget.is_active == True,  # noqa: E712
         )
+        .order_by(Budget.created_at.desc())
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
+
+
+_ALLOW_UNLIMITED = BudgetStatus(
+    is_allowed=True,
+    remaining_tokens=None,
+    remaining_cost_usd=None,
+    usage_percent=0.0,
+    warning_message=None,
+    budget_name=None,
+    hard_limit_action=None,
+)
+
+
+def _evaluate_limits(
+    *,
+    name: str,
+    action: str,
+    soft_limit_percent: int,
+    usage: UsageSummary,
+    estimated_tokens: int,
+    max_total_tokens: int | None,
+    max_cost_usd: Decimal | None,
+) -> BudgetStatus:
+    """Evaluate BOTH token and cost limits, blocking on whichever is reached.
+
+    The previous implementation returned at the first configured limit, so a budget
+    that set both a token and a cost cap never enforced the cost one. Here both are
+    checked and the most-consumed dimension drives the reported usage_percent.
+    """
+    remaining_tokens = (
+        max(0, max_total_tokens - usage.total_tokens) if max_total_tokens is not None else None
+    )
+    remaining_cost = (
+        max(Decimal("0"), max_cost_usd - usage.total_cost_usd) if max_cost_usd is not None else None
+    )
+    token_pct = (usage.total_tokens / max_total_tokens) * 100 if max_total_tokens else 0.0
+    cost_pct = float((usage.total_cost_usd / max_cost_usd) * 100) if max_cost_usd else 0.0
+    usage_percent = max(token_pct, cost_pct)
+
+    # Tokens use `>` against an estimate (the next turn would cross the cap); cost uses
+    # `>=` below because cost is only known after the turn, so we block once already at it.
+    over_tokens = (
+        max_total_tokens is not None and usage.total_tokens + estimated_tokens > max_total_tokens
+    )
+    # Cost is post-hoc (the real cost of a turn is only known after it runs), so the
+    # cap blocks the *next* turn once cumulative spend has reached it — overshoot is
+    # bounded to a single turn. See docs/BUDGET.md.
+    over_cost = max_cost_usd is not None and usage.total_cost_usd >= max_cost_usd
+
+    if over_tokens:
+        return BudgetStatus(
+            is_allowed=False,
+            remaining_tokens=remaining_tokens,
+            remaining_cost_usd=remaining_cost,
+            usage_percent=usage_percent,
+            warning_message=f"Token limit ({max_total_tokens:,}) exceeded for budget '{name}'",
+            budget_name=name,
+            hard_limit_action=action,
+        )
+    if over_cost:
+        return BudgetStatus(
+            is_allowed=False,
+            remaining_tokens=remaining_tokens,
+            remaining_cost_usd=Decimal("0"),
+            usage_percent=max(usage_percent, 100.0),
+            warning_message=f"Cost limit (${max_cost_usd}) exceeded for budget '{name}'",
+            budget_name=name,
+            hard_limit_action=action,
+        )
+
+    warning_message = None
+    if usage_percent >= soft_limit_percent:
+        warning_message = f"Warning: {usage_percent:.1f}% of budget '{name}' used"
+
+    return BudgetStatus(
+        is_allowed=True,
+        remaining_tokens=remaining_tokens,
+        remaining_cost_usd=remaining_cost,
+        usage_percent=usage_percent,
+        warning_message=warning_message,
+        budget_name=name,
+        hard_limit_action=action,
+    )
 
 
 async def check_budget(
@@ -168,12 +285,12 @@ async def check_budget(
     """
     Check if a request is within budget limits.
 
-    NOTE: Budget is informational only and is NOT enforced. The
-    returned `is_allowed` is consumed solely by `get_user_usage_summary` for
-    admin reporting — no orchestrator nor `turn_runner.start` calls this before
-    invoking the model, so a conversation is never blocked or interrupted by a
-    limit. This is a deliberate product choice (visibility, not quota). See
-    docs/BUDGET.md before wiring this into the request path.
+    Enforcement gate: when budgets are enabled, the request path
+    (chat WS turn start) calls this and blocks a new turn when the returned
+    status has ``is_allowed=False`` and ``hard_limit_action == "block"``.
+    Resolution order for the applicable limit: user budget > role budget >
+    global budget > the per-user default monthly cap from settings. See
+    docs/BUDGET.md.
 
     Args:
         db: Database session
@@ -184,124 +301,49 @@ async def check_budget(
     Returns:
         BudgetStatus indicating if request is allowed
     """
-    settings = get_settings()
+    # If budget enforcement is disabled, always allow (no DB hit).
+    if not is_budget_enabled():
+        return _ALLOW_UNLIMITED
 
-    # If budget enforcement is disabled, always allow
-    if not settings.budget_enabled:
+    budget = await get_applicable_budget(db, user_id, user_roles)
+
+    # No budget row — fall back to the per-user default monthly USD cap (if any).
+    if budget is None:
+        default_cap = default_monthly_cost_limit()
+        if default_cap is None:
+            return _ALLOW_UNLIMITED
+        usage = await get_usage_for_period(db, user_id, BudgetPeriod.MONTHLY)
+        return _evaluate_limits(
+            name="default",
+            action=DEFAULT_LIMIT_ACTION,
+            soft_limit_percent=DEFAULT_SOFT_LIMIT_PERCENT,
+            usage=usage,
+            estimated_tokens=estimated_tokens,
+            max_total_tokens=None,
+            max_cost_usd=default_cap,
+        )
+
+    # A budget with no limits configured at all imposes nothing.
+    if budget.max_total_tokens is None and budget.max_cost_usd is None:
         return BudgetStatus(
             is_allowed=True,
             remaining_tokens=None,
             remaining_cost_usd=None,
             usage_percent=0.0,
             warning_message=None,
-            budget_name=None,
+            budget_name=budget.name,
+            hard_limit_action=budget.hard_limit_action,
         )
 
-    budget = await get_applicable_budget(db, user_id, user_roles)
-
-    # No budget configured - use default limits from settings
-    if budget is None:
-        # Use global defaults
-        max_tokens = settings.default_daily_token_limit
-        usage = await get_usage_for_period(db, user_id, BudgetPeriod.DAILY)
-
-        if usage.total_tokens + estimated_tokens > max_tokens:
-            return BudgetStatus(
-                is_allowed=False,
-                remaining_tokens=max(0, max_tokens - usage.total_tokens),
-                remaining_cost_usd=None,
-                usage_percent=(usage.total_tokens / max_tokens) * 100,
-                warning_message=f"Daily token limit ({max_tokens:,}) exceeded",
-                budget_name="default",
-            )
-
-        return BudgetStatus(
-            is_allowed=True,
-            remaining_tokens=max_tokens - usage.total_tokens,
-            remaining_cost_usd=None,
-            usage_percent=(usage.total_tokens / max_tokens) * 100,
-            warning_message=None,
-            budget_name="default",
-        )
-
-    # Get current usage for the budget period
     usage = await get_usage_for_period(db, user_id, budget.period)
-
-    # Check token limit
-    if budget.max_total_tokens is not None:
-        if usage.total_tokens + estimated_tokens > budget.max_total_tokens:
-            return BudgetStatus(
-                is_allowed=False,
-                remaining_tokens=max(0, budget.max_total_tokens - usage.total_tokens),
-                remaining_cost_usd=None,
-                usage_percent=(usage.total_tokens / budget.max_total_tokens) * 100,
-                warning_message=(
-                    f"Token limit ({budget.max_total_tokens:,}) exceeded for budget '{budget.name}'"
-                ),
-                budget_name=budget.name,
-            )
-
-        usage_percent = (usage.total_tokens / budget.max_total_tokens) * 100
-        remaining_tokens = budget.max_total_tokens - usage.total_tokens
-
-        # Check soft limit warning
-        warning_message = None
-        if usage_percent >= budget.soft_limit_percent:
-            warning_message = (
-                f"Warning: {usage_percent:.1f}% of token budget used "
-                f"({usage.total_tokens:,} / {budget.max_total_tokens:,})"
-            )
-
-        return BudgetStatus(
-            is_allowed=True,
-            remaining_tokens=remaining_tokens,
-            remaining_cost_usd=None,
-            usage_percent=usage_percent,
-            warning_message=warning_message,
-            budget_name=budget.name,
-        )
-
-    # Check cost limit
-    if budget.max_cost_usd is not None:
-        if usage.total_cost_usd >= budget.max_cost_usd:
-            return BudgetStatus(
-                is_allowed=False,
-                remaining_tokens=None,
-                remaining_cost_usd=Decimal("0"),
-                usage_percent=100.0,
-                warning_message=(
-                    f"Cost limit (${budget.max_cost_usd}) exceeded for budget '{budget.name}'"
-                ),
-                budget_name=budget.name,
-            )
-
-        remaining_cost = budget.max_cost_usd - usage.total_cost_usd
-        usage_percent = float((usage.total_cost_usd / budget.max_cost_usd) * 100)
-
-        warning_message = None
-        if usage_percent >= budget.soft_limit_percent:
-            warning_message = (
-                f"Warning: {usage_percent:.1f}% of cost budget used "
-                f"(${usage.total_cost_usd:.4f} / ${budget.max_cost_usd})"
-            )
-
-        return BudgetStatus(
-            is_allowed=True,
-            remaining_tokens=None,
-            remaining_cost_usd=remaining_cost,
-            usage_percent=usage_percent,
-            warning_message=warning_message,
-            budget_name=budget.name,
-        )
-
-    # No limits configured
-    return BudgetStatus(
-        is_allowed=True,
-        remaining_tokens=None,
-        remaining_cost_usd=None,
-        usage_percent=0.0,
-        warning_message=None,
-        budget_name=budget.name,
+    return _evaluate_limits(
+        name=budget.name,
+        action=budget.hard_limit_action,
+        soft_limit_percent=budget.soft_limit_percent,
+        usage=usage,
+        estimated_tokens=estimated_tokens,
+        max_total_tokens=budget.max_total_tokens,
+        max_cost_usd=budget.max_cost_usd,
     )
 
 

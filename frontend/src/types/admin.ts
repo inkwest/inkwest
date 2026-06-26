@@ -52,7 +52,8 @@ export interface Budget {
 }
 
 export interface CreateBudgetRequest {
-  name: string;
+  // Optional: the server derives the name from the scope (user/role/global).
+  name?: string;
   description?: string;
   budget_type: BudgetType;
   target_id?: string;
@@ -77,6 +78,37 @@ export interface UpdateBudgetRequest {
   soft_limit_percent?: number;
   hard_limit_action?: string;
   is_active?: boolean;
+}
+
+// Runtime budget-enforcement settings (on/off + per-user default monthly USD cap).
+export interface BudgetSettings {
+  enabled: boolean;
+  default_monthly_cost_limit_usd: number;
+  // Env baselines, shown so the UI can label when a runtime override is in effect.
+  default_enabled: boolean;
+  default_default_monthly_cost_limit_usd: number;
+}
+
+export interface UpdateBudgetSettingsRequest {
+  enabled: boolean;
+  default_monthly_cost_limit_usd: number;
+}
+
+// Live current-period consumption for a budget. Cost/tokens are null for role/global
+// budgets (per-user quotas with no single subject) — only user budgets report use.
+export interface BudgetUsage {
+  budget_id: string;
+  current_cost_usd: number | null;
+  current_total_tokens: number | null;
+}
+
+// A member of a role/global budget with their own current-period consumption.
+export interface BudgetMemberUsage {
+  user_id: string;
+  display_name: string;
+  email: string;
+  current_cost_usd: number;
+  current_total_tokens: number;
 }
 
 // ============================================================================

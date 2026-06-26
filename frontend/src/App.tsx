@@ -16,6 +16,7 @@ import {
   UsersPage,
   RoleMappingsPage,
   UsagePage,
+  BudgetsPage,
   ModelSettingsPage,
   McpServersPage,
   SystemInfoPage,
@@ -114,6 +115,7 @@ function App() {
 <Route path="users" element={<UsersPage />} />
           <Route path="roles" element={<RoleMappingsPage />} />
           <Route path="usage" element={<UsagePage />} />
+          <Route path="budgets" element={<BudgetsPage />} />
           <Route path="model" element={<ModelSettingsPage />} />
           <Route path="mcp" element={<McpServersPage />} />
           <Route path="system-info" element={<SystemInfoPage />} />

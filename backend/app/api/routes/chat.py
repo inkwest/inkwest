@@ -17,6 +17,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -33,6 +34,7 @@ from app.models.session import Session
 from app.models.session_share_link import SessionShareLink
 from app.models.user import User
 from app.services.ai_client import get_orchestrator
+from app.services.budget_service import check_budget, is_budget_enabled
 from app.services.mcp_dek_handshake import handle_dek_message, note_connect, note_disconnect
 from app.services.messages import clear_retry_state, get_retryable_message
 from app.services.session_access import get_session_role
@@ -420,6 +422,28 @@ async def close_session_connections(session_id: str) -> None:
             pass
 
 
+async def _budget_block_reason(user_id: UUID | None, user_roles: list[str]) -> str | None:
+    """User-facing message if the user's spend budget bars a new turn, else None.
+
+    No-op (no DB hit) while enforcement is disabled — the default. Fails open: a
+    budget-check fault must never wedge chat, so a transient DB error allows the turn.
+    """
+    if not is_budget_enabled():
+        return None
+    try:
+        async with async_session_maker() as db:
+            status = await check_budget(db, user_id, user_roles)
+    except Exception:
+        logger.warning("Budget check failed; allowing turn", exc_info=True)
+        return None
+    if not status.is_allowed and status.hard_limit_action == "block":
+        return (
+            "You've reached your usage budget for this period. "
+            "Please contact an administrator to raise your limit."
+        )
+    return None
+
+
 @router.websocket("/ws/chat/{session_id}")
 async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
     """
@@ -447,6 +471,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
     cluster_ctx: ClusterContext | None = None
     user_id = None
     user_display_name = ""
+    user_roles: list[str] = []
     session_role = "owner"  # owner | editor | viewer — gates what this socket may do
     async with async_session_maker() as db:
         user = await validate_websocket_auth(websocket, db)
@@ -456,6 +481,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
 
         user_id = user.id
         user_display_name = user.display_name
+        # Captured now (used per turn for budget checks): the user object is expired
+        # and detached once this session commits/closes.
+        user_roles = list(user.roles or [])
         await db.commit()
 
         session, cluster, role, error = await validate_session(db, session_id, user)
@@ -559,6 +587,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 # orchestrators have no /workdir and no `attachments` parameter.
                 if attachments and get_settings().ai_provider == "claude-cli":
                     turn_kwargs["attachments"] = attachments
+                block_reason = await _budget_block_reason(user_id, user_roles)
+                if block_reason:
+                    await websocket.send_json({"type": "error", "content": block_reason})
+                    continue
                 started = await turn_runner.start(session_id, get_orchestrator(), turn_kwargs)
                 if not started:
                     await websocket.send_json(
@@ -600,6 +632,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                     continue
 
                 logger.info("Retry requested", extra={"session_id": session_id})
+
+                block_reason = await _budget_block_reason(user_id, user_roles)
+                if block_reason:
+                    await websocket.send_json({"type": "error", "content": block_reason})
+                    continue
 
                 started = await turn_runner.start(
                     session_id,

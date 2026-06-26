@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -63,6 +64,89 @@ async def test_list_budgets_empty(admin_client: AsyncClient, mock_db: AsyncMock)
 
 
 @pytest.mark.asyncio
+async def test_list_budget_usage(admin_client: AsyncClient, mock_db: AsyncMock) -> None:
+    """Usage is reported for user budgets; role/global are per-user quotas → null."""
+    from app.services.budget_service import UsageSummary
+
+    user_b = MagicMock()
+    user_b.id = uuid.uuid4()
+    user_b.budget_type = BudgetType.USER
+    user_b.target_id = uuid.uuid4()
+    user_b.period = BudgetPeriod.MONTHLY
+
+    global_b = MagicMock()
+    global_b.id = uuid.uuid4()
+    global_b.budget_type = BudgetType.GLOBAL
+    global_b.target_id = None
+    global_b.period = BudgetPeriod.MONTHLY
+
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [user_b, global_b]
+    mock_db.execute = AsyncMock(return_value=result_mock)
+
+    usage = UsageSummary(
+        total_input_tokens=100,
+        total_output_tokens=50,
+        total_tokens=150,
+        total_cost_usd=Decimal("0.30"),
+        request_count=2,
+    )
+    with patch("app.api.routes.admin.get_usage_for_period", AsyncMock(return_value=usage)):
+        resp = await admin_client.get("/api/admin/budgets/usage")
+
+    assert resp.status_code == 200
+    data = {row["budget_id"]: row for row in resp.json()}
+    assert data[str(user_b.id)]["current_cost_usd"] == 0.30
+    assert data[str(user_b.id)]["current_total_tokens"] == 150
+    assert data[str(global_b.id)]["current_cost_usd"] is None
+    assert data[str(global_b.id)]["current_total_tokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_budget_members_role(admin_client: AsyncClient, mock_db: AsyncMock) -> None:
+    """Role budget members: each role member with their per-member usage (zeros included)."""
+    bid = uuid.uuid4()
+    budget = MagicMock()
+    budget.id = bid
+    budget.budget_type = BudgetType.ROLE
+    budget.target_role = "engineer"
+    budget.period = BudgetPeriod.MONTHLY
+    mock_db.get = AsyncMock(return_value=budget)
+
+    u1 = MagicMock(id=uuid.uuid4(), display_name="Alice", email="a@x", roles=["engineer"])
+    u2 = MagicMock(id=uuid.uuid4(), display_name="Bob", email="b@x", roles=["engineer"])
+    users_result = MagicMock()
+    users_result.scalars.return_value.all.return_value = [u1, u2]
+    usage_rows = MagicMock()
+    usage_rows.all.return_value = [(u1.id, Decimal("0.50"), 1000)]  # only Alice has usage
+    mock_db.execute = AsyncMock(side_effect=[users_result, usage_rows])
+
+    resp = await admin_client.get(f"/api/admin/budgets/{bid}/members")
+    assert resp.status_code == 200
+    rows = resp.json()
+    by_id = {m["user_id"]: m for m in rows}
+    assert by_id[str(u1.id)]["current_cost_usd"] == 0.5
+    assert by_id[str(u1.id)]["current_total_tokens"] == 1000
+    assert by_id[str(u2.id)]["current_cost_usd"] == 0.0  # no usage → zero, still listed
+    assert rows[0]["user_id"] == str(u1.id)  # sorted by cost desc
+
+
+@pytest.mark.asyncio
+async def test_list_budget_members_user_is_empty(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """A user budget has no member list (its single subject is the row itself)."""
+    budget = MagicMock()
+    budget.budget_type = BudgetType.USER
+    budget.target_id = uuid.uuid4()
+    mock_db.get = AsyncMock(return_value=budget)
+
+    resp = await admin_client.get(f"/api/admin/budgets/{uuid.uuid4()}/members")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
 async def test_create_budget(admin_client: AsyncClient, mock_db: AsyncMock) -> None:
     budget = MagicMock()
     budget.id = uuid.uuid4()
@@ -108,6 +192,11 @@ async def test_create_budget(admin_client: AsyncClient, mock_db: AsyncMock) -> N
 
     mock_db.refresh = AsyncMock(side_effect=set_budget_attrs)
 
+    # No existing active budget for this scope (the duplicate-check query).
+    no_dup = MagicMock()
+    no_dup.scalars.return_value.first.return_value = None
+    mock_db.execute = AsyncMock(return_value=no_dup)
+
     resp = await admin_client.post(
         "/api/admin/budgets",
         json={
@@ -118,6 +207,51 @@ async def test_create_budget(admin_client: AsyncClient, mock_db: AsyncMock) -> N
         },
     )
     assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_create_budget_duplicate_conflict(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """A second active budget for the same scope+target is rejected with 409."""
+    existing = MagicMock()
+    dup_result = MagicMock()
+    dup_result.scalars.return_value.first.return_value = existing
+    mock_db.execute = AsyncMock(return_value=dup_result)
+    mock_db.commit = AsyncMock()
+
+    resp = await admin_client.post(
+        "/api/admin/budgets",
+        json={
+            "budget_type": "user",
+            "target_id": str(uuid.uuid4()),
+            "max_cost_usd": 5,
+            "period": "monthly",
+        },
+    )
+    assert resp.status_code == 409
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_derive_budget_name() -> None:
+    """Budget name is derived from the scope: user name, role, or global."""
+    from app.api.routes.admin import BudgetCreate, _derive_budget_name
+
+    db = AsyncMock()
+    user = MagicMock()
+    user.display_name = "Toto"
+    user.email = "toto@localhost"
+    db.get = AsyncMock(return_value=user)
+
+    user_budget = BudgetCreate(budget_type="user", target_id=uuid.uuid4(), max_cost_usd=5)
+    assert await _derive_budget_name(db, user_budget) == "Toto"
+
+    role_budget = BudgetCreate(budget_type="role", target_role="ops", max_cost_usd=5)
+    assert await _derive_budget_name(db, role_budget) == "ops"
+
+    global_budget = BudgetCreate(budget_type="global", max_cost_usd=5)
+    assert await _derive_budget_name(db, global_budget) == "Global default"
 
 
 @pytest.mark.asyncio
@@ -769,5 +903,56 @@ async def test_update_sandbox_settings_rejects_negative(
     admin_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
     resp = await admin_client.put("/api/admin/settings/sandbox", json={"max_sessions_per_user": -1})
+    assert resp.status_code == 422
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_budget_settings_forbidden_for_non_admin(
+    authenticated_client: AsyncClient,
+) -> None:
+    resp = await authenticated_client.get("/api/admin/settings/budget")
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_budget_settings_default(admin_client: AsyncClient) -> None:
+    resp = await admin_client.get("/api/admin/settings/budget")
+    assert resp.status_code == 200
+    data = resp.json()
+    # No override set -> effective equals the env defaults (off, no cap).
+    assert data["enabled"] is False
+    assert data["default_monthly_cost_limit_usd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_update_budget_settings(
+    admin_client: AsyncClient, mock_db: AsyncMock, reset_app_settings: None
+) -> None:
+    from app.services import budget_service
+
+    mock_db.execute = AsyncMock(return_value=MagicMock())
+    resp = await admin_client.put(
+        "/api/admin/settings/budget",
+        json={"enabled": True, "default_monthly_cost_limit_usd": 25.5},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["enabled"] is True
+    assert data["default_monthly_cost_limit_usd"] == 25.5
+    mock_db.commit.assert_awaited()
+    # Effective immediately in memory (no restart).
+    assert budget_service.is_budget_enabled() is True
+    assert budget_service.default_monthly_cost_limit() == Decimal("25.5")
+
+
+@pytest.mark.asyncio
+async def test_update_budget_settings_rejects_negative_cap(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    resp = await admin_client.put(
+        "/api/admin/settings/budget",
+        json={"enabled": True, "default_monthly_cost_limit_usd": -1},
+    )
     assert resp.status_code == 422
     mock_db.commit.assert_not_awaited()

@@ -6,6 +6,7 @@ export { SystemPromptsPage } from './SystemPromptsPage';
 export { UsersPage } from './UsersPage';
 export { RoleMappingsPage } from './RoleMappingsPage';
 export { UsagePage } from './UsagePage';
+export { BudgetsPage } from './BudgetsPage';
 export { ModelSettingsPage } from './ModelSettingsPage';
 export { McpServersPage } from './McpServersPage';
 export { SystemInfoPage } from './SystemInfoPage';

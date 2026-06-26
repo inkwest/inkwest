@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Card,
   CardHeader,
@@ -14,7 +14,7 @@ import {
   Select,
 } from '@/components/ui';
 import { useUsageStore } from '@/store/admin';
-import { TrendingUp, Users, Cpu, DollarSign, ChevronRight, ChevronDown } from 'lucide-react';
+import { TrendingUp, Users, Cpu, DollarSign, ChevronRight, ChevronDown, Wallet } from 'lucide-react';
 import { UserSessionsUsage } from '@/types/admin';
 import * as adminApi from '@/services/adminApi';
 import {
@@ -84,10 +84,32 @@ export function UsagePage() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [customStart, setCustomStart] = useState(dateRange.startDate || '');
   const [customEnd, setCustomEnd] = useState(dateRange.endDate || '');
+  // Right-click "create budget" menu, positioned at the cursor.
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; userId: string; name: string } | null>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     fetchAll();
   }, [fetchAll]);
+
+  // Dismiss the context menu on any click, scroll, or Escape.
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setCtxMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [ctxMenu]);
+
+  // Jump to Budgets with the Create modal prefilled for this user (see BudgetsPage).
+  const createBudgetFor = (userId: string) =>
+    navigate('/admin/budgets', { state: { createForUserId: userId } });
 
   const handlePeriodChange = (newPeriod: string) => {
     setExpandedUser(null);
@@ -286,14 +308,25 @@ export function UsagePage() {
                       <TableHead>User</TableHead>
                       <TableHead className="text-right">Tokens</TableHead>
                       <TableHead className="text-right">Cost</TableHead>
+                      <TableHead className="w-8"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {userUsage.map((usage) => (
                       <Fragment key={usage.user_id}>
                         <TableRow
-                          className="cursor-pointer hover:bg-gray-700/50"
+                          className="group cursor-pointer hover:bg-gray-700/50"
                           onClick={() => usage.user_id && handleUserClick(usage.user_id)}
+                          onContextMenu={(e) => {
+                            if (!usage.user_id) return;
+                            e.preventDefault();
+                            setCtxMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              userId: usage.user_id,
+                              name: usage.display_name || usage.email,
+                            });
+                          }}
                         >
                           <TableCell className="w-8 pr-0">
                             {expandedUser === usage.user_id
@@ -312,10 +345,23 @@ export function UsagePage() {
                           <TableCell className="text-right">
                             {formatCost(usage.cost_usd)}
                           </TableCell>
+                          <TableCell className="w-8 pr-3">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (usage.user_id) createBudgetFor(usage.user_id);
+                              }}
+                              title="Create budget for this user"
+                              aria-label="Create budget for this user"
+                              className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-blue-400"
+                            >
+                              <Wallet className="w-4 h-4" />
+                            </button>
+                          </TableCell>
                         </TableRow>
                         {expandedUser === usage.user_id && (
                           <TableRow key={`${usage.user_id}-sessions`}>
-                            <TableCell colSpan={4} className="bg-gray-900/50 p-0">
+                            <TableCell colSpan={5} className="bg-gray-900/50 p-0">
                               {sessionsLoading ? (
                                 <div className="flex items-center justify-center py-4">
                                   <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500" />
@@ -359,7 +405,7 @@ export function UsagePage() {
                     ))}
                     {userUsage.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={4} className="text-center py-8 text-gray-400">
+                        <TableCell colSpan={5} className="text-center py-8 text-gray-400">
                           No usage data for this period
                         </TableCell>
                       </TableRow>
@@ -471,6 +517,25 @@ export function UsagePage() {
             </Card>
           )}
         </>
+      )}
+
+      {ctxMenu && (
+        <div
+          className="fixed z-50 bg-gray-800 border border-gray-700 rounded-md shadow-lg py-1 text-sm"
+          style={{ top: ctxMenu.y, left: ctxMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              createBudgetFor(ctxMenu.userId);
+              setCtxMenu(null);
+            }}
+            className="flex items-center gap-2 px-3 py-1.5 w-full text-left hover:bg-gray-700"
+          >
+            <Wallet className="w-4 h-4 text-gray-400" />
+            Create budget for {ctxMenu.name}
+          </button>
+        </div>
       )}
     </div>
   );

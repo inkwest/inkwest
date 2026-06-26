@@ -59,9 +59,13 @@ class Budget(Base):
         nullable=True,
     )
 
-    # Budget scope
+    # Budget scope.
+    # values_callable: store/bind the lowercase enum *values* ("user") — the DB enum
+    # type was created with those, not the member names ("USER"). Without this,
+    # SQLAlchemy binds the name and every insert/filter fails with
+    # InvalidTextRepresentationError ("invalid input value for enum budgettype").
     budget_type: Mapped[BudgetType] = mapped_column(
-        SQLEnum(BudgetType),
+        SQLEnum(BudgetType, values_callable=lambda e: [m.value for m in e]),
         nullable=False,
         index=True,
     )
@@ -102,9 +106,9 @@ class Budget(Base):
         comment="Max cost in USD per period",
     )
 
-    # Period configuration
+    # Period configuration (same lowercase-value mapping as budget_type above).
     period: Mapped[BudgetPeriod] = mapped_column(
-        SQLEnum(BudgetPeriod),
+        SQLEnum(BudgetPeriod, values_callable=lambda e: [m.value for m in e]),
         nullable=False,
         default=BudgetPeriod.DAILY,
     )
