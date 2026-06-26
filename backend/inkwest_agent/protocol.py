@@ -64,8 +64,9 @@ from app.services.events import ChatEvent
 # Bumped when the turn-spec / event wire shape changes incompatibly so the broker
 # can refuse a mismatched agent build. P1.4 formalized context/limits/tools/creds;
 # P1.7 added skills (progressive disclosure) + the MCP config path; P1.8 added image
-# attachments (the Converse adapter turns IMAGE files into image content blocks).
-PROTOCOL_VERSION = 4
+# attachments (the Converse adapter turns IMAGE files into image content blocks); the
+# LLM auth broker added bedrock_endpoint_url (route the model call through the broker).
+PROTOCOL_VERSION = 5
 
 # Engine tag default (the only engine that runs this agent).
 INKWEST_AGENT = "inkwest-agent"
@@ -248,6 +249,10 @@ class TurnSpec:
     # ``model`` when unset.
     model_target: str | None = None
     region: str | None = None
+    # Bedrock endpoint override (LLM auth broker): when set, boto3 targets the broker
+    # instead of real Bedrock — it builds ``{url}/model/{id}/converse[-stream]`` and signs
+    # with the bearer grant (AWS_BEARER_TOKEN_BEDROCK), no SigV4. None = direct Bedrock.
+    bedrock_endpoint_url: str | None = None
     # Tool-execution context (Profile A; env-enforced). user_id labels the turn;
     # connector creds reach the executors via the broker-injected env, sourced from
     # the tmpfs ``creds_path`` (the agent never reads the portal credential store).

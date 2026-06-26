@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.services import llm_broker
+from app.services import llm_proxy_token as token
 from app.services import orchestrator_inkwest_agent as oia
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 
@@ -1075,3 +1077,75 @@ class TestEngineDispatch:
             )
             == "cli"
         )
+
+
+# ---------------------------------------------------------------------------
+# LLM auth broker wiring (endpoint_url on the spec + grant injected + burned)
+# ---------------------------------------------------------------------------
+
+
+def test_make_bedrock_client_passes_endpoint_url() -> None:
+    from inkwest_agent.converse import make_bedrock_client
+
+    with patch("inkwest_agent.converse.boto3.client") as mk:
+        make_bedrock_client("eu-west-1", endpoint_url="http://gw:8000/api/llm-proxy")
+        kwargs = mk.call_args.kwargs
+        assert kwargs["endpoint_url"] == "http://gw:8000/api/llm-proxy"
+    with patch("inkwest_agent.converse.boto3.client") as mk:
+        make_bedrock_client("eu-west-1")  # default = direct Bedrock, no override
+        assert "endpoint_url" not in mk.call_args.kwargs
+
+
+async def _run_agent_with_broker(broker_settings):
+    """Run one broker turn with a custom execute_agent fake; capture spec + grant status."""
+    captured: dict = {}
+
+    def fake_execute_agent(session_id, turn_spec, **kw):
+        captured["spec"] = json.loads(turn_spec)
+        env = kw.get("extra_env") or {}
+        tok = env.get("AWS_BEARER_TOKEN_BEDROCK")
+        captured["token"] = tok
+        captured["live_during_turn"] = bool(tok) and bool(token.verify(tok))
+        return _aiter([json.dumps({"type": "done", "input_tokens": 1, "output_tokens": 1})])
+
+    patches, spies = _patch_broker()
+    patches.append(patch.object(llm_broker, "get_settings", return_value=broker_settings))
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(oia, "execute_agent", side_effect=fake_execute_agent):
+            await _collect(
+                oia.orchestrate_chat_inkwest_agent(
+                    db=spies.db,
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="hi",
+                    user_id=USER_ID,
+                )
+            )
+    finally:
+        for p in patches:
+            p.stop()
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_broker_on_sets_endpoint_injects_and_burns_grant() -> None:
+    captured = await _run_agent_with_broker(
+        SimpleNamespace(llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000")
+    )
+    assert captured["spec"]["bedrock_endpoint_url"] == "http://gw:8000/api/llm-proxy"
+    assert captured["live_during_turn"] is True  # grant resolvable while the agent ran
+    with pytest.raises(token.ProxyAuthError):
+        token.verify(captured["token"])  # burned in the finally — no replay after the turn
+
+
+@pytest.mark.asyncio
+async def test_broker_off_leaves_endpoint_none_and_no_grant() -> None:
+    captured = await _run_agent_with_broker(
+        SimpleNamespace(llm_broker_enabled=False, mcp_proxy_base_url="http://gw:8000")
+    )
+    assert captured["spec"]["bedrock_endpoint_url"] is None
+    assert captured["token"] is None  # no AWS_BEARER_TOKEN_BEDROCK injected

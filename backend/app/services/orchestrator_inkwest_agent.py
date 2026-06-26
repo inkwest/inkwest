@@ -31,7 +31,7 @@ from app.core import metrics
 from app.core.config import get_settings
 from app.core.constants import MAX_RESPONSE_TOKENS
 from app.services import attachments as attachments_svc
-from app.services import model_registry
+from app.services import llm_broker, model_registry
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
 from app.services.budget_service import record_usage
@@ -205,9 +205,10 @@ async def orchestrate_chat_inkwest_agent(
     # The env carries AWS_SHARED_CREDENTIALS_FILE (the connector profiles), NOT explicit
     # AWS_ACCESS_KEY_ID/SECRET, so it does not displace the agent's model-call credential:
     # the Bedrock backend authenticates with AWS_BEARER_TOKEN_BEDROCK (set in the
-    # container's sandbox.env), and botocore prefers the bearer token over the
+    # container's sandbox.env, or — with the LLM broker on — the per-turn grant injected
+    # just below, which overrides it), and botocore prefers the bearer token over the
     # shared-credentials file for the bedrock service — so make_bedrock_client still talks
-    # to the backend identity. (The connector `aws` subprocess gets the bearer token
+    # to the broker/backend identity. (The connector `aws` subprocess gets the bearer token
     # stripped — see _projected_aws_env.) Requires sandbox_creds_root to be set for the
     # AWS connector to resolve in-container; without it build_connector_env emits
     # backend-local paths the agent can't see and aws_call degrades to NEEDS_AUTH.
@@ -228,6 +229,15 @@ async def orchestrate_chat_inkwest_agent(
                 extra={"session_id": session_id_str, "connectors": injected},
             )
     creds_path = f"{settings.sandbox_home.rstrip('/')}/.aws"
+
+    # LLM auth broker: when enabled, route the agent's Bedrock calls through the broker. The
+    # per-turn grant rides the connector-env channel (docker exec -e), OVERRIDING the
+    # AWS_BEARER_TOKEN_BEDROCK in sandbox.env so the real key need not live in the sandbox;
+    # the matching endpoint_url rides the TurnSpec below. The grant is BURNED in the finally
+    # (dies with the turn). Off ⇒ empty ⇒ today's behavior (real bearer reaches Bedrock direct).
+    broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
+    if broker_env:
+        connector_env = {**connector_env, **broker_env}
 
     # Skills + MCP (P1.7): resolve from the DB here (the agent is DB-free). Skills ride
     # the spec as name+description ONLY (progressive disclosure); their SKILL.md bodies
@@ -333,6 +343,9 @@ async def orchestrate_chat_inkwest_agent(
             input_modalities=list(getattr(entry, "input_modalities", []) or []),
             model_target=model_target,
             region=settings.aws_region,
+            # Route the model call through the broker when enabled (None ⇒ direct Bedrock).
+            # Paired with the grant injected into connector_env above.
+            bedrock_endpoint_url=llm_broker.agent_bedrock_endpoint_url(),
             user_id=str(user_id) if user_id else None,
             kubeconfig_path=kubeconfig_path,
             context_name=context_name,
@@ -471,6 +484,10 @@ async def orchestrate_chat_inkwest_agent(
         yield error_event(f"Unexpected error: {str(e)}")
 
     finally:
+        # Burn this turn's broker grant: the injected AWS_BEARER_TOKEN_BEDROCK dies with the
+        # turn, so a token exfiltrated from the sandbox can't be replayed afterwards. No-op
+        # when the broker is off. Runs on every exit path (the agent process is already gone).
+        llm_broker.burn_env(broker_env)
         # Remove the materialized MCP config: it can embed MCP creds/headers, so it must
         # not outlive the turn (one-way projection — re-materialized from the DB next turn).
         from app.services.agent_mcp_config import remove_agent_mcp_config
