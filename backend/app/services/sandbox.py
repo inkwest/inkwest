@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 from app.core import metrics
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.services import app_settings
 
 logger = get_logger(__name__)
 
@@ -59,6 +60,7 @@ class Sandbox:
     ext_net: str  # inkwest_extnet_<tag>
     last_used: float  # event-loop clock; refreshed by ensure()/release()
     in_use: int = 0  # live turns holding this pair; reaper never touches in_use > 0
+    user_id: str | None = None  # owner, for the per-user cap; None = unattributed (no cap)
 
 
 @dataclass(frozen=True)
@@ -173,12 +175,12 @@ async def _check_toolbox_image(image: str) -> None:
         )
 
 
-async def provision(session_id: str) -> Sandbox:
+async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
     """Create the conversation's container pair + networks. Rolls back on failure.
 
     Idempotent: any stale same-named objects (e.g. left by a failed prior attempt)
     are removed first, and the durable dirs are reused (so ``--resume`` survives a
-    soft teardown).
+    soft teardown). ``user_id`` attributes the pair to its owner (per-user cap + label).
     """
     settings = get_settings()
     await _check_toolbox_image(settings.sandbox_toolbox_image)
@@ -239,6 +241,8 @@ async def provision(session_id: str) -> Sandbox:
     await _remove_pair(names)
 
     labels = ["--label", _LABEL_SANDBOX, "--label", f"inkwest.session={session_id}"]
+    if user_id:
+        labels += ["--label", f"inkwest.user={user_id}"]
     try:
         await _docker("network", "create", *labels, names.ext_net)
         await _docker("network", "create", "--internal", *labels, names.int_net)
@@ -357,15 +361,17 @@ async def provision(session_id: str) -> Sandbox:
         int_net=names.int_net,
         ext_net=names.ext_net,
         last_used=_now(),
+        user_id=user_id,
     )
 
 
-async def ensure(session_id: str) -> str:
+async def ensure(session_id: str, user_id: str | None = None) -> str:
     """Acquire the conversation container for a turn, provisioning the pair if needed.
 
     Reuses a live pair across turns (refreshing its idle clock). A pair that died
     out-of-band (OOM kill, proxy crash) is torn down and rebuilt so the turn still
-    runs against a working sandbox.
+    runs against a working sandbox. ``user_id`` attributes a freshly provisioned pair
+    to its owner for the per-user cap; call :func:`enforce_user_sandbox_cap` first.
 
     Bumps an in-use refcount the caller MUST drop with :func:`release` when the turn
     ends (use a ``finally``). ``last_used`` only marks turn *start*; a turn outliving
@@ -381,7 +387,7 @@ async def ensure(session_id: str) -> str:
         if sb is None:
             provision_started = _now()
             try:
-                sb = await provision(session_id)
+                sb = await provision(session_id, user_id)
             except Exception:
                 metrics.sandbox_provision_total.labels(result="error").inc()
                 raise
@@ -413,6 +419,106 @@ async def release(session_id: str) -> None:
         if sb.in_use > 0:
             sb.in_use -= 1
         sb.last_used = _now()
+
+
+# Idle pairs (reclaimable) are always reaped back down to the soft cap. Busy pairs (a live
+# turn — never killable) may burst above it up to a hard ceiling — at least 2 over, or +25%
+# of the cap, whichever is larger (so a small cap still gets a usable burst) — then a new
+# turn is refused.
+_CAP_HARD_MARGIN_MIN = 2
+
+
+def hard_ceiling(cap: int) -> int:
+    """Absolute concurrent-sandbox ceiling for a soft ``cap``: ``cap + max(2, cap // 4)``.
+
+    Busy pairs may burst up to here; a turn that would push past it is refused. Single
+    source of truth so the admin view (app.api.routes.admin) and the enforcer agree.
+    """
+    return cap + max(_CAP_HARD_MARGIN_MIN, cap // 4)
+
+
+class SandboxCapExceededError(Exception):
+    """A user is at the hard sandbox ceiling with every pair busy — none reclaimable.
+
+    Raised by :func:`enforce_user_sandbox_cap` so the orchestrator refuses the turn with a
+    user-facing message instead of provisioning past the ceiling.
+    """
+
+    def __init__(self, *, active: int, hard_cap: int) -> None:
+        self.active = active
+        self.hard_cap = hard_cap
+        super().__init__(
+            f"Too many conversations running at once ({active}; limit {hard_cap}). "
+            "Wait for one to finish, or close an idle conversation, then retry."
+        )
+
+
+def _max_sessions_per_user() -> int:
+    """The live per-user sandbox cap: admin override (app_settings) → env default."""
+    return app_settings.get_int_setting(
+        app_settings.SANDBOX_MAX_SESSIONS_PER_USER_KEY,
+        get_settings().sandbox_max_sessions_per_user,
+    )
+
+
+async def _evict(session_id: str) -> None:
+    """Soft-reap one sandbox under its per-session lock — for the per-user cap.
+
+    Mirrors the idle reaper: re-validate under the lock and skip if it became busy or
+    vanished after the caller's snapshot, so a turn that started in the gap is never
+    torn down. Keeps the durable dir, so the conversation cold-starts (and resumes) later.
+    """
+    async with _locks[session_id]:
+        sb = _sandboxes.get(session_id)
+        if sb is None or sb.in_use > 0:
+            return
+        logger.info("sandbox_evict_user_cap", session_id=session_id, user_id=sb.user_id)
+        metrics.sandbox_evicted_user_cap_total.inc()
+        await _teardown_unlocked(session_id, remove_dir=False)
+
+
+async def enforce_user_sandbox_cap(user_id: str | None, session_id: str) -> None:
+    """Keep a user within their concurrent-sandbox band before a turn provisions a pair.
+
+    Two tiers around the admin cap (see :func:`_max_sessions_per_user` / :func:`hard_ceiling`):
+
+    * ``cap``: the soft limit. Reclaim the user's oldest IDLE pairs down to it. An evicted
+      pair keeps its durable dir and cold-starts later (the background idle reaper is a
+      separate, always-on mechanism — this only adds per-turn admission).
+    * ``hard`` (cap + max(2, 25%)): absolute ceiling. Busy pairs hold a live turn and are
+      never killed; if they alone would breach it the turn is REFUSED (raises the cap error).
+
+    Called BEFORE :func:`ensure` so it never holds ``session_id``'s lock while reaping a
+    victim's — no nested-lock deadlock. ``user_id`` None or cap ``<= 0`` (unlimited) is a no-op.
+    """
+    if user_id is None:
+        return
+    cap = _max_sessions_per_user()
+    if cap <= 0:
+        return
+    hard = hard_ceiling(cap)
+
+    # Atomic snapshot (no await through the reads below): this user's pairs, excluding the
+    # incoming session — reused or about to be provisioned, it accounts for exactly one slot.
+    owned = [
+        sb
+        for sb in list(_sandboxes.values())
+        if sb.user_id == user_id and sb.session_id != session_id
+    ]
+    idle = sorted((sb for sb in owned if sb.in_use == 0), key=lambda sb: sb.last_used)
+    busy = len(owned) - len(idle)
+
+    # Hard ceiling: busy pairs can't be reclaimed. If they plus this turn would breach it,
+    # refuse — no amount of idle eviction can make room.
+    if busy + 1 > hard:
+        metrics.sandbox_cap_refused_total.inc()
+        raise SandboxCapExceededError(active=busy + 1, hard_cap=hard)
+
+    # Reclaim oldest idle down to the soft cap. Only idle are touched, so the floor is
+    # busy + 1 — already proven ≤ hard above.
+    to_evict = min(len(idle), max(0, len(owned) + 1 - cap))
+    for sb in idle[:to_evict]:
+        await _evict(sb.session_id)
 
 
 async def _teardown_unlocked(session_id: str, *, remove_dir: bool) -> None:

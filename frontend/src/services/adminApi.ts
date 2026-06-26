@@ -280,6 +280,28 @@ export async function updateModelSettings(
   });
 }
 
+export interface SandboxSettings {
+  /** Effective per-user concurrent-sandbox cap (admin override or env default). 0 = unlimited. */
+  max_sessions_per_user: number;
+  /** The env baseline, so the UI can show when an override differs from it. */
+  default_max_sessions_per_user: number;
+  /** Busy-burst ceiling (cap + max(2, 25%)): beyond it a new turn is refused. 0 when unlimited. */
+  hard_ceiling: number;
+}
+
+export async function getSandboxSettings(): Promise<SandboxSettings> {
+  return fetchAPI('/api/admin/settings/sandbox');
+}
+
+export async function updateSandboxSettings(
+  maxSessionsPerUser: number
+): Promise<SandboxSettings> {
+  return fetchAPI('/api/admin/settings/sandbox', {
+    method: 'PUT',
+    body: JSON.stringify({ max_sessions_per_user: maxSessionsPerUser }),
+  });
+}
+
 /** Force a live catalog refresh; optionally flip the all-vendors flag first. */
 export async function refreshModels(includeAllVendors?: boolean): Promise<ModelSettings> {
   return fetchAPI('/api/admin/settings/model/refresh', {

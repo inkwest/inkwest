@@ -438,3 +438,169 @@ async def test_reap_idle_skips_session_refreshed_under_lock(tmp_path):
     ):
         await sandbox._reap_idle()
     td.assert_not_awaited()  # re-check under the lock saw the refresh -> no force-kill
+
+
+# ---------------------------------------------------------------------------
+# Per-user concurrent-sandbox cap (enforce_user_sandbox_cap)
+# ---------------------------------------------------------------------------
+
+
+def _sb(session_id, user, last_used, in_use=0):
+    sb = sandbox.Sandbox(session_id, "c", "p", "i", "e", last_used=last_used, user_id=user)
+    sb.in_use = in_use
+    sandbox._sandboxes[session_id] = sb
+    return sb
+
+
+def _evicted(td: AsyncMock) -> set[str]:
+    """Session ids passed to the (mocked) teardown."""
+    return {call.args[0] for call in td.await_args_list}
+
+
+# cap=5 -> hard 5+max(2,1)=7; cap=2 -> hard 2+max(2,0)=4.
+
+
+@pytest.mark.asyncio
+async def test_cap_noop_at_or_below_cap():
+    for i in range(4):
+        _sb(f"a{i}", "alice", float(i))
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=5),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        # 4 owned + 1 incoming = 5 == cap -> nothing to reclaim.
+        await sandbox.enforce_user_sandbox_cap("alice", "a-new")
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cap_reaps_idle_to_cap_oldest_first():
+    for i in range(6):
+        _sb(f"a{i}", "alice", float(i * 10))  # a0 oldest .. a5 newest
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=5),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        # 6 owned + 1 incoming = 7; cap 5 -> reap the 2 oldest idle down to 5.
+        await sandbox.enforce_user_sandbox_cap("alice", "a-new")
+    assert _evicted(td) == {"a0", "a1"}
+
+
+@pytest.mark.asyncio
+async def test_cap_never_reaps_busy():
+    for i in range(4):
+        _sb(f"a{i}", "alice", float(i), in_use=1)  # all live
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=5),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        # 4 busy + 1 incoming = 5 <= hard 7 -> allowed; nothing idle to reclaim.
+        await sandbox.enforce_user_sandbox_cap("alice", "a-new")
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cap_reaps_idle_and_spares_busy():
+    _sb("busy", "alice", 1.0, in_use=1)  # oldest but live -> spared
+    _sb("idle1", "alice", 10.0)
+    _sb("idle2", "alice", 20.0)
+    _sb("idle3", "alice", 30.0)
+    _sb("idle4", "alice", 40.0)
+    _sb("idle5", "alice", 50.0)
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=5),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        # 6 owned + 1 incoming = 7; cap 5 -> reap 2 oldest IDLE; the live one is spared.
+        await sandbox.enforce_user_sandbox_cap("alice", "new")
+    assert _evicted(td) == {"idle1", "idle2"}
+
+
+@pytest.mark.asyncio
+async def test_cap_refuses_when_busy_burst_exceeds_hard():
+    for i in range(4):
+        _sb(f"a{i}", "alice", float(i), in_use=1)  # 4 busy, cap 2 -> hard 4
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=2),
+        patch.object(sandbox, "_teardown_unlocked", td),
+        pytest.raises(sandbox.SandboxCapExceededError) as exc,
+    ):
+        # 4 busy + 1 incoming = 5 > hard 4, none reclaimable -> refuse.
+        await sandbox.enforce_user_sandbox_cap("alice", "a-new")
+    assert exc.value.hard_cap == 4
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cap_allows_busy_burst_up_to_hard():
+    for i in range(3):
+        _sb(f"a{i}", "alice", float(i), in_use=1)  # 3 busy, cap 2 -> hard 4
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=2),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        # 3 busy + 1 incoming = 4 == hard -> allowed, nothing to reap.
+        await sandbox.enforce_user_sandbox_cap("alice", "a-new")
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cap_is_per_user():
+    for i in range(5):
+        _sb(f"a{i}", "alice", float(i))
+    for i in range(8):
+        _sb(f"b{i}", "bob", float(i))
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=5),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        # Bob's 8 don't count against alice; alice 5 owned, but incoming is one of hers
+        # (reuse of a0) -> excluded -> 4 owned + 1 = 5 == cap -> no reap.
+        await sandbox.enforce_user_sandbox_cap("alice", "a0")
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cap_excludes_incoming_session_on_reuse():
+    _sb("a1", "alice", 10.0)
+    _sb("a2", "alice", 20.0)
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=2),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        # Reusing a1 (cap 2): a1 excluded -> owned 1 (a2) + incoming 1 = 2 == cap -> no reap.
+        await sandbox.enforce_user_sandbox_cap("alice", "a1")
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cap_unlimited_when_zero():
+    for i in range(10):
+        _sb(f"a{i}", "alice", float(i))
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=0),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        await sandbox.enforce_user_sandbox_cap("alice", "a-new")
+    td.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cap_noop_for_anonymous_user():
+    _sb("a1", None, 10.0)
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_max_sessions_per_user", return_value=1),
+        patch.object(sandbox, "_teardown_unlocked", td),
+    ):
+        await sandbox.enforce_user_sandbox_cap(None, "a2")
+    td.assert_not_awaited()

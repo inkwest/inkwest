@@ -149,6 +149,14 @@ sandbox_active = Gauge(
 sandbox_provision_total = Counter(
     "inkwest_sandbox_provision_total", "Sandbox provision attempts", ["result"]
 )
+sandbox_evicted_user_cap_total = Counter(
+    "inkwest_sandbox_evicted_user_cap_total",
+    "Idle sandboxes soft-reaped to keep a user under the per-user concurrency cap",
+)
+sandbox_cap_refused_total = Counter(
+    "inkwest_sandbox_cap_refused_total",
+    "Turns refused because the user hit the hard sandbox ceiling with all pairs busy",
+)
 sandbox_provision_duration_seconds = Histogram(
     "inkwest_sandbox_provision_duration_seconds",
     "Time to provision a conversation sandbox",

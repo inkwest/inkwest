@@ -31,6 +31,8 @@ from app.services import mcp_oauth_catalog, model_registry
 from app.services.app_settings import (
     BEDROCK_INCLUDE_OPEN_KEY,
     DEFAULT_ENGINE_KEY,
+    SANDBOX_MAX_SESSIONS_PER_USER_KEY,
+    get_int_setting,
     set_setting,
 )
 from app.services.budget_service import (
@@ -44,6 +46,7 @@ from app.services.engines import (
     inkwest_agent_enabled,
 )
 from app.services.model_catalog import bedrock_include_open, catalog_status, refresh_catalog
+from app.services.sandbox import hard_ceiling
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -1060,6 +1063,54 @@ async def update_model_settings(
         f"(engine={body.default_engine}), enabled={body.enabled_models}"
     )
     return _model_settings_response()
+
+
+class SandboxSettingsResponse(BaseModel):
+    """Runtime sandbox limits an admin may tune without a redeploy."""
+
+    # Effective per-user concurrent-sandbox cap (admin override or env default). 0 = unlimited.
+    # Idle conversations are reaped back down to this; the value is the headline limit.
+    max_sessions_per_user: int
+    # The env baseline, shown so the UI can label when an override is in effect.
+    default_max_sessions_per_user: int
+    # Busy-burst ceiling (cap + max(2, 25%); 0 when unlimited): a turn that would push the
+    # user's running sandboxes past it is refused. Exposed so the admin sees the real limit.
+    hard_ceiling: int
+
+
+class UpdateSandboxSettingsRequest(BaseModel):
+    max_sessions_per_user: int = Field(..., ge=0, le=1000)
+
+
+def _sandbox_settings_response() -> SandboxSettingsResponse:
+    env_default = get_settings().sandbox_max_sessions_per_user
+    cap = get_int_setting(SANDBOX_MAX_SESSIONS_PER_USER_KEY, env_default)
+    return SandboxSettingsResponse(
+        max_sessions_per_user=cap,
+        default_max_sessions_per_user=env_default,
+        hard_ceiling=hard_ceiling(cap) if cap > 0 else 0,
+    )
+
+
+@router.get("/settings/sandbox", response_model=SandboxSettingsResponse)
+async def get_sandbox_settings(admin: AdminUser) -> SandboxSettingsResponse:
+    """Get the runtime sandbox limits (currently the per-user concurrency cap)."""
+    return _sandbox_settings_response()
+
+
+@router.put("/settings/sandbox", response_model=SandboxSettingsResponse)
+async def update_sandbox_settings(
+    body: UpdateSandboxSettingsRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> SandboxSettingsResponse:
+    """Set the per-user concurrent-sandbox cap (0 = unlimited). Effective immediately."""
+    await set_setting(db, SANDBOX_MAX_SESSIONS_PER_USER_KEY, str(body.max_sessions_per_user))
+    logger.info(
+        f"Sandbox settings changed by {admin.email}: "
+        f"max_sessions_per_user={body.max_sessions_per_user}"
+    )
+    return _sandbox_settings_response()
 
 
 @router.post("/settings/model/refresh", response_model=ModelSettingsResponse)
