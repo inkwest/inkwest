@@ -4,7 +4,7 @@ import { Share2 } from 'lucide-react';
 import { useChatStore } from '@/store/chat';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
-import { useEgressSocket, isBlocked } from '@/hooks/useEgressSocket';
+import { useEgressSocket, isBlocked, isError } from '@/hooks/useEgressSocket';
 import { useSessionMetrics } from '@/hooks/useSessionMetrics';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
@@ -86,6 +86,7 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
   const [tab, setTab] = useState<'chat' | 'egress' | 'monitoring'>('chat');
   const egressAvailable = egress.connected || egress.events.length > 0;
   const blockedCount = egress.events.filter(isBlocked).length;
+  const errorCount = egress.events.filter(isError).length;
   const showEgress = egressAvailable && tab === 'egress';
   const metricsAvailable = metrics.status === 'running' || metrics.samples.length > 0;
   const showMonitoring = metricsAvailable && tab === 'monitoring';
@@ -219,6 +220,11 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
               {blockedCount > 0 && (
                 <span className="text-[10px] px-1 rounded bg-red-900/50 text-red-400">
                   {blockedCount} blocked
+                </span>
+              )}
+              {errorCount > 0 && (
+                <span className="text-[10px] px-1 rounded bg-amber-900/50 text-amber-400">
+                  {errorCount} errors
                 </span>
               )}
             </>

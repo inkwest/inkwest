@@ -10,12 +10,17 @@ import type { EgressEvent } from '@/hooks/useEgressSocket';
 const egress = vi.hoisted(() => ({
   state: { events: [] as EgressEvent[], connected: false, disabled: false },
 }));
-vi.mock('@/hooks/useEgressSocket', () => ({
-  useEgressSocket: () => egress.state,
-  // Mirror the real predicate: a denial decision or a 4xx/5xx status counts as blocked.
-  isBlocked: (e: EgressEvent) =>
-    e.decision.includes('DENIED') || e.status.startsWith('4') || e.status.startsWith('5'),
-}));
+vi.mock('@/hooks/useEgressSocket', () => {
+  // Mirror the real predicates: only a DENIED decision is a squid block; a 4xx/5xx
+  // on a forwarded request is an upstream error, not a block.
+  const isBlocked = (e: EgressEvent) => e.decision.includes('DENIED');
+  return {
+    useEgressSocket: () => egress.state,
+    isBlocked,
+    isError: (e: EgressEvent) =>
+      !isBlocked(e) && (e.status.startsWith('4') || e.status.startsWith('5')),
+  };
+});
 
 // Stub heavy children so the test isolates ChatView's own markup (the tab bar).
 vi.mock('./MessageList', () => ({ MessageList: () => <div data-testid="message-list" /> }));
@@ -67,11 +72,13 @@ describe('ChatView tab bar', () => {
     expect(screen.getByRole('button', { name: /network/i })).toBeDisabled();
   });
 
-  it('enables the Network tab and shows event + blocked counts once egress is available', () => {
+  it('enables the Network tab and shows event + blocked + error counts once egress is available', () => {
     egress.state = {
       events: [
         event({ _id: 1, decision: 'TCP_TUNNEL', status: '200' }),
         event({ _id: 2, decision: 'TCP_DENIED', status: '403' }),
+        // Upstream 503 on a forwarded tunnel — an error, NOT a squid block.
+        event({ _id: 3, decision: 'TCP_TUNNEL', status: '503' }),
       ],
       connected: true,
       disabled: false,
@@ -80,8 +87,9 @@ describe('ChatView tab bar', () => {
 
     const network = screen.getByRole('button', { name: /network/i });
     expect(network).toBeEnabled();
-    expect(network).toHaveTextContent('2'); // event count badge
-    expect(network).toHaveTextContent('1 blocked'); // the 403 denial
+    expect(network).toHaveTextContent('3'); // event count badge
+    expect(network).toHaveTextContent('1 blocked'); // only the TCP_DENIED/403
+    expect(network).toHaveTextContent('1 errors'); // the TCP_TUNNEL/503
   });
 
   it('enables the Network tab on connect even before any events arrive', () => {

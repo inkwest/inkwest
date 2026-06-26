@@ -7,9 +7,51 @@ vi.mock('@/services/api', () => ({
 }));
 
 import { fetchWsTicket } from '@/services/api';
-import { useEgressSocket } from './useEgressSocket';
+import { useEgressSocket, isBlocked, isError, EgressEvent } from './useEgressSocket';
 
 const mockTicket = fetchWsTicket as unknown as ReturnType<typeof vi.fn>;
+
+function ev(partial: Partial<EgressEvent>): EgressEvent {
+  return {
+    _id: 0,
+    ts: 0,
+    decision: 'TCP_TUNNEL',
+    status: '200',
+    method: 'CONNECT',
+    host: 'example.com',
+    port: '443',
+    bytes: 0,
+    client: 'c',
+    ...partial,
+  };
+}
+
+describe('egress classification', () => {
+  it('treats only a DENIED decision as a squid block', () => {
+    expect(isBlocked(ev({ decision: 'TCP_DENIED', status: '403' }))).toBe(true);
+    expect(isError(ev({ decision: 'TCP_DENIED', status: '403' }))).toBe(false);
+  });
+
+  it('treats a 5xx on a forwarded tunnel as an error, not a block', () => {
+    // The screenshot case: squid established the tunnel (HIER_DIRECT) and the
+    // upstream EKS endpoint returned 503 — unrelated to egress policy.
+    const e = ev({ decision: 'TCP_TUNNEL', status: '503' });
+    expect(isBlocked(e)).toBe(false);
+    expect(isError(e)).toBe(true);
+  });
+
+  it('treats an upstream 4xx as an error, not a block', () => {
+    const e = ev({ decision: 'TCP_MISS', status: '403' });
+    expect(isBlocked(e)).toBe(false);
+    expect(isError(e)).toBe(true);
+  });
+
+  it('treats a successful tunnel as neither blocked nor errored', () => {
+    const e = ev({ decision: 'TCP_TUNNEL', status: '200' });
+    expect(isBlocked(e)).toBe(false);
+    expect(isError(e)).toBe(false);
+  });
+});
 
 describe('useEgressSocket — ticket auth', () => {
   beforeEach(() => mockTicket.mockReset());
