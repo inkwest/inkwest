@@ -32,7 +32,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       <div className="flex gap-2 border-b border-gray-700 -mt-2 mb-4">
         {([
           ['display', 'Display'],
-          ['skills', 'Personal Skills'],
+          ['skills', 'Skills'],
           ['io', 'Import / Export'],
         ] as [Tab, string][]).map(([key, label]) => (
           <button
@@ -139,15 +139,15 @@ function SkillsTab({ adminSkills }: { adminSkills: Skill[] }) {
           onOverride={prefs.overrideSkill}
           overridableAdmin={overridable}
           showOverrideBadge
-          emptyHint="No personal skills yet. Add one, or override an admin skill above."
+          emptyHint="No personal skills yet. Add one, or override a global skill above."
         />
       </section>
 
       {adminSkills.length > 0 && (
         <section>
-          <h4 className="text-sm font-semibold text-gray-200 mb-2">Global (admin) skills</h4>
+          <h4 className="text-sm font-semibold text-gray-200 mb-2">Global skills</h4>
           <p className="text-xs text-gray-500 mb-2">
-            Turn an admin skill off for yourself, or override it (above) to edit your own copy.
+            Turn a global skill off for yourself, or override it (above) to edit your own copy.
             A personal skill of the same name always wins.
           </p>
           <div className="space-y-1">

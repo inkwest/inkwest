@@ -120,7 +120,7 @@ export function SkillsManager({
           placeholder="Search by name, description or content…"
           className="flex-1"
         />
-        <Button onClick={() => openModal()}>
+        <Button onClick={() => openModal()} className="shrink-0 whitespace-nowrap">
           <Plus className="w-4 h-4 mr-2" />
           Add Skill
         </Button>
@@ -135,7 +135,7 @@ export function SkillsManager({
       {onOverride && overridable.length > 0 && (
         <div className="rounded border border-gray-700 bg-gray-900/40 p-3 space-y-2">
           <p className="text-xs text-gray-400">
-            Override an admin skill — forks an editable copy that shadows the global one:
+            Override a global skill — forks an editable copy that shadows the global one:
           </p>
           <div className="flex flex-wrap gap-2">
             {overridable.map((a) => (
@@ -174,7 +174,7 @@ export function SkillsManager({
                     <FileText className="w-4 h-4 text-gray-400 shrink-0" />
                     <span>{skill.name}</span>
                     {showOverrideBadge && skill.is_override && (
-                      <Badge variant="warning" title="Shadows an admin skill of the same name">
+                      <Badge variant="warning" title="Shadows a global skill of the same name">
                         override
                       </Badge>
                     )}
