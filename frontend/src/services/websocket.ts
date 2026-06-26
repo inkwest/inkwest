@@ -49,6 +49,9 @@ export class ChatWebSocket {
     } catch {
       if (this._disconnected) return;
       this.notifyHandlers({ type: 'error', content: 'Failed to authenticate connection' });
+      // Reconnect on a failed ticket POST too (backend redeploy / auth-gateway
+      // blip). scheduleReconnect owns both the give-up decision (budget) and the
+      // 'reconnecting' state, so this path can't strand the UI on "Reconnecting…".
       this.scheduleReconnect();
       return;
     }
@@ -100,6 +103,7 @@ export class ChatWebSocket {
       // not found, 4010 session deleted, 4011 access revoked. The sync socket
       // navigates the user out of the dead session (see useSyncSocket).
       if (event.code === 4004 || event.code === 4010 || event.code === 4011) {
+        this.notifyHandlers({ type: 'reconnecting', state: false });
         return;
       }
 
@@ -107,6 +111,11 @@ export class ChatWebSocket {
       // keep reconnecting on any non-clean, non-terminal close (delay is capped).
       if (event.code !== 1000) {
         this.scheduleReconnect();
+      } else {
+        // Clean close (1000) — no retry pending. Drop any lingering "Reconnecting…"
+        // state so the flat "Disconnected" badge stands. (Exhaustion give-up lives in
+        // scheduleReconnect's budget check, not here.)
+        this.notifyHandlers({ type: 'reconnecting', state: false });
       }
     };
 
@@ -125,6 +134,11 @@ export class ChatWebSocket {
       // navigation (fresh budget), and the chat view surfaces its own connection
       // error — so it must not raise the GLOBAL reload banner. That is the sync
       // socket's job (the app-wide heartbeat); see useSyncSocket.
+      //
+      // Surface the give-up to the chat UI so its badge drops "Reconnecting…" back
+      // to "Disconnected" instead of spinning forever with no retry pending. This is
+      // the single give-up point for both socket-close and ticket-fetch exhaustion.
+      this.notifyHandlers({ type: 'reconnecting', state: false });
       return;
     }
     this.reconnectAttempts++;
@@ -133,6 +147,11 @@ export class ChatWebSocket {
       maxMs: this.maxReconnectDelay,
     });
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+
+    // A retry is now pending — surface it so the UI distinguishes a transient blip
+    // from a terminal disconnect. Cleared by the next 'connected' (onopen), the
+    // budget give-up above, or a terminal/clean close in onclose.
+    this.notifyHandlers({ type: 'reconnecting', state: true });
 
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;

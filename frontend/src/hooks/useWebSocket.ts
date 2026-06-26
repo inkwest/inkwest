@@ -20,6 +20,7 @@ export function useWebSocket(sessionId: string) {
     clearStreamingBlocks,
     setIsStreaming,
     setIsConnected,
+    setIsReconnecting,
     setError,
     addMessage,
     addPeerMessage,
@@ -33,6 +34,7 @@ export function useWebSocket(sessionId: string) {
     switch (event.type) {
       case 'connected':
         setIsConnected(true);
+        setIsReconnecting(false);
         setError(null);
         break;
 
@@ -41,6 +43,13 @@ export function useWebSocket(sessionId: string) {
         // Drop the stale roster/typing so a departed peer doesn't linger as
         // "viewing"/"typing…" until (if ever) a fresh frame arrives.
         clearPresence();
+        break;
+
+      case 'reconnecting':
+        // The socket dropped and the service is retrying (state:true) or has given
+        // up (state:false). Drives the "Reconnecting…" banner/badge over the bare
+        // "Disconnected" state.
+        setIsReconnecting(!!event.state);
         break;
 
       case 'stream_resumed':
@@ -196,6 +205,7 @@ export function useWebSocket(sessionId: string) {
     clearStreamingBlocks,
     setIsStreaming,
     setIsConnected,
+    setIsReconnecting,
     setError,
     addMessage,
     addPeerMessage,
@@ -208,6 +218,7 @@ export function useWebSocket(sessionId: string) {
     // A previous socket's stale isConnected=true would let ChatInput's autoSubmit
     // fire before this socket is open, and send() drops messages silently then.
     setIsConnected(false);
+    setIsReconnecting(false);
 
     // Create and connect WebSocket
     const ws = new ChatWebSocket(sessionId);
@@ -225,8 +236,9 @@ export function useWebSocket(sessionId: string) {
       ws.disconnect();
       // The 'disconnected' event lands after unsubscribe, so reset it here.
       setIsConnected(false);
+      setIsReconnecting(false);
     };
-  }, [sessionId, handleEvent, setIsConnected]);
+  }, [sessionId, handleEvent, setIsConnected, setIsReconnecting]);
 
   const sendMessage = useCallback((content: string, attachments?: Attachment[]) => {
     if (wsRef.current) {

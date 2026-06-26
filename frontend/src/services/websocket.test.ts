@@ -9,6 +9,7 @@ vi.mock('@/services/api', () => ({
 import { fetchWsTicket } from '@/services/api';
 import { ChatWebSocket } from './websocket';
 import { useBackendStore } from '@/store/backend';
+import { RECONNECT_BUDGET_MS } from '@/lib/backoff';
 
 const mockTicket = fetchWsTicket as unknown as ReturnType<typeof vi.fn>;
 
@@ -77,6 +78,69 @@ describe('ChatWebSocket.connect — ticket auth', () => {
     expect(mockTicket).toHaveBeenCalledTimes(2);
     expect(FakeWS.instances).toHaveLength(1);
     expect(FakeWS.instances[0].protocols).toEqual(['inkwest', 'ticket|TICKET456']);
+  });
+
+  it("emits 'reconnecting' state:true when a dropped socket schedules a retry", async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect();
+    const sock = FakeWS.instances[0];
+    sock.onopen?.();
+    sock.onclose?.({ code: 1006 }); // abnormal close → backoff retry
+
+    expect(events).toContainEqual({ type: 'reconnecting', state: true });
+  });
+
+  it("emits 'reconnecting' state:false on a clean close (no retry pending)", async () => {
+    mockTicket.mockResolvedValue('T');
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect();
+    FakeWS.instances[0].onclose?.({ code: 1000 });
+
+    expect(events).toContainEqual({ type: 'reconnecting', state: false });
+    expect(events).not.toContainEqual({ type: 'reconnecting', state: true });
+  });
+
+  it("emits 'reconnecting' state:false on a terminal close code (no retry)", async () => {
+    mockTicket.mockResolvedValue('T');
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect();
+    FakeWS.instances[0].onclose?.({ code: 4011 }); // share revoked — do not loop
+
+    expect(events).toContainEqual({ type: 'reconnecting', state: false });
+    expect(events).not.toContainEqual({ type: 'reconnecting', state: true });
+  });
+
+  it("gives up with a final 'reconnecting' state:false once the reconnect budget is spent", async () => {
+    // Regression guard: with no attempt cap, the wall-clock budget is the only
+    // give-up. When it's spent (ticket POST failing across a >10min outage), the
+    // chat indicator must drop to "Disconnected", not spin "Reconnecting…" forever
+    // with no retry actually pending.
+    vi.useFakeTimers();
+    mockTicket.mockRejectedValue(new Error('502'));
+    const ws = new ChatWebSocket('s1');
+    const events: Array<{ type: string; state?: boolean }> = [];
+    ws.subscribe((e) => events.push(e as { type: string; state?: boolean }));
+
+    await ws.connect(); // fail #1 → arms the budget, schedules a retry (reconnecting:true)
+    // Jump past the give-up budget, then fire the pending retry: the next
+    // scheduleReconnect sees the budget spent and gives up.
+    vi.setSystemTime(Date.now() + RECONNECT_BUDGET_MS + 1000);
+    await vi.advanceTimersByTimeAsync(31000);
+
+    expect(FakeWS.instances).toHaveLength(0); // never got past the ticket
+    const reconnecting = events.filter((e) => e.type === 'reconnecting');
+    expect(reconnecting.at(-1)).toEqual({ type: 'reconnecting', state: false });
   });
 
   it('does not reconnect after disconnect() even if a ticket fetch was in flight', async () => {
