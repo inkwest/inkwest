@@ -601,7 +601,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           inviteToPrompt && 'invite-border',
         )}
       >
-        {/* Attached files (sandbox/claude-cli only), rattachés au message en cours. */}
+        {/* Attached files (sandbox/claude-cli only), attached to the current message. */}
         {canAttach && <AttachmentChips attachments={attachments} onRemove={removeAttachment} />}
         {attachError && <div className="mb-2 px-1 text-xs text-red-400">{attachError}</div>}
         <div className="relative">
