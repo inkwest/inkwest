@@ -2,7 +2,7 @@ import { Fragment, useEffect, type ReactNode } from 'react';
 import { clsx } from 'clsx';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
 import { useSystemInfoStore } from '@/store/admin';
-import { SandboxSettingsCard } from '@/components/admin/SandboxSettingsCard';
+import { SandboxCard } from '@/components/admin/SandboxCard';
 import { Box, Bot, Settings2, Database } from 'lucide-react';
 
 interface Row {
@@ -84,6 +84,8 @@ export function SystemInfoPage() {
             </CardContent>
           </Card>
 
+          {info.sandbox_enabled && <SandboxCard />}
+
           <Card variant="bordered">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -138,8 +140,6 @@ export function SystemInfoPage() {
               />
             </CardContent>
           </Card>
-
-          {info.sandbox_enabled && <SandboxSettingsCard />}
 
           <Card variant="bordered">
             <CardHeader>

@@ -71,6 +71,16 @@ class _Names:
     ext_net: str
 
 
+@dataclass(frozen=True)
+class SandboxInfo:
+    """Read-only snapshot of one running conversation sandbox (for the admin view)."""
+
+    session_id: str  # from the inkwest.session label (canonical, dashes intact)
+    user_id: str | None  # owner from the inkwest.user label; None = unattributed
+    status: str  # docker Status, e.g. "Up 3 minutes" (conveys uptime)
+    in_use: int  # live turns holding the pair (0 when the in-process registry doesn't know it)
+
+
 # In-process registry + per-session lock so two concurrent turns (e.g. a reconnect
 # racing the original) never double-provision the same conversation.
 _sandboxes: dict[str, Sandbox] = {}
@@ -155,7 +165,10 @@ async def _wait_healthy(name: str, timeout: int) -> None:
 
 
 async def _remove_pair(names: _Names) -> None:
-    """Best-effort removal of a pair's containers + networks (never raises)."""
+    """Best-effort removal of a pair's containers + networks: tolerates already-gone objects
+    (``check=False`` swallows non-zero exits). May still raise ``TimeoutError`` if the daemon
+    is wedged and a ``docker rm`` outruns its timeout — callers that must not fail (the reaper)
+    already run under a try/except; the admin terminate route maps it to a 502."""
     await _docker("rm", "-f", names.conv, names.proxy, check=False, timeout=60)
     # Networks only delete once nothing is attached — containers are gone above.
     await _docker("network", "rm", names.int_net, names.ext_net, check=False)
@@ -543,6 +556,82 @@ async def teardown(session_id: str, *, remove_dir: bool = True) -> None:
     """
     async with _locks[session_id]:
         await _teardown_unlocked(session_id, remove_dir=remove_dir)
+
+
+async def list_sandboxes() -> list[SandboxInfo]:
+    """Live snapshot of running conversation sandboxes — ground truth from the daemon.
+
+    One row per conversation, keyed on the conv container (its squid sibling is folded
+    in by filtering on the ``inkwest_conv_`` name). Reflects the actual dind/Docker state
+    rather than the in-process registry, so it stays correct across a backend restart
+    (orphans the registry forgot still show, with ``in_use=0``).
+
+    Uses ``check=True`` so a wedged/unreachable daemon **raises** (RuntimeError/TimeoutError)
+    rather than being silently read as "0 sandboxes" — the admin panel must not conflate an
+    outage with an empty list.
+    """
+    # Tab-delimited because Status (the last field) embeds spaces.
+    fmt = '{{.Label "inkwest.session"}}\t{{.Label "inkwest.user"}}\t{{.Status}}'
+    _, out, _ = await _docker(
+        "ps",
+        "--filter",
+        f"label={_LABEL_SANDBOX}",
+        "--filter",
+        "name=inkwest_conv_",
+        "--format",
+        fmt,
+    )
+    sandboxes: list[SandboxInfo] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[0]:
+            continue  # skip blanks / unexpected rows (a conv container must carry a session label)
+        session_id, user_id, status = parts[0], parts[1], parts[2]
+        sb = _sandboxes.get(session_id)
+        sandboxes.append(
+            SandboxInfo(
+                session_id=session_id,
+                user_id=user_id or None,
+                status=status,
+                in_use=sb.in_use if sb else 0,
+            )
+        )
+    return sandboxes
+
+
+async def terminate(session_id: str) -> bool:
+    """Admin/explicit soft-kill of a running pair: remove its containers + networks but keep
+    the durable session dir, so the owner's next turn cold-starts and resumes. Force — unlike
+    the idle reaper it kills the pair even mid-turn (that turn's ``docker exec`` then fails).
+
+    Returns True if a pair existed and was torn down, False if there was nothing to do.
+
+    Skips entirely — and crucially does **not** materialize a per-session entry in the
+    ``_locks`` defaultdict — for an id that is neither in the registry nor backed by a live
+    container. Without that gate, terminating arbitrary ids (the endpoint accepts any UUID)
+    would grow ``_locks`` unboundedly. The existence probe uses ``check=True`` so a daemon
+    outage raises (surfaced as a 502) instead of being misread as "nothing to terminate".
+
+    Benign, accepted race: a session still inside ``ensure()``'s ``provision()`` window isn't
+    in ``_sandboxes`` yet (it's registered only once healthy) and its containers may not exist
+    when the probe runs, so a terminate racing provisioning can no-op. Harmless — nothing is
+    corrupted, and such a sandbox isn't in the admin list yet anyway; the operator retries once
+    it appears. (A registry member always skips the probe and tears down under the lock.)
+    """
+    if session_id not in _sandboxes:
+        names = _names(session_id)
+        _, ids, _ = await _docker(
+            "ps",
+            "-aq",
+            "--filter",
+            f"name={names.conv}",
+            "--filter",
+            f"name={names.proxy}",
+        )
+        if not ids.strip():
+            return False
+    await teardown(session_id, remove_dir=False)
+    return True
 
 
 async def reap_orphans() -> None:

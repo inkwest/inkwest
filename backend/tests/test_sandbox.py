@@ -46,6 +46,91 @@ def _clear_registry():
     sandbox._locks.clear()
 
 
+@pytest.mark.asyncio
+async def test_list_sandboxes_parses_and_enriches_with_registry():
+    # Two running pairs; the daemon emits one conv row each (tab-delimited session/user/status).
+    # The first is known to the in-process registry (in_use=2); the second is an orphan the
+    # registry forgot → in_use falls back to 0.
+    out = "sid-1\tuser-a\tUp 3 minutes\nsid-2\t\tUp About an hour\n"
+    sandbox._sandboxes["sid-1"] = sandbox.Sandbox(
+        "sid-1", "c", "p", "i", "e", last_used=0.0, in_use=2
+    )
+    with patch.object(sandbox, "_docker", AsyncMock(return_value=(0, out, ""))):
+        result = await sandbox.list_sandboxes()
+
+    assert [s.session_id for s in result] == ["sid-1", "sid-2"]
+    assert result[0].user_id == "user-a"
+    assert result[0].status == "Up 3 minutes"
+    assert result[0].in_use == 2
+    assert result[1].user_id is None  # empty label → None
+    assert result[1].in_use == 0  # orphan: registry doesn't know it
+
+
+@pytest.mark.asyncio
+async def test_list_sandboxes_skips_blank_and_unlabeled_rows():
+    out = "\n\t\t\nsid-3\tuser-c\tUp 1 minute\n"
+    with patch.object(sandbox, "_docker", AsyncMock(return_value=(0, out, ""))):
+        result = await sandbox.list_sandboxes()
+    assert [s.session_id for s in result] == ["sid-3"]
+
+
+@pytest.mark.asyncio
+async def test_list_sandboxes_propagates_daemon_error():
+    # check=True: a wedged/unreachable daemon must raise, not be read as "0 sandboxes".
+    with patch.object(sandbox, "_docker", AsyncMock(side_effect=RuntimeError("daemon down"))):
+        with pytest.raises(RuntimeError):
+            await sandbox.list_sandboxes()
+
+
+@pytest.mark.asyncio
+async def test_terminate_registry_member_tears_down_without_probe():
+    # Known session: no existence probe, straight to soft teardown (durable dir kept).
+    sandbox._sandboxes["known"] = sandbox.Sandbox("known", "c", "p", "i", "e", last_used=0.0)
+    td = AsyncMock()
+    probe = AsyncMock()
+    with (
+        patch.object(sandbox, "teardown", td),
+        patch.object(sandbox, "_docker", probe),
+    ):
+        assert await sandbox.terminate("known") is True
+    td.assert_awaited_once_with("known", remove_dir=False)
+    probe.assert_not_awaited()  # no probe for a registry member
+
+
+@pytest.mark.asyncio
+async def test_terminate_unknown_absent_is_noop_and_skips_teardown():
+    # Unknown id with no live container: no-op. Crucially it must NOT materialize a lock
+    # entry (else terminating arbitrary ids would grow _locks unboundedly).
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_docker", AsyncMock(return_value=(0, "", ""))),
+        patch.object(sandbox, "teardown", td),
+    ):
+        assert await sandbox.terminate("ghost") is False
+    td.assert_not_awaited()
+    assert "ghost" not in sandbox._locks
+
+
+@pytest.mark.asyncio
+async def test_terminate_unknown_orphan_container_tears_down():
+    # Unknown to the registry but a live container exists (orphan after a backend restart):
+    # the existence probe finds it → teardown runs.
+    td = AsyncMock()
+    with (
+        patch.object(sandbox, "_docker", AsyncMock(return_value=(0, "deadbeef", ""))),
+        patch.object(sandbox, "teardown", td),
+    ):
+        assert await sandbox.terminate("orphan") is True
+    td.assert_awaited_once_with("orphan", remove_dir=False)
+
+
+@pytest.mark.asyncio
+async def test_terminate_propagates_daemon_error_on_probe():
+    with patch.object(sandbox, "_docker", AsyncMock(side_effect=TimeoutError("wedged"))):
+        with pytest.raises(TimeoutError):
+            await sandbox.terminate("anything")
+
+
 def test_names_strip_dashes_and_are_unique():
     names = sandbox._names("550e8400-e29b-41d4-a716-446655440000")
     assert names.conv == "inkwest_conv_550e8400e29b41d4a716446655440000"

@@ -956,3 +956,91 @@ async def test_update_budget_settings_rejects_negative_cap(
     )
     assert resp.status_code == 422
     mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_sandboxes_resolves_emails(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """Running sandboxes are listed with owner UUIDs resolved to emails (one batched query)."""
+    from app.services.sandbox import SandboxInfo
+
+    uid = uuid.uuid4()
+    infos = [
+        SandboxInfo(session_id="sid-1", user_id=str(uid), status="Up 3 minutes", in_use=1),
+        # orphan with no owner label
+        SandboxInfo(session_id="sid-2", user_id=None, status="Up 1 hour", in_use=0),
+    ]
+    user = MagicMock(id=uid, email="owner@x")
+    users_result = MagicMock()
+    users_result.scalars.return_value = [user]
+    mock_db.execute = AsyncMock(return_value=users_result)
+
+    with patch("app.api.routes.admin.list_sandboxes", AsyncMock(return_value=infos)):
+        resp = await admin_client.get("/api/admin/sandboxes")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 2
+    by_sid = {s["session_id"]: s for s in data["sandboxes"]}
+    assert by_sid["sid-1"]["user_email"] == "owner@x"
+    assert by_sid["sid-1"]["in_use"] == 1
+    assert by_sid["sid-2"]["user_email"] is None  # unattributed orphan
+
+
+@pytest.mark.asyncio
+async def test_get_active_sandboxes_empty_skips_user_query(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """No running sandboxes → empty list and no user lookup is issued."""
+    with patch("app.api.routes.admin.list_sandboxes", AsyncMock(return_value=[])):
+        resp = await admin_client.get("/api/admin/sandboxes")
+    assert resp.status_code == 200
+    assert resp.json() == {"count": 0, "sandboxes": []}
+    mock_db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_sandboxes_daemon_error_returns_502(
+    admin_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """A wedged/unreachable daemon surfaces as 502 — never a fake empty list or a 500."""
+    with patch(
+        "app.api.routes.admin.list_sandboxes", AsyncMock(side_effect=RuntimeError("daemon down"))
+    ):
+        resp = await admin_client.get("/api/admin/sandboxes")
+    assert resp.status_code == 502
+    mock_db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminate_active_sandbox(admin_client: AsyncClient) -> None:
+    """DELETE soft-kills the pair by id (durable dir kept) and returns 204."""
+    sid = uuid.uuid4()
+    term = AsyncMock(return_value=True)
+    with patch("app.api.routes.admin.terminate_sandbox", term):
+        resp = await admin_client.delete(f"/api/admin/sandboxes/{sid}")
+    assert resp.status_code == 204
+    term.assert_awaited_once_with(str(sid))
+
+
+@pytest.mark.asyncio
+async def test_terminate_active_sandbox_rejects_non_uuid(admin_client: AsyncClient) -> None:
+    """A non-UUID id is refused by validation — can't address arbitrary containers."""
+    term = AsyncMock()
+    with patch("app.api.routes.admin.terminate_sandbox", term):
+        resp = await admin_client.delete("/api/admin/sandboxes/not-a-uuid")
+    assert resp.status_code == 422
+    term.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_terminate_active_sandbox_daemon_error_returns_502(
+    admin_client: AsyncClient,
+) -> None:
+    """A wedged daemon during terminate surfaces as 502, not an unhandled 500."""
+    sid = uuid.uuid4()
+    term = AsyncMock(side_effect=TimeoutError("wedged"))
+    with patch("app.api.routes.admin.terminate_sandbox", term):
+        resp = await admin_client.delete(f"/api/admin/sandboxes/{sid}")
+    assert resp.status_code == 502

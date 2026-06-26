@@ -327,6 +327,32 @@ export async function updateSandboxSettings(
   });
 }
 
+export interface ActiveSandbox {
+  session_id: string;
+  user_id: string | null;
+  /** Resolved owner email; falls back to null when the user is unknown/unattributed. */
+  user_email: string | null;
+  /** Docker status line, e.g. "Up 3 minutes" (conveys uptime). */
+  status: string;
+  /** Live turns holding the pair; 0 = idle (reapable) or a registry-forgotten orphan. */
+  in_use: number;
+}
+
+export interface ActiveSandboxes {
+  count: number;
+  sandboxes: ActiveSandbox[];
+}
+
+/** Live list of conversation sandboxes running in the Docker/dind daemon. */
+export async function getActiveSandboxes(): Promise<ActiveSandboxes> {
+  return fetchAPI('/api/admin/sandboxes');
+}
+
+/** Terminate (soft-kill) a running conversation sandbox by session id; durable state kept. */
+export async function terminateSandbox(sessionId: string): Promise<void> {
+  await fetchAPI(`/api/admin/sandboxes/${sessionId}`, { method: 'DELETE' });
+}
+
 /** Force a live catalog refresh; optionally flip the all-vendors flag first. */
 export async function refreshModels(includeAllVendors?: boolean): Promise<ModelSettings> {
   return fetchAPI('/api/admin/settings/model/refresh', {
