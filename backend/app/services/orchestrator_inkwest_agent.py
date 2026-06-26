@@ -253,7 +253,15 @@ async def orchestrate_chat_inkwest_agent(
             write_agent_mcp_config_with_oauth,
         )
 
-        container = await sandbox.ensure(session_id_str)
+        uid = str(user_id) if user_id else None
+        # Reap the user's oldest idle pairs first; refuse if they're at the hard ceiling
+        # with every conversation busy (nothing reclaimable). The finally is None-safe.
+        try:
+            await sandbox.enforce_user_sandbox_cap(uid, session_id_str)
+        except sandbox.SandboxCapExceededError as e:
+            yield error_event(str(e))
+            return
+        container = await sandbox.ensure(session_id_str, uid)
 
         # Security: prune any cred-bearing MCP config orphaned by a PRIOR turn whose broker
         # was SIGKILLed before its `finally` cleanup could run (the file lives in the durable

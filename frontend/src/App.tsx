@@ -4,6 +4,7 @@ import { Layout } from '@/components/layout/Layout';
 import { ChatPage } from '@/pages/ChatPage';
 import { NewSessionPage } from '@/pages/NewSessionPage';
 import { QuickStartPage } from '@/pages/QuickStartPage';
+import { MyUsagePage } from '@/pages/MyUsagePage';
 import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
 import { SharedSessionPage } from '@/pages/SharedSessionPage';
 import {
@@ -101,6 +102,7 @@ function App() {
           <Route index element={<NewSessionPage />} />
           <Route path="session/:sessionId" element={<ChatPage />} />
           <Route path="start" element={<QuickStartPage />} />
+          <Route path="usage" element={<MyUsagePage />} />
         </Route>
 
         {/* Admin Routes */}

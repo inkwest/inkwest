@@ -4,11 +4,15 @@ import { useSessionsStore } from '@/store/sessions';
 import { useChatStore } from '@/store/chat';
 import { useUpdateStore } from '@/store/update';
 import { useInvitesStore } from '@/store/invites';
+import { useBackendStore } from '@/store/backend';
 import { fetchWsTicket, getVersion, wsBaseUrl } from '@/services/api';
+import { jitteredBackoff, createReconnectBudget, RECONNECT_BUDGET_MS } from '@/lib/backoff';
 
 const WS_URL = wsBaseUrl();
 const RECONNECT_DELAY = 3000;
-const MAX_RECONNECT_ATTEMPTS = 5;
+// No attempt cap: keep reconnecting across a backend deploy/restart. The delay
+// is capped so backoff plateaus rather than growing without bound.
+const RECONNECT_MAX_DELAY = 30000;
 const PING_INTERVAL = 30000;
 
 export function useSyncSocket() {
@@ -40,13 +44,31 @@ export function useSyncSocket() {
   useEffect(() => {
     let unmounted = false;
     let retries = 0;
+    const reconnectBudget = createReconnectBudget(RECONNECT_BUDGET_MS);
+    const ticketAbort = new AbortController();
 
+    // The sync socket is the app-wide heartbeat (mounted once in the shell), so it
+    // is the single loop that gates the global give-up: when ITS budget is spent
+    // the whole app is degraded → red reload banner. Chat/egress give up quietly.
     function scheduleReconnect() {
+      if (unmounted) return;
+      if (reconnectBudget.expired()) {
+        useBackendStore.getState().markGaveUp();
+        return;
+      }
       retries++;
-      if (unmounted || retries > MAX_RECONNECT_ATTEMPTS) return;
-      const delay = RECONNECT_DELAY * Math.pow(2, retries - 1);
+      const delay = jitteredBackoff(retries - 1, { baseMs: RECONNECT_DELAY, maxMs: RECONNECT_MAX_DELAY });
       reconnectRef.current = setTimeout(() => void connect(), delay);
     }
+
+    // A backgrounded tab throttles setTimeout, so the wall-clock budget can elapse
+    // without any real reconnect attempt. Grant a fresh budget when the tab returns
+    // to the foreground so the user isn't met with an instant give-up on a backend
+    // that may be perfectly healthy.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') reconnectBudget.reset();
+    };
+    document.addEventListener('visibilitychange', onVisible);
 
     async function connect() {
       if (unmounted) return;
@@ -62,10 +84,11 @@ export function useSyncSocket() {
       // rides the WS subprotocol since the handshake can't carry the cookie.
       let protocols: string[] = ['inkwest'];
       try {
-        const ticket = await fetchWsTicket();
+        const ticket = await fetchWsTicket(ticketAbort.signal);
         if (unmounted) return;
         protocols = ['inkwest', `ticket|${ticket}`];
       } catch {
+        if (unmounted) return;
         scheduleReconnect();
         return;
       }
@@ -74,6 +97,9 @@ export function useSyncSocket() {
 
       ws.onopen = () => {
         retries = 0;
+        reconnectBudget.reset(); // recovered — grant a fresh give-up budget
+        // A live socket is proof the backend is reachable — clear the global banner.
+        useBackendStore.getState().reachable();
         // Baseline the build on first connect, compare on every reconnect: a
         // deploy that dropped this socket bumps the backend version, so a
         // differing reading surfaces the reload banner. Best-effort.
@@ -147,6 +173,9 @@ export function useSyncSocket() {
           if (!unmounted) navigate('/');
           return;
         }
+        // Code 1000 is an app-initiated clean close (our own ws.close); a real
+        // deploy/restart closes with 1012/1006, which DO fall through to reconnect.
+        if (event.code === 1000) return;
         scheduleReconnect();
       };
 
@@ -164,6 +193,8 @@ export function useSyncSocket() {
 
     return () => {
       unmounted = true;
+      ticketAbort.abort(); // cancel an in-flight ticket fetch + its retry loop
+      document.removeEventListener('visibilitychange', onVisible);
       cleanup();
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       if (wsRef.current) {

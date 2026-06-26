@@ -7,6 +7,7 @@ import pytest
 from app.services import app_settings
 from app.services.app_settings import (
     get_bool_setting,
+    get_int_setting,
     get_setting,
     load_settings,
     set_setting,
@@ -74,6 +75,25 @@ def test_get_bool_setting(raw, expected):
 def test_get_bool_setting_default_when_unset():
     assert get_bool_setting("missing", default=True) is True
     assert get_bool_setting("missing") is False
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("0", 0), ("5", 5), ("42", 42), ("-3", -3)],
+)
+def test_get_int_setting(raw, expected):
+    app_settings._settings = {"cap": raw}
+    assert get_int_setting("cap", 99) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "  ", "abc", "1.5"])
+def test_get_int_setting_falls_back_on_bad_value(raw):
+    app_settings._settings = {"cap": raw}
+    assert get_int_setting("cap", 7) == 7
+
+
+def test_get_int_setting_default_when_unset():
+    assert get_int_setting("missing", 5) == 5
 
 
 @pytest.mark.asyncio

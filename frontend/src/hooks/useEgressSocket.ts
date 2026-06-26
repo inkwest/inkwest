@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchWsTicket, wsBaseUrl } from '@/services/api';
+import { useBackendStore } from '@/store/backend';
+import { jitteredBackoff, createReconnectBudget, RECONNECT_BUDGET_MS } from '@/lib/backoff';
 
 const WS_URL = wsBaseUrl();
+// No attempt cap: keep retrying across a backend deploy/restart; the shared
+// jittered backoff caps the delay (capped exponential, like the other WS loops).
 const RECONNECT_DELAY = 3000;
-const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_MAX_DELAY = 30000;
 const MAX_EVENTS = 500;
 
 export interface EgressEvent {
@@ -46,8 +50,25 @@ export function useEgressSocket(sessionId: string | undefined): EgressState {
     if (!sessionId) return;
     let unmounted = false;
     let retries = 0;
+    const reconnectBudget = createReconnectBudget(RECONNECT_BUDGET_MS);
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    const ticketAbort = new AbortController();
     setDisabled(false);
+
+    // Schedule a jittered reconnect, or stop once the wall-clock budget is spent.
+    // Egress is a secondary observability panel, so on give-up it just stops
+    // silently (panel shows disconnected) rather than raising the GLOBAL reload
+    // banner — that is reserved for the sync socket, whose loss means the app is
+    // actually unusable. A still-healthy app shouldn't flash "reload" because only
+    // the squid-log socket couldn't reconnect.
+    function scheduleReconnect() {
+      if (unmounted) return;
+      if (reconnectBudget.expired()) return; // budget spent — stop quietly
+      reconnectTimer = setTimeout(
+        () => void connect(),
+        jitteredBackoff(retries++, { baseMs: RECONNECT_DELAY, maxMs: RECONNECT_MAX_DELAY }),
+      );
+    }
 
     async function connect() {
       if (unmounted) return;
@@ -63,15 +84,14 @@ export function useEgressSocket(sessionId: string | undefined): EgressState {
       // rides the WS subprotocol since the handshake can't carry the cookie.
       let protocols: string[] = ['inkwest'];
       try {
-        const ticket = await fetchWsTicket();
+        const ticket = await fetchWsTicket(ticketAbort.signal);
         if (unmounted) return;
         protocols = ['inkwest', `ticket|${ticket}`];
       } catch {
-        // Transient ticket failure (backend blip): retry with backoff like a
-        // dropped socket, rather than silently abandoning the panel.
-        if (unmounted || retries >= MAX_RECONNECT_ATTEMPTS) return;
-        retries++;
-        reconnectTimer = setTimeout(() => void connect(), RECONNECT_DELAY * retries);
+        // Transient ticket failure (backend blip / restart): retry with backoff
+        // like a dropped socket, rather than silently abandoning the panel.
+        if (unmounted) return;
+        scheduleReconnect();
         return;
       }
 
@@ -80,6 +100,9 @@ export function useEgressSocket(sessionId: string | undefined): EgressState {
 
       ws.onopen = () => {
         retries = 0;
+        reconnectBudget.reset(); // recovered — grant a fresh give-up budget
+        // A live socket is proof the backend is reachable — clear the global banner.
+        useBackendStore.getState().reachable();
         setConnected(true);
       };
 
@@ -104,9 +127,9 @@ export function useEgressSocket(sessionId: string | undefined): EgressState {
           return;
         }
         if (event.code === 4001 || event.code === 4004) return; // auth/not-found — don't retry
-        if (unmounted || retries >= MAX_RECONNECT_ATTEMPTS) return;
-        retries++;
-        reconnectTimer = setTimeout(() => void connect(), RECONNECT_DELAY * retries);
+        if (event.code === 1000) return; // app-initiated clean close (deploy=1012/1006 reconnects)
+        if (unmounted) return;
+        scheduleReconnect();
       };
 
       ws.onerror = () => ws.close();
@@ -116,6 +139,7 @@ export function useEgressSocket(sessionId: string | undefined): EgressState {
 
     return () => {
       unmounted = true;
+      ticketAbort.abort(); // cancel an in-flight ticket fetch + its retry loop
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) {
         wsRef.current.onclose = null;

@@ -2,6 +2,7 @@ import { Fragment, useEffect, type ReactNode } from 'react';
 import { clsx } from 'clsx';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
 import { useSystemInfoStore } from '@/store/admin';
+import { SandboxSettingsCard } from '@/components/admin/SandboxSettingsCard';
 import { Box, Bot, Settings2, Database } from 'lucide-react';
 
 interface Row {
@@ -137,6 +138,8 @@ export function SystemInfoPage() {
               />
             </CardContent>
           </Card>
+
+          {info.sandbox_enabled && <SandboxSettingsCard />}
 
           <Card variant="bordered">
             <CardHeader>
