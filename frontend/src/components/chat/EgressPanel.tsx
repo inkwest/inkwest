@@ -1,7 +1,19 @@
+import { useMemo, useState } from 'react';
 import { Globe, ShieldCheck, ShieldAlert, AlertTriangle } from 'lucide-react';
 import { EgressEvent, isBlocked, isError } from '@/hooks/useEgressSocket';
 import { Tooltip } from '@/components/ui';
 import { cn } from '@/lib/utils';
+
+// The three outcome categories an egress event falls into — the same classification
+// the row icons/colors use (see isBlocked/isError). Used to filter the live log.
+type EgressKind = 'allowed' | 'blocked' | 'error';
+type EgressFilter = 'all' | EgressKind;
+
+function kindOf(e: EgressEvent): EgressKind {
+  if (isBlocked(e)) return 'blocked';
+  if (isError(e)) return 'error';
+  return 'allowed';
+}
 
 // Render squid timestamps in the viewer's own timezone/locale (no hardcoded zone) so
 // the time reads correctly wherever the operator is — the underlying instant is the
@@ -67,25 +79,68 @@ function EgressRow({ e }: { e: EgressEvent }) {
   );
 }
 
+const FILTERS: { value: EgressFilter; label: string; activeClass: string }[] = [
+  { value: 'all', label: 'All', activeClass: 'bg-gray-700 text-gray-100' },
+  { value: 'allowed', label: 'Allowed', activeClass: 'bg-green-900/50 text-green-300' },
+  { value: 'blocked', label: 'Blocked', activeClass: 'bg-red-900/50 text-red-300' },
+  { value: 'error', label: 'Errors', activeClass: 'bg-amber-900/50 text-amber-300' },
+];
+
 /**
  * Full-pane live network-egress audit for a conversation: every host the sandboxed
  * agent reached through its squid proxy, classified by outcome — allowed (green),
  * blocked by the egress policy (red), or an upstream/connection error that squid
  * forwarded but the destination failed (amber). Rendered inside the "Network" tab.
+ * A filter bar narrows the log to one outcome category.
  */
 export function EgressLog({ events, connected }: { events: EgressEvent[]; connected: boolean }) {
+  const [filter, setFilter] = useState<EgressFilter>('all');
+
+  // Per-category counts label the filter chips; recomputed only when events change.
+  const counts = useMemo(() => {
+    const c = { all: events.length, allowed: 0, blocked: 0, error: 0 };
+    for (const e of events) c[kindOf(e)]++;
+    return c;
+  }, [events]);
+
+  const shown = filter === 'all' ? events : events.filter((e) => kindOf(e) === filter);
+
   return (
-    <div className="flex-1 overflow-y-auto p-3 space-y-0.5 min-h-0">
-      {events.length === 0 ? (
-        <div className="flex items-center gap-2 p-2 text-sm text-gray-500">
-          <Globe className="h-4 w-4 shrink-0" />
-          {connected
-            ? 'No egress yet — hosts the agent reaches appear here (HTTPS shows on connection close).'
-            : 'Connecting to the egress stream…'}
+    <div className="flex-1 flex flex-col min-h-0">
+      {events.length > 0 && (
+        <div className="flex items-center gap-1.5 px-3 py-2 border-b border-gray-800 shrink-0">
+          {FILTERS.map(({ value, label, activeClass }) => (
+            <button
+              key={value}
+              onClick={() => setFilter(value)}
+              className={cn(
+                'text-[11px] px-2 py-0.5 rounded-full transition-colors',
+                filter === value ? activeClass : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800',
+              )}
+            >
+              {label}
+              <span className="ml-1 opacity-70">{counts[value]}</span>
+            </button>
+          ))}
         </div>
-      ) : (
-        events.map((e) => <EgressRow key={e._id} e={e} />)
       )}
+      <div className="flex-1 overflow-y-auto p-3 space-y-0.5 min-h-0">
+        {events.length === 0 ? (
+          <div className="flex items-center gap-2 p-2 text-sm text-gray-500">
+            <Globe className="h-4 w-4 shrink-0" />
+            {connected
+              ? 'No egress yet — hosts the agent reaches appear here (HTTPS shows on connection close).'
+              : 'Connecting to the egress stream…'}
+          </div>
+        ) : shown.length === 0 ? (
+          <div className="flex items-center gap-2 p-2 text-sm text-gray-500">
+            <Globe className="h-4 w-4 shrink-0" />
+            No {filter} events.
+          </div>
+        ) : (
+          shown.map((e) => <EgressRow key={e._id} e={e} />)
+        )}
+      </div>
     </div>
   );
 }

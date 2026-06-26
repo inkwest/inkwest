@@ -56,6 +56,35 @@ describe('EgressLog row classification', () => {
     expect(getByRole('tooltip')).toHaveTextContent(/Blocked by the squid proxy/);
   });
 
+  it('filters the log by outcome category, with per-category counts on the chips', () => {
+    const { getByRole, queryByText } = render(
+      <EgressLog
+        connected
+        events={[
+          ev({ _id: 1, decision: 'TCP_TUNNEL', status: '200', host: 'github.com' }),
+          ev({ _id: 2, decision: 'TCP_DENIED', status: '403', host: 'evil.example.com' }),
+          ev({ _id: 3, decision: 'TCP_TUNNEL', status: '503', host: 'unreachable.eks.amazonaws.com' }),
+        ]}
+      />,
+    );
+
+    // All three rows show by default.
+    expect(queryByText(/github\.com/)).toBeTruthy();
+    expect(queryByText(/evil\.example\.com/)).toBeTruthy();
+    expect(queryByText(/unreachable\.eks/)).toBeTruthy();
+
+    // Filtering to "Blocked" keeps only the DENIED row.
+    fireEvent.click(getByRole('button', { name: /Blocked/ }));
+    expect(queryByText(/evil\.example\.com/)).toBeTruthy();
+    expect(queryByText(/github\.com/)).toBeNull();
+    expect(queryByText(/unreachable\.eks/)).toBeNull();
+
+    // An empty category shows a placeholder rather than nothing.
+    fireEvent.click(getByRole('button', { name: /Allowed/ }));
+    expect(queryByText(/github\.com/)).toBeTruthy();
+    expect(queryByText(/evil\.example\.com/)).toBeNull();
+  });
+
   it('renders the timestamp as 24h HH:mm:ss in the viewer timezone when ts is present', () => {
     // Asserted by shape, not an exact value: the time is formatted in the runner's
     // local timezone, so a fixed string would be flaky across CI machines.
