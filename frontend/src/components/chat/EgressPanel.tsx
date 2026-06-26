@@ -3,10 +3,10 @@ import { EgressEvent, isBlocked, isError } from '@/hooks/useEgressSocket';
 import { Tooltip } from '@/components/ui';
 import { cn } from '@/lib/utils';
 
-// Squid timestamps are operator-facing audit data, so render them in the operators'
-// wall-clock (Europe/Paris) rather than the viewer's locale. Built once at module load.
-const TIME_FMT = new Intl.DateTimeFormat('fr-FR', {
-  timeZone: 'Europe/Paris',
+// Render squid timestamps in the viewer's own timezone/locale (no hardcoded zone) so
+// the time reads correctly wherever the operator is — the underlying instant is the
+// absolute epoch from the log. Forced 24h for an unambiguous audit format. Built once.
+const TIME_FMT = new Intl.DateTimeFormat(undefined, {
   hour: '2-digit',
   minute: '2-digit',
   second: '2-digit',
