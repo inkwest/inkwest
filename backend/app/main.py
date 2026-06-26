@@ -29,6 +29,7 @@ from app.api.routes import (
     health,
     mcp,
     mcp_proxy,
+    me,
     metrics,
     sessions,
     sharing,
@@ -247,6 +248,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 app.include_router(health.router)
 app.include_router(clusters.router, prefix="/api")
 app.include_router(skills.router, prefix="/api")
+app.include_router(me.router, prefix="/api")  # Current-user prefs + personal skills
 app.include_router(system_prompts.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(metrics.router, prefix="/api")  # Per-conversation sandbox resource metrics

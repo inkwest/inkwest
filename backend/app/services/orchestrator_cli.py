@@ -28,7 +28,6 @@ from app.services.events import (
 from app.services.messages import (
     clear_cli_session_id,
     ensure_session_title,
-    get_active_skills,
     get_cli_session_id,
     get_enabled_mcp_servers,
     save_message,
@@ -37,6 +36,7 @@ from app.services.messages import (
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills
+from app.services.user_preferences import get_effective_skills
 from app.tools.connector_exec import build_connector_env, connector_prompt_hint
 
 logger = logging.getLogger(__name__)
@@ -248,11 +248,12 @@ required.
             # reconnect instead of letting its tools silently vanish.
             for dead_key in mcp_dead:
                 yield mcp_auth_required_event(dead_key, session_id_str)
-            # Materialize the active skills as Claude skills in this
-            # conversation's sandbox (one SKILL.md per template). Like the MCP reconcile
-            # above, done every turn from the DB so template edits propagate on the next
-            # turn of each session and it survives a sandbox rebuild.
-            templates = await get_active_skills(db)
+            # Materialize the user's EFFECTIVE skills as Claude skills in this
+            # conversation's sandbox (one SKILL.md per skill): active admin skills the
+            # user hasn't disabled, plus their personal skills (which shadow admin ones).
+            # Like the MCP reconcile above, done every turn from the DB so edits propagate
+            # on the next turn of each session and it survives a sandbox rebuild.
+            templates = await get_effective_skills(db, user_id)
             apply_session_skills(session_id_str, templates)
         else:
             work_dir = f"/tmp/inkwest-sessions/{session_id_str}"

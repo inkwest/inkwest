@@ -221,6 +221,13 @@ class Settings(BaseSettings):
         "csv,tsv,toml,ini,conf,xml,html,sh,py,js,ts,go,sql"
     )
 
+    # Per-user preferences + personal skills quotas. Soft caps, server-
+    # enforced: they bound the agent's per-turn context (every active personal skill
+    # is materialized into the sandbox) and host storage. Tunable per deployment.
+    user_skills_max_count: int = 50  # max ACTIVE personal skills per user
+    user_skill_max_bytes: int = 64 * 1024  # max SKILL.md size, per personal skill
+    user_prefs_doc_max_bytes: int = 256 * 1024  # max serialized preferences document
+
     # ==========================================================================
     # MCP catalog — the set of MCP servers users may enable per conversation.
     # JSON object {"<key>": "<base64(server-def-json)>"}; each value base64-decodes

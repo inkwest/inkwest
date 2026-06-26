@@ -1,4 +1,15 @@
-import { Cluster, Message, Skill, SearchResponse, Session, SessionWithMessages } from '@/types/api';
+import {
+  Cluster,
+  ConfigExport,
+  Message,
+  PreferencesDocument,
+  PreferencesResponse,
+  Skill,
+  SearchResponse,
+  Session,
+  SessionWithMessages,
+  UserSkill,
+} from '@/types/api';
 // Deliberate service→store edge: the retry loop is the single place that knows the
 // backend is unreachable, so it drives the global banner directly via zustand's
 // off-React getState() (no hook/render dependency, no import cycle). Other services
@@ -641,5 +652,68 @@ export async function setSessionMcp(
   return fetchAPI(`/api/sessions/${sessionId}/mcp`, {
     method: 'PUT',
     body: JSON.stringify({ enabled }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Current-user self-service: preferences + personal skills.
+// All scoped to the authenticated user — no admin role.
+// ---------------------------------------------------------------------------
+
+export async function getMyPreferences(): Promise<PreferencesResponse> {
+  return fetchAPI<PreferencesResponse>('/api/me/preferences');
+}
+
+export async function updateMyPreferences(
+  document: PreferencesDocument
+): Promise<PreferencesResponse> {
+  return fetchAPI<PreferencesResponse>('/api/me/preferences', {
+    method: 'PUT',
+    body: JSON.stringify({ document }),
+  });
+}
+
+export async function getMySkills(): Promise<UserSkill[]> {
+  return fetchAPI<UserSkill[]>('/api/me/skills');
+}
+
+export async function createMySkill(content: string): Promise<UserSkill> {
+  return fetchAPI<UserSkill>('/api/me/skills', {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  });
+}
+
+export async function updateMySkill(
+  id: string,
+  data: { content?: string; is_active?: boolean }
+): Promise<UserSkill> {
+  return fetchAPI<UserSkill>(`/api/me/skills/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteMySkill(id: string): Promise<void> {
+  return fetchAPI<void>(`/api/me/skills/${id}`, { method: 'DELETE' });
+}
+
+export async function overrideAdminSkill(adminName: string): Promise<UserSkill> {
+  return fetchAPI<UserSkill>(`/api/me/skills/override/${encodeURIComponent(adminName)}`, {
+    method: 'POST',
+  });
+}
+
+export async function exportMyConfig(): Promise<ConfigExport> {
+  return fetchAPI<ConfigExport>('/api/me/export');
+}
+
+export async function importMyConfig(
+  payload: ConfigExport,
+  replaceAll: boolean
+): Promise<PreferencesResponse> {
+  return fetchAPI<PreferencesResponse>(`/api/me/import?replace_all=${replaceAll}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }
