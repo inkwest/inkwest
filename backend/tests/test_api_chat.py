@@ -1,5 +1,6 @@
 """Tests for chat WebSocket route."""
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -169,3 +170,128 @@ async def test_send_error() -> None:
     await send_error(ws, "something broke", close_code=4004)
     ws.send_json.assert_awaited_once_with({"type": "error", "content": "something broke"})
     ws.close.assert_awaited_once_with(code=4004)
+
+
+# ============================================================================
+# Budget enforcement gate (_budget_block_reason)
+# ============================================================================
+
+
+def _budget_status(*, is_allowed: bool, action: str | None):
+    from app.services.budget_service import BudgetStatus
+
+    return BudgetStatus(
+        is_allowed=is_allowed,
+        remaining_tokens=None,
+        remaining_cost_usd=Decimal("0"),
+        usage_percent=100.0 if not is_allowed else 0.0,
+        warning_message=None,
+        budget_name="b",
+        hard_limit_action=action,
+    )
+
+
+def _session_cm(db: object) -> MagicMock:
+    """Mock for `async with async_session_maker() as db`."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=db)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
+
+
+@pytest.mark.asyncio
+async def test_budget_gate_disabled_skips_db() -> None:
+    """When enforcement is off, the gate allows the turn without touching the DB."""
+    from uuid import uuid4
+
+    from app.api.routes import chat
+
+    with (
+        patch.object(chat, "is_budget_enabled", return_value=False),
+        patch.object(chat, "async_session_maker") as maker,
+    ):
+        result = await chat._budget_block_reason(uuid4(), ["user"])
+
+    assert result is None
+    maker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_budget_gate_blocks_when_over_block_limit() -> None:
+    """Over a block-action limit → returns a user-facing message."""
+    from uuid import uuid4
+
+    from app.api.routes import chat
+
+    with (
+        patch.object(chat, "is_budget_enabled", return_value=True),
+        patch.object(chat, "async_session_maker", _session_cm(AsyncMock())),
+        patch.object(
+            chat,
+            "check_budget",
+            AsyncMock(return_value=_budget_status(is_allowed=False, action="block")),
+        ),
+    ):
+        result = await chat._budget_block_reason(uuid4(), ["user"])
+
+    assert result is not None
+    assert "budget" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_budget_gate_warn_action_does_not_block() -> None:
+    """Over limit but action=warn → does not block (warn budgets only report)."""
+    from uuid import uuid4
+
+    from app.api.routes import chat
+
+    with (
+        patch.object(chat, "is_budget_enabled", return_value=True),
+        patch.object(chat, "async_session_maker", _session_cm(AsyncMock())),
+        patch.object(
+            chat,
+            "check_budget",
+            AsyncMock(return_value=_budget_status(is_allowed=False, action="warn")),
+        ),
+    ):
+        result = await chat._budget_block_reason(uuid4(), ["user"])
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_budget_gate_allows_when_under_limit() -> None:
+    """Under limit → allowed."""
+    from uuid import uuid4
+
+    from app.api.routes import chat
+
+    with (
+        patch.object(chat, "is_budget_enabled", return_value=True),
+        patch.object(chat, "async_session_maker", _session_cm(AsyncMock())),
+        patch.object(
+            chat,
+            "check_budget",
+            AsyncMock(return_value=_budget_status(is_allowed=True, action="block")),
+        ),
+    ):
+        result = await chat._budget_block_reason(uuid4(), ["user"])
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_budget_gate_fails_open_on_error() -> None:
+    """A budget-check error must allow the turn, never wedge chat."""
+    from uuid import uuid4
+
+    from app.api.routes import chat
+
+    with (
+        patch.object(chat, "is_budget_enabled", return_value=True),
+        patch.object(chat, "async_session_maker", _session_cm(AsyncMock())),
+        patch.object(chat, "check_budget", AsyncMock(side_effect=RuntimeError("db down"))),
+    ):
+        result = await chat._budget_block_reason(uuid4(), ["user"])
+
+    assert result is None

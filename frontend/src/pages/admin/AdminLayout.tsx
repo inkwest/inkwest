@@ -9,6 +9,7 @@ import {
   Cpu,
   Plug,
   Info,
+  Wallet,
   ArrowLeft,
 } from 'lucide-react';
 import { useAuthStore } from '@/store/admin';
@@ -31,7 +32,10 @@ const navGroups: { label?: string; items: { to: string; icon: typeof Cpu; label:
   { label: 'Access', items: [{ to: '/admin/users', icon: Users, label: 'Users' }] },
   {
     label: 'Observability',
-    items: [{ to: '/admin/usage', icon: BarChart3, label: 'Usage Reports' }],
+    items: [
+      { to: '/admin/usage', icon: BarChart3, label: 'Usage Reports' },
+      { to: '/admin/budgets', icon: Wallet, label: 'Budgets' },
+    ],
   },
   {
     label: 'Diagnostics',

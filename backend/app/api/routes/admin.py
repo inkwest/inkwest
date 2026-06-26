@@ -17,7 +17,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,13 +30,18 @@ from app.models.user import User
 from app.services import mcp_oauth_catalog, model_registry
 from app.services.app_settings import (
     BEDROCK_INCLUDE_OPEN_KEY,
+    BUDGET_ENABLED_KEY,
     DEFAULT_ENGINE_KEY,
+    DEFAULT_MONTHLY_COST_LIMIT_USD_KEY,
     SANDBOX_MAX_SESSIONS_PER_USER_KEY,
     get_int_setting,
     set_setting,
 )
 from app.services.budget_service import (
+    default_monthly_cost_limit,
     get_period_start,
+    get_usage_for_period,
+    is_budget_enabled,
 )
 from app.services.engines import (
     capable_engines,
@@ -60,7 +65,9 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 class BudgetCreate(BaseModel):
     """Schema for creating a budget."""
 
-    name: str = Field(..., min_length=1, max_length=255)
+    # Optional: a budget's identity is its scope, so the name is derived from the
+    # target (user name / role / global) when omitted. See _derive_budget_name.
+    name: str | None = Field(None, max_length=255)
     description: str | None = None
     budget_type: BudgetType
     target_id: UUID | None = None
@@ -365,15 +372,49 @@ class UpdateModelRequest(BaseModel):
 # =============================================================================
 
 
+async def _derive_budget_name(db: AsyncSession, budget: BudgetCreate) -> str:
+    """A budget's identity is its scope; derive a display name from it.
+
+    User → the user's display name (fallback email/id); role → the role; else global.
+    """
+    if budget.budget_type == BudgetType.USER and budget.target_id is not None:
+        user = await db.get(User, budget.target_id)
+        if user is not None:
+            return user.display_name or user.email or str(budget.target_id)
+        return str(budget.target_id)
+    if budget.budget_type == BudgetType.ROLE and budget.target_role:
+        return budget.target_role
+    return "Global default"
+
+
 @router.post("/budgets", response_model=BudgetResponse, status_code=status.HTTP_201_CREATED)
 async def create_budget(
     budget: BudgetCreate,
     admin: AdminUser,
     db: AsyncSession = Depends(get_db),
 ) -> Budget:
-    """Create a new budget."""
+    """Create a new budget (one active budget per scope+target; name derived from scope)."""
+    # Reject a second *active* budget for the same scope+target: two would be
+    # ambiguous (enforcement silently picks one). Edit the existing one instead.
+    # Best-effort (app-level, no DB unique index): a re-activation or a concurrent
+    # create could still leave two active — get_applicable_budget's newest-wins
+    # resolution keeps that deterministic and harmless rather than raising.
+    dup_q = select(Budget).where(
+        Budget.budget_type == budget.budget_type,
+        Budget.is_active == True,  # noqa: E712
+    )
+    if budget.budget_type == BudgetType.USER:
+        dup_q = dup_q.where(Budget.target_id == budget.target_id)
+    elif budget.budget_type == BudgetType.ROLE:
+        dup_q = dup_q.where(Budget.target_role == budget.target_role)
+    if (await db.execute(dup_q)).scalars().first() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An active budget already exists for this scope. Edit it instead.",
+        )
+
     db_budget = Budget(
-        name=budget.name,
+        name=budget.name or await _derive_budget_name(db, budget),
         description=budget.description,
         budget_type=budget.budget_type,
         target_id=budget.target_id,
@@ -413,6 +454,122 @@ async def list_budgets(
     query = query.order_by(Budget.created_at.desc())
     result = await db.execute(query)
     return result.scalars().all()
+
+
+class BudgetUsageResponse(BaseModel):
+    """Live consumption for a budget's current period.
+
+    Only user budgets have a single subject, so cost/token usage is reported for
+    those; role/global budgets are per-user quotas (each user gets one of that
+    size) with no single aggregate, so their usage is null.
+    """
+
+    budget_id: UUID
+    current_cost_usd: float | None
+    current_total_tokens: int | None
+
+
+# NOTE: must be declared before "/budgets/{budget_id}" or that route captures "usage".
+@router.get("/budgets/usage", response_model=list[BudgetUsageResponse])
+async def list_budget_usage(
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[BudgetUsageResponse]:
+    """Current-period consumption per budget (user budgets only; null otherwise).
+
+    One usage query per user budget — fine for the admin-managed (small) budget set.
+    """
+    budgets = (await db.execute(select(Budget))).scalars().all()
+    out: list[BudgetUsageResponse] = []
+    for b in budgets:
+        if b.budget_type == BudgetType.USER and b.target_id is not None:
+            usage = await get_usage_for_period(db, b.target_id, b.period)
+            out.append(
+                BudgetUsageResponse(
+                    budget_id=b.id,
+                    current_cost_usd=float(usage.total_cost_usd),
+                    current_total_tokens=usage.total_tokens,
+                )
+            )
+        else:
+            out.append(
+                BudgetUsageResponse(
+                    budget_id=b.id, current_cost_usd=None, current_total_tokens=None
+                )
+            )
+    return out
+
+
+class BudgetMemberUsage(BaseModel):
+    """A member of a role/global budget with their current-period consumption.
+
+    Role/global budgets are per-member quotas (each user gets one of this size), so
+    consumption is reported per member rather than as a single aggregate.
+    """
+
+    user_id: UUID
+    display_name: str
+    email: str
+    current_cost_usd: float
+    current_total_tokens: int
+
+
+@router.get("/budgets/{budget_id}/members", response_model=list[BudgetMemberUsage])
+async def list_budget_members(
+    budget_id: UUID,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[BudgetMemberUsage]:
+    """Per-member current-period usage for a role/global budget (empty for a user budget)."""
+    budget = await db.get(Budget, budget_id)
+    if budget is None:
+        raise HTTPException(status_code=404, detail="Budget not found")
+
+    if budget.budget_type == BudgetType.ROLE and budget.target_role:
+        # Filter by role membership in Python: the roles column is text[] and the
+        # array-overlap operator is type-fussy across drivers; the user set is small.
+        role = budget.target_role
+        users = [
+            u for u in (await db.execute(select(User))).scalars().all() if role in (u.roles or [])
+        ]
+    elif budget.budget_type == BudgetType.GLOBAL:
+        users = list((await db.execute(select(User))).scalars().all())
+    else:
+        return []  # user budget — its single subject is the row itself
+
+    if not users:
+        return []
+
+    # One grouped query for all members' usage this period (avoids N+1).
+    period_start = get_period_start(budget.period)
+    rows = (
+        await db.execute(
+            select(
+                UsageRecord.user_id,
+                func.coalesce(func.sum(UsageRecord.cost_usd), Decimal("0")),
+                func.coalesce(func.sum(UsageRecord.input_tokens + UsageRecord.output_tokens), 0),
+            )
+            .where(
+                UsageRecord.recorded_at >= period_start,
+                UsageRecord.user_id.in_([u.id for u in users]),
+            )
+            .group_by(UsageRecord.user_id)
+        )
+    ).all()
+    by_uid = {r[0]: (r[1], int(r[2])) for r in rows}
+
+    members = [
+        BudgetMemberUsage(
+            user_id=u.id,
+            display_name=u.display_name,
+            email=u.email,
+            current_cost_usd=float(by_uid.get(u.id, (Decimal("0"), 0))[0]),
+            current_total_tokens=by_uid.get(u.id, (Decimal("0"), 0))[1],
+        )
+        for u in users
+    ]
+    members.sort(key=lambda m: m.current_cost_usd, reverse=True)
+    return members
 
 
 @router.get("/budgets/{budget_id}", response_model=BudgetResponse)
@@ -601,7 +758,9 @@ async def list_users(
     if is_active is not None:
         query = query.where(User.is_active == is_active)
     if role:
-        query = query.where(User.roles.contains(cast([role], ARRAY(String))))
+        # Cast to text[] to match the column type: ARRAY(String) renders varchar[],
+        # which Postgres rejects for `@>` against the text[] roles column.
+        query = query.where(User.roles.contains(cast([role], ARRAY(Text))))
 
     query = query.order_by(User.created_at.desc())
     result = await db.execute(query)
@@ -1111,6 +1270,62 @@ async def update_sandbox_settings(
         f"max_sessions_per_user={body.max_sessions_per_user}"
     )
     return _sandbox_settings_response()
+
+
+class BudgetSettingsResponse(BaseModel):
+    """Runtime budget-enforcement settings an admin may tune without a redeploy."""
+
+    # Whether over-limit turns are actually blocked (vs. usage merely tracked).
+    enabled: bool
+    # Per-user default monthly spend cap in USD applied to users with no budget row.
+    # 0 = no default cap (only explicit user/role/global budgets apply).
+    default_monthly_cost_limit_usd: float
+    # The env baselines, shown so the UI can label when a runtime override is in effect.
+    default_enabled: bool
+    default_default_monthly_cost_limit_usd: float
+
+
+class UpdateBudgetSettingsRequest(BaseModel):
+    enabled: bool
+    default_monthly_cost_limit_usd: float = Field(..., ge=0)
+
+
+def _budget_settings_response() -> BudgetSettingsResponse:
+    cap = default_monthly_cost_limit()
+    env = get_settings()
+    return BudgetSettingsResponse(
+        enabled=is_budget_enabled(),
+        default_monthly_cost_limit_usd=float(cap) if cap is not None else 0.0,
+        default_enabled=env.budget_enabled,
+        default_default_monthly_cost_limit_usd=env.default_monthly_cost_limit_usd,
+    )
+
+
+@router.get("/settings/budget", response_model=BudgetSettingsResponse)
+async def get_budget_settings(admin: AdminUser) -> BudgetSettingsResponse:
+    """Get budget-enforcement settings (on/off + the per-user default monthly cap)."""
+    return _budget_settings_response()
+
+
+@router.put("/settings/budget", response_model=BudgetSettingsResponse)
+async def update_budget_settings(
+    body: UpdateBudgetSettingsRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> BudgetSettingsResponse:
+    """Toggle enforcement and set the per-user default monthly USD cap. Effective immediately."""
+    # set_setting commits per call, so the two writes aren't atomic. Write the cap
+    # first and flip `enabled` last: a failure between them then leaves enforcement
+    # un-flipped (fail-safe) rather than enabled against a stale/unwritten cap.
+    await set_setting(
+        db, DEFAULT_MONTHLY_COST_LIMIT_USD_KEY, str(body.default_monthly_cost_limit_usd)
+    )
+    await set_setting(db, BUDGET_ENABLED_KEY, "true" if body.enabled else "false")
+    logger.info(
+        f"Budget settings changed by {admin.email}: enabled={body.enabled} "
+        f"default_monthly_cost_limit_usd={body.default_monthly_cost_limit_usd}"
+    )
+    return _budget_settings_response()
 
 
 @router.post("/settings/model/refresh", response_model=ModelSettingsResponse)

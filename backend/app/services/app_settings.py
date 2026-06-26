@@ -30,6 +30,12 @@ DEFAULT_ENGINE_KEY = "default_engine"
 # Per-user concurrent-sandbox ceiling (admin override of settings.sandbox_max_sessions_per_user).
 # Unset = fall back to the env default. See app.services.sandbox._max_sessions_per_user.
 SANDBOX_MAX_SESSIONS_PER_USER_KEY = "sandbox_max_sessions_per_user"
+# Whether per-user spend budgets are *enforced* (block over-limit turns), not just
+# reported. Unset = fall back to settings.budget_enabled. See budget_service.
+BUDGET_ENABLED_KEY = "budget_enabled"
+# Default per-user spend cap in USD/month for users with no explicit budget row.
+# Unset = fall back to settings.default_monthly_cost_limit_usd. 0 = no default cap.
+DEFAULT_MONTHLY_COST_LIMIT_USD_KEY = "default_monthly_cost_limit_usd"
 
 _settings: dict[str, str] = {}
 # Serializes writes so concurrent admin saves can't leave the in-memory copy
@@ -59,6 +65,17 @@ def get_int_setting(key: str, default: int) -> int:
         return default
     try:
         return int(raw)
+    except ValueError:
+        return default
+
+
+def get_float_setting(key: str, default: float) -> float:
+    """Get a float setting; unset/empty/non-numeric falls back to ``default``."""
+    raw = _settings.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default
 

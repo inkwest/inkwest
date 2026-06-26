@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     # Budget Management
     # ==========================================================================
     budget_enabled: bool = False
+    # Per-user default spend cap in USD/month applied to every user without a more
+    # specific (user/role/global) budget row. 0 = no default cap. Admin-overridable
+    # at runtime via the budget_enabled / default_monthly_cost_limit_usd app settings.
+    default_monthly_cost_limit_usd: float = 0.0
     default_daily_token_limit: int = 100000  # Default daily limit per user
     default_monthly_token_limit: int = 2000000  # Default monthly limit per user
     global_daily_token_limit: int = 1000000  # Global daily limit

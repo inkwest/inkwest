@@ -6,6 +6,10 @@ import {
   Budget,
   CreateBudgetRequest,
   UpdateBudgetRequest,
+  BudgetSettings,
+  UpdateBudgetSettingsRequest,
+  BudgetUsage,
+  BudgetMemberUsage,
   RoleMapping,
   CreateRoleMappingRequest,
   UpdateRoleMappingRequest,
@@ -80,6 +84,27 @@ export async function updateBudget(id: string, data: UpdateBudgetRequest): Promi
 
 export async function deleteBudget(id: string): Promise<void> {
   await fetchAPI(`/api/admin/budgets/${id}`, { method: 'DELETE' });
+}
+
+export async function getBudgetSettings(): Promise<BudgetSettings> {
+  return fetchAPI('/api/admin/settings/budget');
+}
+
+export async function updateBudgetSettings(
+  data: UpdateBudgetSettingsRequest
+): Promise<BudgetSettings> {
+  return fetchAPI('/api/admin/settings/budget', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getBudgetUsage(): Promise<BudgetUsage[]> {
+  return fetchAPI('/api/admin/budgets/usage');
+}
+
+export async function getBudgetMembers(budgetId: string): Promise<BudgetMemberUsage[]> {
+  return fetchAPI(`/api/admin/budgets/${budgetId}/members`);
 }
 
 // ============================================================================
