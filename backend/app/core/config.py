@@ -280,7 +280,7 @@ class Settings(BaseSettings):
     # SAME host as mcp_proxy_base_url, inheriting its squid allowlist + host-gateway --add-host
     # — no new egress rule). Off (default): today's behavior — the real bearer rides
     # sandbox_env_file into the sandbox. Rollback = flip this off + restore the bearer in
-    # sandbox_env_file (see docs/HANDOFF-llm-broker-plan.md §Security/reversibility).
+    # sandbox_env_file (see docs/llm-auth-broker.md §Rollback).
     # ==========================================================================
     llm_broker_enabled: bool = False
 

@@ -17,7 +17,7 @@ SigV4), so the broker is a pure header swap + transparent byte passthrough — n
 Auth on this route IS the internal grant (:mod:`app.services.llm_proxy_token`); there is no
 ``get_current_user`` — the sandbox caller carries no session. In scope: the sandboxed
 ``claude-cli`` deployment only; the non-sandboxed ``bedrock`` provider holds creds in-process
-and never crosses a sandbox boundary (see docs/HANDOFF-llm-broker-plan.md §Scope).
+and never crosses a sandbox boundary (see docs/llm-auth-broker.md §Scope).
 """
 
 import logging
