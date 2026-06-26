@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
+from app.services import llm_broker
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
 from app.services.ai_client import resolve_session_model_choice
 from app.services.budget_service import record_usage
@@ -214,6 +215,10 @@ required.
         if refs:
             prompt = f"{user_message}\n\n{refs}" if user_message else refs
 
+    # Bound to this turn; the broker grant (if any) is minted below and BURNED in the finally
+    # so it dies with the turn. Initialized here so the finally can revoke it even on an early
+    # failure (it carries the token in AWS_BEARER_TOKEN_BEDROCK; empty ⇒ burn is a no-op).
+    broker_env: dict[str, str] = {}
     try:
         # Where the agent works. In sandbox mode `claude` runs inside this
         # conversation's own container: ensure() provisions the toolbox+proxy pair on
@@ -274,6 +279,16 @@ required.
         total_output_tokens = 0
         resume_id = cli_session_id
 
+        # Route the CLI's Bedrock calls through the LLM auth broker when enabled (sandbox only
+        # — the broker base URL resolves to the host-gateway alias reachable solely from inside
+        # the sandbox). The JWT + CLAUDE_CODE_USE_BEDROCK + ANTHROPIC_BEDROCK_BASE_URL ride the
+        # connector-env channel (docker exec -e), overriding sandbox_env_file so the real
+        # bearer no longer needs to live in the sandbox. Off/local ⇒ empty ⇒ today's behavior.
+        broker_env = (
+            llm_broker.cli_broker_env(user_id, session_id) if settings.sandbox_enabled else {}
+        )
+        engine_env = {**connector_env, **broker_env}
+
         for attempt in (1, 2):
             content = []
             received_done = False
@@ -288,7 +303,7 @@ required.
                     cli_path=settings.claude_cli_path,
                     timeout=settings.claude_cli_timeout,
                     resume_session_id=resume_id,
-                    extra_env=connector_env or None,
+                    extra_env=engine_env or None,
                     cwd=work_dir,
                     system_prompt=system_prompt,
                     container=container,
@@ -453,6 +468,11 @@ required.
         yield error_event(f"Unexpected error: {str(e)}")
 
     finally:
+        # Burn this turn's broker grant: the injected AWS_BEARER_TOKEN_BEDROCK is dead the
+        # moment the turn ends, so a token exfiltrated from the sandbox can't be replayed
+        # afterwards. No-op when the broker is off (empty env). Runs on every exit path,
+        # including cancel/error (the agent process is already gone by here).
+        llm_broker.burn_env(broker_env)
         # Drop the in-use lease ensure() took so the idle reaper can reclaim this sandbox
         # once it goes quiet. Held for the whole turn (not just ensure()) so a turn longer
         # than SANDBOX_IDLE_TTL isn't torn down mid-exec.

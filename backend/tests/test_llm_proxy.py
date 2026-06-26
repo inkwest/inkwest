@@ -135,29 +135,44 @@ async def test_arn_target_round_trips_and_is_encoded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_or_bad_jwt_is_401() -> None:
+async def test_missing_or_unknown_grant_is_401() -> None:
     ps = _patches(lambda r: _streaming(200))
     for p in ps:
         p.start()
     try:
         async with await _client() as c:
             no_auth = await c.post(f"/api/llm-proxy/model/{MODEL}/converse", content=b"{}")
-            # An mcp-proxy token (wrong aud) signed with the same secret must not pass.
-            import jwt as _jwt
-
-            from app.core.auth import JWT_ALGORITHM
-            from app.core.config import get_settings
-
-            wrong = _jwt.encode(
-                {"aud": "mcp-proxy", "type": "mcp-proxy"},
-                get_settings().secret_key,
-                algorithm=JWT_ALGORITHM,
-            )
-            wrong_aud = await c.post(
-                f"/api/llm-proxy/model/{MODEL}/converse", headers=_bearer(wrong), content=b"{}"
+            # An opaque token that was never minted (or already burned) resolves to no grant.
+            unknown = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse",
+                headers=_bearer("never-minted-token"),
+                content=b"{}",
             )
         assert no_auth.status_code == 401
-        assert wrong_aud.status_code == 401
+        assert unknown.status_code == 401
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_burned_grant_is_401() -> None:
+    """A grant valid mid-turn is rejected once the orchestrator burns it at turn end."""
+    ps = _patches(lambda r: _streaming(200, b"ok"))
+    for p in ps:
+        p.start()
+    try:
+        tok = llm_proxy_token.mint(_U, _S)
+        async with await _client() as c:
+            live = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse", headers=_bearer(tok), content=b"{}"
+            )
+            llm_proxy_token.burn(tok)  # turn ends
+            dead = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse", headers=_bearer(tok), content=b"{}"
+            )
+        assert live.status_code == 200
+        assert dead.status_code == 401
     finally:
         for p in ps:
             p.stop()

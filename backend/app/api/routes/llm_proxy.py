@@ -2,18 +2,19 @@
 LLM auth broker (port of the OAuth2 MCP reverse proxy to the model call itself).
 
 The sandboxed engines (Claude CLI, inkwest-agent) reach Bedrock ONLY through squid, and now
-carry a short-lived internal JWT instead of the real Bedrock API key. They POST to
+carry a short-lived, opaque per-turn grant instead of the real Bedrock API key. They POST to
 ``/api/llm-proxy/model/{id}/{op}`` — the exact path shape both the Claude CLI
 (``ANTHROPIC_BEDROCK_BASE_URL``) and boto3 (``endpoint_url``) construct. This route verifies
-the JWT, RESTRICTS the call (``model_id`` ∈ enabled registry models/ARNs, ``op`` ∈ allowed
+the grant, RESTRICTS the call (``model_id`` ∈ enabled registry models/ARNs, ``op`` ∈ allowed
 Bedrock operations), swaps the ``Authorization`` header for the backend-held real bearer, and
 forwards to real Bedrock — streaming the response back untouched. The real credential lives
-only in the backend process; a compromised sandbox holds only a model-scoped, expiring JWT.
+only in the backend process; a compromised sandbox holds only a model-scoped grant that the
+orchestrator BURNS when the turn ends (see :mod:`app.services.llm_proxy_token`).
 
 With ``AWS_BEARER_TOKEN_BEDROCK`` both the CLI and boto3 send ``Authorization: Bearer …`` (no
 SigV4), so the broker is a pure header swap + transparent byte passthrough — no re-signing.
 
-Auth on this route IS the internal JWT (:mod:`app.services.llm_proxy_token`); there is no
+Auth on this route IS the internal grant (:mod:`app.services.llm_proxy_token`); there is no
 ``get_current_user`` — the sandbox caller carries no session. In scope: the sandboxed
 ``claude-cli`` deployment only; the non-sandboxed ``bedrock`` provider holds creds in-process
 and never crosses a sandbox boundary (see docs/HANDOFF-llm-broker-plan.md §Scope).
