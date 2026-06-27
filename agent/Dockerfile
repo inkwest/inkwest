@@ -136,6 +136,17 @@ WORKDIR /home/sandbox
 RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/home/sandbox/.local/bin:$PATH"
 
+# opencode CLI — second in-sandbox coding-agent engine (anomalyco/opencode). Official
+# installer ships a self-contained compiled binary (bun; no Node runtime) into
+# $HOME/.opencode/bin. The broker spawns `opencode run --format json` per turn.
+RUN curl -fsSL https://opencode.ai/install | bash
+ENV PATH="/home/sandbox/.opencode/bin:$PATH"
+# Warm opencode's one-time config/plugin bootstrap (@opencode-ai/sdk+plugin+zod from npm)
+# and prime the models.dev catalog, so the first real turn doesn't pay that round-trip.
+# Best-effort: guarded with `|| true` so an offline/registry-flaky build still succeeds
+# (npm + models.dev are squid-allowlisted, so a cold container just refetches at runtime).
+RUN opencode --version && (opencode models >/dev/null 2>&1 || true)
+
 # ── inkwest_agent — LEAN bake (carved runtime deps only) ─────────────
 USER root
 ENV INKWEST_AGENT_HOME=/opt/inkwest-agent

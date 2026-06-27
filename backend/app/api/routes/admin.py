@@ -49,6 +49,7 @@ from app.services.engines import (
     enabled_engines,
     engine_for_turn,
     inkwest_agent_enabled,
+    open_catalog_enabled,
 )
 from app.services.model_catalog import bedrock_include_open, catalog_status, refresh_catalog
 from app.services.sandbox import hard_ceiling, list_sandboxes
@@ -246,9 +247,11 @@ class ModelSettingsResponse(BaseModel):
     enabled_models: list[str]
     # Whether all Bedrock vendors (not just Anthropic) are surfaced in the catalog.
     include_all_vendors: bool
-    # Whether the custom (inkwest-agent) engine is enabled — gates the
-    # all-vendors toggle, which is only useful when an engine can run them.
+    # Whether the custom (inkwest-agent) engine is enabled (kept for back-compat).
     inkwest_agent_enabled: bool
+    # Whether ANY agent engine (inkwest-agent or opencode) is enabled — gates the
+    # all-vendors toggle, which is only useful when an engine can run those models.
+    open_catalog_enabled: bool
     # Engines enabled in this deployment (AGENTIC_ENGINES) — the admin renders one
     # section per engine and curates per-(engine, model) availability against this.
     engines: list[str]
@@ -1154,6 +1157,7 @@ def _model_settings_response() -> ModelSettingsResponse:
         enabled_models=model_registry.selectable_models(),
         include_all_vendors=bedrock_include_open(),
         inkwest_agent_enabled=inkwest_agent_enabled(),
+        open_catalog_enabled=open_catalog_enabled(),
         engines=enabled_engines(),
         catalog=CatalogStatus(**catalog_status()),
         models=[_model_info(e) for e in model_registry.merged_entries()],

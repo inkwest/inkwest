@@ -230,7 +230,11 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
         root, "claude"
     )  # CLAUDE_CONFIG_DIR -> durable Claude state (--resume)
     work_dir = os.path.join(root, "workdir")
-    for path in (logs_dir, claude_dir, work_dir):
+    # opencode engine: its per-conversation session store (SQLite opencode.db + storage/)
+    # lives at $HOME/.local/share/opencode in-container; bind-mount it durably so a turn's
+    # `--continue` resumes THIS conversation's session across turns + sandbox rebuilds.
+    opencode_dir = os.path.join(root, "opencode")
+    for path in (logs_dir, claude_dir, work_dir, opencode_dir):
         os.makedirs(path, exist_ok=True)
         # World-writable so the proxy (squid's uid) and the toolbox (its own uid, which may
         # differ from the backend's) can write their state. Per-conversation -> not a leak.
@@ -349,6 +353,10 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
             f"{claude_dir}:{sandbox_home}/.claude",
             "-v",
             f"{work_dir}:/workdir",
+            # opencode engine session store (durable; default data dir is $HOME-based, so the
+            # target mirrors the image's HOME). Idle for the claude-cli/inkwest-agent engines.
+            "-v",
+            f"{opencode_dir}:{sandbox_home}/.local/share/opencode",
             # RAM-only creds: the session's ~/.aws/~/.kube, bind-mounted from the shared
             # tmpfs creds volume (or an empty tmpfs when no such volume is configured).
             *creds_mounts,

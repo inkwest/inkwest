@@ -37,10 +37,12 @@ class Settings(BaseSettings):
     # inference backend (the CLI/sandbox configures its own):
     #   - claude-cli    : Claude Code CLI in the sandbox (Claude models only)
     #   - inkwest-agent : the custom Converse loop (all Bedrock vendors)
+    #   - opencode      : the opencode CLI agent in the sandbox (all Bedrock vendors)
     # Default `claude-cli` preserves today's behavior exactly (no AWS needed until
-    # inkwest-agent is enabled). The catalog is engine-aware (see app.services.engines
-    # / model_catalog): non-Claude Bedrock models are only surfaced when an engine
-    # that can run them is enabled. See docs/SANDBOXED_AGENT_RUNTIME.md (decision #7).
+    # an agent engine is enabled). The catalog is engine-aware (see app.services.engines
+    # / model_catalog): non-Claude Bedrock models are only surfaced when an *agent*
+    # engine (inkwest-agent or opencode) that can run them is enabled.
+    # See docs/SANDBOXED_AGENT_RUNTIME.md (decision #7).
     agentic_engines: str = "claude-cli"
 
     # Anthropic settings. The default model is NOT env-configured: it lives in

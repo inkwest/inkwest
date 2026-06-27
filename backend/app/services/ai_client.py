@@ -96,10 +96,12 @@ def get_orchestrator():
     from app.services.engines import (
         CLAUDE_CLI,
         INKWEST_AGENT,
+        OPENCODE,
         capable_engines,
         configured_default_engine,
         engine_for_turn,
         inkwest_agent_enabled,
+        opencode_enabled,
     )
     from app.services.events import error_event
 
@@ -118,10 +120,11 @@ def get_orchestrator():
         if pinned is None and model == default_model():
             pinned = configured_default_engine()
         engine = engine_for_turn(model, pinned)
-        agent_runnable = inkwest_agent_enabled() and get_settings().sandbox_enabled
-        # Route to the broker only when the agent can actually run (engine enabled +
-        # sandbox available); otherwise fall back to the CLI.
-        if engine == INKWEST_AGENT and agent_runnable:
+        sandbox_ok = get_settings().sandbox_enabled
+        # Route to a sandboxed agent engine only when it can actually run (engine
+        # enabled + sandbox available); otherwise fall back to the CLI — unless the
+        # model can't run on the CLI at all, in which case surface a clean error.
+        if engine == INKWEST_AGENT and inkwest_agent_enabled() and sandbox_ok:
             from app.services.orchestrator_inkwest_agent import (
                 orchestrate_chat_inkwest_agent,
             )
@@ -129,22 +132,28 @@ def get_orchestrator():
             logger.info(f"Engine inkwest-agent (sandboxed) for model {model}")
             orchestrate = orchestrate_chat_inkwest_agent
             used_engine = INKWEST_AGENT
-        elif engine == INKWEST_AGENT and CLAUDE_CLI not in capable_engines(model):
-            # The model needs the inkwest-agent engine (the CLI is Claude-only) but the agent
-            # isn't runnable here (engine disabled or sandbox unavailable). Do NOT fall back to
-            # the CLI — it can't serve this model, the turn would fail there, and the usage
-            # would be misattributed to claude-cli. Surface a clean error instead.
+        elif engine == OPENCODE and opencode_enabled() and sandbox_ok:
+            from app.services.orchestrator_opencode import orchestrate_chat_opencode
+
+            logger.info(f"Engine opencode (sandboxed) for model {model}")
+            orchestrate = orchestrate_chat_opencode
+            used_engine = OPENCODE
+        elif engine in (INKWEST_AGENT, OPENCODE) and CLAUDE_CLI not in capable_engines(model):
+            # The model needs a sandboxed agent engine (the CLI is Claude-only) but that
+            # agent isn't runnable here (engine disabled or sandbox unavailable). Do NOT
+            # fall back to the CLI — it can't serve this model, the turn would fail there,
+            # and the usage would be misattributed to claude-cli. Surface a clean error.
             logger.warning(
-                "inkwest-agent unavailable for non-Claude model %s (agent_enabled=%s sandbox=%s)",
+                "%s unavailable for non-Claude model %s (sandbox=%s)",
+                engine,
                 model,
-                inkwest_agent_enabled(),
-                get_settings().sandbox_enabled,
+                sandbox_ok,
             )
             yield error_event(
-                f"The model '{model}' requires the inkwest-agent engine, which is "
+                f"The model '{model}' requires the {engine} engine, which is "
                 "currently unavailable. Ask an administrator to enable it, or switch to "
                 "a Claude model.",
-                metadata={"model": model, "engine": INKWEST_AGENT, "reason": "engine_unavailable"},
+                metadata={"model": model, "engine": engine, "reason": "engine_unavailable"},
             )
             return
         else:

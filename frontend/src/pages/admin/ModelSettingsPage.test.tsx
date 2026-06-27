@@ -16,6 +16,7 @@ const SETTINGS: adminApi.ModelSettings = {
   enabled_models: [OPUS],
   include_all_vendors: false,
   inkwest_agent_enabled: true,
+  open_catalog_enabled: true,
   engines: ['claude-cli', 'inkwest-agent'],
   catalog: {
     last_refreshed_at: '2026-06-19T10:00:00+00:00',
@@ -449,6 +450,7 @@ describe('ModelSettingsPage', () => {
     mockedApi.getModelSettings.mockResolvedValue({
       ...structuredClone(SETTINGS),
       inkwest_agent_enabled: false,
+      open_catalog_enabled: false,
       engines: ['claude-cli'],
     });
     render(<ModelSettingsPage />);

@@ -24,11 +24,17 @@ from app.core.config import get_settings
 
 CLAUDE_CLI = "claude-cli"
 INKWEST_AGENT = "inkwest-agent"
-KNOWN_ENGINES = frozenset({CLAUDE_CLI, INKWEST_AGENT})
+OPENCODE = "opencode"
+KNOWN_ENGINES = frozenset({CLAUDE_CLI, INKWEST_AGENT, OPENCODE})
 
 # Engine applied to a Claude model when the choice is ambiguous (multiple engines
 # enabled): Claude Code is the native, lowest-overhead path for Claude.
 DEFAULT_ENGINE = CLAUDE_CLI
+
+# Agent engines: in-sandbox coding agents that speak Bedrock Converse and can run
+# ANY vendor (Claude included). claude-cli is the only Claude-only client, so it is
+# the sole non-agent engine. Anything here opens the whole-Bedrock catalog.
+AGENT_ENGINES = KNOWN_ENGINES - {CLAUDE_CLI}
 
 
 def enabled_engines() -> list[str]:
@@ -37,8 +43,20 @@ def enabled_engines() -> list[str]:
 
 
 def inkwest_agent_enabled() -> bool:
-    """Whether the custom Converse engine is enabled (gates the open catalog)."""
+    """Whether the custom Converse engine is enabled."""
     return INKWEST_AGENT in enabled_engines()
+
+
+def opencode_enabled() -> bool:
+    """Whether the opencode engine is enabled."""
+    return OPENCODE in enabled_engines()
+
+
+def open_catalog_enabled() -> bool:
+    """Whether any agent engine is enabled — gates the whole-Bedrock (all-vendor)
+    catalog. Pointless to surface non-Claude models no enabled engine can run.
+    """
+    return any(e in AGENT_ENGINES for e in enabled_engines())
 
 
 def _speaks_anthropic_provider(provider: str | None, model_id: str) -> bool:

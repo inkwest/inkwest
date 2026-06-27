@@ -139,8 +139,14 @@ def test_capable_engines_is_pure_capability():
             assert set(engines.capable_engines("anthropic.claude-opus-4-8")) == {
                 "claude-cli",
                 "inkwest-agent",
+                "opencode",
             }
-            assert engines.capable_engines("meta.llama3-1-70b-instruct-v1:0") == ["inkwest-agent"]
+            # Capability is pure: every agent engine (inkwest-agent + opencode) can run a
+            # non-Claude vendor; enabled-first ordering puts the enabled one ahead.
+            assert engines.capable_engines("meta.llama3-1-70b-instruct-v1:0") == [
+                "inkwest-agent",
+                "opencode",
+            ]
 
 
 def test_runnable_engines_honors_admin_availability():
@@ -195,3 +201,57 @@ def test_validate_engines_accepts_known():
         engines, "get_settings", return_value=_engine_settings("claude-cli", "inkwest-agent")
     ):
         engines.validate_engines()  # no raise
+
+
+# --- opencode engine ---------------------------------------------------------------
+
+
+def test_opencode_enabled_and_validate_accepts_it():
+    with patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")):
+        assert engines.opencode_enabled() is False
+    with patch.object(
+        engines, "get_settings", return_value=_engine_settings("claude-cli", "opencode")
+    ):
+        assert engines.opencode_enabled() is True
+        engines.validate_engines()  # opencode is a known engine → no raise
+
+
+def test_open_catalog_enabled_for_any_agent_engine():
+    # claude-cli alone is Claude-only → no open catalog.
+    with patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")):
+        assert engines.open_catalog_enabled() is False
+    # opencode is an agent engine → it opens the whole-Bedrock catalog on its own.
+    with patch.object(engines, "get_settings", return_value=_engine_settings("opencode")):
+        assert engines.open_catalog_enabled() is True
+    with patch.object(
+        engines, "get_settings", return_value=_engine_settings("claude-cli", "inkwest-agent")
+    ):
+        assert engines.open_catalog_enabled() is True
+
+
+def test_opencode_runs_every_vendor_like_an_agent_engine():
+    with patch.object(
+        engines, "get_settings", return_value=_engine_settings("claude-cli", "opencode")
+    ):
+        with patch("app.services.model_registry.get_entry", return_value=None):
+            # Non-Claude → only the agent engine (opencode) is runnable.
+            assert engines.resolve_engine("meta.llama3-1-70b-instruct-v1:0") == "opencode"
+            # Claude → CLI wins when ambiguous, but opencode is capable too.
+            assert "opencode" in engines.capable_engines("anthropic.claude-opus-4-8")
+            assert engines.resolve_engine("anthropic.claude-opus-4-8") == "claude-cli"
+    # opencode alone → it runs Claude too (via Bedrock).
+    with patch.object(engines, "get_settings", return_value=_engine_settings("opencode")):
+        with patch("app.services.model_registry.get_entry", return_value=None):
+            assert engines.resolve_engine("anthropic.claude-opus-4-8") == "opencode"
+
+
+def test_engine_for_turn_honors_opencode_pin():
+    # The linchpin that makes the get_orchestrator opencode branch reachable: an explicit
+    # opencode pin resolves to OPENCODE when opencode is enabled and runnable for the model.
+    with patch.object(
+        engines, "get_settings", return_value=_engine_settings("claude-cli", "opencode")
+    ):
+        with patch("app.services.model_registry.get_entry", return_value=None):
+            assert engines.engine_for_turn("anthropic.claude-opus-4-8", "opencode") == "opencode"
+            llama = "meta.llama3-1-70b-instruct-v1:0"
+            assert engines.engine_for_turn(llama, "opencode") == "opencode"

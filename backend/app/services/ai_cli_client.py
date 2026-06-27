@@ -13,14 +13,26 @@ import os
 import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
-from app.services.events import ChatEvent
+from app.services.events import (
+    ChatEvent,
+    done_event,
+    error_event,
+    text_event,
+    tool_result_event,
+    tool_start_event,
+)
 
 logger = logging.getLogger(__name__)
 
 # Grace period between SIGTERM and SIGKILL when stopping the agent on an explicit
 # cancel: let it shut down cleanly, but don't wait forever if it ignores the signal.
 _STOP_GRACE_SECONDS = 5.0
+
+# Large stdout buffer for big tool outputs (file reads, kubectl dumps) — shared by every
+# in-container spawn path (claude-cli, inkwest-agent, opencode).
+_SUBPROCESS_BUFFER_LIMIT = 100 * 1024 * 1024  # 100MB
 
 
 def _terminate_quiet(process: asyncio.subprocess.Process) -> None:
@@ -339,13 +351,12 @@ async def execute_claude_cli(
 
     # Use a much larger buffer limit to handle large tool outputs
     # Default is 64KB which can be exceeded by file reads, kubectl outputs, etc.
-    buffer_limit = 100 * 1024 * 1024  # 100MB
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        limit=buffer_limit,
+        limit=_SUBPROCESS_BUFFER_LIMIT,
         env=proc_env,
         cwd=run_cwd,
     )
@@ -631,7 +642,6 @@ async def execute_agent(
     logger.info(f"Spawning inkwest-agent for Inkwest session {session_id}")
 
     # Large buffer for big tool outputs (kubectl dumps, file reads), like the CLI path.
-    buffer_limit = 100 * 1024 * 1024  # 100MB
 
     # Connector creds are injected into THIS subprocess's env only (docker reads the
     # value-less `-e KEY` values from here) — never set process-globally, so sessions
@@ -643,7 +653,7 @@ async def execute_agent(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        limit=buffer_limit,
+        limit=_SUBPROCESS_BUFFER_LIMIT,
         env=proc_env,
     )
 
@@ -749,3 +759,222 @@ async def parse_agent_response(output_stream: AsyncIterator[str]) -> AsyncIterat
             logger.debug(f"Skipping shapeless agent line: {line[:100]}")
             continue
         yield _chat_event_from_dict(data)
+
+
+# =============================================================================
+# opencode engine (anomalyco/opencode) — non-interactive `opencode run --format json`
+#
+# A second in-sandbox coding-agent engine, parity with the claude-cli path: spawn in
+# the conversation container, stream NDJSON stdout, cancel-by-kill via a recorded PID.
+# opencode emits its OWN JSONL schema (NOT our ChatEvent), so the parser translates it.
+# The wire shapes below were captured live against Bedrock (opencode 1.17.10) — see
+# tests/fixtures/opencode_stream_*.jsonl. Payload nests under ``part``:
+#   step_start  {part:{type:"step-start"}}                          -> (dropped)
+#   text        {part:{type:"text", text}}                          -> text_delta
+#   tool_use    {part:{type:"tool", tool, callID, state:{          -> tool_start + tool_result
+#                  status, input, output, metadata:{exit}}}}           (emitted post-completion)
+#   step_finish {part:{reason, tokens:{input,output}, cost}}        -> accumulate; done on "stop"
+#   error       {error:{name, message|data:{message}}}             -> error
+# =============================================================================
+
+
+def _as_dict(x: object) -> dict[str, Any]:
+    """Narrow an arbitrary JSON value to a dict (empty when it isn't one)."""
+    return x if isinstance(x, dict) else {}
+
+
+def _opencode_error_message(data: dict[str, Any]) -> str:
+    """Pull a human-readable message out of an opencode ``error`` event."""
+    err = _as_dict(data.get("error"))
+    inner = _as_dict(err.get("data"))
+    return inner.get("message") or err.get("message") or err.get("name") or "opencode error"
+
+
+async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIterator[ChatEvent]:
+    """Translate ``opencode run --format json`` NDJSON into the canonical ChatEvent stream.
+
+    A turn is one or more *steps* (assistant message → optional tool calls → next step).
+    ``tool_use`` arrives once, already completed, so we synthesize both ``tool_start`` and
+    ``tool_result`` from it. Token counts + cost are per-step → accumulated and surfaced on
+    the terminal ``done`` (emitted when a ``step_finish`` reports ``reason == "stop"``).
+    """
+    in_tokens = out_tokens = tool_calls = iterations = 0
+    cost_usd = 0.0
+    emitted_done = False
+
+    async for line in output_stream:
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            logger.debug(f"Non-JSON opencode output: {line[:120]}")
+            continue
+        if not isinstance(data, dict):
+            continue
+        etype = data.get("type")
+        part = _as_dict(data.get("part"))
+
+        if etype == "text":
+            text = part.get("text")
+            if text:
+                yield text_event(text)
+        elif etype == "tool_use":
+            name = part.get("tool") or "tool"
+            call_id = part.get("callID") or part.get("id") or ""
+            state = _as_dict(part.get("state"))
+            tool_input = _as_dict(state.get("input"))
+            output = state.get("output") or ""
+            meta = _as_dict(state.get("metadata"))
+            exit_code = meta.get("exit")
+            is_error = state.get("status") != "completed" or (exit_code not in (0, None))
+            tool_calls += 1
+            yield tool_start_event(name, tool_input, call_id)
+            yield tool_result_event(name, str(output), call_id, is_error)
+        elif etype == "step_finish":
+            iterations += 1
+            tokens = _as_dict(part.get("tokens"))
+            in_tokens += int(tokens.get("input") or 0)
+            out_tokens += int(tokens.get("output") or 0)
+            cost = part.get("cost")
+            if isinstance(cost, (int, float)):
+                cost_usd += float(cost)
+            if part.get("reason") == "stop":
+                emitted_done = True
+                yield done_event(
+                    metadata={
+                        "iterations": iterations,
+                        "input_tokens": in_tokens,
+                        "output_tokens": out_tokens,
+                        "tool_calls": tool_calls,
+                        "cost_usd": cost_usd,
+                    }
+                )
+        elif etype == "error":
+            yield error_event(_opencode_error_message(data))
+            return
+        # step_start and any unknown event types are intentionally ignored.
+
+    # Stream ended without a terminal "stop" (max steps / abrupt end / killed). Still close
+    # the turn so the broker persists usage instead of hanging — but mark it ``truncated`` so
+    # the broker can tell this apart from a genuine ``stop``: a non-zero process exit after a
+    # truncated close is a real crash whose error must surface, not be masked by this done.
+    if not emitted_done:
+        yield done_event(
+            metadata={
+                "iterations": iterations,
+                "input_tokens": in_tokens,
+                "output_tokens": out_tokens,
+                "tool_calls": tool_calls,
+                "cost_usd": cost_usd,
+                "truncated": True,
+            }
+        )
+
+
+async def execute_opencode(
+    session_id: str,
+    user_message: str,
+    *,
+    container: str,
+    model: str,
+    resume: bool,
+    docker_path: str = "docker",
+    opencode_cmd: str = "opencode",
+    workdir: str = "/workdir",
+    extra_env: dict[str, str] | None = None,
+    timeout: int = 300,
+    cancel_event: asyncio.Event | None = None,
+) -> AsyncIterator[str]:
+    """Spawn ``opencode run`` in the conversation sandbox; stream its NDJSON stdout.
+
+    Mirrors :func:`execute_agent` (spawn-in-container, stdout stream, cancel-by-kill via a
+    recorded PID) but builds the opencode command instead of piping a turn-spec: the new
+    user message rides as the final argv element and the prior transcript is resumed from
+    opencode's own per-conversation session store (``--continue``) — the durable data dir
+    is bind-mounted per conversation (see sandbox.py), so ``--continue`` always resolves to
+    THIS conversation's single session. ``extra_env`` (connector creds) is forwarded as
+    value-less ``-e KEY`` so secrets stay out of argv, exactly like the CLI/agent paths.
+    """
+    pid_file = f"/tmp/inkwest-opencode-{session_id}.pid"
+    oc_cmd = [
+        opencode_cmd,
+        "run",
+        "--format",
+        "json",
+        "--dir",
+        workdir,
+        # opencode needs `<provider>/<model>`; Inkwest only routes Bedrock to this engine. The
+        # broker passes a bare, catalog-resolvable id (ARN-pinned models are rejected upstream),
+        # so we prefix unconditionally here.
+        "-m",
+        f"amazon-bedrock/{model}",
+        # Isolated sandbox: no TTY to approve, so never leave a tool on "ask". The
+        # environment (squid allowlist + scoped creds) is the boundary, not in-loop prompts.
+        "--dangerously-skip-permissions",
+    ]
+    if resume:
+        oc_cmd.append("--continue")
+    oc_cmd.append(user_message)
+
+    # `exec "$@"` replaces the shell with opencode so $$ (written to the PID file) IS the
+    # process an explicit stop signals — docker exec does not forward signals.
+    launch = ["sh", "-c", f'echo $$ > {shlex.quote(pid_file)}; exec "$@"', "sh", *oc_cmd]
+    env_flags = [flag for key in (extra_env or {}) for flag in ("-e", key)]
+    cmd = [docker_path, "exec", "-i", *env_flags, container, *launch]
+
+    logger.info(f"Spawning opencode for Inkwest session {session_id}")
+    proc_env = {**os.environ, **extra_env} if extra_env else None
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        # The prompt rides argv, not stdin → DEVNULL gives opencode an immediate EOF instead
+        # of a dangling pipe (no _feed_stdin task needed, unlike the turn-spec agent path).
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=_SUBPROCESS_BUFFER_LIMIT,
+        env=proc_env,
+    )
+
+    try:
+        try:
+            async for line in _stream_stdout(
+                process,
+                cancel_event=cancel_event,
+                container=container,
+                docker_path=docker_path,
+                pid_file=pid_file,
+            ):
+                yield line
+        except asyncio.CancelledError:
+            logger.warning("opencode stream cancelled")
+            raise
+
+        if cancel_event and cancel_event.is_set():
+            return
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except TimeoutError:
+            # `docker exec` doesn't forward signals, so killing only the local client would
+            # leave opencode running in the container. Route through the shared stop machinery
+            # (signals the in-container PID via its pid file) — same path as an explicit cancel.
+            await _stop_agent(
+                process, container=container, docker_path=docker_path, pid_file=pid_file
+            )
+            raise TimeoutError(f"opencode timed out after {timeout}s")
+
+        if process.returncode != 0:
+            assert process.stderr is not None
+            stderr = await process.stderr.read()
+            stderr_text = stderr.decode().strip() if stderr else ""
+            error_msg = stderr_text or f"Exit code {process.returncode}"
+            logger.error(f"opencode failed with code {process.returncode}: {stderr_text}")
+            raise RuntimeError(f"opencode failed: {error_msg}")
+    except TimeoutError:
+        raise
+    except Exception:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        raise
