@@ -31,7 +31,9 @@ async def _run() -> int:
         return 1
 
     try:
-        client = await asyncio.to_thread(make_bedrock_client, spec.region)
+        client = await asyncio.to_thread(
+            make_bedrock_client, spec.region, endpoint_url=spec.bedrock_endpoint_url
+        )
     except Exception as e:  # boto3/botocore client creation failures
         emit(error_event(f"AI service unavailable: {e}"))
         return 1

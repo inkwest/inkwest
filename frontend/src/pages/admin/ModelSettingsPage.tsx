@@ -303,7 +303,15 @@ export function ModelSettingsPage() {
     setIsRefreshing(true);
     setError(null);
     try {
-      adopt(await refreshModels(includeOpen));
+      const next = await refreshModels(includeOpen);
+      adopt(next);
+      // Discovery degrades to the static catalog on failure and still returns 200 — surface
+      // the reason loudly instead of letting the refresh look like it silently did nothing.
+      if (next.catalog.last_fetch_failed) {
+        setError(
+          `Live discovery failed: ${next.catalog.error ?? 'unknown error'} — showing the cached/static catalog.`
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to refresh catalog');
     } finally {

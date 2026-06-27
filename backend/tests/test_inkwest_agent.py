@@ -113,6 +113,22 @@ def test_parse_turn_spec_rejects_unknown_field():
         )
 
 
+def test_parse_turn_spec_accepts_bedrock_endpoint_url():
+    """Regression guard for the protocol v5 field (the 'unknown field bedrock_endpoint_url'
+    bug class): the agent must ACCEPT the field the broker-wired orchestrator sends, and the
+    value must survive parsing. Catches any name drift between orchestrator and agent."""
+    spec = parse_turn_spec(
+        {
+            "session_id": SESSION_ID,
+            "user_message": "x",
+            "model": "m",
+            "system_prompt": "s",
+            "bedrock_endpoint_url": "http://gw:8000/api/llm-proxy",
+        }
+    )
+    assert spec.bedrock_endpoint_url == "http://gw:8000/api/llm-proxy"
+
+
 def test_parse_turn_spec_rejects_non_object():
     with pytest.raises(TurnSpecError, match="must be a JSON object"):
         parse_turn_spec(["not", "an", "object"])

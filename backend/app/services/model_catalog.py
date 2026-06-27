@@ -7,9 +7,10 @@ Resolves the list of models available on the configured AI provider:
   (the backend already shells out to the aws CLI for connectors); when the
   ``bedrock_include_open`` admin flag is set, non-Anthropic (open-weight) models
   are surfaced too
-- claude-cli: discovered from the backend the CLI itself talks to (its env —
-  sandbox_env_file or the process env — configures Bedrock or the Anthropic
-  API); CLAUDE_CLI_MODELS overrides, undetectable backends fall back to static
+- claude-cli: discovered from the backend the CLI talks to, resolved from the
+  BACKEND settings (AWS_BEARER_TOKEN_BEDROCK / AWS creds ⇒ Bedrock, else
+  ANTHROPIC_API_KEY ⇒ Anthropic) — never sandbox.env, which holds no secret under
+  the LLM broker; CLAUDE_CLI_MODELS overrides, undetectable backends fall back to static
 
 The live list is cached in memory with a TTL and refreshed lazily by
 ``refresh_catalog()``; any fetch failure falls back to the static catalog derived
@@ -48,6 +49,9 @@ _live_models: list[str] | None = None
 _fetched_at: float = 0.0
 _fetched_wall: datetime | None = None
 _last_fetch_failed: bool = False
+# Last discovery error message (surfaced to the admin UI so a failed refresh isn't silent —
+# it otherwise degrades to the static catalog with a 200 and no visible reason). None = clean.
+_last_fetch_error: str | None = None
 _refresh_lock = asyncio.Lock()
 
 # Per-model input/output modalities captured from the Bedrock list-foundation-models
@@ -358,38 +362,37 @@ async def _fetch_bedrock_models(
     return sorted(_dedupe_bedrock_models(models), key=_model_sort_key) or None
 
 
-def _parse_env_file(path: str) -> dict[str, str]:
-    """Minimal dotenv parser for the sandbox env file.
-
-    Supports the `docker run --env-file` subset only: plain KEY=VALUE lines and
-    `#` comments. No `export` keyword, no multi-line values; surrounding quotes
-    are stripped (mixed quoting is not).
-    """
-    env: dict[str, str] = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            env[key.strip()] = value.strip().strip("'\"")
-    return env
-
-
 def _claude_cli_backend_env() -> dict[str, str]:
-    """The environment the in-toolbox/local `claude` actually runs with.
+    """Credentials/config for discovering the claude CLI's Bedrock/Anthropic catalog.
 
-    Sandbox mode passes sandbox_env_file via `docker run --env-file`; the local
-    CLI inherits the backend's own environment.
+    Sourced from the BACKEND settings — **never** the sandbox env file. Under the LLM auth
+    broker the real Bedrock key lives only in the backend (``aws_bearer_token_bedrock``) and the
+    sandbox holds no secret, so discovery must use the backend's own credential; reading
+    ``sandbox.env`` would break the moment the broker strips the key from it (P3). pydantic-
+    settings already loads ``AWS_BEARER_TOKEN_BEDROCK`` / ``AWS_REGION`` / ``ANTHROPIC_API_KEY``
+    from the backend process env, so settings *is* the backend env for these.
+
+    Backend selection mirrors what the in-toolbox ``claude`` would resolve: a Bedrock key (or
+    SigV4 access keys) ⇒ Bedrock (the aws CLI natively honors ``AWS_BEARER_TOKEN_BEDROCK``);
+    else an Anthropic key ⇒ Anthropic API; else nothing ⇒ static fallback. Returns the synthetic
+    env the detection in ``_fetch_claude_cli_models`` keys on.
     """
     settings = get_settings()
-    if settings.sandbox_enabled and settings.sandbox_env_file:
-        try:
-            return _parse_env_file(settings.sandbox_env_file)
-        except OSError as e:
-            logger.warning(f"Cannot read sandbox env file {settings.sandbox_env_file}: {e}")
-            return {}
-    return dict(os.environ)
+    env: dict[str, str] = {}
+    bearer = settings.aws_bearer_token_bedrock
+    akid, asecret = settings.aws_access_key_id, settings.aws_secret_access_key
+    if bearer or (akid and asecret):
+        env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+        if bearer:
+            env["AWS_BEARER_TOKEN_BEDROCK"] = bearer
+        if akid and asecret:
+            env["AWS_ACCESS_KEY_ID"] = akid
+            env["AWS_SECRET_ACCESS_KEY"] = asecret
+        if settings.aws_region:
+            env["AWS_REGION"] = settings.aws_region
+    elif settings.anthropic_api_key:
+        env["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+    return env
 
 
 async def _fetch_claude_cli_models() -> list[str] | None:
@@ -434,7 +437,7 @@ async def refresh_catalog(force: bool = False) -> None:
     pays the fetch latency inline (worst case ~30s — two aws CLI calls at the
     15s cap). Fine at hourly cadence; move to a background task if it bites.
     """
-    global _live_models, _fetched_at, _fetched_wall, _last_fetch_failed
+    global _live_models, _fetched_at, _fetched_wall, _last_fetch_failed, _last_fetch_error
     if not force and _cache_is_fresh():
         return
     if _refresh_lock.locked() and not force:
@@ -458,12 +461,14 @@ async def refresh_catalog(force: bool = False) -> None:
             logger.warning(f"Model catalog fetch failed ({settings.ai_provider}): {e}")
             fetched = None
             failed = True
+            _last_fetch_error = f"{type(e).__name__}: {e}"
 
         _fetched_at = time.monotonic()
         _last_fetch_failed = failed
         if fetched:
             _live_models = fetched
             _fetched_wall = datetime.now(UTC)
+            _last_fetch_error = None  # a good fetch clears the prior error
             logger.info(f"Model catalog refreshed: {len(fetched)} models ({settings.ai_provider})")
 
         # Best-effort: refresh live Bedrock prices for the catalog's region from the
@@ -525,11 +530,23 @@ def profile_arn(model_id: str) -> str | None:
     return _profile_arns.get(model_id) or _profile_arns.get(_BEDROCK_ROUTE_PREFIX.sub("", model_id))
 
 
+def profile_ids_for_arn(arn: str) -> set[str]:
+    """Every known inference-profile id (and route-stripped base) that invokes via ``arn``.
+
+    Reverse of :func:`profile_arn`. The LLM broker allowlists an enabled model's invoke ARN, but
+    Claude Code on Bedrock auto-upgrades a bare foundation id to its regional profile id (e.g.
+    ``eu.anthropic.claude-…``) before invoking — that id, not the ARN, lands in the proxied URL,
+    so it must pass the allowlist too. Empty when no profile maps to the ARN (a bare on-demand
+    model)."""
+    return {pid for pid, parn in _profile_arns.items() if parn == arn}
+
+
 def catalog_status() -> dict:
     """Discovery status for the admin UI: freshness, source, last error state."""
     return {
         "last_refreshed_at": _fetched_wall.isoformat() if _fetched_wall else None,
         "source": "live" if _live_models else "static",
         "last_fetch_failed": _last_fetch_failed,
+        "error": _last_fetch_error,
         "count": len(available_models()),
     }

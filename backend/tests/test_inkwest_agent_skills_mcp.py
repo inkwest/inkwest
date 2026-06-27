@@ -518,9 +518,10 @@ async def test_loop_three_way_routing_in_one_turn(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_protocol_version_is_4():
-    # P1.8 bumped 3 -> 4 (image attachments). Bump this when the wire shape changes again.
-    assert PROTOCOL_VERSION == 4
+def test_protocol_version_is_5():
+    # P1.8 bumped 3 -> 4 (image attachments); the LLM broker bumped 4 -> 5
+    # (bedrock_endpoint_url). Bump this when the wire shape changes again.
+    assert PROTOCOL_VERSION == 5
 
 
 def test_p14_shape_spec_has_empty_p17_fields():

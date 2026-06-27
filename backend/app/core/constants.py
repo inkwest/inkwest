@@ -98,3 +98,17 @@ MCP_OAUTH_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 # it can be replayed on the 401-refresh retry; without a cap a large/streamed tool-call
 # payload (or many concurrent ones) is an unbounded-memory blast radius on the single worker.
 MCP_PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024
+
+# Max request-body bytes the LLM auth broker will buffer before forwarding to Bedrock. The
+# body is buffered once (no retry, unlike the MCP proxy) only to bound single-worker memory
+# under concurrency. Sized for a Converse request carrying conversation history plus inline
+# base64 images (attachment limits cap an image well under this); larger than the MCP cap
+# because a vision turn legitimately dwarfs a tool-call payload, still bounded against abuse.
+LLM_PROXY_MAX_BODY_BYTES = 32 * 1024 * 1024
+
+# Total wall-clock ceiling (seconds) on a single proxied Bedrock response stream. The httpx
+# ``read`` timeout is only an inter-byte idle ceiling, so a buggy/malicious upstream dribbling
+# bytes just under it could pin a worker slot indefinitely (slowloris) on the single replica.
+# This caps the whole stream — generous enough to outlast any real turn (streaming + many tool
+# calls), short enough that a held connection eventually releases its worker + FD.
+LLM_PROXY_STREAM_MAX_SECONDS = 2 * 60 * 60

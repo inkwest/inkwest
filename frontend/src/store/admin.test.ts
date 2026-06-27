@@ -19,6 +19,7 @@ const SAMPLE: adminApi.SystemInfo = {
     last_refreshed_at: '2026-06-22T09:55:00+00:00',
     source: 'live',
     last_fetch_failed: false,
+    error: null,
     count: 7,
   },
 };

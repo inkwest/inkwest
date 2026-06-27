@@ -133,6 +133,7 @@ def make_bedrock_client(
     region: str | None,
     access_key: str | None = None,
     secret_key: str | None = None,
+    endpoint_url: str | None = None,
 ) -> Any:
     """Create a bedrock-runtime client (blocking — call via ``asyncio.to_thread``).
 
@@ -140,12 +141,19 @@ def make_bedrock_client(
     sandbox projects per-session creds onto tmpfs/env, so the chain resolves
     them without the portal ever handing them in argv).
 
+    ``endpoint_url`` (LLM auth broker): when set, point boto3 at the broker instead of
+    real Bedrock. boto3 then builds ``{endpoint_url}/model/{id}/converse[-stream]`` and,
+    because ``AWS_BEARER_TOKEN_BEDROCK`` is set, signs with ``Authorization: Bearer …``
+    (no SigV4) — so the broker is a pure header swap. None = direct Bedrock (today's path).
+
     Egress is proxy-only: botocore honors the container's ``HTTPS_PROXY`` (set at
     sandbox provision) and the ``--internal`` network leaves no other route, so this
-    client reaches Bedrock only through the per-conversation squid allowlist (P1.5).
-    We deliberately do not set ``proxies`` on the Config — the env is the single source,
-    matching the claude-cli path."""
+    client reaches Bedrock (or the broker) only through the per-conversation squid allowlist
+    (P1.5). We deliberately do not set ``proxies`` on the Config — the env is the single
+    source, matching the claude-cli path."""
     kwargs: dict[str, Any] = {"region_name": region, "config": _BEDROCK_CONFIG}
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
     if access_key and secret_key:
         kwargs["aws_access_key_id"] = access_key
         kwargs["aws_secret_access_key"] = secret_key

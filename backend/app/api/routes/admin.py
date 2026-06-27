@@ -232,6 +232,7 @@ class CatalogStatus(BaseModel):
     last_refreshed_at: str | None
     source: str  # live | static
     last_fetch_failed: bool
+    error: str | None = None  # last discovery error message (so a failed refresh isn't silent)
     count: int
 
 

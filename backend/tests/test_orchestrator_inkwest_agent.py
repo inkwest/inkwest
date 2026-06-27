@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.services import llm_broker
+from app.services import llm_proxy_token as token
 from app.services import orchestrator_inkwest_agent as oia
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 
@@ -247,8 +249,14 @@ def _patch_broker(
     enabled_mcp=None,
     mcp_config_path=None,
     mcp_dead=None,
+    broker_settings=None,
 ):
-    """Patch every DB/sandbox/model boundary the broker touches; return the stack + spies."""
+    """Patch every DB/sandbox/model boundary the broker touches; return the stack + spies.
+
+    ``broker_settings`` pins ``llm_broker``'s view of settings — defaulting the LLM auth broker
+    OFF so these tests are hermetic against the developer's ``.env`` (which may set
+    ``LLM_BROKER_ENABLED``). The broker-on tests pass an enabled SimpleNamespace.
+    """
     db = AsyncMock()
     db.commit = AsyncMock()
     spies = SimpleNamespace(
@@ -310,6 +318,14 @@ def _patch_broker(
         # package attribute, which a sys.modules swap would not override.
         patch("app.services.sandbox.ensure", spies.ensure),
         patch("app.services.sandbox.release", spies.release),
+        # Pin the LLM auth broker's settings (default OFF) so connector_env assertions are
+        # hermetic against the developer's .env (LLM_BROKER_ENABLED). Broker-on tests override.
+        patch.object(
+            llm_broker,
+            "get_settings",
+            return_value=broker_settings
+            or SimpleNamespace(llm_broker_enabled=False, mcp_proxy_base_url=""),
+        ),
     ]
     return patches, spies
 
@@ -436,8 +452,10 @@ class TestOrchestrateInkwestAgent:
         # no mcp_config_path; the MCP config is still removed (cleanup is unconditional —
         # it no-ops when there is no file).
         assert spec["skills"] == []
-        assert spec["skills_root"] is None
-        assert spec["mcp_config_path"] is None
+        # Unset optional scalars are OMITTED from the wire spec (forward-compat); the agent
+        # re-applies the None default for absent keys.
+        assert "skills_root" not in spec
+        assert "mcp_config_path" not in spec
         # P1.8: no attachments + the SimpleNamespace entry has no modality data → empty
         # defaults (back-compat — the loop sends no image blocks for either).
         assert spec["attachments"] == []
@@ -1075,3 +1093,116 @@ class TestEngineDispatch:
             )
             == "cli"
         )
+
+
+# ---------------------------------------------------------------------------
+# LLM auth broker wiring (endpoint_url on the spec + grant injected + burned)
+# ---------------------------------------------------------------------------
+
+
+def test_make_bedrock_client_passes_endpoint_url() -> None:
+    from inkwest_agent.converse import make_bedrock_client
+
+    with patch("inkwest_agent.converse.boto3.client") as mk:
+        make_bedrock_client("eu-west-1", endpoint_url="http://gw:8000/api/llm-proxy")
+        kwargs = mk.call_args.kwargs
+        assert kwargs["endpoint_url"] == "http://gw:8000/api/llm-proxy"
+    with patch("inkwest_agent.converse.boto3.client") as mk:
+        make_bedrock_client("eu-west-1")  # default = direct Bedrock, no override
+        assert "endpoint_url" not in mk.call_args.kwargs
+
+
+async def _run_agent_with_broker(broker_settings):
+    """Run one broker turn with a custom execute_agent fake; capture spec + grant status."""
+    captured: dict = {}
+
+    def fake_execute_agent(session_id, turn_spec, **kw):
+        captured["spec"] = json.loads(turn_spec)
+        env = kw.get("extra_env") or {}
+        tok = env.get("AWS_BEARER_TOKEN_BEDROCK")
+        captured["token"] = tok
+        captured["live_during_turn"] = bool(tok) and bool(token.verify(tok))
+        return _aiter([json.dumps({"type": "done", "input_tokens": 1, "output_tokens": 1})])
+
+    patches, spies = _patch_broker(broker_settings=broker_settings)
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(oia, "execute_agent", side_effect=fake_execute_agent):
+            await _collect(
+                oia.orchestrate_chat_inkwest_agent(
+                    db=spies.db,
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="hi",
+                    user_id=USER_ID,
+                )
+            )
+    finally:
+        for p in patches:
+            p.stop()
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_broker_on_sets_endpoint_injects_and_burns_grant() -> None:
+    captured = await _run_agent_with_broker(
+        SimpleNamespace(llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000")
+    )
+    assert captured["spec"]["bedrock_endpoint_url"] == "http://gw:8000/api/llm-proxy"
+    assert captured["live_during_turn"] is True  # grant resolvable while the agent ran
+    with pytest.raises(token.ProxyAuthError):
+        token.verify(captured["token"])  # burned in the finally — no replay after the turn
+
+
+@pytest.mark.asyncio
+async def test_broker_off_leaves_endpoint_none_and_no_grant() -> None:
+    captured = await _run_agent_with_broker(
+        SimpleNamespace(llm_broker_enabled=False, mcp_proxy_base_url="http://gw:8000")
+    )
+    # Broker off ⇒ the unset field is OMITTED from the wire spec (forward-compat: an agent image
+    # that predates bedrock_endpoint_url still parses the spec; parse_turn_spec re-applies None).
+    assert "bedrock_endpoint_url" not in captured["spec"]
+    assert captured["token"] is None  # no AWS_BEARER_TOKEN_BEDROCK injected
+
+
+@pytest.mark.asyncio
+async def test_grant_burned_when_agent_execute_raises() -> None:
+    """Burn runs on the agent orchestrator's ERROR exit path too — a leaked grant is dead even
+    when the turn blows up, not only on the clean stream."""
+    captured: dict = {}
+
+    def boom(session_id, turn_spec, **kw):
+        env = kw.get("extra_env") or {}
+        captured["token"] = env.get("AWS_BEARER_TOKEN_BEDROCK")
+        assert captured["token"] and token.verify(captured["token"])  # live during the turn
+        raise RuntimeError("agent crashed mid-turn")
+
+    patches, spies = _patch_broker(
+        broker_settings=SimpleNamespace(
+            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000"
+        )
+    )
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(oia, "execute_agent", side_effect=boom):
+            await _collect(
+                oia.orchestrate_chat_inkwest_agent(
+                    db=spies.db,
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="hi",
+                    user_id=USER_ID,
+                )
+            )
+    finally:
+        for p in patches:
+            p.stop()
+    assert captured["token"]
+    with pytest.raises(token.ProxyAuthError):  # burned in the finally despite the crash
+        token.verify(captured["token"])

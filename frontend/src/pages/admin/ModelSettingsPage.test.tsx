@@ -22,6 +22,7 @@ const SETTINGS: adminApi.ModelSettings = {
     last_refreshed_at: '2026-06-19T10:00:00+00:00',
     source: 'live',
     last_fetch_failed: false,
+    error: null,
     count: 3,
   },
   models: [
