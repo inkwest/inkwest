@@ -65,8 +65,9 @@ from app.services.events import ChatEvent
 # can refuse a mismatched agent build. P1.4 formalized context/limits/tools/creds;
 # P1.7 added skills (progressive disclosure) + the MCP config path; P1.8 added image
 # attachments (the Converse adapter turns IMAGE files into image content blocks); the
-# LLM auth broker added bedrock_endpoint_url (route the model call through the broker).
-PROTOCOL_VERSION = 5
+# LLM auth broker added bedrock_endpoint_url (route the model call through the broker);
+# v6 added limits.bash_timeout_seconds (the free-form bash exec tool's per-call timeout).
+PROTOCOL_VERSION = 6
 
 # Engine tag default (the only engine that runs this agent).
 INKWEST_AGENT = "inkwest-agent"
@@ -123,6 +124,10 @@ class TurnLimits:
     max_conversation_messages: int = MAX_CONVERSATION_MESSAGES
     budget_remaining: int | None = None
     wallclock_seconds: int | None = None
+    # Per-call timeout for the free-form ``bash`` exec tool (v6). The broker carries its
+    # ``claude_cli_timeout`` here (the agent is settings-free); None ⇒ the agent falls back
+    # to its own default. Still bounded by the broker's whole-turn wall-clock kill.
+    bash_timeout_seconds: int | None = None
 
     @classmethod
     def from_raw(cls, raw: Any) -> "TurnLimits":
@@ -137,7 +142,7 @@ class TurnLimits:
         for k in ("max_iterations", "max_tokens", "max_conversation_messages"):
             if k in raw and (isinstance(raw[k], bool) or not isinstance(raw[k], int)):
                 raise TurnSpecError(f"turn-spec 'limits.{k}' must be an int")
-        for k in ("budget_remaining", "wallclock_seconds"):
+        for k in ("budget_remaining", "wallclock_seconds", "bash_timeout_seconds"):
             v = raw.get(k)
             if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
                 raise TurnSpecError(f"turn-spec 'limits.{k}' must be an int or null")

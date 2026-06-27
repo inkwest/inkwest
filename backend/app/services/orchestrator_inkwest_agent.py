@@ -340,7 +340,12 @@ async def orchestrate_chat_inkwest_agent(
             model=model,
             system_prompt=system_prompt,
             context=TurnContext(history=history),  # mode=replay: broker seeds history
-            limits=TurnLimits(max_tokens=max_tokens),
+            # bash_timeout_seconds: the free-form bash exec tool's per-call timeout. The
+            # agent is settings-free, so carry the broker's claude_cli_timeout on the spec
+            # (the same knob bounding the whole agent subprocess) — bash inherits that cap.
+            limits=TurnLimits(
+                max_tokens=max_tokens, bash_timeout_seconds=settings.claude_cli_timeout
+            ),
             tools=[ToolSpec(name=t["name"]) for t in get_tool_definitions()],
             skills=[SkillSpec(name=s.name, description=s.description or "") for s in active_skills],
             skills_root=skills_container_root() if active_skills else None,
