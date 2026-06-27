@@ -580,12 +580,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 )
 
                 turn_kwargs: dict = {**base_kwargs, "user_message": content}
-                # Attachments need the per-conversation sandbox /workdir, which only exists
-                # under the claude-cli provider. Both sandbox engines consume them there:
-                # claude-cli via @/workdir/<file> refs, inkwest-agent via the TurnSpec
-                # (image files → Converse image blocks, P1.8). The pure API/Bedrock
-                # orchestrators have no /workdir and no `attachments` parameter.
-                if attachments and get_settings().ai_provider == "claude-cli":
+                # Attachments need the per-conversation sandbox /workdir. Both sandbox
+                # engines consume them there: claude-cli via @/workdir/<file> refs,
+                # inkwest-agent via the TurnSpec (image files → Converse image blocks,
+                # P1.8). Without a sandbox there is no /workdir to land them in.
+                if attachments and get_settings().sandbox_enabled:
                     turn_kwargs["attachments"] = attachments
                 block_reason = await _budget_block_reason(user_id, user_roles)
                 if block_reason:

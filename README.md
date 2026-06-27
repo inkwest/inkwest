@@ -96,18 +96,19 @@ open http://localhost:3000/admin
 Create a `.env` file:
 
 ```bash
-# AI Provider (default: claude-cli, no API key needed!)
-AI_PROVIDER=claude-cli
+# Inference runs through the Claude Code CLI (default) and, when enabled, the
+# sandboxed inkwest-agent. There is no AI_PROVIDER: the backend each talks to is
+# set by its own credentials. Execution mode is AGENTIC_ENGINES (default claude-cli).
 
-# OR for Anthropic API
-# AI_PROVIDER=anthropic
+# Anthropic API backend (default for the CLI)
 # ANTHROPIC_API_KEY=sk-ant-...
 
-# OR for AWS Bedrock
-# AI_PROVIDER=bedrock
+# OR an AWS Bedrock backend (required when inkwest-agent is enabled)
 # AWS_REGION=us-east-1
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
+# AWS_BEARER_TOKEN_BEDROCK=...
+# AGENTIC_ENGINES=claude-cli,inkwest-agent
 
 # Database
 DATABASE_URL=postgresql+asyncpg://inkwest:inkwest@localhost:5432/inkwest

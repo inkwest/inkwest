@@ -5,7 +5,6 @@ import { ModelEnginePicker } from './ModelEnginePicker';
 import type { AppConfig } from '@/services/api';
 
 const CONFIG: AppConfig = {
-  provider: 'claude-cli',
   model: 'claude-sonnet-4-6',
   default_engine: 'claude-cli',
   engines: ['claude-cli', 'inkwest-agent'],

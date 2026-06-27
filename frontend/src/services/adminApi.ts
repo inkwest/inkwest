@@ -244,7 +244,6 @@ export interface CatalogStatus {
 }
 
 export interface ModelSettings {
-  provider: string;
   default_model: string;
   /** The engine the default model runs on (admin choice, else resolved heuristically). */
   default_engine: string;
@@ -593,7 +592,6 @@ export interface SystemInfo {
   /** Image ref the broker spawns the inkwest-agent in; '' when sandbox not configured. */
   agent_image: string;
   app_env: string;
-  ai_provider: string;
   default_model: string;
   /** Agentic engines live in this deployment (AGENTIC_ENGINES). */
   engines: string[];

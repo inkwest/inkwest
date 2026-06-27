@@ -8,7 +8,6 @@ const SAMPLE: adminApi.SystemInfo = {
   app_build_timestamp: '2026-06-22T10:00:00+00:00',
   agent_image: 'registry/inkwest/agent:integration-latest',
   app_env: 'production',
-  ai_provider: 'bedrock',
   default_model: 'eu.anthropic.claude-opus-4-8',
   engines: ['claude-cli', 'inkwest-agent'],
   oidc_enabled: true,

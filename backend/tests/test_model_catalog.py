@@ -29,7 +29,6 @@ def reset_catalog_state():
 
 def _settings(**overrides):
     base = {
-        "ai_provider": "anthropic",
         "anthropic_api_key": "sk-test",  # pragma: allowlist secret
         "aws_region": "eu-west-1",
         "aws_access_key_id": None,
@@ -44,18 +43,13 @@ def _settings(**overrides):
     return SimpleNamespace(**base)
 
 
-def test_static_catalog_anthropic_excludes_bedrock_ids():
+def test_static_catalog_excludes_bedrock_ids():
+    # The static fallback is the pricing table's bare claude-* IDs (what the CLI
+    # passes to --model) — never the namespaced Bedrock IDs.
     with patch.object(model_catalog, "get_settings", return_value=_settings()):
         models = static_catalog()
     assert "claude-opus-4-8" in models
     assert not any(m.startswith("anthropic.") for m in models)
-
-
-def test_static_catalog_bedrock_only_bedrock_ids():
-    with patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")):
-        models = static_catalog()
-    assert all(m.startswith("anthropic.") for m in models)
-    assert "anthropic.claude-3-5-sonnet-20241022-v2:0" in models
 
 
 def test_available_models_prefers_live_cache():
@@ -101,7 +95,7 @@ async def test_refresh_catalog_claude_cli_declared_list_skips_fetch():
         patch.object(
             model_catalog,
             "get_settings",
-            return_value=_settings(ai_provider="claude-cli", claude_cli_models="claude-x"),
+            return_value=_settings(claude_cli_models="claude-x"),
         ),
         patch.object(model_catalog, "_fetch_claude_cli_models", fetch),
     ):
@@ -113,9 +107,7 @@ async def test_refresh_catalog_claude_cli_declared_list_skips_fetch():
 @pytest.mark.asyncio
 async def test_refresh_catalog_claude_cli_auto_discovers():
     with (
-        patch.object(
-            model_catalog, "get_settings", return_value=_settings(ai_provider="claude-cli")
-        ),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(
             model_catalog,
             "_fetch_claude_cli_models",
@@ -135,7 +127,6 @@ async def test_fetch_claude_cli_models_bedrock_from_backend_settings():
             model_catalog,
             "get_settings",
             return_value=_settings(
-                ai_provider="claude-cli",
                 aws_bearer_token_bedrock="secret-token",  # pragma: allowlist secret
                 aws_region="eu-west-1",
                 # sandbox.env is irrelevant now — set it to prove it is NOT read.
@@ -166,7 +157,6 @@ async def test_fetch_claude_cli_models_bedrock_sigv4_from_backend_settings():
             model_catalog,
             "get_settings",
             return_value=_settings(
-                ai_provider="claude-cli",
                 aws_bearer_token_bedrock=None,
                 aws_access_key_id="AKIA",  # pragma: allowlist secret
                 aws_secret_access_key="shhh",  # pragma: allowlist secret
@@ -195,7 +185,6 @@ async def test_fetch_claude_cli_models_anthropic_key_from_backend_settings():
             model_catalog,
             "get_settings",
             return_value=_settings(
-                ai_provider="claude-cli",
                 aws_bearer_token_bedrock=None,
                 anthropic_api_key="sk-backend",  # pragma: allowlist secret
             ),
@@ -218,7 +207,6 @@ async def test_fetch_claude_cli_models_undetectable_backend():
         model_catalog,
         "get_settings",
         return_value=_settings(
-            ai_provider="claude-cli",
             aws_bearer_token_bedrock=None,
             aws_access_key_id=None,
             aws_secret_access_key=None,
@@ -267,7 +255,7 @@ async def test_fetch_bedrock_models_parses_profiles_and_on_demand():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         # Claude-only path (include_open False): the meta profile is vendor-gated out,
@@ -312,7 +300,7 @@ async def test_fetch_bedrock_models_captures_modalities():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         await model_catalog._fetch_bedrock_models(include_open=True)
@@ -343,7 +331,6 @@ def test_static_catalog_claude_cli_declared_models():
         model_catalog,
         "get_settings",
         return_value=_settings(
-            ai_provider="claude-cli",
             claude_cli_models="eu.anthropic.claude-fable-5, eu.anthropic.claude-opus-4-8",
         ),
     ):
@@ -382,7 +369,7 @@ async def test_fetch_bedrock_models_dedupes_and_sorts():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         # Claude-only path keeps the dedupe assertion independent of the modality filter.
@@ -475,7 +462,7 @@ async def test_fetch_bedrock_models_include_open_surfaces_non_anthropic():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models(include_open=True)
@@ -500,7 +487,7 @@ async def test_fetch_bedrock_models_default_excludes_open():
         return {"inferenceProfileSummaries": [], "modelSummaries": []}
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
         patch.object(model_catalog, "get_bool_setting", return_value=False),
     ):
@@ -566,7 +553,7 @@ async def test_fetch_bedrock_models_engine_gate_forces_claude_only():
         return {"inferenceProfileSummaries": [], "modelSummaries": []}
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
         patch.object(model_catalog, "get_bool_setting", return_value=True),
         patch.object(model_catalog, "inkwest_agent_enabled", return_value=False),
@@ -587,7 +574,7 @@ async def test_fetch_bedrock_models_engine_enabled_and_flag_surfaces_open():
         return {"inferenceProfileSummaries": [], "modelSummaries": []}
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
         patch.object(model_catalog, "get_bool_setting", return_value=True),
         patch.object(model_catalog, "inkwest_agent_enabled", return_value=True),
@@ -631,7 +618,7 @@ async def test_fetch_bedrock_profile_only_model_surfaces_with_arn():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models(include_open=True)
@@ -694,7 +681,7 @@ async def test_fetch_bedrock_profile_deduped_against_foundation_model():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models()
@@ -723,7 +710,7 @@ async def test_fetch_bedrock_application_profile_without_arn_falls_back_to_id():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models()
@@ -752,7 +739,7 @@ async def test_fetch_bedrock_profiles_best_effort_on_failure():
         }
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models()
@@ -780,7 +767,7 @@ async def test_fetch_bedrock_profiles_junk_payload_does_not_crash():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models()
@@ -806,7 +793,7 @@ async def test_fetch_bedrock_profiles_open_vendor_gated_off_under_claude_only():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models(include_open=False)
@@ -863,7 +850,7 @@ async def test_fetch_bedrock_profiles_drops_non_chat_models():
         return responses[args[1]]
 
     with (
-        patch.object(model_catalog, "get_settings", return_value=_settings(ai_provider="bedrock")),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
     ):
         models = await model_catalog._fetch_bedrock_models(include_open=True)
@@ -890,9 +877,7 @@ async def test_refresh_captures_then_clears_fetch_error():
     fetch clears it."""
     boom = AsyncMock(side_effect=RuntimeError("aws auth boom"))
     with (
-        patch.object(
-            model_catalog, "get_settings", return_value=_settings(ai_provider="anthropic")
-        ),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_fetch_anthropic_models", boom),
         patch.object(model_catalog, "_refresh_live_pricing", AsyncMock()),
     ):
@@ -903,9 +888,7 @@ async def test_refresh_captures_then_clears_fetch_error():
 
     ok = AsyncMock(return_value=["claude-fable-5"])
     with (
-        patch.object(
-            model_catalog, "get_settings", return_value=_settings(ai_provider="anthropic")
-        ),
+        patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_fetch_anthropic_models", ok),
         patch.object(model_catalog, "_refresh_live_pricing", AsyncMock()),
     ):

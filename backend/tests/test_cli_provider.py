@@ -834,39 +834,11 @@ class TestOrchestrateChatCliResume:
 class TestGetOrchestrator:
     """Tests for get_orchestrator factory function."""
 
-    def test_get_orchestrator_cli(self):
-        """claude-cli returns a per-turn engine dispatcher (CLI vs sandboxed agent)."""
-        with patch("app.services.ai_client.get_settings") as mock_settings:
-            mock_settings.return_value.ai_provider = "claude-cli"
+    def test_get_orchestrator_returns_engine_dispatcher(self):
+        """A single engine-dispatched path (CLI vs sandboxed agent) — no provider switch."""
+        from app.services.ai_client import get_orchestrator
 
-            from app.services.ai_client import get_orchestrator
-
-            orchestrator = get_orchestrator()
-
-            assert orchestrator.__name__ == "_dispatch_engine"
-
-    def test_get_orchestrator_anthropic(self):
-        """Anthropic returns a per-turn dispatcher wrapping the API orchestrator (engine+model
-        metric labels)."""
-        with patch("app.services.ai_client.get_settings") as mock_settings:
-            mock_settings.return_value.ai_provider = "anthropic"
-
-            from app.services.ai_client import get_orchestrator
-
-            orchestrator = get_orchestrator()
-
-            assert orchestrator.__name__ == "_dispatch_anthropic"
-
-    def test_get_orchestrator_bedrock(self):
-        """Bedrock returns a per-turn dispatcher (Claude vs Converse by model)."""
-        with patch("app.services.ai_client.get_settings") as mock_settings:
-            mock_settings.return_value.ai_provider = "bedrock"
-
-            from app.services.ai_client import get_orchestrator
-
-            orchestrator = get_orchestrator()
-
-            assert orchestrator.__name__ == "_dispatch_bedrock"
+        assert get_orchestrator().__name__ == "_dispatch_engine"
 
 
 class TestOrchestratorContentOrder:

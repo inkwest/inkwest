@@ -113,6 +113,6 @@ Bedrock credential inside the sandbox it is no longer a credentialed Bedrock egr
 
 ## Scope
 
-In scope: the sandboxed `claude-cli` deployment (CLI + inkwest-agent engines) — both cross the
-sandbox boundary. Out of scope: the non-sandboxed `bedrock` provider (`orchestrator.py` /
-`orchestrator_converse.py`) holds creds in-process and never hands them to a sandbox.
+In scope: both sandboxed engines (CLI + inkwest-agent) — they cross the sandbox boundary, so the
+broker keeps the real Bedrock credential out of the container. (There is no non-sandboxed
+in-process inference path anymore; the legacy SDK/Converse orchestrators were removed.)

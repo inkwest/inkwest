@@ -113,10 +113,9 @@ def _owned_session(mock_db: AsyncMock, mock_session_obj: MagicMock) -> MagicMock
 
 @pytest.fixture
 def attachments_enabled(workdir_root, monkeypatch):
-    """Enable the feature (sandbox + claude-cli) and confine writes to tmp."""
+    """Enable the feature (the sandbox) and confine writes to tmp."""
     s = get_settings()
     monkeypatch.setattr(s, "sandbox_enabled", True)
-    monkeypatch.setattr(s, "ai_provider", "claude-cli")
     monkeypatch.setattr(s, "sandbox_sessions_root", str(workdir_root))
 
 

@@ -24,17 +24,15 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/inkwest"
 
-    # AI Provider: anthropic, bedrock, or claude-cli
-    ai_provider: Literal["anthropic", "bedrock", "claude-cli"] = "claude-cli"
-
     # Agentic engines enabled in this deployment (CSV). An engine is *which
-    # agentic loop* runs a turn, decoupled from AI_PROVIDER (the model backend):
+    # agentic loop* runs a turn — the single driver of a turn, decoupled from the
+    # inference backend (the CLI/sandbox configures its own):
     #   - claude-cli    : Claude Code CLI in the sandbox (Claude models only)
     #   - inkwest-agent : the custom Converse loop (all Bedrock vendors)
-    # Default `claude-cli` preserves today's behavior exactly. The catalog is
-    # engine-aware (see app.services.engines / model_catalog): non-Claude Bedrock
-    # models are only surfaced when an engine that can run them is enabled.
-    # See docs/SANDBOXED_AGENT_RUNTIME.md (decision #7).
+    # Default `claude-cli` preserves today's behavior exactly (no AWS needed until
+    # inkwest-agent is enabled). The catalog is engine-aware (see app.services.engines
+    # / model_catalog): non-Claude Bedrock models are only surfaced when an engine
+    # that can run them is enabled. See docs/SANDBOXED_AGENT_RUNTIME.md (decision #7).
     agentic_engines: str = "claude-cli"
 
     # Anthropic settings. The default model is NOT env-configured: it lives in
@@ -360,15 +358,24 @@ def validate_settings() -> None:
             raise ValueError("SECRET_KEY must be changed from default in production")
 
     # Engines validated here (local import: app.services.engines reads settings).
-    from app.services.engines import validate_engines
+    from app.services.engines import inkwest_agent_enabled, validate_engines
 
     validate_engines()
 
-    if settings.ai_provider == "anthropic" and not settings.anthropic_api_key:
-        raise ValueError("ANTHROPIC_API_KEY is required when AI_PROVIDER is 'anthropic'")
-
-    if settings.ai_provider == "bedrock" and not settings.aws_region:
-        raise ValueError("AWS_REGION is required when AI_PROVIDER is 'bedrock'")
+    # The inkwest-agent engine runs a Bedrock Converse loop, so it needs an AWS region
+    # (orchestrator_inkwest_agent passes settings.aws_region to the agent). Credentials
+    # are NOT required here in general: with the broker off they ride sandbox_env_file
+    # (opaque to the backend); only the broker — which swaps in the backend-held bearer —
+    # is checkable, so require aws_bearer_token_bedrock just in that case. The default
+    # claude-cli-only deployment needs no AWS at all (dev-local parity preserved).
+    if inkwest_agent_enabled():
+        if not settings.aws_region:
+            raise ValueError("AWS_REGION is required when the 'inkwest-agent' engine is enabled")
+        if settings.llm_broker_enabled and not settings.aws_bearer_token_bedrock:
+            raise ValueError(
+                "AWS_BEARER_TOKEN_BEDROCK is required when 'inkwest-agent' runs with "
+                "LLM_BROKER_ENABLED (the broker swaps it in for the sandbox grant)"
+            )
 
     # Connectors: validate each enabled connector's required config in production.
     if settings.connectors_enabled and settings.app_env == "production":

@@ -397,10 +397,8 @@ export function ModelSettingsPage() {
             <CardContent className="space-y-4 pt-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="text-sm text-gray-400">
-                  Provider <span className="text-gray-200 font-medium">{settings.provider}</span>
-                  {settings.inkwest_agent_enabled && (
-                    <span className="text-gray-200 font-medium"> + inkwest-agent engine</span>
-                  )}{' '}
+                  Engines{' '}
+                  <span className="text-gray-200 font-medium">{settings.engines.join(', ')}</span>{' '}
                   ·{' '}
                   {settings.catalog.count} models ·{' '}
                   <span className={settings.catalog.source === 'live' ? 'text-green-400' : 'text-amber-400'}>
@@ -716,7 +714,7 @@ export function ModelSettingsPage() {
       {formState && (
         <ModelFormModal
           model={formState.model}
-          defaultProvider={settings?.provider ?? 'anthropic'}
+          defaultProvider="bedrock"
           onClose={() => setFormState(null)}
           onSubmit={handleFormSubmit}
         />

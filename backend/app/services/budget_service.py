@@ -366,17 +366,17 @@ async def record_usage(
         input_tokens: Input token count
         output_tokens: Output token count
         model: Model name (uses current config if not specified)
-        provider: Provider name
+        provider: Engine that ran the turn (defaults to the current turn's engine)
 
     Returns:
         Created UsageRecord
     """
-    settings = get_settings()
-
     if model is None:
         model = default_model()
     if provider is None:
-        provider = settings.ai_provider
+        # Attribute usage to the engine that ran the turn — the same dimension the
+        # token/cost metrics label by (the dispatcher sets it before orchestrating).
+        provider = metrics.turn_engine()
 
     cost = calculate_cost(model, input_tokens, output_tokens)
 

@@ -10,10 +10,9 @@ prompt, model + ARN/limits), packs it into a :class:`TurnSpec`, spawns
 agent itself is DB-free. Cancellation is **by-kill** (the broker SIGTERM/SIGKILLs
 the in-container process), so the custom loop carries no in-process cancel_event.
 
-Mirrors ``orchestrate_chat_cli``'s sandbox lifecycle (ensure → run → release) and
-``orchestrate_chat_converse``'s persistence model (assistant + tool_result as
-separate role-correct messages, so the history round-trips through Converse on
-the next turn).
+Mirrors ``orchestrate_chat_cli``'s sandbox lifecycle (ensure → run → release). Its
+persistence model writes the assistant turn and each tool_result as separate
+role-correct messages, so the history round-trips through Converse on the next turn.
 """
 
 import asyncio

@@ -1,10 +1,10 @@
 """
 DB-free agentic loop for the standalone ``inkwest_agent`` (Converse-only).
 
-Mirrors the tool-use loop of ``app.services.orchestrator_converse`` but holds no
-DB session: history comes in via the turn-spec, and the loop emits the canonical
-``ChatEvent`` stream (the broker persists from it). Aggregate usage rides on the
-terminal ``done`` event's metadata instead of being written to the DB here.
+The sole Bedrock Converse tool-use loop: it holds no DB session — history comes in
+via the turn-spec, and the loop emits the canonical ``ChatEvent`` stream (the broker
+persists from it). Aggregate usage rides on the terminal ``done`` event's metadata
+instead of being written to the DB here.
 
 Cancellation is **by-kill** (the broker terminates the process), so there is no
 in-process ``cancel_event`` — the loop runs to a terminal stop or the broker

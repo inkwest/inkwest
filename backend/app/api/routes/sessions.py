@@ -520,12 +520,11 @@ class AttachmentDescriptor(BaseModel):
 
 
 def _require_attachments_enabled() -> None:
-    """Guard write endpoints: attachments need the sandbox (claude-cli) workdir."""
-    settings = get_settings()
-    if not (settings.sandbox_enabled and settings.ai_provider == "claude-cli"):
+    """Guard write endpoints: attachments need the sandbox workdir."""
+    if not get_settings().sandbox_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="File attachments require the sandbox (claude-cli) to be enabled",
+            detail="File attachments require the sandbox to be enabled",
         )
 
 

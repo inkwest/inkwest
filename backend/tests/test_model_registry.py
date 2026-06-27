@@ -1,7 +1,6 @@
 """Tests for the model registry: selection, pricing overrides, merge, CRUD."""
 
 from decimal import Decimal
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -105,44 +104,37 @@ def test_default_model_falls_back_to_newest_enabled():
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_id", "expected"),
+    ("model_id", "expected"),
     [
-        ("anthropic", "claude-opus-4-8", "anthropic"),
-        # Bare claude-* (no Bedrock namespace) → anthropic regardless of provider, so it
-        # routes to the CLI (Messages protocol) and groups under Anthropic — not the
-        # deployment provider tag.
-        ("claude-cli", "claude-opus-4-8", "anthropic"),
-        # Bedrock: per-vendor tag derived from the (region-stripped) namespace.
-        ("bedrock", "eu.anthropic.claude-opus-4-8", "anthropic"),
-        ("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic"),
-        ("bedrock", "meta.llama3-1-70b-instruct-v1:0", "meta"),
-        ("bedrock", "us.meta.llama3-1-70b-instruct-v1:0", "meta"),
-        ("bedrock", "mistral.mistral-large-2407-v1:0", "mistral"),
-        ("bedrock", "amazon.nova-pro-v1:0", "amazon"),
-        ("bedrock", "cohere.command-r-v1:0", "cohere"),
-        ("bedrock", "ai21.jamba-1-5-large-v1:0", "ai21"),
-        ("bedrock", "deepseek.r1-v1:0", "deepseek"),
-        ("bedrock", "stability.stable-image-core-v1:0", "stability"),
+        # Bare claude-* (no Bedrock namespace) → anthropic, so it routes to the CLI
+        # (Messages protocol) and groups under Anthropic.
+        ("claude-opus-4-8", "anthropic"),
+        # Per-vendor tag derived from the (region-stripped) namespace.
+        ("eu.anthropic.claude-opus-4-8", "anthropic"),
+        ("anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic"),
+        ("meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("us.meta.llama3-1-70b-instruct-v1:0", "meta"),
+        ("mistral.mistral-large-2407-v1:0", "mistral"),
+        ("amazon.nova-pro-v1:0", "amazon"),
+        ("cohere.command-r-v1:0", "cohere"),
+        ("ai21.jamba-1-5-large-v1:0", "ai21"),
+        ("deepseek.r1-v1:0", "deepseek"),
+        ("stability.stable-image-core-v1:0", "stability"),
         # Vendor tag is derived verbatim from the namespace — NOT an allowlist — so
         # vendors Bedrock keeps adding group coherently instead of all under "bedrock".
-        # This holds under claude-cli too (whole-Bedrock catalog with inkwest-agent on).
-        ("claude-cli", "eu.anthropic.claude-opus-4-8", "anthropic"),
-        ("claude-cli", "mistral.magistral-small-2509", "mistral"),
-        ("claude-cli", "google.gemma-3-27b-it", "google"),
-        ("claude-cli", "nvidia.nemotron-nano-30b-3.0", "nvidia"),
-        ("claude-cli", "qwen.qwen3-coder-30b-a3b-v1:0", "qwen"),
-        ("claude-cli", "openai.gpt-oss-120b:0", "openai"),
-        ("bedrock", "twelvelabs.marengo-embed-3-0-v1:0", "twelvelabs"),
-        ("bedrock", "us.minimax.minimax-m2-5", "minimax"),
-        # Bare, un-namespaced non-Claude ID (no dot) → deployment provider fallback.
-        ("claude-cli", "some-bare-model", "claude-cli"),
+        ("google.gemma-3-27b-it", "google"),
+        ("nvidia.nemotron-nano-30b-3.0", "nvidia"),
+        ("qwen.qwen3-coder-30b-a3b-v1:0", "qwen"),
+        ("openai.gpt-oss-120b:0", "openai"),
+        ("twelvelabs.marengo-embed-3-0-v1:0", "twelvelabs"),
+        ("us.minimax.minimax-m2-5", "minimax"),
+        # Bare, un-namespaced non-Claude ID (no dot) → generic "bedrock" tag
+        # (model_catalog.bedrock_vendor's own fallback; no deployment provider anymore).
+        ("some-bare-model", "bedrock"),
     ],
 )
-def test_derive_provider(provider, model_id, expected):
-    with patch.object(
-        model_registry, "get_settings", return_value=SimpleNamespace(ai_provider=provider)
-    ):
-        assert model_registry._derive_provider(model_id) == expected
+def test_derive_provider(model_id, expected):
+    assert model_registry._derive_provider(model_id) == expected
 
 
 # ---------------------------------------------------------------------------

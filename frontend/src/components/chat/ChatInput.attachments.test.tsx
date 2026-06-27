@@ -20,7 +20,6 @@ const NOTE = { filename: 'note.txt', original_name: 'note.txt', content_type: 't
 function enableAttachments(enabled: boolean) {
   useConfigStore.setState({
     config: {
-      provider: 'claude-cli',
       model: 'm',
       default_engine: 'claude-cli',
       engines: ['claude-cli'],

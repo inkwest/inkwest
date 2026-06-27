@@ -8,9 +8,9 @@ content blocks ↔ Converse blocks, and the tool-definition → ``toolConfig`` s
 The internal blocks and ``ChatEvent`` stay canonical (no Converse-ism leaks into
 the loop), so other hosts (OpenAI/Vertex/…) become additive adapters later.
 
-The in-process ``app.services.orchestrator_converse`` keeps its own copy of these
-helpers until P1.6 retires it; the duplication is intentional and temporary (the
-in-process loop persists inline and shares nothing with this DB-free one).
+This is the only Converse implementation: the former in-process
+``app.services.orchestrator_converse`` has been retired (the engine is the sole
+driver of a turn), so these helpers live here alone.
 """
 
 import os

@@ -11,7 +11,6 @@ const HAIKU = 'eu.anthropic.claude-haiku-4-5';
 const LLAMA = 'meta.llama3-1-70b-instruct-v1:0';
 
 const SETTINGS: adminApi.ModelSettings = {
-  provider: 'bedrock',
   default_model: OPUS,
   default_engine: 'claude-cli',
   enabled_models: [OPUS],

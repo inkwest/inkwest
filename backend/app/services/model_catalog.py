@@ -1,20 +1,17 @@
 """
-Provider-aware model discovery.
+Model discovery for the CLI/sandbox inference backend.
 
-Resolves the list of models available on the configured AI provider:
-- anthropic: live `GET /v1/models` via the SDK
-- bedrock: live `aws bedrock list-inference-profiles` + `list-foundation-models`
-  (the backend already shells out to the aws CLI for connectors); when the
-  ``bedrock_include_open`` admin flag is set, non-Anthropic (open-weight) models
-  are surfaced too
-- claude-cli: discovered from the backend the CLI talks to, resolved from the
-  BACKEND settings (AWS_BEARER_TOKEN_BEDROCK / AWS creds ⇒ Bedrock, else
-  ANTHROPIC_API_KEY ⇒ Anthropic) — never sandbox.env, which holds no secret under
-  the LLM broker; CLAUDE_CLI_MODELS overrides, undetectable backends fall back to static
+Resolves the list of models the backend the CLI talks to serves, from the BACKEND
+settings (AWS_BEARER_TOKEN_BEDROCK / AWS creds ⇒ Bedrock, else ANTHROPIC_API_KEY ⇒
+Anthropic) — never sandbox.env, which holds no secret under the LLM broker.
+CLAUDE_CLI_MODELS overrides; undetectable backends fall back to the static catalog.
+The per-backend discovery helpers below (``_fetch_bedrock_models`` via the aws CLI,
+``_fetch_anthropic_models`` via the SDK) are reached only through
+``_fetch_claude_cli_models``.
 
 The live list is cached in memory with a TTL and refreshed lazily by
 ``refresh_catalog()``; any fetch failure falls back to the static catalog derived
-from the pricing table, so the app never depends on provider availability.
+from the pricing table, so the app never depends on backend availability.
 
 This module is pure discovery — which model IDs exist on the provider. The
 admin-facing selection (enabled subset, default, per-model metadata, pricing
@@ -28,7 +25,6 @@ import os
 import re
 import time
 from datetime import UTC, datetime
-from typing import Any
 
 from anthropic import AsyncAnthropic
 
@@ -72,19 +68,17 @@ _profile_arns: dict[str, str] = {}
 
 
 def static_catalog() -> list[str]:
-    """Provider-appropriate model list when no live catalog is available.
+    """Model list when no live catalog is available.
 
-    claude-cli has no catalog API; the operator may declare what the CLI's
-    backend serves via CLAUDE_CLI_MODELS. Otherwise the pricing table is the
-    fallback. Both are non-empty by construction, so the catalog never is.
+    There is no catalog API for the CLI's backend; the operator may declare what it
+    serves via CLAUDE_CLI_MODELS. Otherwise the pricing table is the fallback (the
+    bare ``claude-*`` IDs the CLI passes to ``--model``). Both are non-empty by
+    construction, so the catalog never is.
     """
     settings = get_settings()
-    if settings.ai_provider == "claude-cli":
-        declared = [m.strip() for m in settings.claude_cli_models.split(",") if m.strip()]
-        if declared:
-            return declared
-    if settings.ai_provider == "bedrock":
-        return [m for m in MODEL_PRICING if m.startswith("anthropic.")]
+    declared = [m.strip() for m in settings.claude_cli_models.split(",") if m.strip()]
+    if declared:
+        return declared
     return [m for m in MODEL_PRICING if not m.startswith("anthropic.")]
 
 
@@ -150,7 +144,7 @@ def is_anthropic_model(model_id: str) -> bool:
     """Whether a model speaks the Anthropic Messages protocol (a Claude model).
 
     Non-Anthropic Bedrock models (Llama, Mistral, Nova, DeepSeek...) are reached
-    through the Bedrock Converse API instead — see orchestrator_converse.
+    through the Bedrock Converse API instead — see the sandboxed inkwest-agent.
     """
     lowered = model_id.lower()
     return "anthropic" in lowered or "claude" in lowered
@@ -183,7 +177,7 @@ def provider_speaks_messages(provider: str) -> bool:
     """Whether a provider/vendor tag uses the Anthropic Messages protocol.
 
     Everything else (open-vendor Bedrock tags + the legacy ``bedrock-open``) is
-    routed through the Converse API — see app.services.orchestrator_converse.
+    routed through the Converse API — see the sandboxed inkwest-agent.
     """
     return provider in _MESSAGES_PROVIDERS
 
@@ -448,17 +442,13 @@ async def refresh_catalog(force: bool = False) -> None:
         settings = get_settings()
         failed = False
         try:
-            if settings.ai_provider == "anthropic":
-                fetched = await _fetch_anthropic_models()
-            elif settings.ai_provider == "bedrock":
-                fetched = await _fetch_bedrock_models()
-            elif settings.claude_cli_models.strip():
-                fetched = None  # claude-cli with an operator-declared list — it wins
+            if settings.claude_cli_models.strip():
+                fetched = None  # an operator-declared CLAUDE_CLI_MODELS list wins
             else:
-                # claude-cli: discover from the backend the CLI itself talks to
+                # Discover from the backend the CLI itself talks to.
                 fetched = await _fetch_claude_cli_models()
         except Exception as e:
-            logger.warning(f"Model catalog fetch failed ({settings.ai_provider}): {e}")
+            logger.warning(f"Model catalog fetch failed: {e}")
             fetched = None
             failed = True
             _last_fetch_error = f"{type(e).__name__}: {e}"
@@ -469,27 +459,24 @@ async def refresh_catalog(force: bool = False) -> None:
             _live_models = fetched
             _fetched_wall = datetime.now(UTC)
             _last_fetch_error = None  # a good fetch clears the prior error
-            logger.info(f"Model catalog refreshed: {len(fetched)} models ({settings.ai_provider})")
+            logger.info(f"Model catalog refreshed: {len(fetched)} models")
 
         # Best-effort: refresh live Bedrock prices for the catalog's region from the
         # public Price List (no creds). A failed fetch returns {} and is ignored, so the
         # last good live map (or the static table) stands — pricing never regresses.
-        await _refresh_live_pricing(settings)
+        await _refresh_live_pricing()
 
 
-def _bedrock_pricing_region(settings: Any) -> str | None:
+def _bedrock_pricing_region() -> str | None:
     """The Bedrock region whose Price List backs the catalog, or None (no Bedrock)."""
-    if settings.ai_provider == "bedrock":
-        return settings.aws_region
-    if settings.ai_provider == "claude-cli":
-        env = _claude_cli_backend_env()
-        if env.get("CLAUDE_CODE_USE_BEDROCK", "").lower() in ("1", "true", "yes"):
-            return env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")
+    env = _claude_cli_backend_env()
+    if env.get("CLAUDE_CODE_USE_BEDROCK", "").lower() in ("1", "true", "yes"):
+        return env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")
     return None
 
 
-async def _refresh_live_pricing(settings: Any) -> None:
-    region = _bedrock_pricing_region(settings)
+async def _refresh_live_pricing() -> None:
+    region = _bedrock_pricing_region()
     if not region:
         return
     from app.services import pricing, pricing_live
