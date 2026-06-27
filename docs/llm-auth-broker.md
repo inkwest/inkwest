@@ -18,7 +18,8 @@ transparent byte passthrough; the eventstream response is streamed back untouche
 
 | Piece | File | Role |
 |---|---|---|
-| Broker route | `app/api/routes/llm_proxy.py` | `POST /api/llm-proxy/model/{id}/{op}` — verify grant, RESTRICT (`model_id` ∈ enabled registry models/ARNs, `op` ∈ `converse`/`converse-stream`/`invoke`/`invoke-with-response-stream`), swap `Authorization` → real bearer, stream to `bedrock-runtime.<region>.amazonaws.com`. |
+| Broker route (data plane) | `app/api/routes/llm_proxy.py` | `POST /api/llm-proxy/model/{id}/{op}` — verify grant, RESTRICT (`model_id` ∈ enabled registry models/ARNs, `op` ∈ `converse`/`converse-stream`/`invoke`/`invoke-with-response-stream`), swap `Authorization` → real bearer, stream to `bedrock-runtime.<region>.amazonaws.com`. |
+| Broker route (control plane) | same file | `GET /api/llm-proxy/{resource}` for a read-only allowlist (`inference-profiles`, `foundation-models`) → `bedrock.<region>.amazonaws.com`. Claude Code lists these to resolve a model to its **regional inference profile** (bare on-demand ids aren't invocable in regions like `eu-west-1`) and points the GETs at the same base URL — without this leg, resolution 404s and the data-plane invoke then fails. Same grant verify + bearer swap. |
 | Grant store | `app/services/llm_proxy_token.py` | In-process registry of opaque per-turn grants. `mint` at turn start, `verify` by lookup, `burn` at turn end. **Not a JWT** — a JWT can't be revoked before expiry; the grant must die when the turn ends. |
 | Wiring | `app/services/llm_broker.py` | `cli_broker_env` / `agent_broker_env` (inject), `agent_bedrock_endpoint_url`, `burn_env` (revoke). The single gate + base-URL derivation for both engines. |
 | Backend bearer | `Settings.aws_bearer_token_bedrock` | The real Bedrock API key, read from the backend process env `AWS_BEARER_TOKEN_BEDROCK`. |

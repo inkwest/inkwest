@@ -433,3 +433,109 @@ def test_allowed_targets_none_enabled_falls_back_to_all() -> None:
     ]
     with patch("app.api.routes.llm_proxy.model_registry.merged_entries", return_value=entries):
         assert llm_proxy._allowed_targets() == {"m.a", "m.b", "arn:b"}
+
+
+# --- control plane (read-only GET allowlist → bedrock.<region>) -------------------------
+
+
+@pytest.mark.asyncio
+async def test_control_plane_inference_profiles_forwarded() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        seen["method"] = request.method
+        return _streaming(200, b'{"inferenceProfileSummaries":[]}')
+
+    ps = _patches(handler)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.get("/api/llm-proxy/inference-profiles", headers=_bearer())
+        assert resp.status_code == 200
+        assert seen["method"] == "GET"
+        assert seen["auth"] == f"Bearer {REAL_KEY}"  # grant swapped for the real bearer
+        # CONTROL plane host (bedrock.), not the data-plane bedrock-runtime.
+        assert seen["url"] == f"https://bedrock.{REGION}.amazonaws.com/inference-profiles"
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_query_and_subpath_forwarded() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return _streaming(200, b"{}")
+
+    ps = _patches(handler)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.get(
+                "/api/llm-proxy/foundation-models?byProvider=anthropic", headers=_bearer()
+            )
+        assert resp.status_code == 200
+        assert seen["url"] == (
+            f"https://bedrock.{REGION}.amazonaws.com/foundation-models?byProvider=anthropic"
+        )
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_unknown_resource_is_404_after_auth() -> None:
+    fired = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fired["n"] += 1
+        return _streaming(200)
+
+    ps = _patches(handler)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            # A non-allowlisted GET resource (and a model-path GET) must not reach upstream.
+            unknown = await c.get("/api/llm-proxy/custom-models", headers=_bearer())
+            model_get = await c.get(f"/api/llm-proxy/model/{MODEL}/converse", headers=_bearer())
+        assert unknown.status_code == 404
+        assert model_get.status_code == 404  # "model" is not an allowlisted control-plane resource
+        assert fired["n"] == 0
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_requires_grant_then_config() -> None:
+    ps = _patches(lambda r: _streaming(200))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            no_auth = await c.get("/api/llm-proxy/inference-profiles")
+        assert no_auth.status_code == 401
+    finally:
+        for p in ps:
+            p.stop()
+    # Not provisioned ⇒ 503 (after auth passes).
+    ps = _patches(lambda r: _streaming(200), settings=_settings(bearer=None))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.get("/api/llm-proxy/inference-profiles", headers=_bearer())
+        assert resp.status_code == 503
+    finally:
+        for p in ps:
+            p.stop()
+        from app.api.routes import llm_proxy
+
+        llm_proxy._transport = None

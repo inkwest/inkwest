@@ -14,6 +14,11 @@ orchestrator BURNS when the turn ends (see :mod:`app.services.llm_proxy_token`).
 With ``AWS_BEARER_TOKEN_BEDROCK`` both the CLI and boto3 send ``Authorization: Bearer …`` (no
 SigV4), so the broker is a pure header swap + transparent byte passthrough — no re-signing.
 
+Two legs: the data plane (``POST /model/{id}/{op}`` → ``bedrock-runtime.<region>``, model/op
+restricted) and a read-only control plane (``GET`` on ``_CONTROL_PLANE_GETS`` → ``bedrock.
+<region>``) that Claude Code uses to resolve a model to its regional inference profile — both
+point at ``ANTHROPIC_BEDROCK_BASE_URL``, so the broker serves both or model resolution breaks.
+
 Auth on this route IS the internal grant (:mod:`app.services.llm_proxy_token`); there is no
 ``get_current_user`` — the sandbox caller carries no session. In scope: the sandboxed
 ``claude-cli`` deployment only; the non-sandboxed ``bedrock`` provider holds creds in-process
@@ -48,6 +53,13 @@ _TIMEOUT = httpx.Timeout(connect=5.0, write=30.0, read=3600.0, pool=5.0)
 # converse-stream (Converse API, used by orchestrator_converse + the inkwest-agent) and
 # invoke / invoke-with-response-stream (InvokeModel, used by the Claude CLI on Bedrock).
 _ALLOWED_OPS = frozenset({"converse", "converse-stream", "invoke", "invoke-with-response-stream"})
+
+# Bedrock CONTROL-plane resources the broker proxies (read-only GET allowlist, first path
+# segment). Claude Code on Bedrock lists these to resolve a model to its regional inference
+# profile (in regions like eu-west-1 the bare foundation-model id isn't invocable on-demand);
+# it points those GETs at ANTHROPIC_BEDROCK_BASE_URL too, so the broker must serve them — to
+# the `bedrock.<region>` control plane (distinct host from `bedrock-runtime.`).
+_CONTROL_PLANE_GETS = frozenset({"inference-profiles", "foundation-models"})
 
 # Hop-by-hop headers (RFC 7230 §6.1) + framing/auth headers httpx/Starlette must own. Unlike
 # the MCP proxy we forward every OTHER client header verbatim (the upstream is AWS Bedrock, our
@@ -163,29 +175,84 @@ async def llm_proxy(model_path: str, request: Request) -> StreamingResponse:
     if target not in _allowed_targets():
         raise HTTPException(status_code=403, detail="Model not permitted")
 
-    settings = get_settings()
-    bearer = settings.aws_bearer_token_bedrock
-    region = settings.aws_region
-    if not bearer or not region:
-        # Flag enabled but the backend cred/region isn't provisioned — degraded, not a dead
-        # request the caller can fix. 503 (transient/misconfig), never leak which is missing.
-        raise HTTPException(status_code=503, detail=_NOT_CONFIGURED)
-
+    bearer, region = _backend_creds()
     body = await _read_capped_body(request)
     url, auth = _UPSTREAMS[_PROVIDER](target, op, request.url.query, region, bearer)
+    return await _send(
+        request, method="POST", url=url, auth=auth, body=body, session_id=claims.session_id
+    )
 
+
+@router.api_route("/llm-proxy/{cp_path:path}", methods=["GET"])
+async def llm_proxy_control_plane(cp_path: str, request: Request) -> StreamingResponse:
+    """Bedrock CONTROL-plane reads — a read-only GET allowlist (see ``_CONTROL_PLANE_GETS``).
+
+    Claude Code resolves models via control-plane listing (ListInferenceProfiles / list models)
+    and points those GETs at ``ANTHROPIC_BEDROCK_BASE_URL`` too. The data-plane route only serves
+    ``/model/{id}/{op}``, so without this the discovery GET 404s and the CLI falls back to the
+    bare model id — which Bedrock then rejects in regions that require an inference profile.
+    Forwarded to the ``bedrock.<region>`` control plane (distinct host from ``bedrock-runtime.``;
+    both already squid-allowlisted)."""
+    try:
+        claims: LlmProxyClaims = verify(_bearer(request))
+    except ProxyAuthError as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
+
+    # Allowlist the first path segment. Checked AFTER auth so an unauthenticated caller learns
+    # nothing about which resources are proxied. 404 (looks like an unknown endpoint), not 403.
+    if cp_path.split("/", 1)[0] not in _CONTROL_PLANE_GETS:
+        raise HTTPException(status_code=404, detail="Unknown LLM proxy resource")
+
+    bearer, region = _backend_creds()
+    # cp_path is a resource path that may carry sub-segments (e.g. inference-profiles/<id>); keep
+    # its slashes, encode the rest. No body on a control-plane GET.
+    url = f"https://bedrock.{region}.amazonaws.com/{quote(cp_path, safe='/')}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+    return await _send(
+        request,
+        method="GET",
+        url=url,
+        auth={"Authorization": f"Bearer {bearer}"},
+        body=None,
+        session_id=claims.session_id,
+    )
+
+
+def _backend_creds() -> tuple[str, str]:
+    """The backend's real Bedrock bearer + region, or 503 when the broker isn't provisioned.
+
+    503 (transient/misconfig), never leaking which of the two is missing.
+    """
+    settings = get_settings()
+    if not settings.aws_bearer_token_bedrock or not settings.aws_region:
+        raise HTTPException(status_code=503, detail=_NOT_CONFIGURED)
+    return settings.aws_bearer_token_bedrock, settings.aws_region
+
+
+async def _send(
+    request: Request,
+    *,
+    method: str,
+    url: str,
+    auth: dict[str, str],
+    body: bytes | None,
+    session_id: str | None,
+) -> StreamingResponse:
+    """Forward one request to Bedrock and stream the response back untouched.
+
+    Single teardown contract (mirrors mcp_proxy): on success the client + stream outlive this
+    handler and are closed by ``_close_stream`` once the body is consumed (or the client
+    disconnects); on any failure before that, close the client here."""
     client = httpx.AsyncClient(transport=_transport, timeout=_TIMEOUT)
     upstream: httpx.Response | None = None
-    # Single teardown contract (mirrors mcp_proxy): on success the client + stream outlive this
-    # handler and are closed by `_close_stream` once the body is consumed (or the client
-    # disconnects); on any failure before that, close the client here.
     try:
         req = client.build_request(
-            "POST", url, headers=_request_headers(request, auth), content=body
+            method, url, headers=_request_headers(request, auth), content=body
         )
         upstream = await client.send(req, stream=True)
     except httpx.HTTPError:
-        logger.exception("llm_proxy_upstream_error", extra={"session_id": claims.session_id})
+        logger.exception("llm_proxy_upstream_error", extra={"session_id": session_id})
         raise HTTPException(status_code=502, detail="Bedrock upstream error") from None
     finally:
         if upstream is None:

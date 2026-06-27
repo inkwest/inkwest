@@ -249,8 +249,14 @@ def _patch_broker(
     enabled_mcp=None,
     mcp_config_path=None,
     mcp_dead=None,
+    broker_settings=None,
 ):
-    """Patch every DB/sandbox/model boundary the broker touches; return the stack + spies."""
+    """Patch every DB/sandbox/model boundary the broker touches; return the stack + spies.
+
+    ``broker_settings`` pins ``llm_broker``'s view of settings — defaulting the LLM auth broker
+    OFF so these tests are hermetic against the developer's ``.env`` (which may set
+    ``LLM_BROKER_ENABLED``). The broker-on tests pass an enabled SimpleNamespace.
+    """
     db = AsyncMock()
     db.commit = AsyncMock()
     spies = SimpleNamespace(
@@ -312,6 +318,14 @@ def _patch_broker(
         # package attribute, which a sys.modules swap would not override.
         patch("app.services.sandbox.ensure", spies.ensure),
         patch("app.services.sandbox.release", spies.release),
+        # Pin the LLM auth broker's settings (default OFF) so connector_env assertions are
+        # hermetic against the developer's .env (LLM_BROKER_ENABLED). Broker-on tests override.
+        patch.object(
+            llm_broker,
+            "get_settings",
+            return_value=broker_settings
+            or SimpleNamespace(llm_broker_enabled=False, mcp_proxy_base_url=""),
+        ),
     ]
     return patches, spies
 
@@ -1108,8 +1122,7 @@ async def _run_agent_with_broker(broker_settings):
         captured["live_during_turn"] = bool(tok) and bool(token.verify(tok))
         return _aiter([json.dumps({"type": "done", "input_tokens": 1, "output_tokens": 1})])
 
-    patches, spies = _patch_broker()
-    patches.append(patch.object(llm_broker, "get_settings", return_value=broker_settings))
+    patches, spies = _patch_broker(broker_settings=broker_settings)
     for p in patches:
         p.start()
     try:
