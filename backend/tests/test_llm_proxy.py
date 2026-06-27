@@ -5,6 +5,7 @@ patched so the focus is the broker contract: JWT auth, model/op restriction, hea
 passthrough, ARN round-trip, body cap, and the error-code split.
 """
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -52,6 +53,20 @@ async def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
+@pytest.fixture(autouse=True)
+def _reset_proxy_state():
+    """The route's upstream transport is a module global and the grant store is process-wide;
+    reset both around every test so a handler/grant from one test can't leak into the next
+    (order-dependent flakiness)."""
+    from app.api.routes import llm_proxy
+
+    llm_proxy._transport = None
+    llm_proxy_token._grants.clear()
+    yield
+    llm_proxy._transport = None
+    llm_proxy_token._grants.clear()
+
+
 def _patches(handler, *, settings=None, allowed=None):
     """Patch the route's collaborators; set the upstream MockTransport handler."""
     from app.api.routes import llm_proxy
@@ -91,7 +106,10 @@ async def test_happy_path_swaps_auth_and_forwards() -> None:
             )
         assert resp.status_code == 200
         assert resp.content == b"event-bytes"
-        assert seen["auth"] == f"Bearer {REAL_KEY}"  # internal JWT swapped for the real bearer
+        assert seen["auth"] == f"Bearer {REAL_KEY}"  # grant swapped for the real bearer
+        # The real backend bearer must NEVER appear in what's streamed back to the sandbox.
+        assert REAL_KEY.encode() not in resp.content
+        assert REAL_KEY not in " ".join(f"{k}:{v}" for k, v in resp.headers.items())
         assert seen["body"] == b'{"messages":[]}'
         assert seen["bedrock_hdr"] == "application/json"  # bedrock-specific header forwarded
         assert seen["url"] == (
@@ -423,8 +441,10 @@ def test_allowed_targets_enabled_subset_and_arns() -> None:
         assert llm_proxy._allowed_targets() == {"m.enabled", "arn:enabled", "m.noarn"}
 
 
-def test_allowed_targets_none_enabled_falls_back_to_all() -> None:
-    """No enabled rows ⇒ the whole catalog is permitted (fresh-deploy default-open)."""
+def test_allowed_targets_none_enabled_is_fail_closed() -> None:
+    """No enabled rows ⇒ the broker permits NOTHING. The model picker is default-OPEN on a fresh
+    deploy, but the broker is a credential gate — defaulting open would let any grant invoke any
+    discovered model on an unconfigured backend."""
     from app.api.routes import llm_proxy
 
     entries = [
@@ -432,7 +452,27 @@ def test_allowed_targets_none_enabled_falls_back_to_all() -> None:
         SimpleNamespace(model_id="m.b", enabled=False, arn="arn:b"),
     ]
     with patch("app.api.routes.llm_proxy.model_registry.merged_entries", return_value=entries):
-        assert llm_proxy._allowed_targets() == {"m.a", "m.b", "arn:b"}
+        assert llm_proxy._allowed_targets() == set()
+
+
+def test_allowed_targets_includes_inference_profile_ids() -> None:
+    """An enabled model's regional inference-profile id (which the CLI auto-upgrades a bare id to
+    before invoking) is allowed alongside the friendly id + ARN."""
+    from app.api.routes import llm_proxy
+
+    entries = [SimpleNamespace(model_id="anthropic.claude-x", enabled=True, arn="arn:eu-x")]
+    with (
+        patch("app.api.routes.llm_proxy.model_registry.merged_entries", return_value=entries),
+        patch(
+            "app.api.routes.llm_proxy.model_catalog.profile_ids_for_arn",
+            return_value={"eu.anthropic.claude-x"},
+        ),
+    ):
+        assert llm_proxy._allowed_targets() == {
+            "anthropic.claude-x",
+            "arn:eu-x",
+            "eu.anthropic.claude-x",
+        }
 
 
 # --- control plane (read-only GET allowlist → bedrock.<region>) -------------------------
@@ -536,6 +576,161 @@ async def test_control_plane_requires_grant_then_config() -> None:
     finally:
         for p in ps:
             p.stop()
-        from app.api.routes import llm_proxy
 
-        llm_proxy._transport = None
+
+# --- passthrough / hardening regressions ------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 429, 500])
+async def test_upstream_non_2xx_passthrough(status: int) -> None:
+    """A Bedrock error status + body is forwarded verbatim — the broker is a transparent
+    passthrough, not an error remapper (only connection-level failures become 502)."""
+    body = b'{"message":"ValidationException"}'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _streaming(status, body)
+
+    ps = _patches(handler)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse", headers=_bearer(), content=b"{}"
+            )
+        assert resp.status_code == status
+        assert resp.content == body
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_disallowed_op_rejected_before_auth() -> None:
+    """Op/path validity is checked BEFORE auth (400), so an unauthenticated probe still can't
+    reach upstream. Pins the chosen ordering."""
+    fired = {"n": 0}
+
+    ps = _patches(lambda r: (fired.__setitem__("n", fired["n"] + 1), _streaming(200))[1])
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            # No Authorization header + a disallowed op.
+            resp = await c.post(f"/api/llm-proxy/model/{MODEL}/delete-everything", content=b"{}")
+        assert resp.status_code == 400
+        assert fired["n"] == 0
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_amz_credential_headers_stripped_bedrock_kept() -> None:
+    """A compromised sandbox must not inject AWS SigV4/credential headers (x-amz-*) onto the
+    broker's authenticated call; Bedrock-specific x-amzn-bedrock-* headers still pass."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["amz_sec"] = request.headers.get("x-amz-security-token")
+        seen["amz_date"] = request.headers.get("x-amz-date")
+        seen["bedrock"] = request.headers.get("x-amzn-bedrock-accept")
+        return _streaming(200, b"ok")
+
+    ps = _patches(handler)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse",
+                headers={
+                    **_bearer(),
+                    "X-Amz-Security-Token": "injected",
+                    "X-Amz-Date": "20260101T000000Z",
+                    "X-Amzn-Bedrock-Accept": "application/json",
+                },
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        assert seen["amz_sec"] is None  # SigV4/credential header dropped
+        assert seen["amz_date"] is None
+        assert seen["bedrock"] == "application/json"  # Bedrock functional header preserved
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_rejects_dot_segments() -> None:
+    """A path that tries to traverse out of the resource allowlist (`..`) is 400'd before the
+    allowlist check, never reaching upstream — the allowlist can't be escaped."""
+    fired = {"n": 0}
+
+    ps = _patches(lambda r: (fired.__setitem__("n", fired["n"] + 1), _streaming(200))[1])
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.get("/api/llm-proxy/inference-profiles/..%2ffoo", headers=_bearer())
+        assert resp.status_code == 400
+        assert fired["n"] == 0
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_stream_wall_clock_deadline_releases() -> None:
+    """The total wall-clock cap stops a stream whose upstream dribbles forever (slowloris),
+    instead of pinning the worker for the full inter-byte idle ceiling."""
+    from app.api.routes import llm_proxy
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        async def gen():
+            yield b"first"
+            await asyncio.sleep(60)  # would otherwise hold the connection
+            yield b"never"
+
+        return httpx.Response(200, content=gen())
+
+    ps = _patches(handler)
+    for p in ps:
+        p.start()
+    try:
+        with patch.object(llm_proxy, "LLM_PROXY_STREAM_MAX_SECONDS", 0.05):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse-stream",
+                    headers=_bearer(),
+                    content=b"{}",
+                )
+                # The deadline fires mid-stream: first chunk arrives, then the bounded iterator
+                # stops cleanly rather than hanging on the 60s sleep.
+                assert resp.status_code == 200
+                assert resp.content == b"first"
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_close_stream_closes_client_even_if_aclose_raises() -> None:
+    """Teardown robustness: if the upstream stream aclose() raises (already-reset connection),
+    the client must still be closed or its pool leaks."""
+    from app.api.routes._proxy_stream import close_stream
+
+    class _Boom:
+        async def aclose(self):
+            raise RuntimeError("already reset")
+
+    closed = {"client": False}
+
+    class _Client:
+        async def aclose(self):
+            closed["client"] = True
+
+    with pytest.raises(RuntimeError):
+        await close_stream(_Boom(), _Client())
+    assert closed["client"] is True  # closed despite the stream aclose raising

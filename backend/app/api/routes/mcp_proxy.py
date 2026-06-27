@@ -23,6 +23,14 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
+from app.api.routes._proxy_stream import (
+    HOP_BY_HOP,
+    TIMEOUT,
+    close_stream,
+    filter_headers,
+    read_capped_body,
+    split_bearer,
+)
 from app.core.constants import MCP_PROXY_MAX_BODY_BYTES
 from app.core.database import async_session_maker
 from app.services import mcp_oauth
@@ -34,26 +42,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["mcp-proxy"])
 
-# Injectable for tests (httpx.MockTransport). Connect/write/pool bounded. read is an *idle*
-# (inter-byte) ceiling, not a total deadline: 1 h matches the squid read_timeout for MCP, so a
-# normal SSE stream with periodic events survives, while a genuinely hung upstream releases the
-# client + FD instead of pinning them forever (unbounded read would never let go at 3 AM).
+# Injectable for tests (httpx.MockTransport). Timeout shared with the LLM proxy; see _proxy_stream.
 _transport: httpx.AsyncBaseTransport | None = None
-_TIMEOUT = httpx.Timeout(connect=5.0, write=30.0, read=3600.0, pool=5.0)
 
-# Hop-by-hop headers (RFC 7230 §6.1) plus framing headers httpx/Starlette must own.
-_HOP_BY_HOP = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
 # Request headers we forward to the upstream MCP server (besides the swapped Authorization).
 _FORWARD_REQ = {
     "accept",
@@ -64,42 +55,17 @@ _FORWARD_REQ = {
 }
 
 
-async def _read_capped_body(request: Request) -> bytes:
-    """Buffer the request body, rejecting bodies over the cap with 413.
-
-    The body is held in RAM so it can be replayed on the 401-refresh retry; without a cap a
-    large or chunked tool-call payload (or many concurrent ones) is an unbounded-memory blast
-    radius on the single worker. Reject on the declared Content-Length when present, and guard
-    again while streaming for chunked requests that omit it.
-    """
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MCP_PROXY_MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Request body too large")
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > MCP_PROXY_MAX_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="Request body too large")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 def _bearer(request: Request) -> str:
-    header = request.headers.get("authorization", "")
-    if not header.lower().startswith("bearer "):
+    token = split_bearer(request)
+    if token is None:
         raise ProxyAuthError("missing bearer token")
-    return header[7:]
+    return token
 
 
 def _request_headers(request: Request, upstream_token: str) -> dict[str, str]:
     headers = {k: v for k, v in request.headers.items() if k.lower() in _FORWARD_REQ}
     headers["Authorization"] = f"Bearer {upstream_token}"
     return headers
-
-
-def _response_headers(upstream: httpx.Response) -> dict[str, str]:
-    return {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
 
 
 def _upstream_url(base: str, path: str) -> str:
@@ -145,20 +111,20 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
     if any(seg in ("..", ".") for seg in path.split("/") if seg):
         raise HTTPException(status_code=400, detail="Invalid proxy path")
 
-    body = await _read_capped_body(request)  # buffer once — needed again on the 401-retry
+    body = await read_capped_body(request, MCP_PROXY_MAX_BODY_BYTES)  # buffer once for 401-retry
     url = _upstream_url(server.url, path)
     if request.url.query:
         url = f"{url}?{request.url.query}"
 
     db: AsyncSession = async_session_maker()
-    client = httpx.AsyncClient(transport=_transport, timeout=_TIMEOUT)
+    client = httpx.AsyncClient(transport=_transport, timeout=TIMEOUT)
     upstream: httpx.Response | None = None
     log_extra = {"mcp_key": key, "session_id": str(claims.session_id)}
 
     # Single teardown contract: the `finally` always closes db (only needed for the token
     # work) and, when we did NOT hand a live stream to StreamingResponse (`upstream is None`),
     # also closes the client. On success the client + stream outlive this handler and are
-    # closed by `_close_stream` after the body is consumed (or the client disconnects).
+    # closed by `close_stream` (shared, _proxy_stream) after the body is consumed (or disconnect).
     try:
         token = await mcp_oauth.get_fresh_token(db, user_id=claims.user_id, mcp_key=key)
         upstream = await _forward(
@@ -204,17 +170,10 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
     return StreamingResponse(
         upstream.aiter_raw(),
         status_code=upstream.status_code,
-        headers=_response_headers(upstream),
-        background=BackgroundTask(_close_stream, upstream, client),
+        headers=filter_headers(upstream.headers, HOP_BY_HOP),
+        background=BackgroundTask(close_stream, upstream, client),
     )
 
 
 _EXPIRED = "MCP authorization expired — reconnect in the panel"
 _UNAVAILABLE = "MCP broker temporarily unavailable"
-
-
-async def _close_stream(upstream: httpx.Response, client: httpx.AsyncClient) -> None:
-    """Release the upstream stream + its client once the response body is done (or the client
-    disconnects mid-stream — Starlette runs the background task either way)."""
-    await upstream.aclose()
-    await client.aclose()

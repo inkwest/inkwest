@@ -530,6 +530,17 @@ def profile_arn(model_id: str) -> str | None:
     return _profile_arns.get(model_id) or _profile_arns.get(_BEDROCK_ROUTE_PREFIX.sub("", model_id))
 
 
+def profile_ids_for_arn(arn: str) -> set[str]:
+    """Every known inference-profile id (and route-stripped base) that invokes via ``arn``.
+
+    Reverse of :func:`profile_arn`. The LLM broker allowlists an enabled model's invoke ARN, but
+    Claude Code on Bedrock auto-upgrades a bare foundation id to its regional profile id (e.g.
+    ``eu.anthropic.claude-…``) before invoking — that id, not the ARN, lands in the proxied URL,
+    so it must pass the allowlist too. Empty when no profile maps to the ARN (a bare on-demand
+    model)."""
+    return {pid for pid, parn in _profile_arns.items() if parn == arn}
+
+
 def catalog_status() -> dict:
     """Discovery status for the admin UI: freshness, source, last error state."""
     return {

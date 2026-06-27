@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     aws_region: str | None = None
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
-    # Real Bedrock API key (bearer) the LLM auth broker swaps the sandbox's internal JWT
+    # Real Bedrock API key (bearer) the LLM auth broker swaps the sandbox's per-turn grant
     # for (app.api.routes.llm_proxy). Read from the backend process env
     # AWS_BEARER_TOKEN_BEDROCK — the SAME var name that used to ride sandbox_env_file INTO
     # the sandbox. When llm_broker_enabled is on it lives ONLY in the backend process: both
@@ -274,9 +274,9 @@ class Settings(BaseSettings):
 
     # ==========================================================================
     # LLM auth broker (claude-cli provider only) — zero model secret in the sandbox.
-    # On: the broker route (app.api.routes.llm_proxy) verifies a short-lived internal JWT
+    # On: the broker route (app.api.routes.llm_proxy) verifies a short-lived opaque grant
     # minted per turn, swaps it for the backend-held aws_bearer_token_bedrock, and forwards
-    # to real Bedrock. The sandbox holds only the JWT + the broker base URL (which rides the
+    # to real Bedrock. The sandbox holds only the grant + the broker base URL (which rides the
     # SAME host as mcp_proxy_base_url, inheriting its squid allowlist + host-gateway --add-host
     # — no new egress rule). Off (default): today's behavior — the real bearer rides
     # sandbox_env_file into the sandbox. Rollback = flip this off + restore the bearer in

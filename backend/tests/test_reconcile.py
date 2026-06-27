@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import Table, select, update
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -316,6 +317,7 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
             oidc_enabled=False,
             connectors_enabled=False,
             sandbox_enabled=False,
+            llm_broker_enabled=False,
             metrics_enabled=False,
             version="test",
             commit_hash="test",
@@ -356,6 +358,7 @@ async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
             oidc_enabled=False,
             connectors_enabled=False,
             sandbox_enabled=False,
+            llm_broker_enabled=False,
             metrics_enabled=False,
             version="test",
             commit_hash="test",
@@ -383,6 +386,61 @@ async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
 
     purge.assert_awaited_once()
     fake_logger.exception.assert_called_once_with("purge_empty_sessions_failed")
+
+
+def _broker_lifespan_settings(*, llm_broker_enabled: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        oidc_enabled=False,
+        connectors_enabled=False,
+        sandbox_enabled=False,
+        llm_broker_enabled=llm_broker_enabled,
+        metrics_enabled=False,
+        version="test",
+        commit_hash="test",
+        build_timestamp="test",
+    )
+
+
+def _patch_lifespan_startup(monkeypatch: Any) -> None:
+    monkeypatch.setattr(app_main, "init_db", AsyncMock())
+    monkeypatch.setattr(app_main, "async_session_maker", lambda: _DummySession())
+    monkeypatch.setattr(app_main, "ensure_default_system_prompt", AsyncMock())
+    monkeypatch.setattr(app_main, "ensure_skills_frontmatter", AsyncMock())
+    monkeypatch.setattr(app_main, "load_settings", AsyncMock())
+    monkeypatch.setattr(app_main, "load_registry", AsyncMock())
+    monkeypatch.setattr(app_main, "load_oauth_catalog", AsyncMock())
+    monkeypatch.setattr(app_main, "refresh_catalog", AsyncMock())
+    monkeypatch.setattr(app_main, "reconcile_interrupted_turns", AsyncMock(return_value=0))
+    monkeypatch.setattr(app_main, "purge_empty_sessions", AsyncMock(return_value=0))
+    monkeypatch.setattr(app_main, "oauth_catalog_keys", lambda: [])
+    monkeypatch.setattr(app_main, "start_listener", AsyncMock())
+    monkeypatch.setattr(app_main, "stop_listener", AsyncMock())
+    monkeypatch.setattr(app_main, "close_db", AsyncMock())
+    monkeypatch.setattr(app_main, "shutdown_telemetry", MagicMock())
+
+
+async def test_lifespan_fails_fast_when_broker_enabled_multi_worker(monkeypatch: Any) -> None:
+    """The in-process grant store assumes single-worker; enabling the broker under
+    WEB_CONCURRENCY>1 must refuse to start rather than 401 every model call at runtime."""
+    monkeypatch.setattr(app_main, "logger", MagicMock())
+    monkeypatch.setattr(app_main, "settings", _broker_lifespan_settings(llm_broker_enabled=True))
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    _patch_lifespan_startup(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="single worker"):
+        async with app_main.lifespan(app_main.app):
+            pass
+
+
+async def test_lifespan_broker_enabled_single_worker_starts(monkeypatch: Any) -> None:
+    """Broker enabled with the default single worker boots cleanly (guard must not false-fire)."""
+    monkeypatch.setattr(app_main, "logger", MagicMock())
+    monkeypatch.setattr(app_main, "settings", _broker_lifespan_settings(llm_broker_enabled=True))
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
+    _patch_lifespan_startup(monkeypatch)
+
+    async with app_main.lifespan(app_main.app):
+        pass
 
 
 async def _session_ids(db: AsyncSession) -> set[uuid.UUID]:

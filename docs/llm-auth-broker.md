@@ -1,7 +1,8 @@
 # LLM auth broker
 
-**Status — shipped, OFF by default (`LLM_BROKER_ENABLED=false`).** Port of the OAuth2 MCP
-reverse-proxy pattern (`docs/mcp-oauth2-proxy.md`) to the **model inference call** itself.
+**Status — implemented, pending merge; OFF by default (`LLM_BROKER_ENABLED=false`).** Port of
+the OAuth2 MCP reverse-proxy pattern (`docs/mcp-oauth2-proxy.md`) to the **model inference call**
+itself.
 
 ## TL;DR
 
@@ -29,13 +30,21 @@ direct-Anthropic-key shape can be added later without touching the route body.
 
 ## Enable
 
+0. **Precondition — single worker / single replica.** The grant store is in-process, so with
+   `LLM_BROKER_ENABLED=true` the backend **refuses to start** (`RuntimeError` at lifespan) when
+   `WEB_CONCURRENCY>1`. It cannot detect `uvicorn/gunicorn --workers N` set without that env var,
+   nor cross-host replicas — those must be single-replica or sticky-routed by deployment. Reconcile
+   topology to single-worker **before** flipping the flag, or the boot fails fast.
 1. **Backend process env**: `LLM_BROKER_ENABLED=true`, `AWS_BEARER_TOKEN_BEDROCK=<real key>`,
    `AWS_REGION=<region>`. The bearer lives **only here** now — and the model-catalog discovery
    (`model_catalog`) reads it from the **backend settings** too (never `sandbox.env`), so
-   stripping the sandbox cred in step 3 doesn't break catalog refresh.
+   stripping the sandbox cred in step 3 doesn't break catalog refresh. Enable at least one model
+   in admin settings: the broker is **fail-closed**, so with no enabled models the CLI turn is
+   refused with a clear error (the agent path 403s — see Restriction).
 2. **`MCP_PROXY_BASE_URL` must be set** — the broker base URL is `<that host>/api/llm-proxy`,
    so it inherits the MCP proxy's squid allowlist + host-gateway `--add-host` (see Squid). If
-   it is unset the broker logs a warning and falls back to direct Bedrock.
+   it is unset the broker logs at **ERROR** (alertable — the fallback re-exposes the real bearer
+   in the sandbox) and falls back to direct Bedrock.
 3. **Migration — strip the sandbox cred**: remove `AWS_BEARER_TOKEN_BEDROCK` from
    `sandbox_env_file`. `CLAUDE_CODE_USE_BEDROCK` / `ANTHROPIC_BEDROCK_BASE_URL` there are
    harmless (the orchestrator injects them per turn via `docker exec -e`, which overrides the
@@ -43,6 +52,15 @@ direct-Anthropic-key shape can be added later without touching the route body.
    done the real key is still readable inside the container** (`/proc/1/environ` of the idle
    container) — the flag only re-routes the running engine process; the env-file is the
    container's base env.
+
+> **inkwest-agent engine — rebuild the agent image first.** The agent only routes through the
+> broker if its baked-in `inkwest_agent` honours `bedrock_endpoint_url` (added in
+> `PROTOCOL_VERSION = 5`). A toolbox image built before that ignores/rejects the field and would
+> call Bedrock directly with the now-stripped key — broken model calls. Rebuild + redeploy the
+> agent toolbox image (protocol v5) **before** step 3 when the `inkwest-agent` engine is in use.
+> This leg also requires the `inkwest-agent` engine enabled via `AGENTIC_ENGINES` (the CLI leg
+> does not). Broker-OFF turns are unaffected: the orchestrator omits the unset field from the
+> turn-spec, so an older agent still parses it.
 
 ## Rollback (fully reversible)
 
@@ -63,19 +81,35 @@ Bedrock credential inside the sandbox it is no longer a credentialed Bedrock egr
   and `burn`ed in the orchestrator `finally` (every exit path — cancel/error included, after
   the agent process is gone). A token exfiltrated from a sandbox is dead the moment the turn
   ends; the exfiltration window is the turn's duration, not a fixed lifetime.
-- **Restriction.** Only enabled registry models (or their ARNs) and the allowed Bedrock ops
-  pass the broker. A grant cannot invoke an unconfigured model.
-- **Binding (current limit).** The grant carries `sub`/`sid` for audit, but the broker does
-  not cross-check them against the request — Bedrock's URL has no session field. Isolation
-  comes from the short, burned lifetime, **not** from per-call session enforcement. A grant
-  alive mid-turn is interchangeable across enabled models. Tightening this (per-session model
-  allowlist, or a forgeable-proof session binding) is deferred.
-- **Single-replica assumption.** The grant store is in-process; a sandbox's broker call must
-  reach the **same** backend process that minted its grant. This matches the documented
-  single-worker / single-replica deployment (see the metrics note in `app/core/config.py`).
-  Scale-out needs a shared store or sticky routing.
-- **TTL backstop.** A 2 h TTL cleans up a grant orphaned when the backend is SIGKILLed before
-  its `finally` runs; the explicit `burn` is the primary path.
+- **Restriction (fail-closed).** Only enabled registry models (their ARNs + regional
+  inference-profile ids) and the allowed Bedrock ops pass the broker. **No enabled rows ⇒
+  nothing invocable** (unlike the default-open model picker — the broker is a credential gate).
+  A grant cannot invoke an unconfigured model. The broker also strips any `x-amz-*` SigV4/
+  session-token header from the sandbox's request, so a compromised sandbox can't inject AWS
+  signing material onto the broker's authenticated upstream call (`x-amzn-bedrock-*` is kept).
+- **Binding (current limit).** The grant carries `user_id`/`session_id` for audit, but the
+  broker does not cross-check them against the request — Bedrock's URL has no session field.
+  Isolation comes from the short, burned lifetime, **not** from per-call session enforcement. A
+  grant alive mid-turn is interchangeable across enabled models. Tightening this (per-session
+  model allowlist, or a forgeable-proof session binding) is deferred.
+- **Single-replica — ENFORCED.** The grant store is in-process; a sandbox's broker call must
+  reach the **same** backend process that minted its grant. The backend fail-fasts at startup
+  when `LLM_BROKER_ENABLED=true` and `WEB_CONCURRENCY>1` (`app/main.py`); `--workers N` without
+  that env var, and cross-host replicas, are undetectable from app code and need single-replica
+  deployment or sticky routing.
+- **TTL backstop + store cap + stream cap.** A 2 h TTL cleans up a grant orphaned when the
+  backend is SIGKILLed before its `finally` runs; the explicit `burn` is the primary path. The
+  store is also hard-capped (`_MAX_GRANTS`) — at the cap, mint evicts the oldest-expiring grant,
+  so a burst of un-burned grants can't grow memory without bound between TTLs. Each proxied
+  response stream is force-closed at a 2 h total wall-clock ceiling (`LLM_PROXY_STREAM_MAX_SECONDS`)
+  so a slowloris upstream can't pin a worker slot past the inter-byte idle timeout.
+- **Recognizable grant.** Every grant is prefixed `inkwest-ephemeral-` (256-bit CSPRNG suffix),
+  so it's instantly distinguishable in logs / `/proc/<pid>/environ` / a Bedrock error body from
+  a real Bedrock key (`ABSK…`) — the prefix is cosmetic; the suffix is what's unguessable.
+- **Network exposure.** The grant is the route's only application-level auth, so `/api/llm-proxy`
+  must NOT sit on a public ingress: the sandbox reaches it solely via the host-gateway alias
+  (the squid-allowlisted `mcp_proxy_base_url` host). Keep it off the public ALB / restrict it to
+  the host-gateway interface so a leaked grant alone isn't usable off-host for its lifetime.
 
 ## Scope
 

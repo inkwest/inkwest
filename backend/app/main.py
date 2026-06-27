@@ -161,6 +161,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "affinity, or disable MCP_CATALOG_OAUTH2."
             )
         logger.info("mcp_oauth_catalog_loaded", keys=len(oauth_keys))
+    # The LLM auth broker's per-turn grant store lives in THIS process's RAM (see
+    # app.services.llm_proxy_token). A second worker/replica would receive a sandbox's broker
+    # call having never minted that grant and 401 every model call — intermittent auth failures
+    # that look like a bug at 3 AM. Fail fast on the one multi-process case we can detect here
+    # (uvicorn/gunicorn workers); cross-host replicas can't be seen from app code and need
+    # single-replica deployment or sticky routing (documented in docs/llm-auth-broker.md).
+    if settings.llm_broker_enabled:
+        workers = int(os.environ.get("WEB_CONCURRENCY", "1") or "1")
+        if workers > 1:
+            raise RuntimeError(
+                f"LLM_BROKER_ENABLED requires a single worker (WEB_CONCURRENCY={workers}); the "
+                "per-turn grant store lives in process RAM. Run single-worker with single-replica "
+                "deployment (or sticky routing), or disable LLM_BROKER_ENABLED."
+            )
+        logger.info("llm_broker_enabled", note="single-replica in-process grant store")
     yield
     # Shutdown
     logger.info("shutting_down_api")
@@ -263,7 +278,7 @@ app.include_router(connectors.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
 # /api/mcp-proxy/{key}/{path} — auth is the internal proxy JWT, not get_current_user.
 app.include_router(mcp_proxy.router, prefix="/api")
-# /api/llm-proxy/model/{id}/{op} — auth is the internal broker JWT, not get_current_user.
+# /api/llm-proxy/model/{id}/{op} — auth is the per-turn broker grant, not get_current_user.
 app.include_router(llm_proxy.router, prefix="/api")
 app.include_router(chat.router)  # WebSocket routes (no prefix needed)
 app.include_router(sync.router)  # Session sync WebSocket

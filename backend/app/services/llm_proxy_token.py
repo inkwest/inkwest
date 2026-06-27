@@ -38,6 +38,14 @@ _TTL_SECONDS = 2 * 60 * 60
 # (which is base64 `ABSK…`). Cosmetic only; the 256-bit random suffix is what's unguessable.
 _TOKEN_PREFIX = "inkwest-ephemeral-"
 
+# Hard upper bound on live grants. The normal path burns each grant in the orchestrator
+# `finally`, so the store holds ~one entry per concurrent turn. This cap is a memory backstop:
+# if `burn` is repeatedly skipped (SIGKILL/OOM mid-turn before `finally`), un-burned grants
+# would otherwise accumulate up to their full TTL during a mint storm. At the cap, mint evicts
+# the OLDEST-expiring grant — bounding store memory regardless of whether burns ever run. Far
+# above any realistic concurrent-turn count, so it never evicts a live, in-use grant in practice.
+_MAX_GRANTS = 10_000
+
 
 class ProxyAuthError(Exception):
     """The broker grant is missing, expired, or already burned."""
@@ -79,6 +87,17 @@ def mint(user_id: object | None, session_id: object | None) -> str:
     """
     now = time.monotonic()
     _sweep(now)
+    # Memory backstop: if expired-grant sweeping didn't bring the store back under the cap (a
+    # burst of un-burned, not-yet-expired grants), evict the oldest-expiring ones so the store
+    # can never grow without bound between TTLs. Logged so a real leak is visible, not silent.
+    if len(_grants) >= _MAX_GRANTS:
+        overflow = len(_grants) - _MAX_GRANTS + 1
+        for tok in sorted(_grants, key=lambda t: _grants[t].expires_at)[:overflow]:
+            del _grants[tok]
+        logger.warning(
+            "llm_proxy_grant_store_capped",
+            extra={"evicted": overflow, "cap": _MAX_GRANTS},
+        )
     # 256 bits of CSPRNG entropy (unguessable) behind a recognizable, non-secret prefix.
     token = _TOKEN_PREFIX + secrets.token_urlsafe(32)
     _grants[token] = _Grant(

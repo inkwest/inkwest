@@ -105,3 +105,10 @@ MCP_PROXY_MAX_BODY_BYTES = 10 * 1024 * 1024
 # base64 images (attachment limits cap an image well under this); larger than the MCP cap
 # because a vision turn legitimately dwarfs a tool-call payload, still bounded against abuse.
 LLM_PROXY_MAX_BODY_BYTES = 32 * 1024 * 1024
+
+# Total wall-clock ceiling (seconds) on a single proxied Bedrock response stream. The httpx
+# ``read`` timeout is only an inter-byte idle ceiling, so a buggy/malicious upstream dribbling
+# bytes just under it could pin a worker slot indefinitely (slowloris) on the single replica.
+# This caps the whole stream — generous enough to outlast any real turn (streaming + many tool
+# calls), short enough that a held connection eventually releases its worker + FD.
+LLM_PROXY_STREAM_MAX_SECONDS = 2 * 60 * 60

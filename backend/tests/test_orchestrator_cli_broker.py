@@ -34,9 +34,13 @@ def _settings(*, broker_enabled: bool, base: str = "http://gw:8000") -> SimpleNa
     )
 
 
-def _patches(settings, capture):
-    def fake_execute_claude_cli(*, extra_env=None, **kw):
+_ENABLED_ENTRY = SimpleNamespace(model_id="anthropic.claude-x", enabled=True, arn=None)
+
+
+def _patches(settings, capture, *, execute=None, entries=None):
+    def fake_execute_claude_cli(*, extra_env=None, model=None, **kw):
         capture["extra_env"] = extra_env
+        capture["model"] = model
         # Snapshot whether the grant is live *during* the turn (before the finally burns it).
         tok = (extra_env or {}).get("AWS_BEARER_TOKEN_BEDROCK")
         capture["token"] = tok
@@ -46,6 +50,14 @@ def _patches(settings, capture):
     return [
         patch.object(oc, "get_settings", return_value=settings),
         patch.object(llm_broker, "get_settings", return_value=settings),
+        # Broker ON + no session/admin choice ⇒ the orchestrator forces the registry default so
+        # the CLI never invokes an id outside the broker allowlist. Stub the registry: one enabled
+        # entry (so the "no enabled models" guard passes) + the resolved default id.
+        patch(
+            "app.services.model_registry.merged_entries",
+            return_value=[_ENABLED_ENTRY] if entries is None else entries,
+        ),
+        patch("app.services.model_registry.default_model", return_value="anthropic.claude-x"),
         patch.object(oc, "save_message", AsyncMock()),
         patch.object(oc, "ensure_session_title", AsyncMock(return_value="title")),
         patch.object(oc, "get_cli_session_id", AsyncMock(return_value=None)),
@@ -64,14 +76,14 @@ def _patches(settings, capture):
         patch("app.services.sandbox.ensure", AsyncMock(return_value="conv")),
         patch("app.services.sandbox.release", AsyncMock()),
         patch("app.services.mcp_config.apply_session_mcp_selection", AsyncMock(return_value=[])),
-        patch.object(oc, "execute_claude_cli", side_effect=fake_execute_claude_cli),
+        patch.object(oc, "execute_claude_cli", side_effect=execute or fake_execute_claude_cli),
     ]
 
 
-async def _run(settings, capture):
+async def _run(settings, capture, *, execute=None, cancel_event=None, entries=None):
     db = AsyncMock()
     db.commit = AsyncMock()
-    ps = _patches(settings, capture)
+    ps = _patches(settings, capture, execute=execute, entries=entries)
     for p in ps:
         p.start()
     try:
@@ -84,6 +96,7 @@ async def _run(settings, capture):
                 context_name=None,
                 user_message="why crash?",
                 user_id=USER_ID,
+                cancel_event=cancel_event,
             )
         )
     finally:
@@ -111,3 +124,65 @@ async def test_no_broker_env_when_disabled() -> None:
     await _run(_settings(broker_enabled=False), capture)
     # connector env is empty and the broker is off ⇒ nothing injected.
     assert capture["extra_env"] is None
+
+
+@pytest.mark.asyncio
+async def test_broker_enabled_but_base_unset_injects_nothing() -> None:
+    """Enabled but mcp_proxy_base_url empty ⇒ the helper falls back to direct Bedrock: no grant
+    minted, no broker env injected (the warn-and-fallback path, proven end-to-end not just in the
+    helper unit test)."""
+    capture: dict = {}
+    await _run(_settings(broker_enabled=True, base=""), capture)
+    assert capture["extra_env"] is None  # connector env empty + no broker env
+    assert capture["token"] is None  # no grant was minted
+
+
+@pytest.mark.asyncio
+async def test_broker_on_forces_registry_default_model() -> None:
+    """Broker ON + no session/admin choice ⇒ force the registry default so the CLI never
+    invokes its built-in default id (which the broker allowlist would 403)."""
+    capture: dict = {}
+    await _run(_settings(broker_enabled=True), capture)
+    assert capture["model"] == "anthropic.claude-x"
+
+
+@pytest.mark.asyncio
+async def test_broker_on_no_enabled_models_errors_clearly() -> None:
+    """Broker ON + no model pin + NO enabled registry rows ⇒ the broker is fail-closed, so the
+    turn is refused with a clear config error rather than an opaque mid-turn 403."""
+    capture: dict = {}
+    events = await _run(_settings(broker_enabled=True), capture, entries=[])
+    assert any(e.type == "error" and "enabled" in (e.content or "").lower() for e in events)
+    assert "model" not in capture  # execute_claude_cli never reached
+
+
+@pytest.mark.asyncio
+async def test_grant_burned_when_execute_raises() -> None:
+    """The security claim — burn runs on the ERROR exit path, not just the clean one. A token
+    that leaked from the sandbox must be dead even when the turn blows up mid-flight."""
+    seen: dict = {}
+
+    def boom(*, extra_env=None, model=None, **kw):
+        seen["token"] = (extra_env or {}).get("AWS_BEARER_TOKEN_BEDROCK")
+        assert seen["token"] and token.verify(seen["token"])  # live during the turn
+        raise RuntimeError("upstream exploded mid-turn")
+
+    capture: dict = {}
+    events = await _run(_settings(broker_enabled=True), capture, execute=boom)
+    assert any(e.type == "error" for e in events)  # error surfaced, not swallowed
+    with pytest.raises(token.ProxyAuthError):  # …and the grant was burned in the finally
+        token.verify(seen["token"])
+
+
+@pytest.mark.asyncio
+async def test_grant_burned_when_cancelled() -> None:
+    """Burn also runs when the turn is cancelled (cancel_event pre-set)."""
+    import asyncio
+
+    capture: dict = {}
+    cancel = asyncio.Event()
+    cancel.set()
+    await _run(_settings(broker_enabled=True), capture, cancel_event=cancel)
+    assert capture["token"]
+    with pytest.raises(token.ProxyAuthError):
+        token.verify(capture["token"])

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
-from app.services import llm_broker
+from app.services import llm_broker, model_registry
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
 from app.services.ai_client import resolve_session_model_choice
 from app.services.budget_service import record_usage
@@ -281,13 +281,28 @@ required.
 
         # Route the CLI's Bedrock calls through the LLM auth broker when enabled (sandbox only
         # — the broker base URL resolves to the host-gateway alias reachable solely from inside
-        # the sandbox). The JWT + CLAUDE_CODE_USE_BEDROCK + ANTHROPIC_BEDROCK_BASE_URL ride the
+        # the sandbox). The grant + CLAUDE_CODE_USE_BEDROCK + ANTHROPIC_BEDROCK_BASE_URL ride the
         # connector-env channel (docker exec -e), overriding sandbox_env_file so the real
         # bearer no longer needs to live in the sandbox. Off/local ⇒ empty ⇒ today's behavior.
         broker_env = (
             llm_broker.cli_broker_env(user_id, session_id) if settings.sandbox_enabled else {}
         )
         engine_env = {**connector_env, **broker_env}
+
+        # With the broker ON, a None model_choice (no session pin, no admin default) would let
+        # the in-toolbox `claude` invoke its OWN built-in default id — which the broker's
+        # enabled-models allowlist rejects (403), breaking the turn opaquely. Force an explicit
+        # model the broker permits: the registry's resolved default (an enabled model when any
+        # is enabled). If NOTHING is enabled the broker is fail-closed and no model is invocable
+        # — surface that as a clear config error instead of a mid-turn 403. Off ⇒ unchanged.
+        if broker_env and model_choice is None:
+            if not any(e.enabled for e in model_registry.merged_entries()):
+                yield error_event(
+                    "No models are enabled for the LLM broker. Enable at least one model "
+                    "in admin settings before using the broker."
+                )
+                return
+            model_choice = model_registry.default_model()
 
         for attempt in (1, 2):
             content = []

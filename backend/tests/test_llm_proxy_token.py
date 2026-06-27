@@ -12,6 +12,15 @@ _U = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _S = uuid.UUID("00000000-0000-4000-8000-000000000002")
 
 
+@pytest.fixture(autouse=True)
+def _clear_grants():
+    """The store is process-wide; isolate each test (count-sensitive cases would otherwise see
+    grants leaked from earlier tests)."""
+    t._grants.clear()
+    yield
+    t._grants.clear()
+
+
 def test_mint_verify_round_trip() -> None:
     tok = t.mint(_U, _S)
     claims = t.verify(tok)
@@ -76,3 +85,15 @@ def test_mint_sweeps_expired_grants() -> None:
     )
     t.mint(_U, _S)  # mint sweeps expired entries so crash-orphans don't accumulate
     assert stale not in t._grants
+
+
+def test_store_is_hard_capped(monkeypatch) -> None:
+    """A burst of un-burned (not-yet-expired) grants can't grow the store without bound — at the
+    cap, mint evicts the oldest-expiring entry so the count stays bounded."""
+    monkeypatch.setattr(t, "_MAX_GRANTS", 5)
+    tokens = [t.mint(_U, _S) for _ in range(20)]
+    assert len(t._grants) <= 5
+    # The oldest grants were evicted; the most-recently minted ones survive and still verify.
+    assert t.verify(tokens[-1]).session_id == str(_S)
+    with pytest.raises(ProxyAuthError):
+        t.verify(tokens[0])  # oldest evicted under the cap

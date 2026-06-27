@@ -230,14 +230,12 @@ async def orchestrate_chat_inkwest_agent(
             )
     creds_path = f"{settings.sandbox_home.rstrip('/')}/.aws"
 
-    # LLM auth broker: when enabled, route the agent's Bedrock calls through the broker. The
-    # per-turn grant rides the connector-env channel (docker exec -e), OVERRIDING the
-    # AWS_BEARER_TOKEN_BEDROCK in sandbox.env so the real key need not live in the sandbox;
-    # the matching endpoint_url rides the TurnSpec below. The grant is BURNED in the finally
-    # (dies with the turn). Off ⇒ empty ⇒ today's behavior (real bearer reaches Bedrock direct).
-    broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
-    if broker_env:
-        connector_env = {**connector_env, **broker_env}
+    # LLM auth broker state — the grant is MINTED inside the try below (not here), so the
+    # finally's burn_env always covers it: minting before the try would leak the grant until
+    # its TTL backstop if a cancellation/raise occurred between mint and the try. Initialized
+    # here so the finally can revoke it unconditionally (empty ⇒ burn is a no-op).
+    broker_env: dict[str, str] = {}
+    broker_endpoint_url: str | None = None
 
     # Skills + MCP (P1.7): resolve from the DB here (the agent is DB-free). Skills ride
     # the spec as name+description ONLY (progressive disclosure); their SKILL.md bodies
@@ -257,6 +255,16 @@ async def orchestrate_chat_inkwest_agent(
 
     container: str | None = None
     try:
+        # Mint the broker grant + resolve the matching endpoint as the FIRST thing in the try, so
+        # the finally's burn_env always revokes it. Both gate on the same broker_base_url() (empty
+        # env ⇄ None endpoint). The grant rides connector_env (docker exec -e), OVERRIDING the
+        # AWS_BEARER_TOKEN_BEDROCK in sandbox.env so the real key need not live in the sandbox; the
+        # endpoint rides the TurnSpec below. Off ⇒ empty ⇒ today's behavior (real bearer direct).
+        broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
+        broker_endpoint_url = llm_broker.agent_bedrock_endpoint_url() if broker_env else None
+        if broker_env:
+            connector_env = {**connector_env, **broker_env}
+
         from app.services import sandbox
         from app.services.agent_mcp_config import (
             remove_agent_mcp_config,
@@ -344,14 +352,21 @@ async def orchestrate_chat_inkwest_agent(
             model_target=model_target,
             region=settings.aws_region,
             # Route the model call through the broker when enabled (None ⇒ direct Bedrock).
-            # Paired with the grant injected into connector_env above.
-            bedrock_endpoint_url=llm_broker.agent_bedrock_endpoint_url(),
+            # Paired with the grant injected into connector_env above (resolved together).
+            bedrock_endpoint_url=broker_endpoint_url,
             user_id=str(user_id) if user_id else None,
             kubeconfig_path=kubeconfig_path,
             context_name=context_name,
             creds_path=creds_path,
         )
-        turn_spec_json = json.dumps(dataclasses.asdict(spec))
+        # Drop None-valued top-level scalars before serializing: parse_turn_spec re-applies the
+        # field default for any ABSENT key, so omitting an unset optional (e.g. bedrock_endpoint_url
+        # when the broker is off) keeps the wire format forward-compatible — an agent image that
+        # predates a newly-added optional field still parses the spec instead of hard-failing its
+        # `_reject_unknown` guard on every (broker-off) turn. Non-None fields and the always-present
+        # nested objects/lists (context, limits, tools, …) are sent as-is.
+        raw_spec = {k: v for k, v in dataclasses.asdict(spec).items() if v is not None}
+        turn_spec_json = json.dumps(raw_spec)
 
         # Reconstruct role-correct messages from the flat event stream so the persisted
         # history round-trips through Converse next turn (toolResult must live in a user

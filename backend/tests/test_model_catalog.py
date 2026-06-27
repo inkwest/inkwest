@@ -648,6 +648,23 @@ async def test_fetch_bedrock_profile_only_model_surfaces_with_arn():
     assert model_catalog.profile_arn("zai.glm-4.7-flash") is None
 
 
+def test_profile_ids_for_arn_reverse_maps():
+    """The LLM broker allowlists an enabled model's ARN, then accepts every inference-profile id
+    that resolves to it (the CLI auto-upgrades a bare id to its regional profile id before
+    invoking). Reverse of profile_arn; empty for an unknown ARN."""
+    arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.anthropic.claude-x"
+    model_catalog._profile_arns = {
+        "eu.anthropic.claude-x": arn,  # surfaced regional profile id
+        "anthropic.claude-x": arn,  # route-stripped underlying id (dual-keyed)
+        "eu.other.model": "arn:other",  # unrelated profile
+    }
+    assert model_catalog.profile_ids_for_arn(arn) == {
+        "eu.anthropic.claude-x",
+        "anthropic.claude-x",
+    }
+    assert model_catalog.profile_ids_for_arn("arn:nonexistent") == set()
+
+
 @pytest.mark.asyncio
 async def test_fetch_bedrock_profile_deduped_against_foundation_model():
     """An overlapping base+profile model yields one entry (no dupe); the profile id is the

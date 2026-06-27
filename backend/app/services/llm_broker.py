@@ -6,10 +6,10 @@ sandboxed engines stay in lock-step:
 
 - **claude-cli** (:func:`cli_broker_env`): the Claude CLI talks to Bedrock when
   ``CLAUDE_CODE_USE_BEDROCK=1`` + ``ANTHROPIC_BEDROCK_BASE_URL`` point it at the broker, with
-  ``AWS_BEARER_TOKEN_BEDROCK`` carrying the internal JWT. All three are injected per turn via
+  ``AWS_BEARER_TOKEN_BEDROCK`` carrying the per-turn grant. All three are injected per turn via
   the connector-env channel (``docker exec -e``), which overrides the static ``sandbox_env_file``.
 - **inkwest-agent** (:func:`agent_bedrock_endpoint_url` + :func:`agent_broker_env`): boto3's
-  ``endpoint_url`` rides the TurnSpec; the JWT rides the spawn env.
+  ``endpoint_url`` rides the TurnSpec; the grant rides the spawn env.
 
 The broker base reuses ``mcp_proxy_base_url``'s host (squid-allowlisted, host-gateway
 ``--add-host``) — no new egress rule, just a distinct ``/api/llm-proxy`` path prefix. When the
@@ -48,9 +48,14 @@ def broker_base_url() -> str | None:
     base = settings.mcp_proxy_base_url
     if not base:
         # Enabled but unreachable: the sandbox can't egress to a broker that has no host (the
-        # squid allowlist + --add-host both key off mcp_proxy_base_url). Warn loudly and fall
-        # back to direct Bedrock rather than silently breaking model calls.
-        logger.warning("llm_broker_enabled but mcp_proxy_base_url is unset; broker not wired")
+        # squid allowlist + --add-host both key off mcp_proxy_base_url). Fall back to direct
+        # Bedrock rather than break model calls — but this RE-EXPOSES the real bearer in the
+        # sandbox env-file (the exact posture the broker removes), so log at ERROR (alertable),
+        # not WARNING: a misconfiguration here is a silent security regression, not a hiccup.
+        logger.error(
+            "llm_broker_enabled but mcp_proxy_base_url is unset; broker NOT wired — "
+            "falling back to the real Bedrock bearer in the sandbox (credential re-exposed)"
+        )
         return None
     return f"{base.rstrip('/')}/api/llm-proxy"
 
@@ -78,9 +83,9 @@ def agent_bedrock_endpoint_url() -> str | None:
 
 
 def agent_broker_env(user_id: UUID | str | None, session_id: UUID | str | None) -> dict[str, str]:
-    """JWT env injected into the inkwest-agent at spawn (``docker exec -e``).
+    """Grant env injected into the inkwest-agent at spawn (``docker exec -e``).
 
-    Only the bearer rides the env here — the endpoint_url rides the TurnSpec
+    Only the grant rides the env here — the endpoint_url rides the TurnSpec
     (:func:`agent_bedrock_endpoint_url`). Empty when the broker is off/misconfigured.
     """
     if broker_base_url() is None:
