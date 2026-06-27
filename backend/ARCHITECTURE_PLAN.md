@@ -466,7 +466,6 @@ maintain separate integrations for each provider.
 
 ```python
 # .env
-AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=sk-or-...
 OPENROUTER_MODEL=anthropic/claude-sonnet-4
 

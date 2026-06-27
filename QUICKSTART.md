@@ -18,21 +18,23 @@ cd kubepanion
 cp .env.example .env
 ```
 
-Edit `.env` with your preferred AI provider:
+Edit `.env`. There is no AI_PROVIDER: inference runs through the Claude Code CLI
+(default) and, when enabled, the sandboxed inkwest-agent. The backend each talks
+to is set by its own credentials; execution mode is `AGENTIC_ENGINES`.
 
 ```bash
-# Option A: Claude CLI (default, no API key needed)
-AI_PROVIDER=claude-cli
+# Default: claude-cli engine, no API key needed
+# AGENTIC_ENGINES=claude-cli
 
-# Option B: Anthropic (recommended for production)
-AI_PROVIDER=anthropic
+# Anthropic API backend for the CLI
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Option C: AWS Bedrock
-AI_PROVIDER=bedrock
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
+# OR an AWS Bedrock backend (required when inkwest-agent is enabled)
+# AWS_REGION=us-east-1
+# AWS_ACCESS_KEY_ID=AKIA...
+# AWS_SECRET_ACCESS_KEY=...
+# AWS_BEARER_TOKEN_BEDROCK=...
+# AGENTIC_ENGINES=claude-cli,inkwest-agent
 ```
 
 ## 2. Add Kubeconfigs
@@ -93,7 +95,7 @@ docker compose up -d
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AI_PROVIDER` | AI backend: `claude-cli`, `anthropic`, `bedrock` | `claude-cli` |
+| `AGENTIC_ENGINES` | Enabled engines (CSV): `claude-cli`, `inkwest-agent` | `claude-cli` |
 | `ANTHROPIC_API_KEY` | Anthropic API key | - |
 | `AWS_REGION` | AWS region for Bedrock | - |
 | `KUBECONFIG_DIR` | Host path to kubeconfigs | `./kubeconfigs` |
