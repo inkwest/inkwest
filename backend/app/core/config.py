@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/inkwest"
 
+    # DEPRECATED, ignored — TEMPORARY migration shim. AI_PROVIDER was removed (dispatch
+    # is engine-only — see AGENTIC_ENGINES). Kept only as an accepted-but-unused field
+    # so a stale value lingering in a .env file, compose env_file, or k8s manifest does
+    # not trip pydantic-settings' extra=forbid and crash startup during migration.
+    # Nothing reads it. Drop once every env (local + the deployed
+    # manifests) has been scrubbed of AI_PROVIDER.
+    ai_provider: str | None = None
+
     # Agentic engines enabled in this deployment (CSV). An engine is *which
     # agentic loop* runs a turn — the single driver of a turn, decoupled from the
     # inference backend (the CLI/sandbox configures its own):
