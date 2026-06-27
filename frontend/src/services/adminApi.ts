@@ -238,6 +238,8 @@ export interface CatalogStatus {
   last_refreshed_at: string | null;
   source: 'live' | 'static';
   last_fetch_failed: boolean;
+  /** Last discovery error message (so a failed refresh isn't silent); null when clean. */
+  error: string | null;
   count: number;
 }
 

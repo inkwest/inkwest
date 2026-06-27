@@ -30,7 +30,9 @@ direct-Anthropic-key shape can be added later without touching the route body.
 ## Enable
 
 1. **Backend process env**: `LLM_BROKER_ENABLED=true`, `AWS_BEARER_TOKEN_BEDROCK=<real key>`,
-   `AWS_REGION=<region>`. The bearer lives **only here** now.
+   `AWS_REGION=<region>`. The bearer lives **only here** now — and the model-catalog discovery
+   (`model_catalog`) reads it from the **backend settings** too (never `sandbox.env`), so
+   stripping the sandbox cred in step 3 doesn't break catalog refresh.
 2. **`MCP_PROXY_BASE_URL` must be set** — the broker base URL is `<that host>/api/llm-proxy`,
    so it inherits the MCP proxy's squid allowlist + host-gateway `--add-host` (see Squid). If
    it is unset the broker logs a warning and falls back to direct Bedrock.

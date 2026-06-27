@@ -22,6 +22,7 @@ def reset_catalog_state():
     model_catalog._live_models = None
     model_catalog._fetched_at = 0.0
     model_catalog._last_fetch_failed = False
+    model_catalog._last_fetch_error = None
     model_catalog._modalities = {}
     model_catalog._profile_arns = {}
 
@@ -33,6 +34,7 @@ def _settings(**overrides):
         "aws_region": "eu-west-1",
         "aws_access_key_id": None,
         "aws_secret_access_key": None,
+        "aws_bearer_token_bedrock": None,
         "aws_cli_path": "aws",
         "claude_cli_models": "",
         "sandbox_enabled": False,
@@ -125,15 +127,8 @@ async def test_refresh_catalog_claude_cli_auto_discovers():
 
 
 @pytest.mark.asyncio
-async def test_fetch_claude_cli_models_bedrock_sandbox(tmp_path):
-    """Sandbox env configuring Bedrock drives a Bedrock catalog fetch."""
-    env_file = tmp_path / "sandbox.env"
-    env_file.write_text(
-        "CLAUDE_CODE_USE_BEDROCK=1\n"
-        "AWS_BEARER_TOKEN_BEDROCK=secret-token\n"  # pragma: allowlist secret
-        "AWS_REGION=eu-west-1\n"
-        "# ANTHROPIC_MODEL=ignored-comment\n"
-    )
+async def test_fetch_claude_cli_models_bedrock_from_backend_settings():
+    """A backend Bedrock key (NOT sandbox.env) drives a Bedrock catalog fetch."""
     bedrock_fetch = AsyncMock(return_value=["eu.anthropic.claude-sonnet-4-5-20250929-v1:0"])
     with (
         patch.object(
@@ -141,8 +136,11 @@ async def test_fetch_claude_cli_models_bedrock_sandbox(tmp_path):
             "get_settings",
             return_value=_settings(
                 ai_provider="claude-cli",
+                aws_bearer_token_bedrock="secret-token",  # pragma: allowlist secret
+                aws_region="eu-west-1",
+                # sandbox.env is irrelevant now — set it to prove it is NOT read.
                 sandbox_enabled=True,
-                sandbox_env_file=str(env_file),
+                sandbox_env_file="/does/not/exist.env",
             ),
         ),
         patch.object(model_catalog, "_fetch_bedrock_models", bedrock_fetch),
@@ -160,9 +158,37 @@ async def test_fetch_claude_cli_models_bedrock_sandbox(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_fetch_claude_cli_models_anthropic_key(tmp_path):
-    env_file = tmp_path / "sandbox.env"
-    env_file.write_text("ANTHROPIC_API_KEY=acme-sandbox\n")  # pragma: allowlist secret
+async def test_fetch_claude_cli_models_bedrock_sigv4_from_backend_settings():
+    """SigV4 access keys (no bearer) also drive Bedrock discovery from backend settings."""
+    bedrock_fetch = AsyncMock(return_value=["eu.anthropic.claude-opus-4-7"])
+    with (
+        patch.object(
+            model_catalog,
+            "get_settings",
+            return_value=_settings(
+                ai_provider="claude-cli",
+                aws_bearer_token_bedrock=None,
+                aws_access_key_id="AKIA",  # pragma: allowlist secret
+                aws_secret_access_key="shhh",  # pragma: allowlist secret
+                aws_region="eu-west-1",
+            ),
+        ),
+        patch.object(model_catalog, "_fetch_bedrock_models", bedrock_fetch),
+    ):
+        models = await model_catalog._fetch_claude_cli_models()
+    assert models == ["eu.anthropic.claude-opus-4-7"]
+    bedrock_fetch.assert_awaited_once_with(
+        region="eu-west-1",
+        extra_env={
+            "AWS_ACCESS_KEY_ID": "AKIA",  # pragma: allowlist secret
+            "AWS_SECRET_ACCESS_KEY": "shhh",  # pragma: allowlist secret
+            "AWS_REGION": "eu-west-1",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_claude_cli_models_anthropic_key_from_backend_settings():
     anthropic_fetch = AsyncMock(return_value=["claude-fable-5"])
     with (
         patch.object(
@@ -170,8 +196,8 @@ async def test_fetch_claude_cli_models_anthropic_key(tmp_path):
             "get_settings",
             return_value=_settings(
                 ai_provider="claude-cli",
-                sandbox_enabled=True,
-                sandbox_env_file=str(env_file),
+                aws_bearer_token_bedrock=None,
+                anthropic_api_key="sk-backend",  # pragma: allowlist secret
             ),
         ),
         patch.object(model_catalog, "_fetch_anthropic_models", anthropic_fetch),
@@ -180,23 +206,23 @@ async def test_fetch_claude_cli_models_anthropic_key(tmp_path):
 
     assert models == ["claude-fable-5"]
     anthropic_fetch.assert_awaited_once_with(
-        api_key="acme-sandbox",  # pragma: allowlist secret
+        api_key="sk-backend",  # pragma: allowlist secret
         base_url=None,
     )
 
 
 @pytest.mark.asyncio
-async def test_fetch_claude_cli_models_undetectable_backend(tmp_path):
-    """Vertex / keyless gateway: nothing to query -> static fallback."""
-    env_file = tmp_path / "sandbox.env"
-    env_file.write_text("CLAUDE_CODE_USE_VERTEX=1\n")
+async def test_fetch_claude_cli_models_undetectable_backend():
+    """No Bedrock key/creds and no Anthropic key -> nothing to query -> static fallback."""
     with patch.object(
         model_catalog,
         "get_settings",
         return_value=_settings(
             ai_provider="claude-cli",
-            sandbox_enabled=True,
-            sandbox_env_file=str(env_file),
+            aws_bearer_token_bedrock=None,
+            aws_access_key_id=None,
+            aws_secret_access_key=None,
+            anthropic_api_key=None,
         ),
     ):
         assert await model_catalog._fetch_claude_cli_models() is None
@@ -837,4 +863,36 @@ def test_catalog_status_reports_static_when_no_live_models():
         status = catalog_status()
     assert status["source"] == "static"
     assert status["last_refreshed_at"] is None
+    assert status["error"] is None
     assert status["count"] > 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_captures_then_clears_fetch_error():
+    """A failed discovery surfaces its error (not a silent static fallback); a later good
+    fetch clears it."""
+    boom = AsyncMock(side_effect=RuntimeError("aws auth boom"))
+    with (
+        patch.object(
+            model_catalog, "get_settings", return_value=_settings(ai_provider="anthropic")
+        ),
+        patch.object(model_catalog, "_fetch_anthropic_models", boom),
+        patch.object(model_catalog, "_refresh_live_pricing", AsyncMock()),
+    ):
+        await refresh_catalog(force=True)
+        status = catalog_status()
+        assert status["last_fetch_failed"] is True
+        assert "aws auth boom" in (status["error"] or "")
+
+    ok = AsyncMock(return_value=["claude-fable-5"])
+    with (
+        patch.object(
+            model_catalog, "get_settings", return_value=_settings(ai_provider="anthropic")
+        ),
+        patch.object(model_catalog, "_fetch_anthropic_models", ok),
+        patch.object(model_catalog, "_refresh_live_pricing", AsyncMock()),
+    ):
+        await refresh_catalog(force=True)
+        status = catalog_status()
+        assert status["last_fetch_failed"] is False
+        assert status["error"] is None
