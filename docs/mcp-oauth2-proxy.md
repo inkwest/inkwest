@@ -20,7 +20,15 @@
 >   fetches are IP-pinned; requires single-worker / session affinity. **Still pending: rollout
 >   step 0** — the live end-to-end check that the headless CLI honours `HTTP_PROXY` through
 >   squid (needs the real toolbox/squid; manual acceptance gate, not unit-testable).
-> - The body sections below predate both increments; treat the four bullets above as the
+> - **Static HTTP catalog brokering (later increment).** The same reverse proxy now also fronts
+>   **static** `MCP_CATALOG` servers of the HTTP/SSE kind: `mcp_config.build_session_static_servers`
+>   rewrites them to `/api/mcp-proxy/{key}/` + an internal JWT (no per-user grant — the credential
+>   is a shared, server-side catalog secret), and `mcp_proxy.py` resolves a non-oauth key via
+>   `mcp_catalog.get_static_http_server` and injects the def's real `headers` (Authorization OR a
+>   custom header like `X-API-Key`). A static HTTP server's apikey no longer enters the sandbox.
+>   **stdio** catalog servers are NOT brokered (local process, no upstream URL) and stay verbatim;
+>   with `MCP_PROXY_BASE_URL` unset, all static entries fall back to verbatim injection.
+> - The body sections below predate these increments; treat the bullets above as the
 >   source of truth where they conflict.
 
 **TL;DR**: Extend the static MCP catalog with `auth: oauth2` entries. Backend brokers the

@@ -294,3 +294,125 @@ async def test_unknown_key_is_404() -> None:
             resp = await c.post("/api/mcp-proxy/ghost/", headers=_bearer("ghost"), content=b"{}")
     assert resp.status_code == 404
     mcp_proxy._transport = None
+
+
+# --- static catalog HTTP servers (broker the shared API key, never inject it in the sandbox) ---
+
+STATIC_URL = "https://static-mcp.example.com/mcp"
+
+
+def _static_patches(handler, *, server_def):
+    """Patch the route for a STATIC catalog key: no oauth server, no DB/token — the broker
+    injects the def's real headers and forwards."""
+    from app.api.routes import mcp_proxy
+
+    mcp_proxy._transport = httpx.MockTransport(handler)
+    return [
+        patch("app.api.routes.mcp_proxy.get_oauth_server", return_value=None),
+        patch("app.api.routes.mcp_proxy.get_static_http_server", return_value=server_def),
+        patch("app.services.mcp_oauth._resolve_ips", lambda host: ["93.184.216.34"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_static_injects_real_headers_and_drops_internal_jwt() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        seen["api_key"] = request.headers.get("x-api-key")
+        seen["proto"] = request.headers.get("mcp-protocol-version")
+        seen["body"] = request.content
+        seen["url"] = str(request.url)
+        return _streaming(200, b'{"ok":true}')
+
+    server_def = {"type": "http", "url": STATIC_URL, "headers": {"X-API-Key": "REALKEY"}}
+    ps = _static_patches(handler, server_def=server_def)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/cx/",
+                headers={**_bearer("cx"), "MCP-Protocol-Version": "2025-06-18"},
+                content=b'{"jsonrpc":"2.0"}',
+            )
+        assert resp.status_code == 200
+        assert resp.content == b'{"ok":true}'
+        assert seen["api_key"] == "REALKEY"  # noqa: S105 # pragma: allowlist secret
+        assert seen["auth"] is None  # inbound internal JWT dropped, not forwarded upstream
+        assert seen["proto"] == "2025-06-18"  # allowlisted client header still forwarded
+        assert seen["body"] == b'{"jsonrpc":"2.0"}'
+        assert seen["url"].endswith("/mcp")  # path preserved (host is IP-pinned by pin_url)
+        assert b"REALKEY" not in resp.content
+    finally:
+        for p in ps:
+            p.stop()
+        from app.api.routes import mcp_proxy
+
+        mcp_proxy._transport = None
+
+
+@pytest.mark.asyncio
+async def test_static_token_minted_for_other_key_is_401() -> None:
+    """A JWT minted for key A must not be replayed against static key B."""
+    server_def = {"type": "http", "url": STATIC_URL, "headers": {}}
+    ps = _static_patches(lambda r: _streaming(200), server_def=server_def)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post("/api/mcp-proxy/cx/", headers=_bearer("other"), content=b"{}")
+        assert resp.status_code == 401
+    finally:
+        for p in ps:
+            p.stop()
+        from app.api.routes import mcp_proxy
+
+        mcp_proxy._transport = None
+
+
+@pytest.mark.asyncio
+async def test_static_ssrf_rejected_is_502() -> None:
+    server_def = {"type": "http", "url": STATIC_URL, "headers": {"X-API-Key": "REALKEY"}}
+    ps = _static_patches(lambda r: _streaming(200), server_def=server_def)
+    ps.append(patch("app.services.mcp_oauth._resolve_ips", lambda host: ["10.0.0.1"]))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post("/api/mcp-proxy/cx/", headers=_bearer("cx"), content=b"{}")
+        assert resp.status_code == 502
+    finally:
+        for p in ps:
+            p.stop()
+        from app.api.routes import mcp_proxy
+
+        mcp_proxy._transport = None
+
+
+@pytest.mark.asyncio
+async def test_static_dot_segment_is_400() -> None:
+    fired = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fired["n"] += 1
+        return _streaming(200)
+
+    server_def = {"type": "http", "url": STATIC_URL, "headers": {}}
+    ps = _static_patches(handler, server_def=server_def)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/cx/%2e%2e/evil", headers=_bearer("cx"), content=b"{}"
+            )
+        assert resp.status_code == 400
+        assert fired["n"] == 0
+    finally:
+        for p in ps:
+            p.stop()
+        from app.api.routes import mcp_proxy
+
+        mcp_proxy._transport = None
