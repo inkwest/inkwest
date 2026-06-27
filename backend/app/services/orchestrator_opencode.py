@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
+from app.services import llm_broker
 from app.services.ai_cli_client import execute_opencode, parse_opencode_response
 from app.services.ai_client import resolve_session_model
 from app.services.budget_service import record_usage
@@ -270,6 +271,10 @@ async def orchestrate_chat_opencode(
             )
 
     container: str | None = None
+    # LLM auth broker grant + base. Declared here so the finally always burns the grant;
+    # MINTED inside the try (below) so a failure can never leak a grant the finally can't see.
+    broker_env: dict[str, str] = {}
+    broker_base: str | None = None
     # On an abnormal exit (cancel / timeout / crash) we TEAR DOWN the conv container rather
     # than just releasing it: opencode's bash can spawn children (kubectl, long curls) that a
     # SIGKILL of opencode alone would orphan in the container. Killing the container reaps the
@@ -293,6 +298,16 @@ async def orchestrate_chat_opencode(
                 extra={"session_id": session_id_str},
             )
             resume = False
+
+        # LLM auth broker (llm_broker_enabled): route opencode's model call through the backend
+        # proxy. The provider gets the broker base as `baseURL` (it appends /model/{id}/{op},
+        # the broker route); the per-turn grant rides the env as AWS_BEARER_TOKEN_BEDROCK,
+        # injected via docker exec -e so it overrides the env-file value for opencode's process.
+        # With the broker on, sandbox.env drops the real key (see sandbox.env.example / docs), so
+        # the only Bedrock token in the sandbox is this ephemeral grant — burned at turn end
+        # (finally). Off ⇒ empty/None ⇒ opencode uses the sandbox.env key direct (today's behavior).
+        broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
+        broker_base = llm_broker.agent_bedrock_endpoint_url()
 
         # Materialize this turn's skill bodies into the sandbox (claude/skills, mounted at
         # <home>/.claude/skills — readable by opencode). Same cadence/dir as the other engines.
@@ -333,6 +348,11 @@ async def orchestrate_chat_opencode(
         }
         if mcp_block:
             opencode_cfg["mcp"] = mcp_block
+        # LLM broker on: point opencode's amazon-bedrock provider at the proxy base. opencode
+        # (AI SDK) appends /model/{id}/{op} to baseURL — the broker route shape. The grant
+        # (AWS_BEARER_TOKEN_BEDROCK) rides the spawn env below. Off ⇒ no baseURL ⇒ direct Bedrock.
+        if broker_base:
+            opencode_cfg["provider"] = {"amazon-bedrock": {"options": {"baseURL": broker_base}}}
         with open(opencode_json, "w", encoding="utf-8") as f:
             json.dump(opencode_cfg, f)
 
@@ -373,7 +393,7 @@ async def orchestrate_chat_opencode(
                 model=model,
                 resume=resume,
                 docker_path=settings.sandbox_docker_path,
-                extra_env=connector_env or None,
+                extra_env={**connector_env, **broker_env} or None,
                 timeout=settings.claude_cli_timeout,
                 cancel_event=cancel_event,
             )
@@ -500,6 +520,9 @@ async def orchestrate_chat_opencode(
     finally:
         from app.services import sandbox
 
+        # Burn this turn's broker grant: the injected AWS_BEARER_TOKEN_BEDROCK is dead the moment
+        # the turn ends, bounding a leaked grant to the turn. No-op when the broker was off.
+        llm_broker.burn_env(broker_env)
         # Remove the cred-bearing opencode.json (MCP headers/JWT) — must not outlive the turn.
         with contextlib.suppress(Exception):
             os.remove(os.path.join(sandbox.session_dir(session_id_str), "workdir", "opencode.json"))

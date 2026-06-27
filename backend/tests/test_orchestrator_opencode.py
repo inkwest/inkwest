@@ -155,6 +155,7 @@ class TestOrchestrateOpencode:
         async def fake_exec(session_id, user_message, **kwargs):
             cap["resume"] = kwargs.get("resume")
             cap["model"] = kwargs.get("model")
+            cap["extra_env"] = kwargs.get("extra_env")
             for line in exec_lines or []:
                 yield line
 
@@ -320,6 +321,71 @@ class TestOrchestrateOpencode:
             # Assert inside the patch context — the AsyncMock is reverted on exit.
             oo.record_usage.assert_awaited_once()
             assert oo.record_usage.await_args.kwargs["cost_usd"] == Decimal("0.0123")
+
+    @pytest.mark.asyncio
+    async def test_llm_broker_wiring_when_enabled(self):
+        # Broker on: opencode gets the proxy baseURL + the per-turn grant as the bearer env
+        # (overriding the real key for its process), and the grant is burned at turn end.
+        captured_cfg: dict = {}
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            with (
+                patch.object(
+                    oo.llm_broker,
+                    "agent_bedrock_endpoint_url",
+                    MagicMock(return_value="http://broker/api/llm-proxy"),
+                ),
+                patch.object(
+                    oo.llm_broker,
+                    "agent_broker_env",
+                    MagicMock(return_value={"AWS_BEARER_TOKEN_BEDROCK": "jwt-x"}),
+                ),
+                patch.object(oo.llm_broker, "burn_env", MagicMock()) as burn,
+                patch.object(oo.json, "dump", lambda cfg, f: captured_cfg.update(cfg)),
+            ):
+                await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=AsyncMock(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+                burn.assert_called_once()  # grant revoked in the finally
+        # Grant injected via the spawn env (docker exec -e overrides the real key).
+        assert cap["extra_env"]["AWS_BEARER_TOKEN_BEDROCK"] == "jwt-x"
+        # opencode.json points the amazon-bedrock provider at the broker base.
+        assert (
+            captured_cfg["provider"]["amazon-bedrock"]["options"]["baseURL"]
+            == "http://broker/api/llm-proxy"
+        )
+
+    @pytest.mark.asyncio
+    async def test_broker_off_uses_no_provider_override(self):
+        # Broker off (default): no provider baseURL, no bearer override → direct Bedrock.
+        captured_cfg: dict = {}
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es, patch.object(oo.json, "dump", lambda cfg, f: captured_cfg.update(cfg)):
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+        assert "provider" not in captured_cfg
+        assert "AWS_BEARER_TOKEN_BEDROCK" not in (cap["extra_env"] or {})
 
     @pytest.mark.asyncio
     async def test_expired_aws_creds_emit_connector_required(self):
