@@ -21,7 +21,6 @@ const LLAMA = {
 
 // Single-engine deployment: plain model names, no engine choice.
 const CONFIG_CLI = {
-  provider: 'anthropic',
   model: 'claude-sonnet-4-20250514',
   default_engine: 'claude-cli',
   engines: ['claude-cli'],
@@ -34,7 +33,6 @@ const CONFIG_CLI = {
 
 // Both engines on: Engine·Model pairs. Claude → both engines, Llama → agent only.
 const CONFIG_BOTH = {
-  provider: 'claude-cli',
   model: 'claude-sonnet-4-20250514',
   default_engine: 'claude-cli',
   engines: ['claude-cli', 'inkwest-agent'],
@@ -61,8 +59,8 @@ function setSession(model: string | null, engine: string | null = null) {
   });
 }
 
-const trigger = () => screen.getByTitle('Provider: anthropic · Model for this conversation');
-const triggerBoth = () => screen.getByTitle('Provider: claude-cli · Model for this conversation');
+const trigger = () => screen.getByTitle('Model for this conversation');
+const triggerBoth = () => screen.getByTitle('Model for this conversation');
 
 describe('SessionModelSelect', () => {
   beforeEach(() => {
@@ -72,7 +70,7 @@ describe('SessionModelSelect', () => {
 
   it('renders nothing without an active session', () => {
     render(<SessionModelSelect />);
-    expect(screen.queryByTitle(/Provider:/)).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Model for this conversation')).not.toBeInTheDocument();
   });
 
   it('shows the Default entry when unpinned and changes the model on the fly', async () => {

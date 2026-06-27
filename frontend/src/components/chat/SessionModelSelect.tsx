@@ -24,7 +24,7 @@ export function SessionModelSelect({ className }: { className?: string }) {
       allowDisabledCurrent
       className={className}
       menuClassName="bottom-full mb-1 right-0 w-96 max-w-[calc(100vw-2rem)]"
-      title={`Provider: ${config.provider} · Model for this conversation`}
+      title="Model for this conversation"
       onChange={(model, engine) => {
         // Best-effort: server rejected (e.g. model disabled after this tab loaded its
         // config) → the store keeps the previous value and the trigger snaps back;

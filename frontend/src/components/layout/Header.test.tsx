@@ -107,7 +107,6 @@ describe('Header', () => {
   it('renders no default-model badge (selection moved to the chat toolbar picker)', () => {
     useConfigStore.setState({
       config: {
-        provider: 'anthropic',
         model: 'claude-sonnet-4-20250514',
         default_engine: 'claude-cli',
         engines: ['claude-cli'],

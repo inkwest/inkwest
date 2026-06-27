@@ -109,7 +109,6 @@ export function SystemInfoPage() {
               <InfoList
                 rows={[
                   { label: 'Environment', value: info.app_env },
-                  { label: 'AI provider', value: info.ai_provider },
                   { label: 'Default model', value: info.default_model, mono: true },
                   { label: 'Engines', value: info.engines.join(', ') },
                   { label: 'Auth mode', value: info.oidc_enabled ? 'OIDC' : 'Dev (auto-login)' },

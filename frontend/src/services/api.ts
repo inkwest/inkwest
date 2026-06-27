@@ -271,7 +271,6 @@ export interface ModelInfo {
 }
 
 export interface AppConfig {
-  provider: string;
   /** Default model (ID) applied when a session has no explicit choice. */
   model: string;
   /** The engine the default model runs on (admin choice, else resolved heuristically). */
