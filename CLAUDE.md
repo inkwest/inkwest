@@ -44,7 +44,7 @@ pre-commit run --all-files
 ```
 backend/app/api/routes/     # FastAPI route handlers
 backend/app/api/dependencies.py  # Auth + DB injection
-backend/app/services/       # Orchestrators, AI client, tools, budget; agent_mcp_config.py (P1.7: broker materializes a conversation's enabled MCP server defs into a sandbox file, removed on turn end as it can embed creds)
+backend/app/services/       # Orchestrators, AI client, tools, budget; agent_mcp_config.py (P1.7: broker materializes a conversation's enabled MCP server defs into a sandbox file, removed on turn end as it can embed creds). MCP credential brokering: static catalog HTTP/SSE servers (`mcp_catalog.py`) are rewritten to `/api/mcp-proxy/{key}/` + an internal JWT (like OAuth2) by `mcp_config.build_session_static_servers`, so their real headers/apikey never enter the sandbox — `mcp_proxy.py` injects them server-side; stdio servers can't be brokered (local process) and stay verbatim. Needs `mcp_proxy_base_url`; unset ⇒ verbatim fallback
 backend/app/models/         # SQLAlchemy models
 backend/app/core/           # Config, auth, database, logging
 backend/app/tools/          # kubectl definitions, executor, validation

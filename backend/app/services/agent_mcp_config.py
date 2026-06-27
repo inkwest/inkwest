@@ -113,12 +113,19 @@ async def write_agent_mcp_config_with_oauth(
         return None, []
     # Lazy import: avoids a circular import (mcp_config imports nothing here, but keeps
     # the static-only path free of the oauth/DB dependency chain).
-    from app.services.mcp_config import oauth_proxy_servers_for
+    from app.services.mcp_config import build_session_static_servers, oauth_proxy_servers_for
 
-    static_servers = build_mcp_servers(enabled_keys)
-    # No ``existing`` passed: unlike the CLI's .claude.json (kept stable for idempotency), the
-    # broker removes this cred-bearing file every turn and re-materializes it, so a fresh
-    # internal JWT per turn is intentional and harmless — it never accumulates on disk.
+    # Static HTTP catalog servers are brokered (proxy URL + internal JWT) so their real headers
+    # never enter the sandbox — same as the CLI path; stdio servers stay verbatim. ``existing={}``:
+    # this cred-bearing file is removed + re-materialized every turn, so a fresh JWT per turn is
+    # intentional (never accumulates on disk). Falls back to verbatim when the broker is unwired.
+    static_servers = build_session_static_servers(
+        enabled_keys,
+        base=get_settings().mcp_proxy_base_url,
+        user_id=user_id,
+        session_id=session_id,
+        existing={},
+    )
     oauth_servers, dead = await oauth_proxy_servers_for(
         session_id, enabled_keys, user_id=user_id, db=db
     )

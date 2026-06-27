@@ -34,6 +34,7 @@ from app.api.routes._proxy_stream import (
 from app.core.constants import MCP_PROXY_MAX_BODY_BYTES
 from app.core.database import async_session_maker
 from app.services import mcp_oauth
+from app.services.mcp_catalog import get_static_http_server
 from app.services.mcp_oauth import GrantDeadError, McpOauthError
 from app.services.mcp_oauth_catalog import get_oauth_server
 from app.services.mcp_proxy_token import ProxyAuthError, ProxyClaims, verify
@@ -62,9 +63,14 @@ def _bearer(request: Request) -> str:
     return token
 
 
-def _request_headers(request: Request, upstream_token: str) -> dict[str, str]:
+def _request_headers(request: Request, inject: dict[str, str]) -> dict[str, str]:
+    # Forward only the allowlisted client headers, then layer the upstream credential on top.
+    # oauth -> a single ``Authorization: Bearer <real-token>``; static catalog -> the def's real
+    # headers (may be ``Authorization`` OR a custom header like ``X-API-Key``). The inbound
+    # internal JWT rides ``Authorization``, which is NOT in _FORWARD_REQ, so it is dropped before
+    # ``inject`` wins — the sandbox's token never reaches the upstream.
     headers = {k: v for k, v in request.headers.items() if k.lower() in _FORWARD_REQ}
-    headers["Authorization"] = f"Bearer {upstream_token}"
+    headers.update(inject)
     return headers
 
 
@@ -92,17 +98,27 @@ async def _forward(
 
 @router.api_route("/mcp-proxy/{key}/{path:path}", methods=["GET", "POST", "DELETE"])
 async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
+    # Resolve the key: an OAuth2 server (per-user vault token, refreshed) OR a static catalog
+    # HTTP server (shared server-side headers from MCP_CATALOG). Either way the sandbox holds
+    # only the internal JWT; the real credential is injected here. stdio catalog servers carry
+    # no URL (get_static_http_server returns None), so they are never brokered through this route.
     server = get_oauth_server(key)
-    if server is None:
-        raise HTTPException(status_code=404, detail="Unknown OAuth2 MCP server")
+    static_def = get_static_http_server(key) if server is None else None
+    if server is None and static_def is None:
+        raise HTTPException(status_code=404, detail="Unknown MCP server")
     try:
         claims: ProxyClaims = verify(_bearer(request), mcp_key=key)
     except ProxyAuthError as e:
         raise HTTPException(status_code=401, detail=str(e)) from e
 
+    if server is not None:
+        upstream_base = server.url
+    else:
+        assert static_def is not None  # narrowed by the 404 guard above
+        upstream_base = static_def["url"]
     # SSRF defence-in-depth: the catalog URL is admin-set, but verify it before fetching.
     try:
-        mcp_oauth.assert_public_https(server.url)
+        mcp_oauth.assert_public_https(upstream_base)
     except McpOauthError as e:
         raise HTTPException(status_code=502, detail="MCP server URL rejected") from e
 
@@ -112,9 +128,21 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Invalid proxy path")
 
     body = await read_capped_body(request, MCP_PROXY_MAX_BODY_BYTES)  # buffer once for 401-retry
-    url = _upstream_url(server.url, path)
+    url = _upstream_url(upstream_base, path)
     if request.url.query:
         url = f"{url}?{request.url.query}"
+
+    # Static catalog HTTP server: inject the def's real headers (the shared credential the
+    # sandbox never sees) and stream — no vault, no token refresh, no DB session.
+    if static_def is not None:
+        return await _proxy_static(
+            request,
+            url=url,
+            headers=static_def.get("headers") or {},
+            body=body,
+            key=key,
+            session_id=claims.session_id,
+        )
 
     db: AsyncSession = async_session_maker()
     client = httpx.AsyncClient(transport=_transport, timeout=TIMEOUT)
@@ -131,7 +159,7 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
             client,
             method=request.method,
             url=url,
-            headers=_request_headers(request, token),
+            headers=_request_headers(request, {"Authorization": f"Bearer {token}"}),
             body=body,
         )
         if upstream.status_code == 401:
@@ -145,7 +173,7 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
                 client,
                 method=request.method,
                 url=url,
-                headers=_request_headers(request, token),
+                headers=_request_headers(request, {"Authorization": f"Bearer {token}"}),
                 body=body,
             )
             if upstream.status_code == 401:
@@ -164,6 +192,49 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
         raise HTTPException(status_code=503, detail=_UNAVAILABLE) from None
     finally:
         await db.close()  # token work is done; never pin a DB conn for the stream lifetime
+        if upstream is None:
+            await client.aclose()
+
+    return StreamingResponse(
+        upstream.aiter_raw(),
+        status_code=upstream.status_code,
+        headers=filter_headers(upstream.headers, HOP_BY_HOP),
+        background=BackgroundTask(close_stream, upstream, client),
+    )
+
+
+async def _proxy_static(
+    request: Request,
+    *,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    key: str,
+    session_id: object,
+) -> StreamingResponse:
+    """Forward to a static catalog HTTP server, injecting its real headers server-side.
+
+    Simpler than the oauth path: the credential is a shared, static catalog secret, so there is
+    no vault lookup, no token refresh, and no 401-retry — and no DB session to manage. Same
+    single-teardown contract: on success the client + stream outlive this handler (closed by the
+    BackgroundTask); on a pre-handoff failure, close the client here."""
+    client = httpx.AsyncClient(transport=_transport, timeout=TIMEOUT)
+    upstream: httpx.Response | None = None
+    try:
+        upstream = await _forward(
+            client,
+            method=request.method,
+            url=url,
+            headers=_request_headers(request, headers),
+            body=body,
+        )
+    except httpx.HTTPError:
+        logger.exception(
+            "mcp_proxy_static_upstream_error",
+            extra={"mcp_key": key, "session_id": str(session_id)},
+        )
+        raise HTTPException(status_code=502, detail="MCP upstream error") from None
+    finally:
         if upstream is None:
             await client.aclose()
 

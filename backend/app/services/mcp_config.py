@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.mcp_user_token import McpUserToken
-from app.services.mcp_catalog import build_mcp_servers, get_mcp_catalog
+from app.services.mcp_catalog import build_mcp_servers, get_mcp_catalog, is_http_server
 from app.services.mcp_oauth_catalog import get_oauth_catalog
 from app.services.mcp_proxy_token import mint_stable
 
@@ -198,6 +198,51 @@ async def oauth_proxy_servers_for(
     )
 
 
+def build_session_static_servers(
+    enabled_keys: list[str],
+    *,
+    base: str,
+    user_id: UUID | None,
+    session_id: str,
+    existing: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """``mcpServers`` entries for the enabled STATIC catalog keys, brokered where possible.
+
+    An HTTP/SSE catalog server is rewritten to a proxy entry — the in-app ``/api/mcp-proxy/{key}/``
+    URL + a mint-stable internal JWT — so its real ``headers`` (the API key/token) never enter the
+    sandbox; the broker injects them server-side (see :mod:`app.api.routes.mcp_proxy`). A stdio
+    server is emitted verbatim (it runs a local process in the sandbox — no upstream URL to
+    broker). When the broker isn't wired (no ``base``) or there is no ``user_id`` to bind a token
+    to, EVERY entry falls back to verbatim — today's behavior (creds in the container).
+
+    Mirrors :func:`_oauth_proxy_servers`' stable-JWT reuse so an unchanged selection stays a
+    no-op write on the CLI's persistent ``.claude.json``.
+    """
+    if not base or user_id is None:
+        return build_mcp_servers(enabled_keys)
+
+    catalog = get_mcp_catalog()
+    base = base.rstrip("/")
+    servers: dict[str, dict[str, Any]] = {}
+    for key in enabled_keys:
+        server_def = catalog.get(key)
+        if server_def is None:
+            continue  # not a static-catalog key (e.g. an oauth key) — handled elsewhere
+        if not is_http_server(server_def):
+            servers[key] = server_def  # stdio: not brokerable, inject verbatim
+            continue
+        prior = (existing.get(key) or {}).get("headers", {}).get("Authorization", "")
+        prior_jwt = prior[7:] if prior.lower().startswith("bearer ") else None
+        token = mint_stable(prior_jwt, user_id, UUID(session_id), key)
+        servers[key] = {
+            # Preserve the catalog's declared transport (http/sse); default http when unset.
+            "type": server_def.get("type") or "http",
+            "url": f"{base}/api/mcp-proxy/{key}/",
+            "headers": {"Authorization": f"Bearer {token}"},
+        }
+    return servers
+
+
 async def apply_session_mcp_selection(
     session_id: str, enabled_keys: list[str], *, user_id: UUID | None, db: AsyncSession
 ) -> list[str]:
@@ -225,7 +270,14 @@ async def apply_session_mcp_selection(
         session_id, enabled_keys, user_id=user_id, db=db, existing=existing_servers
     )
 
-    enabled_servers = {**build_mcp_servers(enabled_static), **oauth_servers}
+    static_servers = build_session_static_servers(
+        enabled_static,
+        base=get_settings().mcp_proxy_base_url,
+        user_id=user_id,
+        session_id=session_id,
+        existing=existing_servers,
+    )
+    enabled_servers = {**static_servers, **oauth_servers}
     catalog_keys = set(static_catalog) | set(oauth_catalog)
 
     merged = merge_mcp_selection(config, enabled_servers, catalog_keys)

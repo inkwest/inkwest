@@ -158,3 +158,76 @@ class TestOauthInjection:
         # Feature not wired (no base url): skipped silently, not reported as a dead grant.
         assert dead == []
         assert "notion" not in _servers(path)
+
+
+# --- static HTTP brokering (build_session_static_servers) ------------------------------
+
+_HTTP_DEF = {"type": "http", "url": "https://cx.example/mcp", "headers": {"X-API-Key": "SECRET"}}
+_STDIO_DEF = {"command": "npx", "args": ["some-mcp"]}
+
+
+def _patch_catalog(monkeypatch, catalog: dict) -> None:
+    """Patch the catalog at BOTH bindings: mcp_config's imported name (brokering branch) and
+    the mcp_catalog source (the verbatim build_mcp_servers fallback reads its own module)."""
+    from app.services import mcp_catalog, mcp_config
+
+    monkeypatch.setattr(mcp_config, "get_mcp_catalog", lambda: catalog)
+    monkeypatch.setattr(mcp_catalog, "get_mcp_catalog", lambda: catalog)
+
+
+def test_build_session_static_servers_brokers_http(monkeypatch):
+    from app.services import mcp_config
+
+    _patch_catalog(monkeypatch, {"cx": _HTTP_DEF})
+    out = mcp_config.build_session_static_servers(
+        ["cx"], base="http://alias:8000", user_id=_USER, session_id=_SID, existing={}
+    )
+    assert out["cx"]["url"] == "http://alias:8000/api/mcp-proxy/cx/"
+    assert out["cx"]["type"] == "http"
+    assert out["cx"]["headers"]["Authorization"].startswith("Bearer ")
+    assert "SECRET" not in json.dumps(out)  # real header never materialized
+
+
+def test_build_session_static_servers_stdio_verbatim(monkeypatch):
+    from app.services import mcp_config
+
+    _patch_catalog(monkeypatch, {"s": _STDIO_DEF})
+    out = mcp_config.build_session_static_servers(
+        ["s"], base="http://alias:8000", user_id=_USER, session_id=_SID, existing={}
+    )
+    assert out == {"s": _STDIO_DEF}  # stdio cannot be brokered — injected verbatim
+
+
+def test_build_session_static_servers_verbatim_when_base_unset(monkeypatch):
+    from app.services import mcp_config
+
+    _patch_catalog(monkeypatch, {"cx": _HTTP_DEF})
+    out = mcp_config.build_session_static_servers(
+        ["cx"], base="", user_id=_USER, session_id=_SID, existing={}
+    )
+    assert out == {"cx": _HTTP_DEF}  # broker unwired -> today's behavior (cred in container)
+
+
+def test_build_session_static_servers_verbatim_when_no_user(monkeypatch):
+    from app.services import mcp_config
+
+    _patch_catalog(monkeypatch, {"cx": _HTTP_DEF})
+    out = mcp_config.build_session_static_servers(
+        ["cx"], base="http://alias:8000", user_id=None, session_id=_SID, existing={}
+    )
+    assert out == {"cx": _HTTP_DEF}  # no user to bind a token to -> verbatim
+
+
+def test_build_session_static_servers_reuses_prior_jwt(monkeypatch):
+    """Stable JWT: an unchanged selection reuses the prior token so the .claude.json write
+    stays a no-op across turns."""
+    from app.services import mcp_config
+
+    _patch_catalog(monkeypatch, {"cx": _HTTP_DEF})
+    first = mcp_config.build_session_static_servers(
+        ["cx"], base="http://alias:8000", user_id=_USER, session_id=_SID, existing={}
+    )
+    second = mcp_config.build_session_static_servers(
+        ["cx"], base="http://alias:8000", user_id=_USER, session_id=_SID, existing=first
+    )
+    assert first["cx"]["headers"] == second["cx"]["headers"]  # token reused, not re-minted

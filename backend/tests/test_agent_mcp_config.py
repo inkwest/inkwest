@@ -125,13 +125,18 @@ async def test_with_oauth_merges_static_and_proxy_servers(tmp_path):
     """The agent config carries BOTH static-catalog defs and OAuth2 proxy entries —
     the gap this closes: OAuth2 MCP servers were invisible to the inkwest-agent engine."""
     (tmp_path / "claude").mkdir()
-    static_def = {"type": "http", "url": "https://cx.example/mcp"}
+    static_http = {
+        "type": "http",
+        "url": "https://cx.example/mcp",
+        "headers": {"X-API-Key": "SECRET"},
+    }
     proxy_def = {"type": "http", "url": "http://backend/api/mcp-proxy/notion/", "headers": {}}
-    s, d = _patches(tmp_path)
+    settings = _settings(tmp_path)
+    settings.mcp_proxy_base_url = "http://backend"
     with (
-        s,
-        d,
-        patch.object(amc, "build_mcp_servers", return_value={"cx": static_def}),
+        patch.object(amc, "get_settings", return_value=settings),
+        patch("app.services.sandbox.session_dir", return_value=str(tmp_path)),
+        patch("app.services.mcp_config.get_mcp_catalog", return_value={"cx": static_http}),
         patch(
             "app.services.mcp_config.oauth_proxy_servers_for",
             new=AsyncMock(return_value=({"notion": proxy_def}, [])),
@@ -143,8 +148,13 @@ async def test_with_oauth_merges_static_and_proxy_servers(tmp_path):
 
     assert path == "/home/agent/.claude/inkwest-agent-mcp.json"
     assert dead == []
-    written = json.loads((tmp_path / "claude" / "inkwest-agent-mcp.json").read_text())
-    assert written == {"mcpServers": {"cx": static_def, "notion": proxy_def}}
+    written = json.loads((tmp_path / "claude" / "inkwest-agent-mcp.json").read_text())["mcpServers"]
+    # Static HTTP cx is brokered: proxy URL + internal JWT, and the real X-API-Key is absent.
+    assert written["cx"]["url"] == "http://backend/api/mcp-proxy/cx/"
+    assert written["cx"]["headers"]["Authorization"].startswith("Bearer ")
+    assert "SECRET" not in json.dumps(written)
+    # OAuth2 notion proxy entry passed through unchanged.
+    assert written["notion"] == proxy_def
 
 
 async def test_with_oauth_returns_dead_keys_for_inactive_grant(tmp_path):

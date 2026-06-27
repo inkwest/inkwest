@@ -49,3 +49,24 @@ class TestBuildMcpServers:
         monkeypatch.setattr(mcp_catalog, "get_mcp_catalog", lambda: {"a": a, "b": b})
         # Unknown key ignored; order follows the requested keys.
         assert build_mcp_servers(["b", "unknown"]) == {"b": b}
+
+
+def test_is_http_server_classifies_transport():
+    """HTTP/SSE servers carry a url; stdio servers carry command/args. Only http is brokerable."""
+    from app.services.mcp_catalog import is_http_server
+
+    assert is_http_server({"type": "http", "url": "https://x/mcp"}) is True
+    assert is_http_server({"url": "https://x/mcp"}) is True  # type optional, url is the signal
+    assert is_http_server({"command": "npx", "args": ["x"]}) is False  # stdio
+    assert is_http_server({}) is False
+
+
+def test_get_static_http_server(monkeypatch):
+    from app.services import mcp_catalog
+
+    http = {"type": "http", "url": "https://x/mcp", "headers": {"X-API-Key": "k"}}
+    stdio = {"command": "npx", "args": ["y"]}
+    monkeypatch.setattr(mcp_catalog, "get_mcp_catalog", lambda: {"h": http, "s": stdio})
+    assert mcp_catalog.get_static_http_server("h") == http
+    assert mcp_catalog.get_static_http_server("s") is None  # stdio: not brokerable
+    assert mcp_catalog.get_static_http_server("missing") is None
