@@ -1,12 +1,11 @@
 """
 Tool-call execution — the DB-free half of the shared orchestration loop.
 
-Carved out of ``orchestrator_common.py``: running a batch of tool calls
-and yielding their ``ChatEvent``s needs no DB session, so it lives here, away from
-``finalize_turn`` (usage/stats persistence, which is sqlalchemy-bound). The two
-API-based orchestrators and the standalone ``inkwest_agent`` loop all share this —
-a fix in tool dispatch, the connector re-auth affordance, or cancel handling lands
-once for all three.
+Running a batch of tool calls and yielding their ``ChatEvent``s needs no DB session
+so it lives here, away from usage/stats persistence (sqlalchemy-bound).
+The sandboxed-agent orchestrator (``orchestrator_inkwest_agent``) and the standalone
+``inkwest_agent`` loop both share this — a fix in tool dispatch, the connector re-auth
+affordance, or cancel handling lands once for both.
 """
 
 import asyncio

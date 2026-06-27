@@ -239,7 +239,6 @@ class CatalogStatus(BaseModel):
 class ModelSettingsResponse(BaseModel):
     """Schema for model settings."""
 
-    provider: str
     default_model: str
     # The engine the default model runs on (admin choice, else resolved heuristically).
     default_engine: str
@@ -1145,7 +1144,6 @@ def _model_info(entry: model_registry.ModelEntry) -> ModelInfo:
 def _model_settings_response() -> ModelSettingsResponse:
     default_id = model_registry.default_model()
     return ModelSettingsResponse(
-        provider=get_settings().ai_provider,
         default_model=default_id,
         default_engine=engine_for_turn(default_id, configured_default_engine()),
         enabled_models=model_registry.selectable_models(),
@@ -1659,7 +1657,6 @@ class SystemInfoResponse(BaseModel):
     agent_image: str
     # Resolved runtime environment.
     app_env: str
-    ai_provider: str
     default_model: str
     # Agentic engines live in this deployment (AGENTIC_ENGINES).
     engines: list[str]
@@ -1685,13 +1682,12 @@ async def get_system_info(admin: AdminUser) -> SystemInfoResponse:
         app_build_timestamp=settings.build_timestamp,
         agent_image=settings.agent_image,
         app_env=settings.app_env,
-        ai_provider=settings.ai_provider,
         default_model=model_registry.default_model(),
         engines=enabled_engines(),
         oidc_enabled=settings.oidc_enabled,
         sandbox_enabled=settings.sandbox_enabled,
-        # Mirrors /api/config: attachments need the per-conversation sandbox (claude-cli).
-        attachments_enabled=settings.sandbox_enabled and settings.ai_provider == "claude-cli",
+        # Mirrors /api/config: attachments need the per-conversation sandbox.
+        attachments_enabled=settings.sandbox_enabled,
         secret_storage_enabled=mcp_oauth_catalog.secret_storage_enabled(),
         catalog=CatalogStatus(**catalog_status()),
     )

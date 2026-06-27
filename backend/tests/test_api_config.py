@@ -10,7 +10,7 @@ async def test_get_app_config(authenticated_client: AsyncClient) -> None:
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["provider"]
+    assert isinstance(data["engines"], list) and data["engines"]
     assert data["model"]
     available_ids = [m["id"] for m in data["available_models"]]
     assert data["model"] in available_ids

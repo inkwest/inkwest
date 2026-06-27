@@ -61,7 +61,7 @@ router = APIRouter(tags=["llm-proxy"])
 _transport: httpx.AsyncBaseTransport | None = None
 
 # Bedrock runtime operations the broker permits (the trailing path segment). converse /
-# converse-stream (Converse API, used by orchestrator_converse + the inkwest-agent) and
+# converse-stream (Converse API, used by the inkwest-agent) and
 # invoke / invoke-with-response-stream (InvokeModel, used by the Claude CLI on Bedrock).
 _ALLOWED_OPS = frozenset({"converse", "converse-stream", "invoke", "invoke-with-response-stream"})
 

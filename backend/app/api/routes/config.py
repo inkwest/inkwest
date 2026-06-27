@@ -40,7 +40,6 @@ class ModelInfo(BaseModel):
 class AppConfigResponse(BaseModel):
     """Schema for app config response."""
 
-    provider: str
     # Default model (ID) applied when a session has no explicit choice.
     model: str
     # The engine the default model runs on (admin choice, else resolved heuristically) —
@@ -51,9 +50,9 @@ class AppConfigResponse(BaseModel):
     engines: list[str]
     # Admin-enabled models users may pick per session.
     available_models: list[ModelInfo]
-    # Whether file attachments are usable: requires the per-conversation sandbox
-    # (claude-cli), the only orchestrator with a /workdir + @-file syntax. The UI
-    # hides the attach affordances when false.
+    # Whether file attachments are usable: requires the per-conversation sandbox,
+    # the only runtime with a /workdir + @-file syntax. The UI hides the attach
+    # affordances when false.
     attachments_enabled: bool
 
 
@@ -65,7 +64,6 @@ async def get_app_config(user: CurrentUser) -> AppConfigResponse:
     selectable = set(selectable_models())
     default_id = default_model()
     return AppConfigResponse(
-        provider=settings.ai_provider,
         model=default_id,
         default_engine=engine_for_turn(default_id, configured_default_engine()),
         engines=enabled_engines(),
@@ -80,5 +78,5 @@ async def get_app_config(user: CurrentUser) -> AppConfigResponse:
             for e in merged_entries()
             if e.model_id in selectable
         ],
-        attachments_enabled=settings.sandbox_enabled and settings.ai_provider == "claude-cli",
+        attachments_enabled=settings.sandbox_enabled,
     )

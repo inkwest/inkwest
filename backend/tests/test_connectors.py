@@ -604,7 +604,6 @@ def test_validate_settings_rejects_invalid_role_filter():
 
     with patch("app.core.config.get_settings") as mock_get:
         mock_get.return_value = MagicMock(
-            ai_provider="claude-cli",
             app_env="development",
             aws_sso_role_filter="([",  # unbalanced → re.error
         )

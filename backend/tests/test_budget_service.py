@@ -322,10 +322,9 @@ class TestBudgetServiceIntegration:
         session_id = uuid4()
         user_id = uuid4()
 
-        with patch("app.services.budget_service.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
-                ai_provider="anthropic",
-            )
+        # provider defaults to the engine that ran the turn (metrics task-context),
+        # aligning the UsageRecord dimension with the token/cost metrics.
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"):
             with patch("app.services.budget_service.default_model") as mock_model:
                 mock_model.return_value = "claude-sonnet-4-20250514"
 
@@ -347,7 +346,7 @@ class TestBudgetServiceIntegration:
                 assert record.input_tokens == 1000
                 assert record.output_tokens == 500
                 assert record.model == "claude-sonnet-4-20250514"
-                assert record.provider == "anthropic"
+                assert record.provider == "claude-cli"
                 # Cost should be calculated
                 # 1000 input at $3/M = $0.003
                 # 500 output at $15/M = $0.0075

@@ -481,7 +481,6 @@ async def test_get_system_info(admin_client: AsyncClient) -> None:
     assert "app_build_timestamp" in data
     # Agent image ref — the broker's worker image, or '' when the sandbox isn't configured.
     assert isinstance(data["agent_image"], str)
-    assert data["ai_provider"] == "claude-cli"
     assert isinstance(data["default_model"], str) and data["default_model"]
     # Runtime/feature state.
     assert isinstance(data["engines"], list)

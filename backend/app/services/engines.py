@@ -1,8 +1,8 @@
 """
 Agentic engines: which loop runs a turn, decoupled from the model backend.
 
-An *engine* is the agentic loop driving a conversation, distinct from
-``AI_PROVIDER`` (the model API/credentials):
+An *engine* is the agentic loop driving a conversation — the single driver of a
+turn, decoupled from the inference backend (the CLI/sandbox configures its own):
 
 - ``claude-cli``    — Claude Code CLI in the sandbox; Claude models only.
 - ``inkwest-agent`` — the custom Converse loop; every Bedrock vendor (Claude
@@ -15,9 +15,9 @@ The set of engines enabled in a deployment comes from ``AGENTIC_ENGINES``
 - the **catalog gate** (``inkwest_agent_enabled``): non-Claude Bedrock models are
   only surfaced when an engine that can run them is enabled — pointless to offer
   models no enabled engine can drive;
-- the **per-turn engine** (``resolve_engine``): the contract the Phase 1 broker
- consumes to dispatch a turn. First-class today (``session.engine``
-  reserved); the in-process orchestrator selection still routes by provider.
+- the **per-turn engine** (``resolve_engine`` / ``engine_for_turn``): how
+  ``get_orchestrator`` dispatches a turn (sandboxed agent vs CLI), reconciled
+  against the resolved model and any explicit ``session.engine`` pin.
 """
 
 from app.core.config import get_settings

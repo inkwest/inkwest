@@ -5,8 +5,8 @@ Owns everything the admin configures about models and everything the rest of the
 app reads about them:
 
 - which models users may pick (``selectable_models``) and the default
-  (``default_model``) — resolved against the *current* provider catalog so a
-  stale persisted choice (e.g. after an AI_PROVIDER switch) can never be served;
+  (``default_model``) — resolved against the *current* catalog so a stale
+  persisted choice (e.g. after a backend/catalog change) can never be served;
 - the merged view the admin/console UIs render (``merged_entries``): discovered
   models plus operator-added custom rows, each carrying label, provider,
   pricing, and lifecycle flags;
@@ -31,7 +31,6 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.models.model_registry import ModelRegistry
 from app.services.model_catalog import (
     available_models,
@@ -105,21 +104,19 @@ def _derive_provider(model_id: str) -> str:
 
     The tag is the per-vendor Bedrock namespace (``anthropic``, ``meta``,
     ``mistral``...) whenever the ID carries a recognized vendor namespace — so the
-    admin UI groups by vendor and per-turn routing reads the right provider. This
-    holds regardless of the deployment provider: under ``claude-cli`` with the
-    inkwest-agent engine on, the whole-Bedrock catalog surfaces vendor models, and
-    tagging them all ``claude-cli`` would both lump every vendor under one box and
-    misroute (a Claude model would fail ``provider_speaks_messages`` and be sent to
-    the broker instead of the CLI). A bare ``claude-*`` (Anthropic API / gateway, no
-    Bedrock namespace) is tagged ``anthropic``; anything else falls back to the
-    configured provider.
+    admin UI groups by vendor and per-turn routing reads the right provider. With
+    the inkwest-agent engine on, the whole-Bedrock catalog surfaces vendor models;
+    each keeps its own vendor tag so a Claude model routes via the Messages/CLI path
+    and an open-weight one via Converse. A bare ``claude-*`` (Anthropic API / gateway,
+    no Bedrock namespace) is tagged ``anthropic``; any other un-namespaced ID keeps
+    the generic ``bedrock`` tag (``model_catalog.bedrock_vendor``'s own fallback).
     """
     vendor = bedrock_vendor(model_id)
     if vendor != "bedrock":  # a recognized Bedrock vendor namespace (incl. anthropic)
         return vendor
     if is_anthropic_model(model_id):  # bare claude-* without a Bedrock namespace
         return "anthropic"
-    return get_settings().ai_provider
+    return vendor  # un-namespaced, non-Claude ID → generic "bedrock"
 
 
 def _row_pricing(row: dict[str, Any] | None) -> tuple[ModelPricing | None, bool]:

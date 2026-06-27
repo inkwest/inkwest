@@ -993,7 +993,6 @@ class TestEngineDispatch:
             # admin default engine applies when the session itself pins no engine.
             patch("app.services.ai_client.default_model", MagicMock(return_value=model)),
             patch("app.services.engines.configured_default_engine", return_value=default_engine),
-            patch("app.services.ai_client.get_entry", MagicMock(return_value=entry)),
             patch("app.services.model_registry.get_entry", MagicMock(return_value=entry)),
             patch("app.services.engines.inkwest_agent_enabled", return_value=agent_enabled),
             patch("app.services.orchestrator_cli.orchestrate_chat_cli", fake_cli),
@@ -1002,7 +1001,6 @@ class TestEngineDispatch:
                 fake_agent,
             ),
         ):
-            gs.return_value.ai_provider = "claude-cli"
             gs.return_value.sandbox_enabled = sandbox_enabled
             orchestrator = get_orchestrator()
             async for _ in orchestrator(db=AsyncMock(), session_id=SESSION_ID, user_message="x"):
