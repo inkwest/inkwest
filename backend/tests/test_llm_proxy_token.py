@@ -23,6 +23,13 @@ def test_mint_is_unique_per_turn() -> None:
     assert t.mint(_U, _S) != t.mint(_U, _S)  # opaque, fresh each turn — never reused
 
 
+def test_mint_carries_recognizable_prefix() -> None:
+    tok = t.mint(_U, _S)
+    # Identifiable as an Inkwest ephemeral grant (never a real base64 Bedrock key); still resolves.
+    assert tok.startswith("inkwest-ephemeral-")
+    assert t.verify(tok).session_id == str(_S)
+
+
 def test_mint_tolerates_missing_identity() -> None:
     claims = t.verify(t.mint(None, None))
     assert claims.user_id is None

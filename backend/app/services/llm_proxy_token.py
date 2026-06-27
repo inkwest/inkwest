@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 # comfortably longer than any turn while still bounding a leaked-on-crash grant.
 _TTL_SECONDS = 2 * 60 * 60
 
+# Human-recognizable prefix on every grant: makes it obvious in logs, /proc/<pid>/environ, or
+# a Bedrock error body that this is an Inkwest ephemeral grant — never a real Bedrock API key
+# (which is base64 `ABSK…`). Cosmetic only; the 256-bit random suffix is what's unguessable.
+_TOKEN_PREFIX = "inkwest-ephemeral-"
+
 
 class ProxyAuthError(Exception):
     """The broker grant is missing, expired, or already burned."""
@@ -74,7 +79,8 @@ def mint(user_id: object | None, session_id: object | None) -> str:
     """
     now = time.monotonic()
     _sweep(now)
-    token = secrets.token_urlsafe(32)  # 256 bits of CSPRNG entropy — unguessable
+    # 256 bits of CSPRNG entropy (unguessable) behind a recognizable, non-secret prefix.
+    token = _TOKEN_PREFIX + secrets.token_urlsafe(32)
     _grants[token] = _Grant(
         user_id=str(user_id) if user_id is not None else None,
         session_id=str(session_id) if session_id is not None else None,
