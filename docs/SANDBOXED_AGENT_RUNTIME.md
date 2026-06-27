@@ -1,5 +1,12 @@
 # Sandboxed Agent Runtime + Provisioning Worker — Plan
 
+> **Update — `AI_PROVIDER` removed.** The engine is now the *sole* driver of a turn:
+> `AI_PROVIDER` and the in-process orchestrators (`orchestrator.py` /
+> `orchestrator_converse.py` / `orchestrator_common.py`) have been deleted. References
+> to `AI_PROVIDER` and to those files below are historical context for the plan; the
+> live runtime is the engine dispatch in `ai_client.get_orchestrator()` over
+> `AGENTIC_ENGINES`.
+
 Status: **design locked** (decisions below), not yet implemented.
 Scope: move the two privileged things the portal does today — **running the agentic loop + executing tools**, and **minting cloud credentials** — out of the internet-facing portal. The loop moves into the per-session **sandbox** (parity with how Claude Code already runs); minting moves to a dedicated **provisioning worker** with its own identity, NOTIFY-driven. The portal becomes a thin broker. As a capability rider, the sandboxed custom loop unlocks the **whole Bedrock vendor catalog** (Amazon, Meta, Mistral, Cohere, AI21, DeepSeek, Stability, Anthropic) via the Converse adapter.
 
@@ -14,7 +21,7 @@ Scope: move the two privileged things the portal does today — **running the ag
 
 A portal compromise today ⇒ tool execution + model API + cloud-credential minting. The CLI engine already avoids most of this (it lives in the sandbox); the custom engine and the minting path do not.
 
-Current usage note: with `AI_PROVIDER=claude-cli` (the typical Inkwest deployment, CLI pointed at Bedrock) the custom loop is **dormant** — the CLI engine in the sandbox handles everything. A deployment on `AI_PROVIDER=anthropic`/`bedrock` (the repo's `docker-compose.prod.yml` default) already runs the custom loop **in-portal** today; Phase 1 moves it.
+Current usage note: the typical Inkwest deployment runs only the `claude-cli` engine in the sandbox; the custom loop is reached solely by enabling `inkwest-agent`. (The earlier in-portal SDK/Converse loop this plan set out to relocate has since been removed outright — there is no non-sandboxed inference path anymore.)
 
 ## Engine model
 

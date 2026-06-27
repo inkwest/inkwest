@@ -61,9 +61,9 @@ Exit the container:
 exit
 ```
 
-### 4. Configure the provider
+### 4. Configure the engine
 
-Set `AI_PROVIDER=claude-cli` in your `.env` or docker-compose environment (this is the default).
+The `claude-cli` engine is the default `AGENTIC_ENGINES` entry — no extra config needed. (There is no `AI_PROVIDER`; the CLI talks to whatever its own credentials configure.)
 
 The backend will invoke `claude` with `--dangerously-skip-permissions` for non-interactive tool execution. This is acceptable because the container provides the isolation boundary.
 

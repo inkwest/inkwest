@@ -25,7 +25,6 @@ import os
 import re
 import time
 from datetime import UTC, datetime
-from typing import Any
 
 from anthropic import AsyncAnthropic
 
@@ -465,10 +464,10 @@ async def refresh_catalog(force: bool = False) -> None:
         # Best-effort: refresh live Bedrock prices for the catalog's region from the
         # public Price List (no creds). A failed fetch returns {} and is ignored, so the
         # last good live map (or the static table) stands — pricing never regresses.
-        await _refresh_live_pricing(settings)
+        await _refresh_live_pricing()
 
 
-def _bedrock_pricing_region(settings: Any) -> str | None:
+def _bedrock_pricing_region() -> str | None:
     """The Bedrock region whose Price List backs the catalog, or None (no Bedrock)."""
     env = _claude_cli_backend_env()
     if env.get("CLAUDE_CODE_USE_BEDROCK", "").lower() in ("1", "true", "yes"):
@@ -476,8 +475,8 @@ def _bedrock_pricing_region(settings: Any) -> str | None:
     return None
 
 
-async def _refresh_live_pricing(settings: Any) -> None:
-    region = _bedrock_pricing_region(settings)
+async def _refresh_live_pricing() -> None:
+    region = _bedrock_pricing_region()
     if not region:
         return
     from app.services import pricing, pricing_live

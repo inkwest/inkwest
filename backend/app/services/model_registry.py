@@ -116,7 +116,11 @@ def _derive_provider(model_id: str) -> str:
         return vendor
     if is_anthropic_model(model_id):  # bare claude-* without a Bedrock namespace
         return "anthropic"
-    return vendor  # un-namespaced, non-Claude ID → generic "bedrock"
+    # Un-namespaced, non-Claude ID → the generic "bedrock" tag (bedrock_vendor's own
+    # fallback). NB: "bedrock" is in _MESSAGES_PROVIDERS, so such a model is treated as
+    # Messages-capable and can run on claude-cli — correct for the only realistic source
+    # of a bare non-Claude ID (an Anthropic-compatible gateway, which speaks Messages).
+    return vendor
 
 
 def _row_pricing(row: dict[str, Any] | None) -> tuple[ModelPricing | None, bool]:

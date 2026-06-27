@@ -17,15 +17,21 @@ Inkwest is an AI-powered investigation portal. Users interact with an AI assista
              Providers          (Brave/SerpAPI)
 ```
 
-## AI Providers
+## Engines
 
-| Provider | Setting | Use Case | Tested |
-|---|---|---|---|
-| Anthropic | `AI_PROVIDER=anthropic` | Direct Claude API (with prompt caching) | Yes |
-| AWS Bedrock | `AI_PROVIDER=bedrock` | Enterprise AWS deployments | Yes |
-| Claude CLI | `AI_PROVIDER=claude-cli` | Local dev with Claude Max subscription | Yes |
+A turn is driven by an *engine* (the agentic loop), not by an inference-provider
+setting — there is no `AI_PROVIDER`. Enabled engines come from `AGENTIC_ENGINES`
+(CSV, default `claude-cli`):
 
-Each provider has its own orchestrator (`orchestrator.py`, `orchestrator_cli.py`). The factory `get_orchestrator()` in `ai_client.py` selects the correct one at runtime.
+| Engine | Orchestrator | Use Case |
+|---|---|---|
+| `claude-cli` | `orchestrator_cli.py` | Claude Code CLI subprocess (Claude models); dev-local needs no sandbox |
+| `inkwest-agent` | `orchestrator_inkwest_agent.py` | Sandboxed Bedrock Converse loop (all vendors) |
+
+The inference backend is whatever the CLI / sandbox is configured to talk to (an
+Anthropic API key, or AWS Bedrock via bearer/creds). `get_orchestrator()` in
+`ai_client.py` returns a single per-turn dispatcher that picks the engine from the
+resolved model and any session pin.
 
 ## Authentication
 
@@ -72,9 +78,9 @@ backend/app/
     auth.py              # OIDCClient, JWT create/verify
     database.py          # AsyncSession, engine
   services/
-    ai_client.py         # Provider factory: get_orchestrator(), get_ai_client()
-    orchestrator.py      # Anthropic/Bedrock tool loop
-    orchestrator_cli.py  # Claude CLI subprocess
+    ai_client.py                    # get_orchestrator(): per-turn engine dispatcher
+    orchestrator_cli.py             # Claude CLI subprocess engine
+    orchestrator_inkwest_agent.py   # Sandboxed Bedrock Converse engine
     auth_cleanup.py      # Background cleanup of expired OIDC states
     prompts.py           # System prompt generation
     web_search.py        # Brave/SerpAPI with source trust classification
@@ -185,16 +191,16 @@ Admin-only endpoints under `/api/admin/`:
 - **Events**: `session_created`, `session_updated`, `session_deleted`
 - Keeps multiple browser tabs in sync without polling
 
-### Multi-Provider Orchestration
+### Engine-Dispatched Orchestration
 
-The `get_orchestrator()` factory in `ai_client.py` returns an async generator function based on `AI_PROVIDER`:
+The `get_orchestrator()` factory in `ai_client.py` returns a single async generator that resolves the engine per turn (from the session's model + any pin, against `AGENTIC_ENGINES`):
 
-| Provider | Orchestrator | Notes |
+| Engine | Orchestrator | Notes |
 |---|---|---|
-| `anthropic` / `bedrock` | `orchestrator.py` | Native Anthropic SDK, streaming tool loop |
-| `claude-cli` | `orchestrator_cli.py` | Local subprocess, no API costs |
+| `claude-cli` | `orchestrator_cli.py` | Claude Code CLI subprocess; also the dev-local fallback (no sandbox) |
+| `inkwest-agent` | `orchestrator_inkwest_agent.py` | Sandboxed Bedrock Converse loop for all vendors |
 
-All orchestrators yield `ChatEvent` objects for WebSocket streaming. They accept an optional `cancel_event: asyncio.Event` for mid-stream cancellation, checked at loop boundaries (before API call, after response, before/during tool execution).
+Both orchestrators yield `ChatEvent` objects for WebSocket streaming. `orchestrator_cli.py` accepts an optional `cancel_event: asyncio.Event` for mid-stream cancellation, checked at loop boundaries; the sandboxed agent cancels by-kill (the broker terminates the in-container process).
 
 ## Database
 
@@ -214,7 +220,7 @@ All settings via environment variables (see `app/core/config.py`):
 | Category | Key Variables |
 |---|---|
 | Database | `DATABASE_URL` |
-| AI Provider | `AI_PROVIDER`, `ANTHROPIC_API_KEY`, `AWS_REGION`, `BEDROCK_MODEL_ID`, `CLAUDE_CLI_PATH` |
+| Inference / Engines | `AGENTIC_ENGINES`, `ANTHROPIC_API_KEY`, `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK`, `CLAUDE_CLI_PATH`, `CLAUDE_CLI_MODELS` |
 | Auth | `OIDC_ENABLED`, `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `SECRET_KEY` |
 | Kubernetes | `KUBECONFIG_DIR`, `KUBECTL_TIMEOUT` |
 | Budget | `BUDGET_ENABLED`, `DEFAULT_DAILY_TOKEN_LIMIT`, `DEFAULT_MONTHLY_TOKEN_LIMIT` |
