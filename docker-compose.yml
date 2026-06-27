@@ -54,8 +54,8 @@ services:
       - "9090:9090"  # Prometheus metrics exporter (METRICS_PORT, on by default)
     environment:
       - DATABASE_URL=postgresql+asyncpg://inkwest:inkwest@db:5432/inkwest
-      # AI Provider: anthropic, bedrock, or claude-cli
-      - AI_PROVIDER=${AI_PROVIDER:-claude-cli}
+      # Engines enabled in this deployment (CSV). Default claude-cli.
+      - AGENTIC_ENGINES=${AGENTIC_ENGINES:-claude-cli}
       # Anthropic
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
