@@ -72,6 +72,12 @@ PROTOCOL_VERSION = 6
 # Engine tag default (the only engine that runs this agent).
 INKWEST_AGENT = "inkwest-agent"
 
+# Marker the broker greps out of a TurnSpecError to detect a protocol-version mismatch
+# (an unknown field can only mean the agent binary predates the broker) and rewrite the
+# opaque rejection into an actionable "rebuild the sandbox image" message. The single
+# source of truth for that cross-component contract — do NOT reword in isolation.
+UNKNOWN_FIELDS_MARKER = "unknown field(s):"
+
 
 class TurnSpecError(ValueError):
     """Raised when the turn-spec is missing required fields or malformed."""
@@ -80,7 +86,12 @@ class TurnSpecError(ValueError):
 def _reject_unknown(raw: dict[str, Any], known: Iterable[str], where: str) -> None:
     unknown = [k for k in raw if k not in known]
     if unknown:
-        raise TurnSpecError(f"turn-spec {where} has unknown field(s): {', '.join(sorted(unknown))}")
+        # Stamp our own PROTOCOL_VERSION so the broker can show both parties' versions
+        # when the spec lags the image (it parses "agent protocol vN" out of this text).
+        raise TurnSpecError(
+            f"turn-spec {where} has {UNKNOWN_FIELDS_MARKER} {', '.join(sorted(unknown))} "
+            f"(agent protocol v{PROTOCOL_VERSION})"
+        )
 
 
 @dataclass(frozen=True)
