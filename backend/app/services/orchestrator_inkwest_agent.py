@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -48,6 +49,8 @@ from app.services.user_preferences import get_effective_skills
 from app.tools.connector_exec import build_connector_env, session_kube_contexts
 from app.tools.definitions import get_tool_definitions
 from inkwest_agent.protocol import (
+    PROTOCOL_VERSION,
+    UNKNOWN_FIELDS_MARKER,
     AttachmentSpec,
     SkillSpec,
     ToolSpec,
@@ -57,6 +60,55 @@ from inkwest_agent.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _rewrite_protocol_mismatch(event: ChatEvent, app_env: str = "development") -> ChatEvent:
+    """Turn the agent's raw ``unknown field(s)`` turn-spec rejection into the real cause.
+
+    When the broker (this process, at the current PROTOCOL_VERSION) packs a field the
+    sandbox agent image is too old to know, the stale agent rejects the spec with an
+    opaque ``Invalid turn-spec: ... has unknown field(s): <name>``. That's a protocol
+    mismatch, not a malformed spec — the agent image lags the broker (the broker builds
+    the spec from the same source as the agent, so an unknown field can only mean the
+    agent binary predates this broker). Surface the actionable cause, where the offending
+    field(s) sit, AND both parties' protocol versions so the lag is diagnosable at a glance.
+
+    The remedy is environment-specific: in dev the operator rebuilds the local sandbox
+    image; in prod there is no manual rebuild — the image ships via CI, so we point at a
+    redeploy instead (telling a prod operator to "rebuild" would send them down a path
+    that doesn't exist).
+
+    The trigger text + the ``(agent protocol vN)`` stamp are produced by
+    ``inkwest_agent.protocol._reject_unknown`` — keep the two in sync (a test round-trips
+    a real rejection through here to guard the contract).
+    """
+    msg = event.content or ""
+    if event.type == "error" and UNKNOWN_FIELDS_MARKER in msg and "turn-spec" in msg:
+        # Recover the sub-object the field belongs to ("'limits'", "'context'", …) so the
+        # message points at where to look; absent for a top-level field.
+        where_match = re.search(r"turn-spec ('[^']+') has " + re.escape(UNKNOWN_FIELDS_MARKER), msg)
+        where = f" in {where_match.group(1)}" if where_match else ""
+        # Split the agent's version stamp off the field list: newer agents append
+        # "(agent protocol vN)"; pre-versioned images just name the fields.
+        fields_part = msg.split(UNKNOWN_FIELDS_MARKER, 1)[1]
+        agent_match = re.search(r"\(agent protocol v(\d+)\)", fields_part)
+        agent_proto = agent_match.group(1) if agent_match else None
+        if agent_match:
+            fields_part = fields_part[: agent_match.start()]
+        fields = fields_part.strip().rstrip(".").strip() or "?"
+        agent_label = f"v{agent_proto}" if agent_proto else "older (pre-versioned image)"
+        remedy = (
+            "Redeploy with a sandbox image matching the broker."
+            if app_env == "production"
+            else "Rebuild the sandbox image to match the broker."
+        )
+        return error_event(
+            f"Sandbox agent image is out of date (turn-spec protocol mismatch). "
+            f"Broker speaks protocol v{PROTOCOL_VERSION}, agent build speaks {agent_label}; "
+            f"it can't parse broker field(s){where}: {fields}. {remedy}",
+            metadata={**(event.metadata or {}), "original_error": msg},
+        )
+    return event
 
 
 async def orchestrate_chat_inkwest_agent(
@@ -339,7 +391,12 @@ async def orchestrate_chat_inkwest_agent(
             model=model,
             system_prompt=system_prompt,
             context=TurnContext(history=history),  # mode=replay: broker seeds history
-            limits=TurnLimits(max_tokens=max_tokens),
+            # bash_timeout_seconds: the free-form bash exec tool's per-call timeout. The
+            # agent is settings-free, so carry the broker's claude_cli_timeout on the spec
+            # (the same knob bounding the whole agent subprocess) — bash inherits that cap.
+            limits=TurnLimits(
+                max_tokens=max_tokens, bash_timeout_seconds=settings.claude_cli_timeout
+            ),
             tools=[ToolSpec(name=t["name"]) for t in get_tool_definitions()],
             skills=[SkillSpec(name=s.name, description=s.description or "") for s in active_skills],
             skills_root=skills_container_root() if active_skills else None,
@@ -443,6 +500,8 @@ async def orchestrate_chat_inkwest_agent(
                     received_terminal = True
                     if event.type == "done":
                         done_meta = event.metadata or {}
+                    else:
+                        event = _rewrite_protocol_mismatch(event, settings.app_env)
                 yield event
 
             # On an explicit cancel the agent was SIGKILLed mid-turn: assistant_blocks may
@@ -462,7 +521,10 @@ async def orchestrate_chat_inkwest_agent(
             # through, i.e. the agent crashed silently.
             if not received_terminal:
                 logger.error(f"inkwest-agent failed: {e}")
-                yield error_event(str(e))
+                # A turn-spec rejection that surfaced only via stderr (stdout emit never
+                # landed) still reads as a protocol mismatch — rewrite it the same way as
+                # the streamed error so the actionable cause isn't lost on this path.
+                yield _rewrite_protocol_mismatch(error_event(str(e)), settings.app_env)
             return
 
         # Persist usage from the terminal done meta (the agent reports aggregate totals).

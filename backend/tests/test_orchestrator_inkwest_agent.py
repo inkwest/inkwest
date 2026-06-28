@@ -279,6 +279,7 @@ def _patch_broker(
         aws_region="eu-west-1",
         sandbox_home="/home/agent",
         claude_cli_timeout=120,
+        app_env="development",
     )
     patches = [
         patch.object(oia, "get_settings", return_value=settings),
@@ -636,6 +637,189 @@ class TestOrchestrateInkwestAgent:
         spec = json.loads(spies.turn_spec)
         assert spec["skills"] == []
         assert [e.type for e in events] == ["done"]
+
+    async def _run_mismatch(self, raw: str):
+        patches, spies = _patch_broker(history=[], entry=None)
+        lines = [json.dumps({"type": "error", "content": raw, "is_error": True})]
+        for p in patches:
+            p.start()
+        try:
+            events = await _run_broker(spies, lines)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        errs = [e for e in events if e.type == "error"]
+        assert len(errs) == 1
+        return errs[0]
+
+    @pytest.mark.asyncio
+    async def test_unknown_field_error_rewritten_to_protocol_mismatch(self):
+        """A pre-versioned (old) sandbox agent rejects a broker field with an opaque
+        ``unknown field(s)`` error and no version stamp. The broker rewrites it to name
+        the real cause (rebuild), the offending field(s), and both parties' protocols —
+        the agent shown as pre-versioned — while stashing the raw text in metadata."""
+        from inkwest_agent.protocol import PROTOCOL_VERSION
+
+        raw = "Invalid turn-spec: turn-spec 'limits' has unknown field(s): bash_timeout_seconds"
+        err = await self._run_mismatch(raw)
+        assert "out of date" in (err.content or "")
+        assert "Rebuild the sandbox image" in (err.content or "")
+        # offending field surfaced in the header so the lag is diagnosable at a glance.
+        assert "bash_timeout_seconds" in (err.content or "")
+        # both parties' protocols shown; old image has no stamp -> pre-versioned.
+        assert f"v{PROTOCOL_VERSION}" in (err.content or "")
+        assert "pre-versioned" in (err.content or "")
+        # raw rejection still preserved verbatim in metadata for full debugging context.
+        assert err.metadata.get("original_error") == raw
+
+    @pytest.mark.asyncio
+    async def test_protocol_mismatch_shows_agent_version_when_stamped(self):
+        """A version-stamped agent names its own protocol in the rejection; the broker
+        parses it and shows both versions, with the field list cleanly separated from
+        the stamp."""
+        from inkwest_agent.protocol import PROTOCOL_VERSION
+
+        raw = (
+            "Invalid turn-spec: turn-spec 'limits' has unknown field(s): "
+            "bash_timeout_seconds (agent protocol v3)"
+        )
+        err = await self._run_mismatch(raw)
+        content = err.content or ""
+        assert f"v{PROTOCOL_VERSION}" in content  # broker version
+        assert "v3" in content  # parsed agent version
+        assert "pre-versioned" not in content
+        # the version stamp must not leak into the field list.
+        assert "bash_timeout_seconds" in content
+        assert "agent protocol" not in content.split("field(s)", 1)[1].split(".")[0]
+
+    @pytest.mark.asyncio
+    async def test_protocol_mismatch_roundtrips_real_rejection(self):
+        """Contract guard: feed an ACTUAL ``TurnSpecError`` (produced by the agent's own
+        ``parse_turn_spec``, wrapped exactly as ``__main__`` does) through the broker's
+        rewrite. If either side's wording drifts out of sync, the rewrite stops firing and
+        these asserts fail loudly — the cross-module string contract stays honest."""
+        from inkwest_agent.protocol import PROTOCOL_VERSION, TurnSpecError, parse_turn_spec
+
+        try:
+            parse_turn_spec(
+                {
+                    "session_id": "s",
+                    "user_message": "u",
+                    "model": "m",
+                    "system_prompt": "p",
+                    "limits": {"future_knob": 1},
+                }
+            )
+            raise AssertionError("parse_turn_spec should reject the unknown limits field")
+        except TurnSpecError as e:
+            raw = f"Invalid turn-spec: {e}"  # exactly how inkwest_agent.__main__ emits it
+
+        err = await self._run_mismatch(raw)
+        content = err.content or ""
+        assert "out of date" in content
+        assert "Rebuild the sandbox image" in content
+        # The agent stamped its own (current) version, so both versions resolve to it.
+        assert f"v{PROTOCOL_VERSION}" in content
+        assert "pre-versioned" not in content
+        # The sub-object location and the field both surface; the stamp doesn't leak in.
+        assert "in 'limits'" in content
+        assert "future_knob" in content
+        assert "agent protocol" not in content.split("field(s)", 1)[1]
+        assert err.metadata.get("original_error") == raw
+
+    @pytest.mark.asyncio
+    async def test_non_protocol_error_passes_through_untouched(self):
+        """A normal agent error (not a turn-spec rejection) must NOT be rewritten —
+        guards against the marker check over-matching."""
+        raw = "AI service unavailable: throttled by Bedrock"
+        err = await self._run_mismatch(raw)
+        assert (err.content or "") == raw
+        assert "out of date" not in (err.content or "")
+        assert "original_error" not in (err.metadata or {})
+
+    @pytest.mark.asyncio
+    async def test_protocol_mismatch_rewritten_on_stderr_only_path(self):
+        """A rejection that escapes via the agent's non-zero exit (stderr → RuntimeError)
+        instead of a streamed error event is still rewritten — the broker must not leak the
+        opaque message on the silent-crash path. received_terminal stays False here."""
+        from inkwest_agent.protocol import PROTOCOL_VERSION
+
+        patches, spies = _patch_broker(history=[], entry=None)
+        for p in patches:
+            p.start()
+
+        def boom(session_id, turn_spec, **kw):
+            raise RuntimeError(
+                "inkwest-agent failed: Invalid turn-spec: turn-spec 'limits' has "
+                "unknown field(s): bash_timeout_seconds (agent protocol v3)"
+            )
+
+        try:
+            with patch.object(oia, "execute_agent", side_effect=boom):
+                events = await _collect(
+                    oia.orchestrate_chat_inkwest_agent(
+                        db=spies.db,
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="why crash?",
+                        user_id=USER_ID,
+                    )
+                )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        errs = [e for e in events if e.type == "error"]
+        assert len(errs) == 1
+        assert "out of date" in (errs[0].content or "")
+        assert "v3" in (errs[0].content or "")
+        assert f"v{PROTOCOL_VERSION}" in (errs[0].content or "")
+
+    def test_rewrite_remedy_is_environment_specific(self):
+        """Dev → "rebuild" (the operator builds the local image); prod → "redeploy", and
+        the word "rebuild" must NOT appear (there is no manual rebuild in prod — the image
+        ships via CI). The cause/version/field reporting is identical in both."""
+        from app.services.events import error_event
+
+        raw = "Invalid turn-spec: turn-spec 'limits' has unknown field(s): foo (agent protocol v3)"
+        dev = oia._rewrite_protocol_mismatch(error_event(raw), "development")
+        prod = oia._rewrite_protocol_mismatch(error_event(raw), "production")
+        assert "Rebuild the sandbox image" in (dev.content or "")
+        assert "Redeploy" in (prod.content or "")
+        assert "ebuild" not in (prod.content or "")  # neither "Rebuild" nor "rebuild"
+        # Same diagnosis on both paths.
+        for ev in (dev, prod):
+            assert "out of date" in (ev.content or "")
+            assert "foo" in (ev.content or "")
+            assert "v3" in (ev.content or "")
+
+    def test_rewrite_handles_top_level_field_and_multiple_fields(self):
+        """A top-level rejection has no quoted sub-object → no "in '...'" fragment; a
+        comma-separated field list is preserved verbatim (not truncated at the first comma)."""
+        from app.services.events import error_event
+
+        raw = (
+            "Invalid turn-spec: turn-spec top level has unknown field(s): alpha, beta "
+            "(agent protocol v6)"
+        )
+        out = oia._rewrite_protocol_mismatch(error_event(raw), "development").content or ""
+        assert "alpha, beta" in out
+        assert "in 'top level'" not in out  # 'top level' is unquoted → no location fragment
+        assert " in '" not in out
+
+    def test_rewrite_empty_field_list_falls_back_and_none_content_passes_through(self):
+        """Degenerate inputs: a marker with no field text degrades to "?" rather than
+        raising; an error event with content=None is left untouched."""
+        from app.services.events import ChatEvent, error_event
+
+        raw = "turn-spec 'limits' has unknown field(s): (agent protocol v6)"
+        out = oia._rewrite_protocol_mismatch(error_event(raw), "development").content or ""
+        assert "out of date" in out
+        assert ": ?." in out  # empty field list → "?" sentinel
+        # None content: guarded by `or ""`, no crash, no rewrite.
+        passthrough = oia._rewrite_protocol_mismatch(ChatEvent(type="error", content=None))
+        assert passthrough.content is None
 
     @pytest.mark.asyncio
     async def test_mcp_config_cleaned_up_on_error_path(self):

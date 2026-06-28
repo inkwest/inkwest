@@ -34,6 +34,7 @@ from app.services.tool_execution import ToolRunResult, execute_tool_calls
 
 from .clock import current_datetime, is_datetime_tool
 from .converse import image_blocks_for_attachments, to_converse_message, to_converse_tools
+from .exec import BASH_DEFAULT_TIMEOUT, is_exec_tool, run_exec_tool
 from .mcp import MCPManager, load_mcp_config
 from .protocol import TurnSpec
 from .skills import is_skill_tool, read_skill
@@ -203,6 +204,17 @@ async def _run_loop(
                 elif is_datetime_tool(name):
                     yield tool_start_event(name, call["input"], call["id"])
                     output, is_error = current_datetime(call["input"])
+                    yield tool_result_event(name, output, call["id"], is_error)
+                    tool_results.append(_result_block(call["id"], output, is_error))
+                elif is_exec_tool(name):
+                    # Free-form exec (bash/read_file/write_file): synthetic, sandbox-only —
+                    # handled here so it never reaches the shared (unsandboxed) executor.
+                    yield tool_start_event(name, call["input"], call["id"])
+                    output, is_error = await run_exec_tool(
+                        name,
+                        call["input"],
+                        timeout=spec.limits.bash_timeout_seconds or BASH_DEFAULT_TIMEOUT,
+                    )
                     yield tool_result_event(name, output, call["id"], is_error)
                     tool_results.append(_result_block(call["id"], output, is_error))
                 elif mcp.owns(name):

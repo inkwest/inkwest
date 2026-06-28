@@ -36,6 +36,13 @@ _SKILL_DESC_MAX = 200
 # anchored in the system prompt — accuracy when the model asks, reliability up front.
 CURRENT_DATETIME_TOOL = "current_datetime"
 
+# Free-form exec tools (only the sandboxed agent advertises these — to_converse_tools is
+# the DB-free worker's own builder, so they never reach the unsandboxed in-portal path).
+# Names owned here; the executors + the /workdir jail live in exec.py (skills.py pattern).
+BASH_TOOL = "bash"
+READ_FILE_TOOL = "read_file"
+WRITE_FILE_TOOL = "write_file"
+
 # Bound the call so a hung/credential-stalled Bedrock endpoint can't pin the
 # process: boto3 runs in a worker thread and cannot be cancelled mid-call.
 _BEDROCK_CONFIG = Config(
@@ -274,6 +281,56 @@ def datetime_tool_spec() -> dict[str, Any]:
     return _tool_spec(CURRENT_DATETIME_TOOL, description, {"type": "object", "properties": {}})
 
 
+def exec_tool_specs() -> list[dict[str, Any]]:
+    """Build the free-form exec tools (``bash`` / ``read_file`` / ``write_file``).
+
+    Always advertised for the sandboxed agent (the sandbox is the containment boundary,
+    not the tool surface). They let the model write and run analysis code rather than only
+    calling the typed connector tools; the executors + the /workdir jail live in exec.py.
+    """
+    bash = _tool_spec(
+        BASH_TOOL,
+        "Run a shell command in /workdir (persists across turns). Use it to write+run "
+        "Python/bash for analysis, or to pipe connector CLIs (kubectl, aws, glab — "
+        "read-only). stdout and stderr are merged; large output is truncated.",
+        {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The shell command to run."}
+            },
+            "required": ["command"],
+        },
+    )
+    read_file = _tool_spec(
+        READ_FILE_TOOL,
+        "Read a UTF-8 text file from /workdir. Returns raw content (no line-number "
+        "prefixes). Page large files with `offset` (0-based start line) and `limit`.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path (relative to /workdir)."},
+                "offset": {"type": "integer", "description": "0-based start line (default 0)."},
+                "limit": {"type": "integer", "description": "Max lines to return (default 2000)."},
+            },
+            "required": ["path"],
+        },
+    )
+    write_file = _tool_spec(
+        WRITE_FILE_TOOL,
+        "Write a UTF-8 text file to /workdir (overwrites). Use it to save a script before "
+        "running it with bash, or to persist an analysis artifact across turns.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path (relative to /workdir)."},
+                "content": {"type": "string", "description": "The full file content."},
+            },
+            "required": ["path", "content"],
+        },
+    )
+    return [bash, read_file, write_file]
+
+
 def to_converse_tools(
     skills: list[SkillSpec] | None = None,
     mcp_tools: list[dict[str, Any]] | None = None,
@@ -281,14 +338,16 @@ def to_converse_tools(
     """Translate the tool surfaces into one Converse toolConfig.
 
     Base read-only tools (kubectl/connectors) + the always-on synthetic ``current_datetime``
-    clock + an optional synthetic ``read_skill`` tool (P1.7 skills) + optional MCP tools
-    already in Converse ``toolSpec`` shape (P1.7 MCP). Skills/MCP/clock re-express
-    capabilities the Converse loop has no native system for.
+    clock + the always-on free-form exec tools (``bash``/``read_file``/``write_file``, the
+    sandbox is the containment boundary) + an optional synthetic ``read_skill`` tool (P1.7
+    skills) + optional MCP tools already in Converse ``toolSpec`` shape (P1.7 MCP).
+    Skills/MCP/clock/exec re-express capabilities the Converse loop has no native system for.
     """
     tools: list[dict[str, Any]] = [
         _tool_spec(t["name"], t["description"], t["input_schema"]) for t in get_tool_definitions()
     ]
     tools.append(datetime_tool_spec())
+    tools.extend(exec_tool_specs())
     skill_tool = skill_tool_spec(skills or [])
     if skill_tool is not None:
         tools.append(skill_tool)

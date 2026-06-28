@@ -119,8 +119,17 @@ def test_to_converse_tools_merges_skill_and_mcp(monkeypatch):
     ]
     cfg = to_converse_tools(skills=[SkillSpec(name="s", description="d")], mcp_tools=mcp_tools)
     names = [t["toolSpec"]["name"] for t in cfg["tools"]]
-    # current_datetime is always advertised, right after the base tools.
-    assert names == ["kubectl_get", CURRENT_DATETIME_TOOL, READ_SKILL_TOOL, "mcp__cx__query"]
+    # current_datetime + the always-on exec tools are advertised right after the base tools,
+    # then the skill loader, then MCP-owned tools.
+    assert names == [
+        "kubectl_get",
+        CURRENT_DATETIME_TOOL,
+        "bash",
+        "read_file",
+        "write_file",
+        READ_SKILL_TOOL,
+        "mcp__cx__query",
+    ]
 
 
 def test_datetime_tool_always_advertised(monkeypatch):
@@ -518,10 +527,11 @@ async def test_loop_three_way_routing_in_one_turn(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_protocol_version_is_5():
+def test_protocol_version_is_6():
     # P1.8 bumped 3 -> 4 (image attachments); the LLM broker bumped 4 -> 5
-    # (bedrock_endpoint_url). Bump this when the wire shape changes again.
-    assert PROTOCOL_VERSION == 5
+    # (bedrock_endpoint_url); the exec tools bumped 5 -> 6 (limits.bash_timeout_seconds).
+    # Bump this when the wire shape changes again.
+    assert PROTOCOL_VERSION == 6
 
 
 def test_p14_shape_spec_has_empty_p17_fields():
