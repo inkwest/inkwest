@@ -84,6 +84,36 @@ async def test_one_active_turn_per_session(runner):
     release.set()
 
 
+async def test_slot_frees_on_done_before_finally(runner):
+    """Regression: a client that starts its next turn the instant it receives `done`
+    (e.g. flushing a client-side message queue) must not be rejected. The slot is
+    freed when `done` is emitted, not in the deferred finally — so the next turn
+    starts even while the previous turn's task is still winding down."""
+    hold = asyncio.Event()
+
+    async def orchestrate(db, cancel_event, **kwargs):
+        yield done_event()
+        # Keep the turn task alive past `done` so its finally (eviction) hasn't run yet.
+        await hold.wait()
+
+    assert await runner.start("s1", orchestrate, {}) is True
+    sub = await runner.subscribe("s1")
+    assert sub is not None
+    snapshot, queue = sub
+    seen = list(snapshot)
+    while not any(e["type"] == "done" for e in seen):
+        seen.append(await asyncio.wait_for(queue.get(), timeout=2))
+
+    # Turn task is still alive (hold not set), yet the slot is already free.
+    assert await runner.is_active("s1") is False
+
+    async def orchestrate2(db, cancel_event, **kwargs):
+        yield done_event()
+
+    assert await runner.start("s1", orchestrate2, {}) is True
+    hold.set()  # release the first turn so its task can finish cleanly
+
+
 async def test_fan_out_to_multiple_subscribers(runner):
     release = asyncio.Event()
 

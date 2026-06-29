@@ -37,7 +37,7 @@ describe('ChatInput attachments', () => {
     vi.mocked(api.uploadAttachments).mockReset();
     vi.mocked(api.deleteAttachment).mockReset().mockResolvedValue(undefined);
     useDraftsStore.setState({ drafts: {} });
-    useChatStore.setState({ messages: [] });
+    useChatStore.setState({ messages: [], queuedMessages: [] });
     useSkillsStore.setState({ templates: [], fetchTemplates: vi.fn(), isLoading: false, error: null });
     enableAttachments(true);
     // jsdom doesn't implement object URLs; the image-preview path needs them.
@@ -102,5 +102,33 @@ describe('ChatInput attachments', () => {
     });
 
     await waitFor(() => expect(api.uploadAttachments).toHaveBeenCalledWith('s1', [file]));
+  });
+
+  it('previews an image thumbnail on a queued message', async () => {
+    vi.spyOn(api, 'fetchAttachmentBlob').mockResolvedValue(new Blob(['x'], { type: 'image/png' }));
+    useChatStore.setState({
+      queuedMessages: [
+        {
+          id: 'q1',
+          content: 'look at this',
+          attachments: [{ filename: 'shot.png', original_name: 'shot.png', content_type: 'image/png', size: 10 }],
+        },
+      ],
+    });
+    render(<ChatInput onSend={onSend} sessionId="s1" isStreaming onStop={vi.fn()} />);
+
+    // The bytes are fetched server-side (auth) and shown via an object URL.
+    const img = await screen.findByRole('img', { name: 'shot.png' });
+    expect(img).toHaveAttribute('src', 'blob:mock');
+    expect(api.fetchAttachmentBlob).toHaveBeenCalledWith('s1', 'shot.png');
+  });
+
+  it('shows a file chip for a queued non-image attachment', () => {
+    useChatStore.setState({
+      queuedMessages: [{ id: 'q1', content: 'see the log', attachments: [NOTE] }],
+    });
+    render(<ChatInput onSend={onSend} sessionId="s1" isStreaming onStop={vi.fn()} />);
+
+    expect(screen.getByText('note.txt')).toBeInTheDocument();
   });
 });
