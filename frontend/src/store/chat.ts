@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { ContentBlock, Message, MessageContent } from '@/types/api';
+import { Attachment, ContentBlock, Message, MessageContent } from '@/types/api';
 
 // The backend persists a turn the way the model API frames it — and how many rows
 // that takes depends on the orchestrator. The CLI path writes ONE fused assistant
@@ -43,6 +43,15 @@ function toBlocks(content: MessageContent): ContentBlock[] {
   return [];
 }
 
+// A user message typed while a turn is streaming. The backend rejects a second
+// concurrent turn (one active turn per session), so these are buffered client-side
+// and flushed as a single combined message once the current turn ends.
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  attachments?: Attachment[];
+}
+
 // Content block types for streaming
 type StreamingBlock =
   | { type: 'text'; content: string }
@@ -65,6 +74,8 @@ interface ChatState {
   // New: ordered streaming blocks for inline display
   streamingBlocks: StreamingBlock[];
   isStreaming: boolean;
+  // Messages typed while a turn is streaming, sent combined once it ends.
+  queuedMessages: QueuedMessage[];
   isConnected: boolean;
   // A dropped socket is auto-retrying (exponential backoff) — distinct from a
   // terminal disconnect so the UI can show "Reconnecting…" rather than a flat
@@ -103,6 +114,11 @@ interface ChatState {
   clearPresence: () => void;
   // New actions for inline streaming
   clearStreamingBlocks: () => void;
+  // Message queue (typed while streaming)
+  enqueueMessage: (content: string, attachments?: Attachment[]) => void;
+  updateQueuedMessage: (id: string, content: string) => void;
+  removeQueuedMessage: (id: string) => void;
+  clearQueue: () => void;
   // Session lifecycle
   resetChat: () => void;
 }
@@ -114,6 +130,7 @@ export const useChatStore = create<ChatState>((set) => ({
   toolResults: [],
   streamingBlocks: [],
   isStreaming: false,
+  queuedMessages: [],
   isConnected: false,
   isReconnecting: false,
   error: null,
@@ -221,6 +238,20 @@ export const useChatStore = create<ChatState>((set) => ({
       ),
     })),
   clearStreamingBlocks: () => set({ streamingBlocks: [] }),
+  enqueueMessage: (content, attachments) =>
+    set((state) => ({
+      queuedMessages: [
+        ...state.queuedMessages,
+        { id: crypto.randomUUID(), content, attachments: attachments?.length ? attachments : undefined },
+      ],
+    })),
+  updateQueuedMessage: (id, content) =>
+    set((state) => ({
+      queuedMessages: state.queuedMessages.map((m) => (m.id === id ? { ...m, content } : m)),
+    })),
+  removeQueuedMessage: (id) =>
+    set((state) => ({ queuedMessages: state.queuedMessages.filter((m) => m.id !== id) })),
+  clearQueue: () => set({ queuedMessages: [] }),
   setPresence: (presence) => set({ presence }),
   setTyping: (user_id, display_name, state) =>
     set((s) => {
@@ -236,6 +267,7 @@ export const useChatStore = create<ChatState>((set) => ({
       toolResults: [],
       streamingBlocks: [],
       isStreaming: false,
+      queuedMessages: [],
       error: null,
       presence: [],
       typingUsers: [],

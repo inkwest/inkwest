@@ -74,6 +74,8 @@ describe('useWebSocket', () => {
     useChatStore.setState({
       messages: [],
       streamingMessage: '',
+      streamingBlocks: [],
+      queuedMessages: [],
       isConnected: false,
       isReconnecting: false,
       isStreaming: false,
@@ -168,6 +170,53 @@ describe('useWebSocket', () => {
     act(() => ws.emit({ type: 'connected' }));
     expect(useChatStore.getState().isConnected).toBe(true);
     expect(useChatStore.getState().isReconnecting).toBe(false);
+  });
+
+  it('flushes the queue as one combined message when the turn ends (done)', () => {
+    const sendSpy = vi.spyOn(ChatWebSocket.prototype, 'sendMessage');
+    useChatStore.setState({
+      messages: [],
+      streamingBlocks: [],
+      isStreaming: true,
+      queuedMessages: [
+        { id: 'q1', content: 'check the logs' },
+        { id: 'q2', content: 'and the deploys' },
+      ],
+    });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[MockWS.instances.length - 1];
+
+    act(() => ws.emit({ type: 'done', metadata: {} }));
+
+    // Combined into one turn (joined by blank line), queue drained, new turn started.
+    expect(sendSpy).toHaveBeenCalledWith('check the logs\n\nand the deploys', undefined);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+    expect(useChatStore.getState().isStreaming).toBe(true);
+    const messages = useChatStore.getState().messages;
+    expect(messages[messages.length - 1].content).toBe('check the logs\n\nand the deploys');
+
+    sendSpy.mockRestore();
+  });
+
+  it('flushes the queue and clears the banner even when the turn errors', () => {
+    const sendSpy = vi.spyOn(ChatWebSocket.prototype, 'sendMessage');
+    useChatStore.setState({
+      messages: [],
+      streamingBlocks: [],
+      isStreaming: true,
+      queuedMessages: [{ id: 'q1', content: 'retry the check' }],
+    });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[MockWS.instances.length - 1];
+
+    act(() => ws.emit({ type: 'error', content: 'boom' }));
+
+    expect(sendSpy).toHaveBeenCalledWith('retry the check', undefined);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+    expect(useChatStore.getState().error).toBeNull();
+    expect(useChatStore.getState().isStreaming).toBe(true);
+
+    sendSpy.mockRestore();
   });
 
   it('retryMessage is a no-op when the socket cannot send (dropped frame)', () => {

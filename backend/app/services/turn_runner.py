@@ -168,7 +168,11 @@ class TurnRunner:
                 async for event in orchestrate(db=db, cancel_event=turn.cancel_event, **kwargs):
                     if event.type == "error":
                         errored = True
-                    await self._emit(turn, event.to_dict())
+                    # Free the slot atomically with emitting the terminal `done` event
+                    # (see _emit): a client that sends its next turn the instant it
+                    # receives `done` — e.g. flushing a client-side message queue — would
+                    # otherwise be rejected by the not-yet-run finally below.
+                    await self._emit(turn, event.to_dict(), terminal=event.type == "done")
         except Exception:
             errored = True
             logger.exception("Turn failed", extra={"session_id": turn.session_id})
@@ -192,9 +196,16 @@ class TurnRunner:
             for queue in subscribers:
                 queue.put_nowait(TURN_END)
 
-    async def _emit(self, turn: _Turn, payload: dict[str, Any]) -> None:
+    async def _emit(self, turn: _Turn, payload: dict[str, Any], *, terminal: bool = False) -> None:
         async with self._lock:
             turn.buffer.append(payload)
+            # Mark the turn done in the SAME lock hold that queues the terminal event, so
+            # by the time any client receives `done` the slot is already free and its next
+            # turn (e.g. a queued-message flush) won't hit "a response is already in
+            # progress". The finally still evicts the turn + sends TURN_END; its `is turn`
+            # guard won't clobber a newer turn that started in between.
+            if terminal:
+                turn.done = True
             subscribers = list(turn.subscribers)
         for queue in subscribers:
             queue.put_nowait(payload)

@@ -81,7 +81,15 @@ function FileChip({ attachment }: { attachment: Attachment }) {
 
 // An <img> can't carry the bearer token, so fetch the bytes with auth and show
 // them via an object URL. Falls back to a file chip if the fetch fails.
-function HistoryImage({ sessionId, attachment }: { sessionId: string; attachment: Attachment }) {
+function HistoryImage({
+  sessionId,
+  attachment,
+  compact = false,
+}: {
+  sessionId: string;
+  attachment: Attachment;
+  compact?: boolean;
+}) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +115,13 @@ function HistoryImage({ sessionId, attachment }: { sessionId: string; attachment
       src={url}
       alt={attachment.original_name}
       title={attachment.original_name}
-      className="max-h-40 max-w-[12rem] rounded-lg border border-gray-600 object-contain"
+      // Compact: small square thumbnail for the pending-message queue; default: the
+      // larger contained preview used on sent messages.
+      className={
+        compact
+          ? 'h-14 w-14 rounded-md border border-gray-600 object-cover'
+          : 'max-h-40 max-w-[12rem] rounded-lg border border-gray-600 object-contain'
+      }
     />
   );
 }
@@ -115,16 +129,18 @@ function HistoryImage({ sessionId, attachment }: { sessionId: string; attachment
 export function MessageAttachments({
   sessionId,
   attachments,
+  compact = false,
 }: {
   sessionId: string;
   attachments: Attachment[];
+  compact?: boolean;
 }) {
   if (attachments.length === 0) return null;
   return (
-    <div className="mt-2 flex flex-wrap gap-2">
+    <div className={`flex flex-wrap gap-2 ${compact ? 'mt-1' : 'mt-2'}`}>
       {attachments.map((a) =>
         isImage(a.content_type) ? (
-          <HistoryImage key={a.filename} sessionId={sessionId} attachment={a} />
+          <HistoryImage key={a.filename} sessionId={sessionId} attachment={a} compact={compact} />
         ) : (
           <FileChip key={a.filename} attachment={a} />
         ),

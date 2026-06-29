@@ -1,9 +1,9 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent, type ChangeEvent, type ClipboardEvent, type ReactNode } from 'react';
-import { Send, Square, Paperclip, Loader2 } from 'lucide-react';
+import { Send, Square, Paperclip, Loader2, ListPlus, X } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
 import { useDraftsStore } from '@/store/drafts';
 import { useComposerStore } from '@/store/composer';
-import { useChatStore } from '@/store/chat';
+import { useChatStore, type QueuedMessage } from '@/store/chat';
 import { useSkillsStore } from '@/store/skills';
 import { useConfigStore } from '@/store/config';
 import { Skill, Attachment } from '@/types/api';
@@ -12,7 +12,7 @@ import { cn, TEXT_SIZE } from '@/lib/utils';
 import { SkillPalette } from './SkillPalette';
 import { ToolHoverCard } from './ToolHoverCard';
 import { SkillAutocomplete } from './SkillAutocomplete';
-import { AttachmentChips, PendingAttachment } from './Attachments';
+import { AttachmentChips, MessageAttachments, PendingAttachment } from './Attachments';
 import { formatArgs } from '@/lib/skillArgs';
 
 interface Props {
@@ -123,6 +123,40 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   // the previous session's messages there, since resetChat only runs in ChatPage.
   const noMessages = useChatStore((s) => s.messages.length === 0);
   const inviteToPrompt = (large || noMessages) && !message.trim() && !focused;
+  // Messages typed while a turn is streaming are queued (the backend rejects a second
+  // concurrent turn) and flushed combined when it ends — see useWebSocket's `done`/`error`.
+  const queuedMessages = useChatStore((s) => s.queuedMessages);
+  const enqueueMessage = useChatStore((s) => s.enqueueMessage);
+  const updateQueuedMessage = useChatStore((s) => s.updateQueuedMessage);
+  const removeQueuedMessage = useChatStore((s) => s.removeQueuedMessage);
+  // Inline edit of a still-unsent queued message: click its text to edit, Enter/blur
+  // commits, Escape cancels. Emptied with no attachments → the entry is dropped.
+  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null);
+  const [editingQueuedText, setEditingQueuedText] = useState('');
+  // Set on Escape so the blur that fires as the input unmounts doesn't re-commit the
+  // discarded text (the blur handler closes over the pre-cancel editing text).
+  const cancelQueuedEditRef = useRef(false);
+  const startQueuedEdit = (m: QueuedMessage) => {
+    cancelQueuedEditRef.current = false;
+    setEditingQueuedId(m.id);
+    setEditingQueuedText(m.content);
+  };
+  const cancelQueuedEdit = () => {
+    cancelQueuedEditRef.current = true;
+    setEditingQueuedId(null);
+    setEditingQueuedText('');
+  };
+  const commitQueuedEdit = (m: QueuedMessage) => {
+    if (cancelQueuedEditRef.current) {
+      cancelQueuedEditRef.current = false;
+      return;
+    }
+    const text = editingQueuedText.trim();
+    if (!text && !m.attachments?.length) removeQueuedMessage(m.id);
+    else updateQueuedMessage(m.id, text);
+    setEditingQueuedId(null);
+    setEditingQueuedText('');
+  };
 
   // --- File attachments (sandbox/claude-cli only; needs a session to upload to) ---
   const attachmentsEnabled = useConfigStore((s) => s.config?.attachments_enabled ?? false);
@@ -357,27 +391,30 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   const handleSend = () => {
     setShimmer(false);
     const text = message.trim();
-    // Send when there's text OR attachments. Don't send while a response is
-    // streaming (the button is Stop then, but Enter would still fire and the
-    // backend rejects a second turn) or while an upload is still in flight (its
-    // descriptor wouldn't be included).
-    if ((text || attachments.length > 0) && !disabled && !isStreaming && !uploading) {
-      // Strip the client-only previewUrl from the wire payload.
-      const descriptors: Attachment[] = attachments.map((a) => ({
-        filename: a.filename,
-        original_name: a.original_name,
-        content_type: a.content_type,
-        size: a.size,
-      }));
+    // Nothing to send, blocked, or an upload is still in flight (its descriptor
+    // wouldn't be included) — bail. We DON'T bail on `isStreaming`: while a turn
+    // streams the message is queued instead of sent (the backend rejects a second
+    // concurrent turn), and the whole queue is flushed combined when the turn ends.
+    if ((!text && attachments.length === 0) || disabled || uploading) return;
+    // Strip the client-only previewUrl from the wire payload.
+    const descriptors: Attachment[] = attachments.map((a) => ({
+      filename: a.filename,
+      original_name: a.original_name,
+      content_type: a.content_type,
+      size: a.size,
+    }));
+    if (isStreaming) {
+      enqueueMessage(text, descriptors.length ? descriptors : undefined);
+    } else {
       onSend(text, descriptors.length ? descriptors : undefined);
-      stopTyping();
-      setMessage('');
-      attachments.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
-      setAttachments([]);
-      setAttachError(null);
-      setHistoryIndex(null);
-      if (sessionId) clearDraft(sessionId);
     }
+    stopTyping();
+    setMessage('');
+    attachments.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
+    setAttachments([]);
+    setAttachError(null);
+    setHistoryIndex(null);
+    if (sessionId) clearDraft(sessionId);
   };
 
   // Auto-submit the handed-off prompt once the WS is connected. Only fires for the
@@ -601,6 +638,68 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           inviteToPrompt && 'invite-border',
         )}
       >
+        {/* Messages queued while the turn streams — sent combined when it ends. */}
+        {queuedMessages.length > 0 && (
+          <div className="mb-2 flex flex-col gap-1">
+            <span className="px-1 text-xs text-gray-400">
+              En file ({queuedMessages.length}) — envoyés ensemble à la réponse
+            </span>
+            <div className="flex flex-col gap-1">
+              {queuedMessages.map((m) => (
+                <div
+                  key={m.id}
+                  className="flex flex-col gap-1 rounded-lg border border-gray-700 bg-gray-900/60 py-1 pl-2 pr-1 text-xs text-gray-300"
+                >
+                  <div className="flex items-start gap-2">
+                    {editingQueuedId === m.id ? (
+                      <textarea
+                        autoFocus
+                        value={editingQueuedText}
+                        onChange={(e) => setEditingQueuedText(e.target.value)}
+                        // Match the main composer: Enter commits, Shift+Enter adds a newline.
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            commitQueuedEdit(m);
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            cancelQueuedEdit();
+                          }
+                        }}
+                        onBlur={() => commitQueuedEdit(m)}
+                        aria-label="Modifier le message en file"
+                        rows={Math.min(8, Math.max(1, editingQueuedText.split('\n').length))}
+                        className="min-w-0 flex-1 resize-none rounded bg-gray-800 px-1 py-0.5 text-white focus:outline-none"
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => startQueuedEdit(m)}
+                        title="Modifier"
+                        className="min-w-0 flex-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-left hover:text-white"
+                      >
+                        {m.content || 'Pièce(s) jointe(s)'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeQueuedMessage(m.id)}
+                      aria-label="Retirer de la file"
+                      className="shrink-0 rounded p-0.5 text-gray-500 hover:bg-gray-700 hover:text-gray-200"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                  {/* Image thumbnails + file chips, reusing the sent-message renderer
+                      (bytes fetched server-side; files are already uploaded). */}
+                  {sessionId && m.attachments?.length ? (
+                    <MessageAttachments sessionId={sessionId} attachments={m.attachments} compact />
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {/* Attached files (sandbox/claude-cli only), attached to the current message. */}
         {canAttach && <AttachmentChips attachments={attachments} onRemove={removeAttachment} />}
         {attachError && <div className="mb-2 px-1 text-xs text-red-400">{attachError}</div>}
@@ -696,16 +795,32 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           <div className="flex items-center gap-2">
             {modelControl}
             {isStreaming ? (
-              <button
-                onClick={onStop}
-                aria-label="Stop"
-                className={cn(
-                  'flex items-center justify-center rounded-lg border border-transparent bg-red-600 hover:bg-red-700 shrink-0',
-                  btnSize,
-                )}
-              >
-                <Square className={iconSize} />
-              </button>
+              <>
+                {/* Queue the typed message; it sends combined with the rest when the
+                    current turn ends (a second concurrent turn is rejected server-side). */}
+                <button
+                  onClick={handleSend}
+                  aria-label="Queue message"
+                  title="Mettre en file (envoyé à la fin de la réponse)"
+                  disabled={disabled || uploading || (!message.trim() && attachments.length === 0)}
+                  className={cn(
+                    'flex items-center justify-center rounded-lg border border-transparent bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0',
+                    btnSize,
+                  )}
+                >
+                  <ListPlus className={iconSize} />
+                </button>
+                <button
+                  onClick={onStop}
+                  aria-label="Stop"
+                  className={cn(
+                    'flex items-center justify-center rounded-lg border border-transparent bg-red-600 hover:bg-red-700 shrink-0',
+                    btnSize,
+                  )}
+                >
+                  <Square className={iconSize} />
+                </button>
+              </>
             ) : (
               <button
                 onClick={handleSend}

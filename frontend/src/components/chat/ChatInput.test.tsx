@@ -15,7 +15,7 @@ describe('ChatInput', () => {
     onSend.mockClear();
     useDraftsStore.setState({ drafts: {} });
     useComposerStore.setState({ pending: null, nonce: 0 });
-    useChatStore.setState({ messages: [] });
+    useChatStore.setState({ messages: [], queuedMessages: [] });
     // Stub the templates store so the on-mount fetch is a no-op (no real network) and
     // the "/" autocomplete starts empty unless a test populates it.
     useSkillsStore.setState({
@@ -86,6 +86,86 @@ describe('ChatInput', () => {
 
     await user.click(screen.getByRole('button', { name: /send message/i }));
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('queues the message instead of sending while a turn is streaming (Enter)', async () => {
+    const user = userEvent.setup();
+    render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
+
+    const textarea = screen.getByPlaceholderText(/investigate or analyse/i);
+    await user.type(textarea, 'check the logs{enter}');
+
+    // Not sent (backend rejects a concurrent turn) — buffered and the composer clears.
+    expect(onSend).not.toHaveBeenCalled();
+    expect(useChatStore.getState().queuedMessages.map((m) => m.content)).toEqual(['check the logs']);
+    expect(textarea).toHaveValue('');
+    // Surfaced as a removable chip with a live count; no Send button while streaming.
+    expect(screen.getByText(/En file \(1\)/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /send message/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /queue message/i })).toBeInTheDocument();
+  });
+
+  it('removes a queued message via its chip', async () => {
+    const user = userEvent.setup();
+    useChatStore.setState({ queuedMessages: [{ id: 'q1', content: 'drop me' }] });
+    render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
+
+    expect(screen.getByText('drop me')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /retirer de la file/i }));
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+  });
+
+  it('edits an unsent queued message inline and commits on Enter', async () => {
+    const user = userEvent.setup();
+    useChatStore.setState({ queuedMessages: [{ id: 'q1', content: 'old text' }] });
+    render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'old text' }));
+    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    await user.clear(input);
+    await user.type(input, 'new text{enter}');
+
+    expect(useChatStore.getState().queuedMessages.map((m) => m.content)).toEqual(['new text']);
+  });
+
+  it('keeps newlines when editing a multi-line queued message (Shift+Enter)', async () => {
+    const user = userEvent.setup();
+    useChatStore.setState({ queuedMessages: [{ id: 'q1', content: 'orig' }] });
+    render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'orig' }));
+    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    await user.clear(input);
+    // Shift+Enter inserts a newline (no commit); a bare Enter then commits.
+    await user.type(input, 'line1{shift>}{enter}{/shift}line2{enter}');
+
+    expect(useChatStore.getState().queuedMessages.map((m) => m.content)).toEqual(['line1\nline2']);
+  });
+
+  it('discards a queued edit on Escape (keeps the original)', async () => {
+    const user = userEvent.setup();
+    useChatStore.setState({ queuedMessages: [{ id: 'q1', content: 'keep me' }] });
+    render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'keep me' }));
+    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    await user.clear(input);
+    await user.type(input, 'changed{escape}');
+
+    expect(useChatStore.getState().queuedMessages.map((m) => m.content)).toEqual(['keep me']);
+  });
+
+  it('drops a queued message when edited to empty (no attachments)', async () => {
+    const user = userEvent.setup();
+    useChatStore.setState({ queuedMessages: [{ id: 'q1', content: 'remove via edit' }] });
+    render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'remove via edit' }));
+    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    await user.clear(input);
+    await user.type(input, '{enter}');
+
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
   it('clears input after sending', async () => {

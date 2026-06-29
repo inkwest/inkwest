@@ -62,6 +62,49 @@ describe('chatStore.applyServerMessages', () => {
   });
 });
 
+describe('chatStore message queue', () => {
+  beforeEach(() => {
+    useChatStore.setState({ queuedMessages: [] });
+  });
+
+  it('enqueues messages in order, dropping empty attachment lists', () => {
+    const { enqueueMessage } = useChatStore.getState();
+    enqueueMessage('first', []);
+    enqueueMessage('second', [{ filename: 'f', original_name: 'f', content_type: 'text/plain', size: 1 }]);
+    const queued = useChatStore.getState().queuedMessages;
+    expect(queued.map((m) => m.content)).toEqual(['first', 'second']);
+    expect(queued[0].attachments).toBeUndefined();
+    expect(queued[1].attachments).toHaveLength(1);
+    expect(queued[0].id).not.toEqual(queued[1].id);
+  });
+
+  it('updates a queued message content by id, leaving others untouched', () => {
+    const { enqueueMessage, updateQueuedMessage } = useChatStore.getState();
+    enqueueMessage('a');
+    enqueueMessage('b');
+    const [first] = useChatStore.getState().queuedMessages;
+    updateQueuedMessage(first.id, 'edited');
+    expect(useChatStore.getState().queuedMessages.map((m) => m.content)).toEqual(['edited', 'b']);
+  });
+
+  it('removes a queued message by id and clears the whole queue', () => {
+    const { enqueueMessage, removeQueuedMessage, clearQueue } = useChatStore.getState();
+    enqueueMessage('a');
+    enqueueMessage('b');
+    const [a] = useChatStore.getState().queuedMessages;
+    removeQueuedMessage(a.id);
+    expect(useChatStore.getState().queuedMessages.map((m) => m.content)).toEqual(['b']);
+    clearQueue();
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+  });
+
+  it('drops the queue on resetChat (session switch)', () => {
+    useChatStore.getState().enqueueMessage('stale');
+    useChatStore.getState().resetChat();
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+  });
+});
+
 function assistantWithTools(id: string, blocks: ContentBlock[]): Message {
   return { id, session_id: 's1', role: 'assistant', content: blocks, created_at: '2026-06-10T00:00:00Z' };
 }

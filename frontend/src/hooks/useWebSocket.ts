@@ -31,6 +31,31 @@ export function useWebSocket(sessionId: string) {
   } = useChatStore();
 
   const handleEvent = useCallback((event: ChatEvent) => {
+    // Once the current turn ends, send everything the user queued during it as a
+    // single combined turn (the backend rejects concurrent turns, so we can't send
+    // them mid-stream). Runs on both `done` and `error` — the user opted to flush
+    // even after a stop/error. No-op when the queue is empty.
+    const flushQueue = () => {
+      const { queuedMessages, clearQueue } = useChatStore.getState();
+      if (queuedMessages.length === 0) return;
+      // Skip blank contents (an attachment-only or edited-empty entry) so the join
+      // doesn't open with a stray blank line.
+      const content = queuedMessages.map((m) => m.content.trim()).filter(Boolean).join('\n\n');
+      const attachments = queuedMessages.flatMap((m) => m.attachments ?? []);
+      clearQueue();
+      setError(null); // moving on to a fresh turn — drop any just-shown error banner
+      addMessage({
+        id: crypto.randomUUID(),
+        session_id: sessionId,
+        role: 'user',
+        content,
+        attachments: attachments.length ? attachments : undefined,
+        created_at: new Date().toISOString(),
+      });
+      wsRef.current?.sendMessage(content, attachments.length ? attachments : undefined);
+      setIsStreaming(true);
+    };
+
     switch (event.type) {
       case 'connected':
         setIsConnected(true);
@@ -143,6 +168,7 @@ export function useWebSocket(sessionId: string) {
         clearStreamingBlocks();
         setActiveToolCall(null);
         setIsStreaming(false);
+        flushQueue();
         break;
       }
 
@@ -150,6 +176,7 @@ export function useWebSocket(sessionId: string) {
         setError(event.content || 'An error occurred');
         setIsStreaming(false);
         setActiveToolCall(null);
+        flushQueue();
         break;
 
       case 'connector_required': {
