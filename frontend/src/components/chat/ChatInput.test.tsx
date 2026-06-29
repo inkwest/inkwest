@@ -100,7 +100,7 @@ describe('ChatInput', () => {
     expect(useChatStore.getState().queuedMessages.map((m) => m.content)).toEqual(['check the logs']);
     expect(textarea).toHaveValue('');
     // Surfaced as a removable chip with a live count; no Send button while streaming.
-    expect(screen.getByText(/En file \(1\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Queued \(1\)/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /send message/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /queue message/i })).toBeInTheDocument();
   });
@@ -111,7 +111,7 @@ describe('ChatInput', () => {
     render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
 
     expect(screen.getByText('drop me')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: /retirer de la file/i }));
+    await user.click(screen.getByRole('button', { name: /remove from queue/i }));
     expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
@@ -121,7 +121,7 @@ describe('ChatInput', () => {
     render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
 
     await user.click(screen.getByRole('button', { name: 'old text' }));
-    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    const input = screen.getByRole('textbox', { name: /edit queued message/i });
     await user.clear(input);
     await user.type(input, 'new text{enter}');
 
@@ -134,7 +134,7 @@ describe('ChatInput', () => {
     render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
 
     await user.click(screen.getByRole('button', { name: 'orig' }));
-    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    const input = screen.getByRole('textbox', { name: /edit queued message/i });
     await user.clear(input);
     // Shift+Enter inserts a newline (no commit); a bare Enter then commits.
     await user.type(input, 'line1{shift>}{enter}{/shift}line2{enter}');
@@ -148,7 +148,7 @@ describe('ChatInput', () => {
     render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
 
     await user.click(screen.getByRole('button', { name: 'keep me' }));
-    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    const input = screen.getByRole('textbox', { name: /edit queued message/i });
     await user.clear(input);
     await user.type(input, 'changed{escape}');
 
@@ -161,7 +161,7 @@ describe('ChatInput', () => {
     render(<ChatInput onSend={onSend} isStreaming onStop={vi.fn()} />);
 
     await user.click(screen.getByRole('button', { name: 'remove via edit' }));
-    const input = screen.getByRole('textbox', { name: /modifier le message en file/i });
+    const input = screen.getByRole('textbox', { name: /edit queued message/i });
     await user.clear(input);
     await user.type(input, '{enter}');
 

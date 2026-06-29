@@ -642,7 +642,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         {queuedMessages.length > 0 && (
           <div className="mb-2 flex flex-col gap-1">
             <span className="px-1 text-xs text-gray-400">
-              En file ({queuedMessages.length}) — envoyés ensemble à la réponse
+              Queued ({queuedMessages.length}) — sent together when the turn ends
             </span>
             <div className="flex flex-col gap-1">
               {queuedMessages.map((m) => (
@@ -667,7 +667,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
                           }
                         }}
                         onBlur={() => commitQueuedEdit(m)}
-                        aria-label="Modifier le message en file"
+                        aria-label="Edit queued message"
                         rows={Math.min(8, Math.max(1, editingQueuedText.split('\n').length))}
                         className="min-w-0 flex-1 resize-none rounded bg-gray-800 px-1 py-0.5 text-white focus:outline-none"
                       />
@@ -675,16 +675,16 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
                       <button
                         type="button"
                         onClick={() => startQueuedEdit(m)}
-                        title="Modifier"
+                        title="Edit"
                         className="min-w-0 flex-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-left hover:text-white"
                       >
-                        {m.content || 'Pièce(s) jointe(s)'}
+                        {m.content || 'Attachment(s)'}
                       </button>
                     )}
                     <button
                       type="button"
                       onClick={() => removeQueuedMessage(m.id)}
-                      aria-label="Retirer de la file"
+                      aria-label="Remove from queue"
                       className="shrink-0 rounded p-0.5 text-gray-500 hover:bg-gray-700 hover:text-gray-200"
                     >
                       <X className="h-3 w-3" />
@@ -801,7 +801,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
                 <button
                   onClick={handleSend}
                   aria-label="Queue message"
-                  title="Mettre en file (envoyé à la fin de la réponse)"
+                  title="Queue (sent when the turn ends)"
                   disabled={disabled || uploading || (!message.trim() && attachments.length === 0)}
                   className={cn(
                     'flex items-center justify-center rounded-lg border border-transparent bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shrink-0',
