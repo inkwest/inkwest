@@ -113,6 +113,13 @@ class GrantDeadError(Exception):
     """The user's grant is unusable (invalid_grant / revoked) — reconnect required."""
 
 
+class ClientDeadError(McpOauthError):
+    """The registered OAuth client itself is dead (``invalid_client`` — e.g. the AS expired
+    the RFC 7591 dynamic registration). The DCR client must be re-registered, not just the
+    user's grant refreshed; callers drop the persisted client so the next connect re-registers.
+    """
+
+
 @dataclass(frozen=True)
 class Discovery:
     """Discovered authorization-server metadata for one MCP server."""
@@ -371,18 +378,71 @@ async def ensure_client(
     pass an already-fetched discovery to avoid a redundant round-trip.
     """
     existing = await db.get(McpOauthClient, server.key)
-    if existing is not None:
+    if existing is not None and not _client_expired(existing):
         return existing
 
     # Single-flight per key: serialise concurrent first-connects so only one runs DCR /
     # the insert. The re-check inside the lock catches a peer that registered while we waited.
     async with _dcr_lock(server.key):
         existing = await db.get(McpOauthClient, server.key)
-        if existing is not None:
+        if existing is not None and not _client_expired(existing):
             return existing
+        if existing is not None:
+            # Registration lapsed (AS-provided expiry passed) → drop and re-register.
+            await _drop_client(db, server.key, client_id=existing.client_id)
         return await _register_and_persist_client(
             db, server, redirect_uri=redirect_uri, disco=disco
         )
+
+
+def _client_expired(client: McpOauthClient) -> bool:
+    """Whether a persisted DCR client's registration has lapsed per its AS-provided expiry.
+
+    Only meaningful when the AS returned a real expiry (``client_secret_expires_at`` /
+    ``client_id_expires_at``; many public clients return 0 = never). A server-side expiry the AS
+    doesn't report (e.g. the mcp-auth-proxy reports 0 yet enforces a hidden TTL) is caught at
+    connect by the authorize-liveness preflight (:func:`_client_alive_at_authorize`), and where
+    the AS surfaces it at the token endpoint, lazily as :class:`ClientDeadError`.
+    """
+    return client.client_expires_at is not None and client.client_expires_at <= datetime.now(UTC)
+
+
+async def _client_alive_at_authorize(
+    authorize_endpoint: str, client_id: str, redirect_uri: str
+) -> bool:
+    """Connect-time liveness probe of the AS authorize endpoint.
+
+    Returns ``False`` ONLY when the AS rejects the client as ``invalid_client`` — a DCR
+    registration the AS has silently expired (some proxies report ``client_id_expires_at: 0``
+    yet enforce a hidden TTL, and reveal the expiry only here, never at ``/token`` and without
+    RFC 7592). Positive-evidence: any other outcome (login page, redirect, a different error,
+    or a probe transport failure) is treated as alive, so a still-valid client is NEVER
+    re-registered — no churn, no orphaned-registration leak.
+    """
+    # Use a well-formed request (valid PKCE challenge) so that on an AS which validates request
+    # params before the client, a dead client still rejects as invalid_client (not masked by an
+    # invalid_request for a malformed challenge). The verifier is discarded — we never exchange.
+    _, code_challenge = generate_pkce()
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": "openid",
+        "state": secrets.token_urlsafe(16),
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    try:
+        resp = await _http("GET", authorize_endpoint, params=params)
+    except McpOauthError:
+        return True  # probe blip → don't block the connect; assume alive
+    if resp.status_code not in (400, 401):
+        return True
+    try:
+        error = str((resp.json() or {}).get("error", ""))
+    except (ValueError, TypeError):
+        error = "invalid_client" if "invalid_client" in (resp.text or "") else ""
+    return error != "invalid_client"
 
 
 async def _register_and_persist_client(
@@ -404,8 +464,14 @@ async def _register_and_persist_client(
         # Prefer public (PKCE) clients; if the AS still issues a secret, persist it as-is.
         # Org-level secret-at-rest custody (KMS/sealed) is Increment 2 — noted limitation.
         client_secret_ref = reg.get("client_secret")
-        if reg.get("client_secret_expires_at"):
-            client_expires_at = datetime.fromtimestamp(int(reg["client_secret_expires_at"]), UTC)
+        # RFC 7591 expiry: a confidential client uses ``client_secret_expires_at``, a public
+        # (PKCE) client ``client_id_expires_at``. ``0`` means "never expires" → leave None.
+        # NOTE: some AS (the mcp-auth-proxy) report ``0`` yet still enforce a hidden idle TTL,
+        # so this is best-effort only; the connect-time authorize-liveness preflight is the real
+        # safety net (see _client_alive_at_authorize / build_authorize_url).
+        exp = reg.get("client_secret_expires_at") or reg.get("client_id_expires_at")
+        if exp:
+            client_expires_at = datetime.fromtimestamp(int(exp), UTC)
 
     row = McpOauthClient(
         mcp_key=server.key,
@@ -465,6 +531,20 @@ async def build_authorize_url(
     """Persist a single-use pending state and return the AS authorization URL (PKCE S256)."""
     disco = await discover(server.url)
     client = await ensure_client(db, server, redirect_uri=redirect_uri, disco=disco)
+
+    # Liveness preflight: some AS silently expire a DCR registration and reveal it ONLY at
+    # /authorize (invalid_client) — not at /token, no RFC 7592. Probe before handing the user a
+    # popup; re-register once iff the client is rejected as invalid_client, so the popup gets a
+    # live client instead of an error page. Positive-evidence only → a valid client is never
+    # churned (no orphaned-registration leak).
+    if not await _client_alive_at_authorize(
+        disco.authorization_endpoint, client.client_id, redirect_uri
+    ):
+        # Compare-and-delete (client_id-scoped): a concurrent connect may have already
+        # re-registered a fresh client; don't clobber it. ensure_client then reuses that peer's
+        # client or registers a new one under its own single-flight lock.
+        await _drop_client(db, server.key, client_id=client.client_id)
+        client = await ensure_client(db, server, redirect_uri=redirect_uri, disco=disco)
 
     state = secrets.token_urlsafe(32)
     code_verifier, code_challenge = generate_pkce()
@@ -553,17 +633,25 @@ async def exchange_code(
     if client is None:
         raise McpOauthError("client registration missing")
 
-    token = await _token_request(
-        client.token_endpoint,
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "client_id": client.client_id,
-            "code_verifier": pending.code_verifier,
-        },
-        client.client_secret_ref,
-    )
+    try:
+        token = await _token_request(
+            client.token_endpoint,
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": client.client_id,
+                "code_verifier": pending.code_verifier,
+            },
+            client.client_secret_ref,
+        )
+    except ClientDeadError:
+        # The DCR client expired AS-side: drop it so the next connect re-registers. The code is
+        # already spent against the dead client, so the user must restart the connect.
+        await _drop_client(db, pending.mcp_key, client_id=client.client_id)
+        raise McpOauthError(
+            "the MCP client registration has expired; reconnect to re-register"
+        ) from None
     return await _store_token(db, pending.user_id, server, token, dek)
 
 
@@ -656,6 +744,14 @@ async def get_fresh_token(
                 },
                 client.client_secret_ref,
             )
+        except ClientDeadError:
+            # The shared DCR client expired AS-side: drop it (the next connect re-registers)
+            # and mark this grant expired — it can't refresh under a dead client. Surface as a
+            # dead grant so the proxy maps it to a reconnect (401), same UX as invalid_grant.
+            await _drop_client(db, mcp_key, client_id=client.client_id)
+            row.status = "expired"
+            await db.commit()
+            raise GrantDeadError("client registration expired; reconnect to re-register") from None
         except GrantDeadError:
             row.status = "expired"  # invalid_grant — the grant is dead, reconnect needed
             await db.commit()
@@ -687,10 +783,36 @@ async def _token_request(
     if resp.status_code == 200:
         result: dict[str, Any] = resp.json()
         return result
-    # 400/401 from the token endpoint = the grant/code is rejected — terminal.
+    # 400/401 from the token endpoint = the grant/code is rejected — terminal. Distinguish a
+    # dead CLIENT registration (RFC 6749 ``invalid_client`` — e.g. the AS expired our DCR
+    # client) from a dead GRANT (``invalid_grant`` / spent code): the former needs the client
+    # re-registered, the latter only a user reconnect. Default to grant-dead when unparseable.
     if resp.status_code in (400, 401):
+        error = ""
+        try:
+            error = str((resp.json() or {}).get("error", ""))
+        except (ValueError, TypeError):
+            pass
+        if error == "invalid_client":
+            raise ClientDeadError(f"client registration rejected: HTTP {resp.status_code}")
         raise GrantDeadError(f"token endpoint rejected the grant: HTTP {resp.status_code}")
     raise McpOauthError(f"token endpoint error: HTTP {resp.status_code}")
+
+
+async def _drop_client(db: AsyncSession, mcp_key: str, *, client_id: str | None = None) -> None:
+    """Delete the persisted DCR client for ``mcp_key`` so the next connect re-registers
+    (RFC 7591). Called when the AS reports the client registration is dead — the shared client
+    is per-key, so dropping it once heals every user's grant on their next connect. Idempotent.
+
+    ``client_id`` scopes the delete to that exact registration (compare-and-delete): if a
+    concurrent connect already re-registered a fresh client, the predicate matches nothing and
+    we leave it — so we never clobber a peer's just-minted client. Atomic at the DB (no TOCTOU).
+    """
+    stmt = delete(McpOauthClient).where(McpOauthClient.mcp_key == mcp_key)
+    if client_id is not None:
+        stmt = stmt.where(McpOauthClient.client_id == client_id)
+    await db.execute(stmt)
+    await db.commit()
 
 
 async def _store_token(

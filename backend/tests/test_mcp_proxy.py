@@ -180,15 +180,19 @@ async def test_double_401_marks_expired_and_returns_401() -> None:
 
 
 @pytest.mark.asyncio
-async def test_grant_dead_is_401() -> None:
+async def test_grant_dead_is_401_and_marks_expired() -> None:
+    # A dead grant (refresh rejected / undecryptable blob / dropped client) must also downgrade
+    # the local row, else the catalog poll keeps the "connected" badge on a broken grant.
     fresh = AsyncMock(side_effect=GrantDeadError("no active grant"))
     ps = _patches(lambda r: httpx.Response(200), fresh_token=fresh)
+    mark = ps[-1]
     for p in ps:
         p.start()
     try:
         async with await _client() as c:
             resp = await c.post("/api/mcp-proxy/notion/", headers=_bearer(), content=b"{}")
         assert resp.status_code == 401
+        mark.new.assert_awaited()  # grant downgraded → UI flips to "Reconnect"
     finally:
         for p in ps:
             p.stop()
