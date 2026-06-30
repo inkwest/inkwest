@@ -8,12 +8,15 @@ vi.mock('@/services/api', () => ({
   getVersion: vi.fn().mockResolvedValue({ version: 'v1', build_timestamp: 't' }),
   wsBaseUrl: () => 'ws://test',
 }));
+vi.mock('@/lib/mcpDek', () => ({ dekReply: vi.fn() }));
 
 import { fetchWsTicket } from '@/services/api';
+import { dekReply } from '@/lib/mcpDek';
 import { useSyncSocket } from './useSyncSocket';
 import { useBackendStore } from '@/store/backend';
 
 const mockTicket = fetchWsTicket as unknown as ReturnType<typeof vi.fn>;
+const mockDekReply = dekReply as unknown as ReturnType<typeof vi.fn>;
 
 class FakeWS {
   static OPEN = 1;
@@ -38,6 +41,7 @@ describe('useSyncSocket — reconnect & give-up', () => {
     FakeWS.instances = [];
     mockTicket.mockReset();
     navigateMock.mockReset();
+    mockDekReply.mockReset();
     vi.stubGlobal('WebSocket', FakeWS as unknown as typeof WebSocket);
     useBackendStore.setState({ unavailable: false, retrying: 0, gaveUp: false });
   });
@@ -84,6 +88,60 @@ describe('useSyncSocket — reconnect & give-up', () => {
     FakeWS.instances[0].readyState = FakeWS.OPEN;
     FakeWS.instances[0].onopen?.();
     expect(useBackendStore.getState().unavailable).toBe(false);
+    unmount();
+  });
+
+  it('kicks off the MCP DEK handshake on open (key seated without a chat socket)', async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    const { unmount } = renderHook(() => useSyncSocket());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const ws = FakeWS.instances[0];
+    ws.readyState = FakeWS.OPEN;
+    ws.onopen?.();
+
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'mcp_dek_open' }));
+    unmount();
+  });
+
+  it('computes dekReply for an mcp_dek_* frame and sends the reply back', async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    mockDekReply.mockResolvedValue({ type: 'mcp_dek_supply', dek: 'abc' });
+    const { unmount } = renderHook(() => useSyncSocket());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const ws = FakeWS.instances[0];
+    ws.readyState = FakeWS.OPEN;
+    const frame = { type: 'mcp_dek_challenge', wrapped_dek: 'w', wrap_iv: 'iv' };
+    (ws.onmessage as unknown as (e: { data: string }) => void)?.({ data: JSON.stringify(frame) });
+    await vi.advanceTimersByTimeAsync(0); // flush the awaited dekReply promise
+
+    expect(mockDekReply).toHaveBeenCalledWith(frame);
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'mcp_dek_supply', dek: 'abc' }));
+    unmount();
+  });
+
+  it('swallows a dekReply rejection (crypto failure) without sending or throwing', async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    mockDekReply.mockRejectedValue(new Error('subtle crypto blew up'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { unmount } = renderHook(() => useSyncSocket());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const ws = FakeWS.instances[0];
+    ws.readyState = FakeWS.OPEN;
+    ws.send.mockClear(); // drop the mcp_dek_open from onopen
+    (ws.onmessage as unknown as (e: { data: string }) => void)?.({
+      data: JSON.stringify({ type: 'mcp_dek_challenge', wrapped_dek: 'w' }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
     unmount();
   });
 });

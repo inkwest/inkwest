@@ -8,8 +8,11 @@
 >   The static catalog is untouched.
 > - **Browser-fractioned key custody (audit-doc Phase C), not KMS/sealed.** Per-user tokens
 >   are AES-256-GCM under a per-user DEK whose wrapped form lives in a new `mcp_user_keys`
->   table; the DEK is supplied by the browser over the chat WS and held in RAM only while
->   connected (`app/core/crypto.py`, `app/services/mcp_dek_store.py`, `mcp_dek_handshake.py`).
+>   table; the DEK is supplied by the browser over the **sync WS** (app-wide, so the key is
+>   resident whenever a tab is open — required for connecting a server from the settings panel
+>   with no chat open) **and** the chat WS, with an additive refcount across both, held in RAM
+>   only while connected (`app/core/crypto.py`, `app/services/mcp_dek_store.py`,
+>   `mcp_dek_handshake.py`).
 >   There are **no** `token_vault_*` / KMS settings. Phase B (KMS/sealed) is not used here.
 > - **`oauth_flow.py` was NOT extracted** from the GitLab connector (only `generate_pkce` is
 >   reused). The OAuth client is self-contained in `app/services/mcp_oauth.py`.

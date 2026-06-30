@@ -249,9 +249,20 @@ async def _http(method: str, url: str, **kwargs: Any) -> httpx.Response:
                     chunks.append(chunk)
             finally:
                 await resp.aclose()
+            # `aiter_bytes()` already content-decoded the body (gunzip/br/deflate). Drop the
+            # now-stale framing headers before rebuilding: keeping Content-Encoding would make
+            # httpx try to decode the already-plaintext bytes again on .json()/.text
+            # (httpx.DecodingError — e.g. a gzipped /token response), and a stale Content-Length
+            # would no longer match the decoded length. The byte cap above bounds the *decoded*
+            # size, so this preserves the anti-OOM posture.
+            rebuilt_headers = [
+                (k, v)
+                for k, v in resp.headers.multi_items()
+                if k.lower() not in ("content-encoding", "content-length")
+            ]
             return httpx.Response(
                 status_code=resp.status_code,
-                headers=resp.headers,
+                headers=rebuilt_headers,
                 content=b"".join(chunks),
                 request=resp.request,
             )
