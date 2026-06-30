@@ -20,6 +20,7 @@ from app.models.mcp_oauth_client import McpOauthClient
 from app.models.mcp_user_token import McpUserToken
 from app.services import mcp_oauth
 from app.services.mcp_oauth import (
+    ClientDeadError,
     Discovery,
     GrantDeadError,
     McpOauthError,
@@ -769,3 +770,226 @@ async def test_get_fresh_token_non_dict_blob_is_grant_dead() -> None:
     db.get = AsyncMock(return_value=token)
     with pytest.raises(GrantDeadError):
         await mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=dek)
+
+
+# --------------------------------------------------------------------------- #
+# Expired/invalid client registration (invalid_client) self-heal
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_token_request_invalid_client_raises_client_dead() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"error": "invalid_client", "error_description": "client registration expired"},
+        )
+
+    _use_transport(handler)
+    with pytest.raises(ClientDeadError):
+        await mcp_oauth._token_request(
+            "https://as.example.com/token", {"grant_type": "refresh_token"}, None
+        )
+
+
+@pytest.mark.asyncio
+async def test_token_request_invalid_grant_stays_grant_dead() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    _use_transport(handler)
+    with pytest.raises(GrantDeadError):
+        await mcp_oauth._token_request("https://as.example.com/token", {}, None)
+
+
+@pytest.mark.asyncio
+async def test_get_fresh_token_invalid_client_drops_client_and_reconnects(monkeypatch) -> None:
+    server = _server()
+    monkeypatch.setattr(mcp_oauth, "get_oauth_server", lambda key: server)
+    drop = AsyncMock()
+    monkeypatch.setattr(mcp_oauth, "_drop_client", drop)
+    dek = generate_dek()
+    blob, iv = seal(dek, json.dumps({"access_token": "old", "refresh_token": "RT"}).encode())
+    token = McpUserToken(user_id=_USER, mcp_key="notion", vault_ref="r", status="active")
+    token.blob, token.blob_iv = blob, iv
+    token.expires_at = datetime.now(UTC) - timedelta(minutes=5)  # expired → refresh path
+    client = McpOauthClient(
+        mcp_key="notion",
+        issuer="https://as.example.com",
+        token_endpoint="https://as.example.com/token",
+        client_id="cid-123",
+    )
+
+    async def _get(model, pk):
+        return token if model is McpUserToken else client
+
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=_get)
+    db.commit = AsyncMock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid_client"})
+
+    _use_transport(handler)
+    # Surfaced as a dead grant so the proxy maps it to a 401 reconnect (same UX as invalid_grant).
+    with pytest.raises(GrantDeadError):
+        await mcp_oauth.get_fresh_token(db, user_id=_USER, mcp_key="notion", dek=dek)
+    assert token.status == "expired"
+    drop.assert_awaited_once_with(db, "notion", client_id="cid-123")
+
+
+@pytest.mark.asyncio
+async def test_exchange_code_invalid_client_drops_client(monkeypatch) -> None:
+    server = _server()
+    monkeypatch.setattr(mcp_oauth, "get_oauth_server", lambda key: server)
+    drop = AsyncMock()
+    monkeypatch.setattr(mcp_oauth, "_drop_client", drop)
+    client = McpOauthClient(
+        mcp_key="notion",
+        issuer="https://as.example.com",
+        token_endpoint="https://as.example.com/token",
+        client_id="cid-123",
+    )
+    db = _mock_db_for_exchange(client)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_client"})
+
+    _use_transport(handler)
+    with pytest.raises(McpOauthError, match="registration has expired"):
+        await mcp_oauth.exchange_code(
+            db, state="s", code="c", redirect_uri="https://app/cb", dek=generate_dek()
+        )
+    drop.assert_awaited_once_with(db, "notion", client_id="cid-123")
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_reregisters_expired_client(monkeypatch) -> None:
+    server = _server(client_id=None)  # forces DCR
+    disco = Discovery(
+        issuer="https://as.example.com",
+        authorization_endpoint="https://as.example.com/authorize",
+        token_endpoint="https://as.example.com/token",
+        registration_endpoint="https://as.example.com/register",
+        revocation_endpoint=None,
+    )
+    expired = McpOauthClient(
+        mcp_key="notion",
+        issuer="https://as.example.com",
+        token_endpoint="https://as.example.com/token",
+        client_id="old-cid",
+    )
+    expired.client_expires_at = datetime.now(UTC) - timedelta(days=1)
+    fresh = McpOauthClient(
+        mcp_key="notion",
+        issuer="https://as.example.com",
+        token_endpoint="https://as.example.com/token",
+        client_id="new-cid",
+    )
+    drop = AsyncMock()
+    monkeypatch.setattr(mcp_oauth, "_drop_client", drop)
+    gets = [expired, expired, fresh]  # existing-check, under-lock re-check, persisted re-read
+
+    async def _get(model, pk):
+        return gets.pop(0) if gets else fresh
+
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=_get)
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/register"
+        return httpx.Response(201, json={"client_id": "new-cid", "client_secret_expires_at": 0})
+
+    _use_transport(handler)
+    row = await mcp_oauth.ensure_client(db, server, redirect_uri="https://app/cb", disco=disco)
+    assert row.client_id == "new-cid"  # re-registered, not the lapsed one
+    drop.assert_awaited_once_with(db, "notion", client_id="old-cid")
+
+
+def test_client_expired_helper() -> None:
+    c = McpOauthClient(mcp_key="k", issuer="i", token_endpoint="t", client_id="c")
+    c.client_expires_at = None
+    assert mcp_oauth._client_expired(c) is False
+    c.client_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert mcp_oauth._client_expired(c) is True
+    c.client_expires_at = datetime.now(UTC) + timedelta(days=1)
+    assert mcp_oauth._client_expired(c) is False
+
+
+# --------------------------------------------------------------------------- #
+# Authorize-liveness preflight (silently-expired DCR client → re-register at connect)
+# --------------------------------------------------------------------------- #
+def _disco_dcr() -> Discovery:
+    return Discovery(
+        issuer="https://as.example.com",
+        authorization_endpoint="https://as.example.com/authorize",
+        token_endpoint="https://as.example.com/token",
+        registration_endpoint="https://as.example.com/register",
+        revocation_endpoint=None,
+    )
+
+
+def _client(client_id: str) -> McpOauthClient:
+    return McpOauthClient(
+        mcp_key="notion",
+        issuer="https://as.example.com",
+        token_endpoint="https://as.example.com/token",
+        client_id=client_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_alive_at_authorize_signal() -> None:
+    az = "https://as.example.com/authorize"
+    # invalid_client → dead
+    _use_transport(lambda r: httpx.Response(400, json={"error": "invalid_client"}))
+    assert await mcp_oauth._client_alive_at_authorize(az, "cid", "https://app/cb") is False
+    # a different error (e.g. redirect_uri) → the client itself is fine → alive
+    _use_transport(lambda r: httpx.Response(400, json={"error": "invalid_request"}))
+    assert await mcp_oauth._client_alive_at_authorize(az, "cid", "https://app/cb") is True
+    # login page → alive
+    _use_transport(lambda r: httpx.Response(200, text="<html>login</html>"))
+    assert await mcp_oauth._client_alive_at_authorize(az, "cid", "https://app/cb") is True
+    # non-JSON error body mentioning invalid_client → dead
+    _use_transport(lambda r: httpx.Response(400, text="error=invalid_client; expired"))
+    assert await mcp_oauth._client_alive_at_authorize(az, "cid", "https://app/cb") is False
+
+
+@pytest.mark.asyncio
+async def test_build_authorize_url_reregisters_when_client_dead(monkeypatch) -> None:
+    server = _server(client_id=None)
+    monkeypatch.setattr(mcp_oauth, "discover", AsyncMock(return_value=_disco_dcr()))
+    ensure = AsyncMock(side_effect=[_client("dead-cid"), _client("new-cid")])
+    monkeypatch.setattr(mcp_oauth, "ensure_client", ensure)
+    monkeypatch.setattr(mcp_oauth, "_client_alive_at_authorize", AsyncMock(return_value=False))
+    drop = AsyncMock()
+    monkeypatch.setattr(mcp_oauth, "_drop_client", drop)
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    url = await mcp_oauth.build_authorize_url(
+        db, server, user_id=_USER, redirect_uri="https://app/cb"
+    )
+    assert "client_id=new-cid" in url  # the re-registered client is used in the popup URL
+    drop.assert_awaited_once_with(db, server.key, client_id="dead-cid")
+    assert ensure.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_build_authorize_url_keeps_live_client(monkeypatch) -> None:
+    server = _server(client_id=None)
+    monkeypatch.setattr(mcp_oauth, "discover", AsyncMock(return_value=_disco_dcr()))
+    ensure = AsyncMock(return_value=_client("live-cid"))
+    monkeypatch.setattr(mcp_oauth, "ensure_client", ensure)
+    monkeypatch.setattr(mcp_oauth, "_client_alive_at_authorize", AsyncMock(return_value=True))
+    drop = AsyncMock()
+    monkeypatch.setattr(mcp_oauth, "_drop_client", drop)
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    url = await mcp_oauth.build_authorize_url(
+        db, server, user_id=_USER, redirect_uri="https://app/cb"
+    )
+    assert "client_id=live-cid" in url
+    drop.assert_not_awaited()
+    assert ensure.await_count == 1

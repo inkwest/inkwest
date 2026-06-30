@@ -15,6 +15,7 @@ Error semantics the caller/panel must distinguish:
 - broker degraded (DB/vault/transient AS) → 503
 """
 
+import contextlib
 import logging
 
 import httpx
@@ -182,6 +183,12 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
                 await mcp_oauth.mark_expired(db, user_id=claims.user_id, mcp_key=key)
                 raise HTTPException(status_code=401, detail=_EXPIRED)
     except GrantDeadError:
+        # The grant is dead (refresh/exchange rejected, undecryptable blob, or a dropped DCR
+        # client). Downgrade the local row so the next catalog poll flips the "connected" badge
+        # to "Reconnect" — otherwise the optimistic active row keeps the UI showing connected
+        # even though every call fails. Idempotent + best-effort (don't mask the 401).
+        with contextlib.suppress(Exception):
+            await mcp_oauth.mark_expired(db, user_id=claims.user_id, mcp_key=key)
         raise HTTPException(status_code=401, detail=_EXPIRED) from None
     except McpOauthError:
         raise HTTPException(status_code=503, detail=_UNAVAILABLE) from None
