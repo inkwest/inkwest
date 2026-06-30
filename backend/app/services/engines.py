@@ -145,7 +145,14 @@ def engine_for_turn(model_id: str, pinned: str | None = None) -> str:
         return runnable[0]
     # Nothing offered (engine off / admin disabled every pairing): fall back to the
     # capability default so the turn still resolves to a sane engine.
-    return DEFAULT_ENGINE if _speaks_anthropic(model_id) else INKWEST_AGENT
+    if _speaks_anthropic(model_id):
+        return DEFAULT_ENGINE
+    # Non-Claude needs an agent engine. Pick the operator's first-declared enabled agent
+    # (AGENTIC_ENGINES order — deterministic, the deployment's primary) so the downstream
+    # "engine unavailable" error names a real engine (not inkwest-agent on an opencode-only
+    # deployment). Fall back to INKWEST_AGENT only when no agent engine is enabled at all.
+    enabled_agents = [e for e in enabled_engines() if e in AGENT_ENGINES]
+    return enabled_agents[0] if enabled_agents else INKWEST_AGENT
 
 
 def resolve_engine(model_id: str) -> str:

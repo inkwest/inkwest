@@ -72,11 +72,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     htop \
     sysstat \
     file \
-    # Data wrangling / editors
+    # Data wrangling / editors / search
     jq \
     yq \
     less \
     emacs-nox \
+    # ripgrep: opencode's grep/file-search tooling shells out to `rg`; without it the
+    # agent's search degrades and `which rg` fails inside its bash tool.
+    ripgrep \
     # Python (system-wide; the agent runs from a dedicated venv below)
     python3 \
     # Misc clients

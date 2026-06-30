@@ -163,7 +163,7 @@ class TestOrchestrateOpencode:
 
         es = ExitStack()
         es.enter_context(patch.object(oo, "get_session_messages", AsyncMock(return_value=history)))
-        es.enter_context(patch.object(oo, "get_active_skills", AsyncMock(return_value=[])))
+        es.enter_context(patch.object(oo, "get_effective_skills", AsyncMock(return_value=[])))
         es.enter_context(patch.object(oo, "get_enabled_mcp_servers", AsyncMock(return_value=[])))
         es.enter_context(patch.object(oo, "apply_session_skills", MagicMock()))
         es.enter_context(patch.object(oo, "save_message", AsyncMock()))
@@ -196,9 +196,13 @@ class TestOrchestrateOpencode:
         gs.return_value.sandbox_enabled = True
         gs.return_value.sandbox_docker_path = "docker"
         gs.return_value.claude_cli_timeout = 120
-        # AGENTS.md / opencode.json writes go to a temp workdir
+        # AGENTS.md / opencode.json writes go to a temp workdir (no real FS): mock the
+        # makedirs/open and the atomic-publish rename+remove so opencode.json staging
+        # doesn't touch disk.
         es.enter_context(patch.object(oo.os, "makedirs", MagicMock()))
         es.enter_context(patch("builtins.open", MagicMock()))
+        es.enter_context(patch.object(oo.os, "replace", MagicMock()))
+        cap["os_remove"] = es.enter_context(patch.object(oo.os, "remove", MagicMock()))
         # F1 resume guard probes opencode.db presence in the durable dir.
         es.enter_context(patch.object(oo.os.path, "isfile", MagicMock(return_value=store_exists)))
         return es, cap
@@ -367,7 +371,38 @@ class TestOrchestrateOpencode:
 
     @pytest.mark.asyncio
     async def test_broker_off_uses_no_provider_override(self):
-        # Broker off (default): no provider baseURL, no bearer override → direct Bedrock.
+        # Broker off: no provider baseURL, no bearer override → direct Bedrock. Force the
+        # broker funcs off explicitly (don't rely on the ambient LLM_BROKER_ENABLED default,
+        # which is on in some envs and would invert this test's premise).
+        captured_cfg: dict = {}
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with (
+            es,
+            patch.object(oo.llm_broker, "agent_bedrock_endpoint_url", MagicMock(return_value=None)),
+            patch.object(oo.llm_broker, "agent_broker_env", MagicMock(return_value={})),
+            patch.object(oo.json, "dump", lambda cfg, f: captured_cfg.update(cfg)),
+        ):
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+        assert "provider" not in captured_cfg
+        assert "AWS_BEARER_TOKEN_BEDROCK" not in (cap["extra_env"] or {})
+
+    @pytest.mark.asyncio
+    async def test_small_model_pinned_to_session_model_and_aux_agents_disabled(self):
+        # opencode's small_model is pinned to the SESSION model (never the un-enabled
+        # claude-haiku default the broker would 403), and the title/summary sub-agents — the
+        # out-of-stream small-model spenders — are disabled so no unmetered cost is incurred.
         captured_cfg: dict = {}
         es, cap = self._patch(
             history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
@@ -384,8 +419,32 @@ class TestOrchestrateOpencode:
                     user_id=USER_ID,
                 )
             )
-        assert "provider" not in captured_cfg
-        assert "AWS_BEARER_TOKEN_BEDROCK" not in (cap["extra_env"] or {})
+        assert captured_cfg["small_model"] == "amazon-bedrock/m"  # session model from _patch
+        assert captured_cfg["agent"]["title"]["disable"] is True
+        assert captured_cfg["agent"]["summary"]["disable"] is True
+
+    @pytest.mark.asyncio
+    async def test_cred_bearing_opencode_json_removed(self):
+        # opencode.json can embed MCP creds/JWT headers → it must not outlive the turn.
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+        cred_path = "/tmp/does-not-matter/workdir/opencode.json"
+        assert any(c.args and c.args[0] == cred_path for c in cap["os_remove"].call_args_list), (
+            "opencode.json must be removed so creds don't outlive the turn"
+        )
 
     @pytest.mark.asyncio
     async def test_expired_aws_creds_emit_connector_required(self):
@@ -529,3 +588,71 @@ class TestOpencodeDispatch:
     @pytest.mark.asyncio
     async def test_falls_back_to_cli_when_sandbox_off(self):
         assert await self._dispatch(opencode_enabled=True, sandbox_enabled=False) == "cli"
+
+    async def _dispatch_nonclaude(self, *, opencode_enabled, sandbox_enabled):
+        """Dispatch a NON-Claude model pinned to opencode; return (engine_run, events).
+
+        A non-Claude model can't run on the CLI, so when opencode is unavailable the
+        dispatcher must surface a clean error and run NEITHER orchestrator — not silently
+        fall back to the CLI (which would 403 / misattribute usage). capable_engines is
+        forced to exclude claude-cli to model the non-Claude case.
+        """
+        from app.services.ai_client import get_orchestrator
+
+        seen = {}
+        events = []
+
+        async def fake_cli(**kwargs):
+            seen["engine"] = "cli"
+            if False:
+                yield
+
+        async def fake_opencode(**kwargs):
+            seen["engine"] = "opencode"
+            if False:
+                yield
+
+        with (
+            patch("app.services.ai_client.get_settings") as gs,
+            patch(
+                "app.services.ai_client.resolve_session_model",
+                AsyncMock(return_value="meta.llama3-1-70b-instruct-v1:0"),
+            ),
+            patch(
+                "app.services.ai_client.resolve_session_engine", AsyncMock(return_value="opencode")
+            ),
+            patch("app.services.engines.engine_for_turn", MagicMock(return_value="opencode")),
+            patch("app.services.engines.opencode_enabled", return_value=opencode_enabled),
+            patch("app.services.engines.inkwest_agent_enabled", return_value=False),
+            patch("app.services.engines.capable_engines", MagicMock(return_value=["opencode"])),
+            patch("app.services.orchestrator_cli.orchestrate_chat_cli", fake_cli),
+            patch("app.services.orchestrator_opencode.orchestrate_chat_opencode", fake_opencode),
+        ):
+            gs.return_value.ai_provider = "claude-cli"
+            gs.return_value.sandbox_enabled = sandbox_enabled
+            orchestrator = get_orchestrator()
+            async for ev in orchestrator(db=AsyncMock(), session_id=SESSION_ID, user_message="x"):
+                events.append(ev)
+        return seen.get("engine"), events
+
+    @pytest.mark.asyncio
+    async def test_nonclaude_errors_when_opencode_disabled(self):
+        engine, events = await self._dispatch_nonclaude(
+            opencode_enabled=False, sandbox_enabled=True
+        )
+        assert engine is None  # neither orchestrator ran — no silent CLI fallback
+        err = next((e for e in events if e.type == "error"), None)
+        assert err is not None, "expected a clean engine-unavailable error"
+        assert err.metadata.get("reason") == "engine_unavailable"
+        assert err.metadata.get("engine") == "opencode"
+
+    @pytest.mark.asyncio
+    async def test_nonclaude_errors_when_sandbox_off(self):
+        engine, events = await self._dispatch_nonclaude(
+            opencode_enabled=True, sandbox_enabled=False
+        )
+        assert engine is None
+        err = next((e for e in events if e.type == "error"), None)
+        assert err is not None, "expected a clean engine-unavailable error"
+        assert err.metadata.get("reason") == "engine_unavailable"
+        assert err.metadata.get("engine") == "opencode"

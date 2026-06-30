@@ -43,7 +43,6 @@ from app.services.events import (
 )
 from app.services.messages import (
     ensure_session_title,
-    get_active_skills,
     get_enabled_mcp_servers,
     get_session_messages,
     save_message,
@@ -51,6 +50,7 @@ from app.services.messages import (
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills, skills_container_root
+from app.services.user_preferences import get_effective_skills
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +148,9 @@ async def orchestrate_chat_opencode(
     logger.info(f"Starting opencode orchestration for session {session_id_str}")
     # kubeconfig_path/context_name are part of the uniform orchestrator contract but unused
     # here: opencode's bash reaches the cluster via KUBECONFIG in the projected connector env
-    # (build_connector_env), not these args. attachments ride the durable workdir already.
-    _ = (kubeconfig_path, context_name, attachments)
+    # (build_connector_env), not these args. attachments ride the durable workdir already
+    # (attachments.py); the list itself is only consulted to detect an attachments-only turn.
+    _ = (kubeconfig_path, context_name)
 
     settings = get_settings()
     if not settings.sandbox_enabled:
@@ -224,7 +225,9 @@ async def orchestrate_chat_opencode(
     # inkwest-agent broker). Skills become an AGENTS.md index opencode reads on demand; MCP
     # servers are materialized into opencode.json's `mcp` block below.
     try:
-        active_skills = await get_active_skills(db)
+        # Effective (admin ∩ per-user) skills, matching the other engines — a per-user
+        # disable / personal skill must apply identically regardless of engine.
+        active_skills = await get_effective_skills(db, user_id)
     except Exception as e:
         logger.warning("active_skills_load_failed", extra={"error": str(e)})
         active_skills = []
@@ -284,7 +287,16 @@ async def orchestrate_chat_opencode(
     try:
         from app.services import sandbox
 
-        container = await sandbox.ensure(session_id_str)
+        uid = str(user_id) if user_id else None
+        # Per-user admission control before provisioning, same as the cli/inkwest-agent
+        # engines: reap the user's oldest idle pairs, refuse if at the hard ceiling with
+        # nothing reclaimable. Without this opencode turns could provision past the cap.
+        try:
+            await sandbox.enforce_user_sandbox_cap(uid, session_id_str)
+        except sandbox.SandboxCapExceededError as e:
+            yield error_event(str(e))
+            return
+        container = await sandbox.ensure(session_id_str, uid)
 
         # Resume only if opencode's OWN session store actually survived. `--continue` resumes
         # the store in the durable per-conv mount; if Postgres has history but the store is
@@ -340,11 +352,26 @@ async def orchestrate_chat_opencode(
         # opencode.json (auto-loaded from --dir). Least-privilege tool surface: disable the
         # network-egress tools the investigation agent doesn't need (websearch has no provider
         # here; webfetch would egress) — defence in depth on top of the squid allowlist.
+        # `skill` (opencode's native skill tool) is disabled too: Inkwest surfaces skills as an
+        # AGENTS.md index the agent reads on demand via `read` (progressive disclosure), so the
+        # native tool — which can't resolve our `~/.claude/skills` layout — only errors.
         # Permissions stay implicit-allow via --dangerously-skip-permissions (no TTY for "ask").
         # The `mcp` block can embed creds/JWT headers → this file is removed on turn end (finally).
         opencode_cfg: dict[str, Any] = {
             "$schema": "https://opencode.ai/config.json",
-            "tools": {"websearch": False, "webfetch": False},
+            "tools": {"websearch": False, "webfetch": False, "skill": False},
+            # Defensive pin: opencode's built-in amazon-bedrock small model is claude-haiku,
+            # which isn't an enabled registry model → the broker (fail-closed) would 403 any
+            # use. Point it at the SESSION model (enabled/brokered). It's effectively unused
+            # since the title/summary sub-agents below are disabled, but this keeps any residual
+            # small_model use off the un-enabled default.
+            "small_model": f"amazon-bedrock/{model}",
+            # Disable opencode's auxiliary small-model sub-agents (title + summary). They run
+            # OUTSIDE the foreground `run` stream, so their Bedrock spend is NOT captured in the
+            # turn's usage/cost (the broker doesn't meter, and the parser only sees `run` steps)
+            # — unaccounted cost. Inkwest titles backend-side, so these earn nothing here.
+            # (Context compaction runs mid-`run`, so its cost IS metered → left enabled.)
+            "agent": {"title": {"disable": True}, "summary": {"disable": True}},
         }
         if mcp_block:
             opencode_cfg["mcp"] = mcp_block
@@ -353,8 +380,19 @@ async def orchestrate_chat_opencode(
         # (AWS_BEARER_TOKEN_BEDROCK) rides the spawn env below. Off ⇒ no baseURL ⇒ direct Bedrock.
         if broker_base:
             opencode_cfg["provider"] = {"amazon-bedrock": {"options": {"baseURL": broker_base}}}
-        with open(opencode_json, "w", encoding="utf-8") as f:
-            json.dump(opencode_cfg, f)
+        # Atomic publish into the bind-mounted workdir: stage on a sibling OUTSIDE the mount
+        # (a half-written cred-bearing file must be invisible to the container), then one
+        # os.replace into the dir. A bind mount follows the INODE, so we never swap the dir —
+        # renaming a file INTO it is path-resolved and the warm container sees it. Matches the
+        # cred-refresh discipline (eks_refresh / write_aws_profiles).
+        staging = os.path.join(os.path.dirname(workdir), f".opencode.json.{uuid.uuid4().hex}")
+        try:
+            with open(staging, "w", encoding="utf-8") as f:
+                json.dump(opencode_cfg, f)
+            os.replace(staging, opencode_json)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(staging)
 
         # Reconstruct role-correct messages from the flat event stream so the persisted
         # history round-trips (toolResult lives in a user turn, not the assistant one). A
@@ -385,10 +423,23 @@ async def orchestrate_chat_opencode(
             assistant_blocks = []
             pending_results = []
 
+        # opencode takes the prompt as argv and ignores the attachments list, but uploaded
+        # files already live in /workdir (attachments.py). An attachments-only turn would
+        # otherwise send an empty prompt and silently no-op; point the agent at the files by
+        # name so it doesn't have to discover them.
+        agent_message = user_message
+        if not agent_message.strip() and attachments:
+            names = ", ".join(f"/workdir/{a['filename']}" for a in attachments if a.get("filename"))
+            agent_message = (
+                f"Please review the attached file(s): {names}"
+                if names
+                else "Please review the attached file(s) in /workdir."
+            )
+
         try:
             output_stream = execute_opencode(
                 session_id_str,
-                user_message,
+                agent_message,
                 container=container,
                 model=model,
                 resume=resume,
