@@ -94,11 +94,14 @@ def get_orchestrator():
     # the engine per turn from the session's model — a non-Claude model needs the
     # agent (the CLI is Claude-only). Claude models stay on the CLI (its native path).
     from app.services.engines import (
+        CLAUDE_CLI,
         INKWEST_AGENT,
+        capable_engines,
         configured_default_engine,
         engine_for_turn,
         inkwest_agent_enabled,
     )
+    from app.services.events import error_event
 
     async def _dispatch_engine(
         db: AsyncSession, session_id: "str | UUID", **kwargs: Any
@@ -115,9 +118,10 @@ def get_orchestrator():
         if pinned is None and model == default_model():
             pinned = configured_default_engine()
         engine = engine_for_turn(model, pinned)
+        agent_runnable = inkwest_agent_enabled() and get_settings().sandbox_enabled
         # Route to the broker only when the agent can actually run (engine enabled +
         # sandbox available); otherwise fall back to the CLI.
-        if engine == INKWEST_AGENT and inkwest_agent_enabled() and get_settings().sandbox_enabled:
+        if engine == INKWEST_AGENT and agent_runnable:
             from app.services.orchestrator_inkwest_agent import (
                 orchestrate_chat_inkwest_agent,
             )
@@ -125,11 +129,29 @@ def get_orchestrator():
             logger.info(f"Engine inkwest-agent (sandboxed) for model {model}")
             orchestrate = orchestrate_chat_inkwest_agent
             used_engine = INKWEST_AGENT
+        elif engine == INKWEST_AGENT and CLAUDE_CLI not in capable_engines(model):
+            # The model needs the inkwest-agent engine (the CLI is Claude-only) but the agent
+            # isn't runnable here (engine disabled or sandbox unavailable). Do NOT fall back to
+            # the CLI — it can't serve this model, the turn would fail there, and the usage
+            # would be misattributed to claude-cli. Surface a clean error instead.
+            logger.warning(
+                "inkwest-agent unavailable for non-Claude model %s (agent_enabled=%s sandbox=%s)",
+                model,
+                inkwest_agent_enabled(),
+                get_settings().sandbox_enabled,
+            )
+            yield error_event(
+                f"The model '{model}' requires the inkwest-agent engine, which is "
+                "currently unavailable. Ask an administrator to enable it, or switch to "
+                "a Claude model.",
+                metadata={"model": model, "engine": INKWEST_AGENT, "reason": "engine_unavailable"},
+            )
+            return
         else:
             from app.services.orchestrator_cli import orchestrate_chat_cli
 
             orchestrate = orchestrate_chat_cli
-            used_engine = "claude-cli"
+            used_engine = CLAUDE_CLI
         metrics.set_turn_engine(used_engine)
         metrics.set_turn_model(model)
         metrics.chat_turns_total.labels(engine=used_engine, model=model).inc()

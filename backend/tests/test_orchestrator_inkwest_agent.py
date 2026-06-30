@@ -1153,7 +1153,15 @@ class TestOrchestrateInkwestAgent:
 
 class TestEngineDispatch:
     async def _dispatch(
-        self, *, model, entry, agent_enabled, sandbox_enabled, pinned=None, default_engine=None
+        self,
+        *,
+        model,
+        entry,
+        agent_enabled,
+        sandbox_enabled,
+        pinned=None,
+        default_engine=None,
+        return_events=False,
     ):
         from app.services.ai_client import get_orchestrator
 
@@ -1187,8 +1195,14 @@ class TestEngineDispatch:
         ):
             gs.return_value.sandbox_enabled = sandbox_enabled
             orchestrator = get_orchestrator()
-            async for _ in orchestrator(db=AsyncMock(), session_id=SESSION_ID, user_message="x"):
-                pass
+            events = [
+                ev
+                async for ev in orchestrator(
+                    db=AsyncMock(), session_id=SESSION_ID, user_message="x"
+                )
+            ]
+        if return_events:
+            return seen.get("engine"), events
         return seen.get("engine")
 
     @pytest.mark.asyncio
@@ -1251,29 +1265,35 @@ class TestEngineDispatch:
         )
 
     @pytest.mark.asyncio
-    async def test_non_claude_falls_back_to_cli_when_agent_disabled(self):
+    async def test_non_claude_errors_when_agent_disabled(self):
+        # A non-Claude model needs the agent; with the agent disabled it must NOT fall back
+        # to the CLI (which can't serve it) — it surfaces a clean error and runs neither.
         entry = SimpleNamespace(provider="meta", arn=None, options={})
-        assert (
-            await self._dispatch(
-                model="meta.llama3-1-70b-instruct-v1:0",
-                entry=entry,
-                agent_enabled=False,
-                sandbox_enabled=True,
-            )
-            == "cli"
+        engine, events = await self._dispatch(
+            model="meta.llama3-1-70b-instruct-v1:0",
+            entry=entry,
+            agent_enabled=False,
+            sandbox_enabled=True,
+            return_events=True,
         )
+        assert engine is None  # neither orchestrator ran
+        assert [e for e in events if e.type == "error"], "expected a clean error event"
+        err = next(e for e in events if e.type == "error")
+        assert err.metadata.get("reason") == "engine_unavailable"
 
     @pytest.mark.asyncio
-    async def test_non_claude_falls_back_to_cli_when_sandbox_off(self):
+    async def test_non_claude_errors_when_sandbox_off(self):
         entry = SimpleNamespace(provider="meta", arn=None, options={})
-        assert (
-            await self._dispatch(
-                model="meta.llama3-1-70b-instruct-v1:0",
-                entry=entry,
-                agent_enabled=True,
-                sandbox_enabled=False,
-            )
-            == "cli"
+        engine, events = await self._dispatch(
+            model="meta.llama3-1-70b-instruct-v1:0",
+            entry=entry,
+            agent_enabled=True,
+            sandbox_enabled=False,
+            return_events=True,
+        )
+        assert engine is None
+        assert any(
+            e.type == "error" and e.metadata.get("reason") == "engine_unavailable" for e in events
         )
 
 
