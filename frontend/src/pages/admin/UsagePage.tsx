@@ -17,9 +17,13 @@ import { useUsageStore } from '@/store/admin';
 import { TrendingUp, Users, Cpu, DollarSign, ChevronRight, ChevronDown, Wallet } from 'lucide-react';
 import { UserSessionsUsage } from '@/types/admin';
 import * as adminApi from '@/services/adminApi';
+import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
+import { formatTokens, formatCost } from '@/lib/usageFormat';
+import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
 import {
-  BarChart,
+  ComposedChart,
   Bar,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -47,16 +51,19 @@ function lastMonthRange(): adminApi.UsageDateRange {
   };
 }
 
-function formatTokens(tokens: number) {
-  if (tokens >= 1_000_000) return (tokens / 1_000_000).toFixed(2) + 'M';
-  if (tokens >= 1_000) return (tokens / 1_000).toFixed(1) + 'K';
-  return tokens.toString();
+type UserSortKey =
+  | 'display_name'
+  | 'conversation_count'
+  | 'mean_req'
+  | 'total_tokens'
+  | 'cost_usd';
+
+// Average requests (turns) per conversation; 0 conversations ⇒ 0 (avoid divide-by-zero).
+function meanRequestsPerConv(u: { request_count: number; conversation_count: number }) {
+  return u.conversation_count > 0 ? u.request_count / u.conversation_count : 0;
 }
 
-function formatCost(cost: number | string) {
-  const n = typeof cost === 'string' ? parseFloat(cost) : cost;
-  return n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
-}
+const USERS_PAGE_SIZE = 10;
 
 function formatTimeseriesLabel(iso: string, period: string) {
   const d = new Date(iso);
@@ -87,6 +94,36 @@ export function UsagePage() {
   // Right-click "create budget" menu, positioned at the cursor.
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; userId: string; name: string } | null>(null);
   const navigate = useNavigate();
+
+  // Client-side tristate sort for the "Usage by User" table (rows are already capped server-side).
+  const [userSort, setUserSort] = useState<SortState<UserSortKey>>({ key: 'cost_usd', dir: 'desc' });
+  const userKey = userSort.key;
+  const sortedUserUsage =
+    userKey === null
+      ? userUsage
+      : [...userUsage].sort((a, b) => {
+          const dir = userSort.dir === 'asc' ? 1 : -1;
+          if (userKey === 'display_name') {
+            return dir * (a.display_name || a.email).localeCompare(b.display_name || b.email);
+          }
+          const val = (u: typeof a) =>
+            userKey === 'mean_req' ? meanRequestsPerConv(u) : (u[userKey] as number);
+          return dir * (val(a) - val(b));
+        });
+  const toggleUserSort = (key: UserSortKey) => {
+    setUserSort((s) => cycleSort(s, key));
+    setUserPage(0);
+  };
+
+  // Front-only pager over the (server-capped, top-1000-by-cost) user rows.
+  const [userPage, setUserPage] = useState(0);
+  const {
+    pageCount: userPageCount,
+    clamped: userPageClamped,
+    start: userStart,
+    end: userEnd,
+  } = pageWindow(sortedUserUsage.length, USERS_PAGE_SIZE, userPage);
+  const pagedUserUsage = sortedUserUsage.slice(userStart, userEnd);
 
   useEffect(() => {
     fetchAll();
@@ -272,23 +309,31 @@ export function UsagePage() {
               </CardHeader>
               <CardContent>
                 <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={timeseries.map((p) => ({
+                  <ComposedChart data={timeseries.map((p) => ({
                     ...p,
                     label: formatTimeseriesLabel(p.timestamp, period),
                     total_tokens: p.input_tokens + p.output_tokens,
                   }))}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                     <XAxis dataKey="label" tick={{ fill: '#9CA3AF', fontSize: 12 }} />
-                    <YAxis tick={{ fill: '#9CA3AF', fontSize: 12 }} tickFormatter={(v) => formatTokens(v)} />
+                    {/* Left axis: token bars. Right axis: cost line — separate scales so a
+                        small dollar figure stays readable next to millions of tokens. */}
+                    <YAxis yAxisId="tokens" tick={{ fill: '#9CA3AF', fontSize: 12 }} tickFormatter={(v) => formatTokens(v)} />
+                    <YAxis yAxisId="cost" orientation="right" tick={{ fill: '#F59E0B', fontSize: 12 }} tickFormatter={(v) => formatCost(v)} />
                     <Tooltip
                       contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: 8 }}
                       labelStyle={{ color: '#E5E7EB' }}
-                      formatter={(value, name) => [formatTokens(Number(value) || 0), name === 'input_tokens' ? 'Input' : 'Output']}
+                      formatter={(value, name) =>
+                        name === 'cost_usd'
+                          ? [formatCost(Number(value) || 0), 'Cost']
+                          : [formatTokens(Number(value) || 0), name === 'input_tokens' ? 'Input' : 'Output']
+                      }
                     />
-                    <Legend formatter={(value) => value === 'input_tokens' ? 'Input tokens' : 'Output tokens'} />
-                    <Bar dataKey="input_tokens" stackId="tokens" fill="#3B82F6" radius={[0, 0, 0, 0]} />
-                    <Bar dataKey="output_tokens" stackId="tokens" fill="#10B981" radius={[4, 4, 0, 0]} />
-                  </BarChart>
+                    <Legend formatter={(value) => value === 'input_tokens' ? 'Input tokens' : value === 'output_tokens' ? 'Output tokens' : 'Cost'} />
+                    <Bar yAxisId="tokens" dataKey="input_tokens" stackId="tokens" fill="#3B82F6" radius={[0, 0, 0, 0]} />
+                    <Bar yAxisId="tokens" dataKey="output_tokens" stackId="tokens" fill="#10B981" radius={[4, 4, 0, 0]} />
+                    <Line yAxisId="cost" type="monotone" dataKey="cost_usd" stroke="#F59E0B" strokeWidth={2} dot={false} />
+                  </ComposedChart>
                 </ResponsiveContainer>
               </CardContent>
             </Card>
@@ -298,21 +343,69 @@ export function UsagePage() {
             {/* Usage by User — clickable drill-down */}
             <Card variant="bordered">
               <CardHeader>
-                <CardTitle>Usage by User</CardTitle>
+                {/* Pager lives in the header, not a footer: user rows vary in height (2-line
+                    name+email), so a bottom pager shifts vertically between pages and the button
+                    slips out from under the cursor. A fixed top anchor never moves. */}
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <CardTitle>Usage by User</CardTitle>
+                  {sortedUserUsage.length > 0 && (
+                    <div className="flex items-center gap-3 text-sm font-normal text-gray-400">
+                      <span>
+                        {userPageClamped * USERS_PAGE_SIZE + 1}–
+                        {Math.min((userPageClamped + 1) * USERS_PAGE_SIZE, sortedUserUsage.length)} of{' '}
+                        {sortedUserUsage.length}
+                        <span className="text-gray-600"> · top 1000 by cost</span>
+                      </span>
+                      {userPageCount > 1 && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setUserPage((p) => Math.max(0, p - 1))}
+                            disabled={userPageClamped === 0}
+                            className="px-2 py-1 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            ‹ Prev
+                          </button>
+                          <span>
+                            {userPageClamped + 1} / {userPageCount}
+                          </span>
+                          <button
+                            onClick={() => setUserPage((p) => Math.min(userPageCount - 1, p + 1))}
+                            disabled={userPageClamped >= userPageCount - 1}
+                            className="px-2 py-1 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            Next ›
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </CardHeader>
               <CardContent className="p-0">
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead></TableHead>
-                      <TableHead>User</TableHead>
-                      <TableHead className="text-right">Tokens</TableHead>
-                      <TableHead className="text-right">Cost</TableHead>
+                      <TableHead className="cursor-pointer select-none" aria-sort={ariaSort(userSort, 'display_name')} onClick={() => toggleUserSort('display_name')}>
+                        User{sortArrow(userSort, 'display_name')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'conversation_count')} onClick={() => toggleUserSort('conversation_count')}>
+                        Convs{sortArrow(userSort, 'conversation_count')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'mean_req')} onClick={() => toggleUserSort('mean_req')}>
+                        Req/conv{sortArrow(userSort, 'mean_req')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'total_tokens')} onClick={() => toggleUserSort('total_tokens')}>
+                        Tokens{sortArrow(userSort, 'total_tokens')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cost_usd')} onClick={() => toggleUserSort('cost_usd')}>
+                        Cost{sortArrow(userSort, 'cost_usd')}
+                      </TableHead>
                       <TableHead className="w-8"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {userUsage.map((usage) => (
+                    {pagedUserUsage.map((usage) => (
                       <Fragment key={usage.user_id}>
                         <TableRow
                           className="group cursor-pointer hover:bg-gray-700/50"
@@ -340,6 +433,12 @@ export function UsagePage() {
                             </div>
                           </TableCell>
                           <TableCell className="text-right">
+                            {usage.conversation_count}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {meanRequestsPerConv(usage).toFixed(1)}
+                          </TableCell>
+                          <TableCell className="text-right">
                             {formatTokens(usage.total_tokens)}
                           </TableCell>
                           <TableCell className="text-right">
@@ -361,7 +460,7 @@ export function UsagePage() {
                         </TableRow>
                         {expandedUser === usage.user_id && (
                           <TableRow key={`${usage.user_id}-sessions`}>
-                            <TableCell colSpan={5} className="bg-gray-900/50 p-0">
+                            <TableCell colSpan={7} className="bg-gray-900/50 p-0">
                               {sessionsLoading ? (
                                 <div className="flex items-center justify-center py-4">
                                   <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500" />
@@ -405,7 +504,7 @@ export function UsagePage() {
                     ))}
                     {userUsage.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={5} className="text-center py-8 text-gray-400">
+                        <TableCell colSpan={7} className="text-center py-8 text-gray-400">
                           No usage data for this period
                         </TableCell>
                       </TableRow>
@@ -416,48 +515,7 @@ export function UsagePage() {
             </Card>
 
             {/* Usage by Model */}
-            <Card variant="bordered">
-              <CardHeader>
-                <CardTitle>Usage by Model</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Model</TableHead>
-                      <TableHead className="text-right">Requests</TableHead>
-                      <TableHead className="text-right">Tokens</TableHead>
-                      <TableHead className="text-right">Cost</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {modelUsage.map((usage) => (
-                      <TableRow key={usage.model}>
-                        <TableCell className="font-medium">
-                          {usage.model}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {usage.request_count}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {formatTokens(usage.total_tokens)}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {formatCost(usage.cost_usd)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                    {modelUsage.length === 0 && (
-                      <TableRow>
-                        <TableCell colSpan={4} className="text-center py-8 text-gray-400">
-                          No usage data for this period
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
+            <ModelUsageTable data={modelUsage} />
           </div>
 
           {summary && (

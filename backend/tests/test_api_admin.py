@@ -394,18 +394,42 @@ async def test_usage_summary(admin_client: AsyncClient, mock_db: AsyncMock) -> N
 
 @pytest.mark.asyncio
 async def test_usage_by_user(admin_client: AsyncClient, mock_db: AsyncMock) -> None:
-    mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+    # user_id=None skips the secondary user lookup; the row still carries the aggregates.
+    row = MagicMock(
+        user_id=None,
+        input_tokens=100,
+        output_tokens=50,
+        cost_usd=1.5,
+        request_count=8,
+        conversation_count=3,
+    )
+    mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: [row]))
 
     resp = await admin_client.get("/api/admin/usage/by-user")
     assert resp.status_code == 200
+    data = resp.json()
+    assert data[0]["conversation_count"] == 3
+    assert data[0]["total_tokens"] == 150
 
 
 @pytest.mark.asyncio
 async def test_usage_by_model(admin_client: AsyncClient, mock_db: AsyncMock) -> None:
-    mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+    # The query aliases UsageRecord.provider (which stores the engine) to `engine`.
+    row = MagicMock(
+        model="claude-3-5-sonnet-20241022",
+        engine="claude-cli",
+        input_tokens=100,
+        output_tokens=50,
+        cost_usd=1.5,
+        request_count=8,
+    )
+    mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: [row]))
 
     resp = await admin_client.get("/api/admin/usage/by-model")
     assert resp.status_code == 200
+    data = resp.json()
+    assert data[0]["engine"] == "claude-cli"
+    assert data[0]["total_tokens"] == 150
 
 
 # ============================================================================

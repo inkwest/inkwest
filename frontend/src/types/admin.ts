@@ -168,6 +168,7 @@ export interface UserUsage {
   email: string;
   display_name: string;
   request_count: number;
+  conversation_count: number;
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
@@ -176,7 +177,7 @@ export interface UserUsage {
 
 export interface ModelUsage {
   model: string;
-  provider: string;
+  engine: string;
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;

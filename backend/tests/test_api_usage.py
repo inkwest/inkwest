@@ -3,6 +3,7 @@
 These are scoped to the current user and must be reachable by non-admins.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -56,6 +57,39 @@ async def test_my_usage_by_model_empty(
 
 
 @pytest.mark.asyncio
+async def test_my_usage_by_model_exposes_engine(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    # Contract: the per-model breakdown reports the engine that ran each turn under the
+    # `engine` key (DB column is `provider`), matching the admin report and the ModelUsage type.
+    row = SimpleNamespace(
+        model="claude-opus-4-8",
+        engine="claude-cli",
+        input_tokens=100,
+        output_tokens=40,
+        cost_usd=0.5,
+        request_count=3,
+    )
+    mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: [row]))
+
+    resp = await authenticated_client.get("/api/me/usage/by-model")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == [
+        {
+            "model": "claude-opus-4-8",
+            "engine": "claude-cli",
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "total_tokens": 140,
+            "cost_usd": 0.5,
+            "request_count": 3,
+        }
+    ]
+    assert "provider" not in data[0]
+
+
+@pytest.mark.asyncio
 async def test_my_usage_sessions_empty(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
@@ -70,7 +104,7 @@ async def test_my_usage_sessions_empty(
 async def test_my_usage_sessions_rejects_oversized_limit(
     authenticated_client: AsyncClient,
 ) -> None:
-    resp = await authenticated_client.get("/api/me/usage/sessions?limit=500")
+    resp = await authenticated_client.get("/api/me/usage/sessions?limit=1001")
     assert resp.status_code == 422
 
 

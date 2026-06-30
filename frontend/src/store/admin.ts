@@ -304,7 +304,7 @@ export const useUsageStore = create<UsageState>((set, get) => ({
     try {
       const [summary, userUsage, modelUsage, timeseries] = await Promise.all([
         adminApi.getUsageSummary(apiPeriod, dateRange),
-        adminApi.getUsageByUser(apiPeriod, 20, dateRange),
+        adminApi.getUsageByUser(apiPeriod, 1000, dateRange),
         adminApi.getUsageByModel(apiPeriod, dateRange),
         adminApi.getUsageTimeseries(granularity, apiPeriod, dateRange),
       ]);

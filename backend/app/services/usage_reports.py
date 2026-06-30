@@ -79,10 +79,13 @@ async def by_model(
     end: datetime | None,
 ) -> list[dict[str, Any]]:
     """Usage broken down by model, costliest first."""
+    # `UsageRecord.provider` stores the engine that ran the turn, so grouping by
+    # (model, provider) IS the model×engine breakdown — same model can appear once per
+    # engine. Exposed as `engine` to match the admin report and the ModelUsage type.
     query = (
         select(
             UsageRecord.model,
-            UsageRecord.provider,
+            UsageRecord.provider.label("engine"),
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
@@ -97,7 +100,7 @@ async def by_model(
     return [
         {
             "model": row.model,
-            "provider": row.provider,
+            "engine": row.engine,
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
             "total_tokens": row.input_tokens + row.output_tokens,
