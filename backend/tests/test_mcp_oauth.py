@@ -6,6 +6,7 @@ service's DB access is exercised against an ``AsyncMock(spec=AsyncSession)`` —
 Postgres-specific ON CONFLICT / DCR race is left to the optional e2e (real-Postgres) tier.
 """
 
+import gzip
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -76,6 +77,32 @@ def test_ssrf_guard_rejects(url: str) -> None:
 
 def test_ssrf_guard_allows_public_https() -> None:
     mcp_oauth.assert_public_https("https://mcp.example.com/mcp")  # no raise
+
+
+# --------------------------------------------------------------------------- #
+# _http response rebuild
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_http_decodes_gzip_response_then_json() -> None:
+    """A gzip-Content-Encoded response must decode cleanly to JSON.
+
+    Regression: `_http` read the already-decoded body via `aiter_bytes()` but rebuilt the
+    Response with the original headers (incl. `Content-Encoding: gzip`), so `.json()` tried
+    to gunzip the plaintext again → httpx.DecodingError. Real symptom: an MCP server's gzipped
+    /token endpoint failing with "POST .../token failed: DecodingError".
+    """
+    body = gzip.compress(json.dumps({"access_token": "abc", "token_type": "Bearer"}).encode())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+        )
+
+    _use_transport(handler)
+    resp = await mcp_oauth._http("POST", "https://as.example.com/token", data={"grant_type": "x"})
+    assert resp.json() == {"access_token": "abc", "token_type": "Bearer"}
 
 
 # --------------------------------------------------------------------------- #

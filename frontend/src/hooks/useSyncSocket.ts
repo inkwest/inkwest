@@ -7,6 +7,7 @@ import { useInvitesStore } from '@/store/invites';
 import { useBackendStore } from '@/store/backend';
 import { fetchWsTicket, getVersion, wsBaseUrl } from '@/services/api';
 import { jitteredBackoff, createReconnectBudget, RECONNECT_BUDGET_MS } from '@/lib/backoff';
+import { dekReply } from '@/lib/mcpDek';
 
 const WS_URL = wsBaseUrl();
 const RECONNECT_DELAY = 3000;
@@ -113,12 +114,27 @@ export function useSyncSocket() {
             ws.send(JSON.stringify({ type: 'ping' }));
           }
         }, PING_INTERVAL);
+        // Kick off the MCP DEK handshake (browser-fractioned key custody) on this app-wide
+        // socket so the server can decrypt the user's MCP token blobs whenever a tab is open
+        // — not only inside a chat. No-op if no OAuth2 MCP is configured. Mirrors ChatWebSocket.
+        ws.send(JSON.stringify({ type: 'mcp_dek_open' }));
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'pong') return;
+          // Browser-fractioned DEK handshake: compute the reply (unwrap/wrap) and send it back.
+          if (typeof data.type === 'string' && data.type.startsWith('mcp_dek_')) {
+            void dekReply(data)
+              .then((reply) => {
+                if (reply && ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify(reply));
+                }
+              })
+              .catch((e) => console.error('MCP DEK handshake failed:', e));
+            return;
+          }
           // A new conversation-share invitation — surface the accept/decline popup.
           if (data.type === 'share_invite') {
             useInvitesStore.getState().addInvite({
