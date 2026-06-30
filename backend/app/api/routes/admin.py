@@ -905,7 +905,7 @@ async def get_usage_by_user(
     period: BudgetPeriod = BudgetPeriod.DAILY,
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
-    limit: int = Query(default=50, le=100),
+    limit: int = Query(default=50, le=1000),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
     """Get usage breakdown by user."""
@@ -922,6 +922,7 @@ async def get_usage_by_user(
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
             func.count(UsageRecord.id).label("request_count"),
+            func.count(func.distinct(UsageRecord.session_id)).label("conversation_count"),
         )
         .where(*conditions)
         .group_by(UsageRecord.user_id)
@@ -952,6 +953,7 @@ async def get_usage_by_user(
             "total_tokens": row.input_tokens + row.output_tokens,
             "cost_usd": float(row.cost_usd),
             "request_count": row.request_count,
+            "conversation_count": row.conversation_count,
         }
         for row in rows
     ]
@@ -972,10 +974,13 @@ async def get_usage_by_model(
     if filter_end:
         conditions.append(UsageRecord.recorded_at <= filter_end)
 
+    # `UsageRecord.provider` stores the engine that ran the turn (record_usage defaults it to
+    # metrics.turn_engine()), so grouping by (model, provider) IS the model×engine breakdown —
+    # the same model can legitimately appear once per engine it ran on.
     query = (
         select(
             UsageRecord.model,
-            UsageRecord.provider,
+            UsageRecord.provider.label("engine"),
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
@@ -992,7 +997,7 @@ async def get_usage_by_model(
     return [
         {
             "model": row.model,
-            "provider": row.provider,
+            "engine": row.engine,
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
             "total_tokens": row.input_tokens + row.output_tokens,

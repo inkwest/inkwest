@@ -9,7 +9,7 @@ import type { ModelUsage, SessionUsage, UsageSummary } from '@/types/admin';
 
 // Cap on the per-conversation breakdown — single source of truth for both the
 // request and the "showing top N" note the page renders on truncation.
-export const MY_USAGE_SESSIONS_LIMIT = 100;
+export const MY_USAGE_SESSIONS_LIMIT = 1000;
 
 interface MyUsageState {
   summary: UsageSummary | null;

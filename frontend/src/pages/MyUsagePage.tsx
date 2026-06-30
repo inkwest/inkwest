@@ -16,6 +16,9 @@ import {
 import { useMyUsageStore, MY_USAGE_SESSIONS_LIMIT } from '@/store/usage';
 import { TrendingUp, MessageSquare, Cpu, DollarSign } from 'lucide-react';
 import type { UsageDateRange } from '@/services/usageApi';
+import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
+import { formatTokens, formatCost } from '@/lib/usageFormat';
+import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
 import {
   ComposedChart,
   Bar,
@@ -47,22 +50,15 @@ function lastMonthRange(): UsageDateRange {
   };
 }
 
-function formatTokens(tokens: number) {
-  if (tokens >= 1_000_000) return (tokens / 1_000_000).toFixed(2) + 'M';
-  if (tokens >= 1_000) return (tokens / 1_000).toFixed(1) + 'K';
-  return tokens.toString();
-}
-
-function formatCost(cost: number | string) {
-  const n = typeof cost === 'string' ? parseFloat(cost) : cost;
-  return n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
-}
-
 function formatTimeseriesLabel(iso: string, period: string) {
   const d = new Date(iso);
   if (period === 'hourly' || period === 'daily') return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   return d.toISOString().slice(0, 10);
 }
+
+type SessionSortKey = 'title' | 'request_count' | 'total_tokens' | 'cost_usd';
+
+const SESSIONS_PAGE_SIZE = 10;
 
 export function MyUsagePage() {
   const {
@@ -81,6 +77,34 @@ export function MyUsagePage() {
 
   const [customStart, setCustomStart] = useState(dateRange.startDate || '');
   const [customEnd, setCustomEnd] = useState(dateRange.endDate || '');
+
+  // Client-side tristate sort over the (server-capped, costliest-first) conversation rows.
+  const [sessionSort, setSessionSort] = useState<SortState<SessionSortKey>>({ key: 'cost_usd', dir: 'desc' });
+  const sessionKey = sessionSort.key;
+  const sortedSessions =
+    sessionKey === null
+      ? sessions
+      : [...sessions].sort((a, b) => {
+          const dir = sessionSort.dir === 'asc' ? 1 : -1;
+          if (sessionKey === 'title') {
+            return dir * (a.title || '').localeCompare(b.title || '');
+          }
+          return dir * ((a[sessionKey] as number) - (b[sessionKey] as number));
+        });
+
+  // Front-only pager over the conversation rows.
+  const [sessionPage, setSessionPage] = useState(0);
+  const {
+    pageCount: sessionPageCount,
+    clamped: sessionPageClamped,
+    start: sessionStart,
+    end: sessionEnd,
+  } = pageWindow(sortedSessions.length, SESSIONS_PAGE_SIZE, sessionPage);
+  const pagedSessions = sortedSessions.slice(sessionStart, sessionEnd);
+  const toggleSessionSort = (key: SessionSortKey) => {
+    setSessionSort((s) => cycleSort(s, key));
+    setSessionPage(0);
+  };
 
   useEffect(() => {
     fetchAll();
@@ -109,7 +133,7 @@ export function MyUsagePage() {
   return (
     // main is overflow-hidden (chat scrolls internally) — own our scroll here.
     <div className="h-full overflow-y-auto">
-      <div className="max-w-6xl mx-auto w-full p-6 space-y-6">
+      <div className="w-full p-6 space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold">My Usage</h1>
@@ -259,20 +283,68 @@ export function MyUsagePage() {
             {/* My Conversations */}
             <Card variant="bordered">
               <CardHeader>
-                <CardTitle>My Conversations</CardTitle>
+                {/* Pager lives in the header, not a footer: row heights vary (wrapped titles),
+                    so a bottom pager shifts vertically between pages and the button slips out
+                    from under the cursor. A fixed top anchor never moves. */}
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <CardTitle>My Conversations</CardTitle>
+                  {sortedSessions.length > 0 && (
+                    <div className="flex items-center gap-3 text-sm font-normal text-gray-400">
+                      <span>
+                        {sessionPageClamped * SESSIONS_PAGE_SIZE + 1}–
+                        {Math.min((sessionPageClamped + 1) * SESSIONS_PAGE_SIZE, sortedSessions.length)} of{' '}
+                        {sortedSessions.length}
+                        {/* Server caps the list at the costliest N — flag truncation so the totals
+                            above (which cover everything) aren't misread as this list's sum. */}
+                        {sessions.length >= MY_USAGE_SESSIONS_LIMIT && (
+                          <span className="text-gray-600"> · top {MY_USAGE_SESSIONS_LIMIT} by cost</span>
+                        )}
+                      </span>
+                      {sessionPageCount > 1 && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setSessionPage((p) => Math.max(0, p - 1))}
+                            disabled={sessionPageClamped === 0}
+                            className="px-2 py-1 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            ‹ Prev
+                          </button>
+                          <span>
+                            {sessionPageClamped + 1} / {sessionPageCount}
+                          </span>
+                          <button
+                            onClick={() => setSessionPage((p) => Math.min(sessionPageCount - 1, p + 1))}
+                            disabled={sessionPageClamped >= sessionPageCount - 1}
+                            className="px-2 py-1 rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            Next ›
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </CardHeader>
               <CardContent className="p-0">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Conversation</TableHead>
-                      <TableHead className="text-right">Requests</TableHead>
-                      <TableHead className="text-right">Tokens</TableHead>
-                      <TableHead className="text-right">Cost</TableHead>
+                      <TableHead className="cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'title')} onClick={() => toggleSessionSort('title')}>
+                        Conversation{sortArrow(sessionSort, 'title')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'request_count')} onClick={() => toggleSessionSort('request_count')}>
+                        Requests{sortArrow(sessionSort, 'request_count')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'total_tokens')} onClick={() => toggleSessionSort('total_tokens')}>
+                        Tokens{sortArrow(sessionSort, 'total_tokens')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cost_usd')} onClick={() => toggleSessionSort('cost_usd')}>
+                        Cost{sortArrow(sessionSort, 'cost_usd')}
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {sessions.map((s) => (
+                    {pagedSessions.map((s) => (
                       <TableRow key={s.session_id}>
                         <TableCell>
                           <Link
@@ -296,51 +368,11 @@ export function MyUsagePage() {
                     )}
                   </TableBody>
                 </Table>
-                {/* Capped at the costliest N — flag truncation so the totals above
-                    (which cover everything) aren't misread as this list's sum. */}
-                {sessions.length >= MY_USAGE_SESSIONS_LIMIT && (
-                  <p className="text-xs text-gray-500 px-4 py-2">
-                    Showing the {MY_USAGE_SESSIONS_LIMIT} costliest conversations.
-                  </p>
-                )}
               </CardContent>
             </Card>
 
             {/* Usage by Model */}
-            <Card variant="bordered">
-              <CardHeader>
-                <CardTitle>Usage by Model</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Model</TableHead>
-                      <TableHead className="text-right">Requests</TableHead>
-                      <TableHead className="text-right">Tokens</TableHead>
-                      <TableHead className="text-right">Cost</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {modelUsage.map((usage) => (
-                      <TableRow key={usage.model}>
-                        <TableCell className="font-medium">{usage.model}</TableCell>
-                        <TableCell className="text-right">{usage.request_count}</TableCell>
-                        <TableCell className="text-right">{formatTokens(usage.total_tokens)}</TableCell>
-                        <TableCell className="text-right">{formatCost(usage.cost_usd)}</TableCell>
-                      </TableRow>
-                    ))}
-                    {modelUsage.length === 0 && (
-                      <TableRow>
-                        <TableCell colSpan={4} className="text-center py-8 text-gray-400">
-                          No usage data for this period
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
+            <ModelUsageTable data={modelUsage} />
           </div>
 
           {summary && (

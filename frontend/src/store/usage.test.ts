@@ -30,7 +30,7 @@ const SESSIONS: SessionUsage[] = [
 const MODELS: ModelUsage[] = [
   {
     model: 'claude-opus-4-8',
-    provider: 'anthropic',
+    engine: 'claude-cli',
     input_tokens: 5000,
     output_tokens: 3000,
     total_tokens: 8000,

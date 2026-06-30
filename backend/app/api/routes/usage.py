@@ -56,7 +56,7 @@ async def get_my_usage_sessions(
     period: BudgetPeriod = BudgetPeriod.MONTHLY,
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
-    limit: int = Query(default=100, ge=1, le=200),
+    limit: int = Query(default=1000, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
     """Per-conversation usage breakdown for the current user (costliest first)."""
