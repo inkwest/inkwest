@@ -6,6 +6,7 @@ import { useDraftsStore } from '@/store/drafts';
 import { useChatStore } from '@/store/chat';
 import { useSkillsStore } from '@/store/skills';
 import { useConfigStore } from '@/store/config';
+import { useConnectorsStore } from '@/store/connectors';
 import * as api from '@/services/api';
 
 // Keep the rest of the api module real; stub only the attachment calls.
@@ -39,6 +40,8 @@ describe('ChatInput attachments', () => {
     useDraftsStore.setState({ drafts: {} });
     useChatStore.setState({ messages: [], queuedMessages: [] });
     useSkillsStore.setState({ templates: [], fetchTemplates: vi.fn(), isLoading: false, error: null });
+    // Active connector by default so sends don't trip the no-connector confirm modal.
+    useConnectorsStore.setState({ statuses: { aws: { connector: 'aws', state: 'connected' } } });
     enableAttachments(true);
     // jsdom doesn't implement object URLs; the image-preview path needs them.
     URL.createObjectURL = vi.fn(() => 'blob:mock');
