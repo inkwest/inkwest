@@ -12,6 +12,7 @@ import {
 } from '@/services/api';
 import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useSessionsStore } from '@/store/sessions';
+import { useMcpStore } from '@/store/mcp';
 import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCache';
 
 interface Props {
@@ -58,6 +59,9 @@ export function McpPanel({
   const [open, setOpen] = useState(autoOpen);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Mirror the per-session selection into the shared store so ChatInput's "no connector
+  // activated" warning reacts to MCP enablement without its own fetch.
+  const setSessionEnabled = useMcpStore((s) => s.setSessionEnabled);
   // Active connect-poll intervals, tracked so they're always cleared on unmount (otherwise a
   // popup left open would poll the catalog forever and setState on an unmounted component).
   const pollTimers = useRef<Set<number>>(new Set());
@@ -89,6 +93,7 @@ export function McpPanel({
           const next = new Set(sel.enabled);
           setEnabled(next);
           setDraftEnabled(next);
+          setSessionEnabled(sessionId, sel.enabled);
         }
       } catch {
         if (!cancelled) setError('Failed to load MCP servers');
@@ -98,7 +103,7 @@ export function McpPanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, setSessionEnabled]);
 
   const toggleDraft = (key: string) => {
     if (saving) return;
@@ -122,6 +127,7 @@ export function McpPanel({
       const next = new Set(res.enabled);
       setEnabled(next);
       setDraftEnabled(next);
+      setSessionEnabled(sessionId, res.enabled);
       setOpen(false);
       // Per-server connect/disconnect events were persisted server-side — reload the
       // conversation so they appear inline (flicker-free for the already-open session).
@@ -189,6 +195,7 @@ export function McpPanel({
         const set = new Set(res.enabled);
         setEnabled(set);
         setDraftEnabled(set);
+        setSessionEnabled(sessionId, res.enabled);
       }
       const cat = await disconnectMcpAuth(key);
       primeMcpCatalog(cat); // keep the shared cache in sync so a remount isn't stale

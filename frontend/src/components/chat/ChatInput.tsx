@@ -1,6 +1,8 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent, type ChangeEvent, type ClipboardEvent, type ReactNode } from 'react';
-import { Send, Square, Paperclip, Loader2, ListPlus, X } from 'lucide-react';
+import { Send, Square, Paperclip, Loader2, ListPlus, X, AlertTriangle } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
+import { useConnectorsStore } from '@/store/connectors';
+import { useMcpStore } from '@/store/mcp';
 import { useDraftsStore } from '@/store/drafts';
 import { useComposerStore } from '@/store/composer';
 import { useChatStore, type QueuedMessage } from '@/store/chat';
@@ -14,6 +16,8 @@ import { ToolHoverCard } from './ToolHoverCard';
 import { SkillAutocomplete } from './SkillAutocomplete';
 import { AttachmentChips, MessageAttachments, PendingAttachment } from './Attachments';
 import { formatArgs } from '@/lib/skillArgs';
+import { Modal } from '@/components/ui/Modal';
+import { Button } from '@/components/ui/Button';
 
 interface Props {
   onSend: (message: string, attachments?: Attachment[]) => void;
@@ -157,6 +161,24 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     setEditingQueuedId(null);
     setEditingQueuedText('');
   };
+
+  // No-connector guard: warn (and confirm on send) when the conversation has no access
+  // path for the assistant — no AWS/GitLab grant connected and no MCP server enabled.
+  // Per-vendor selectors keep this from re-rendering on unrelated status churn. The
+  // connectors store is GLOBAL (per-session statuses overwritten on ConnectorPanel
+  // mount, never reset), so pre-session — the start screen, sessionId undefined — its
+  // contents belong to whatever session was open last and must be ignored: with no
+  // session there are no grants, so treat both as not-connected.
+  const awsConnected = useConnectorsStore((s) => !!sessionId && s.statuses.aws?.state === 'connected');
+  const gitlabConnected = useConnectorsStore((s) => !!sessionId && s.statuses.gitlab?.state === 'connected');
+  const mcpEnabledCount = useMcpStore((s) =>
+    sessionId ? s.enabledBySession[sessionId]?.length ?? 0 : 0,
+  );
+  const noConnector = !awsConnected && !gitlabConnected && mcpEnabledCount === 0;
+  // Hovering the no-connector warning glows the connector controls, pointing the user at
+  // where to fix it. The "send anyway" confirm is a modal rather than a native dialog.
+  const [warnHover, setWarnHover] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   // --- File attachments (sandbox/claude-cli only; needs a session to upload to) ---
   const attachmentsEnabled = useConfigStore((s) => s.config?.attachments_enabled ?? false);
@@ -388,7 +410,15 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     setSkillIndex(0);
   }, [skillQuery]);
 
-  const handleSend = () => {
+  // Something is sendable: text typed or a file attached. Drives the no-connector
+  // warning/glow visibility and the send guard so all three agree (an attachment-only
+  // message that pops the confirm also shows the warning).
+  const hasContent = !!message.trim() || attachments.length > 0;
+
+  // The actual send/queue, with no connector confirmation. handleSend wraps this with
+  // the no-connector guard; the auto-submit handoff calls it directly (the user already
+  // confirmed on the start screen, so it must not re-prompt after navigation).
+  const submit = () => {
     setShimmer(false);
     const text = message.trim();
     // Nothing to send, blocked, or an upload is still in flight (its descriptor
@@ -417,6 +447,24 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     if (sessionId) clearDraft(sessionId);
   };
 
+  // Send, but first confirm when the conversation has no connector access path — the
+  // assistant can't reach AWS, GitLab or any MCP tool, so the message is likely a
+  // mistake. Only prompts when there's actually something sendable (mirrors submit's
+  // bail) so an empty Enter doesn't pop the dialog.
+  const handleSend = () => {
+    if (hasContent && !disabled && !uploading && noConnector) {
+      setConfirmOpen(true);
+      return;
+    }
+    submit();
+  };
+
+  // "Send anyway" from the no-connector confirm modal.
+  const confirmSendAnyway = () => {
+    setConfirmOpen(false);
+    submit();
+  };
+
   // Auto-submit the handed-off prompt once the WS is connected. Only fires for the
   // untouched seed: if the user has started editing it, we defer to them. If connect
   // never happens, the text simply stays in the composer (recoverable).
@@ -424,7 +472,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   useEffect(() => {
     if (!autoSubmit || autoSubmittedRef.current) return;
     if (disabled || isStreaming) return;
-    // Don't latch the one-shot while an upload is in flight: handleSend would no-op on
+    // Don't latch the one-shot while an upload is in flight: submit() would no-op on
     // `uploading` and we'd never retry. `uploading` is in the deps so this re-fires once
     // the upload settles.
     if (uploading) return;
@@ -435,8 +483,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     if (message.trim() !== seededText) return;
     if (!seededText && attachments.length === 0) return;
     autoSubmittedRef.current = true;
-    handleSend();
-    // handleSend reads current message/attachments/disabled; this is a guarded one-shot.
+    // submit() — not handleSend() — so a start-screen handoff doesn't re-pop the
+    // no-connector confirm the user already answered before navigating here.
+    submit();
+    // submit reads current message/attachments/disabled; this is a guarded one-shot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSubmit, disabled, isStreaming, uploading, message, initialPrompt, attachments.length]);
 
@@ -626,6 +676,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   const iconSize = 'h-4 w-4';
 
   return (
+    <>
     <div className={large ? '' : 'px-4 pb-4'}>
       {/* Single rounded card: textarea on top, one control row beneath (attach /
           skills on the left, model picker + send on the right). The focus glow
@@ -790,10 +841,60 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
                 className={cn(toolBtn, 'px-0')}
               />
             </ToolHoverCard>
-            {connectorControls}
+            {connectorControls && (
+              // Glow when the no-connector warning is hovered/focused — points the user
+              // here. Gated on the same condition as the warning (not warnHover alone) so
+              // it can't outlive the trigger: the warning span unmounts on send while still
+              // hovered, and a removed node fires no mouseleave to clear warnHover.
+              <span
+                data-testid="connector-controls-wrap"
+                className={cn(
+                  'flex items-center gap-1.5 rounded-lg transition-shadow',
+                  warnHover && noConnector && hasContent &&
+                    'ring-2 ring-amber-400/80 shadow-[0_0_12px_2px_rgba(251,191,36,0.5)]',
+                )}
+              >
+                {connectorControls}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {modelControl}
+            {/* No-connector warning: sits between the model picker and send, shown once
+                there's something to send but the conversation has no AWS/GitLab/MCP access. */}
+            {noConnector && hasContent && (
+              // align="right": the warning sits at the right edge of the toolbar, so the
+              // hover card grows leftward to stay on-screen. Hovering it glows the
+              // connector controls (warnHover) to show where to grant access.
+              <ToolHoverCard
+                align="right"
+                title="No connector activated"
+                body={
+                  <p className="text-gray-400">
+                    No connector is activated for this conversation — the assistant can't
+                    reach AWS, GitLab or any MCP tool. Grant access from the toolbar, or send
+                    anyway to chat without tools.
+                  </p>
+                }
+              >
+                <span
+                  role="img"
+                  aria-label="No connector activated"
+                  title="No connector activated"
+                  tabIndex={0}
+                  onMouseEnter={() => setWarnHover(true)}
+                  onMouseLeave={() => setWarnHover(false)}
+                  onFocus={() => setWarnHover(true)}
+                  onBlur={() => setWarnHover(false)}
+                  className={cn(
+                    'flex items-center justify-center text-amber-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400/60',
+                    btnSize,
+                  )}
+                >
+                  <AlertTriangle className={iconSize} />
+                </span>
+              </ToolHoverCard>
+            )}
             {isStreaming ? (
               <>
                 {/* Queue the typed message; it sends combined with the rest when the
@@ -846,5 +947,32 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         )}
       </div>
     </div>
+    {/* No-connector "send anyway" confirm — replaces the native dialog with the app modal. */}
+    <Modal
+      isOpen={confirmOpen}
+      onClose={() => setConfirmOpen(false)}
+      title="No connector activated"
+      size="sm"
+    >
+      <div className="space-y-4">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
+          <p className="text-sm text-gray-300">
+            No connector is activated for this conversation — the assistant won't be able to
+            reach AWS, GitLab or any MCP tool. You can grant access from the toolbar, or
+            {isStreaming ? ' queue this message anyway' : ' send anyway'} and chat without tools.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setConfirmOpen(false)}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={confirmSendAnyway}>
+            {isStreaming ? 'Queue anyway' : 'Send anyway'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+    </>
   );
 }
