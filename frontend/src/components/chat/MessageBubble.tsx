@@ -28,6 +28,11 @@ interface Props {
   onRetry?: (messageId: string) => void;
   // Transiently emphasized when deep-linked from a search hit (see ChatView).
   highlighted?: boolean;
+  // Whether this is the last message in the stream. Retry is only offered on the
+  // latest turn; an older failure is shown darkened with no retry (replaying a
+  // superseded turn would rewrite history from the wrong point). Defaults to true
+  // so a bubble rendered outside a list keeps its retry affordance.
+  isLatest?: boolean;
 }
 
 // Display labels for session-event subjects; falls back to the raw key so a new
@@ -148,9 +153,11 @@ function SessionEventLine({
   );
 }
 
-export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighted }: Props) {
+export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighted, isLatest = true }: Props) {
   const isUser = message.role === 'user';
   const hasError = message.status === 'error';
+  // Only the latest failure is replayable; older ones just dim (no retry button).
+  const showRetry = hasError && message.is_retryable && isLatest;
   const isPending = message.status === 'pending';
   const [copied, setCopied] = useState(false);
   const [copiedKind, setCopiedKind] = useState<'rich' | 'teams' | 'md' | null>(null);
@@ -328,7 +335,14 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
     >
       {/* Non-clipping wrapper so the copy menu can overflow the bubble (which is
           overflow-hidden to clip content to its rounded corners). */}
-      <div className="group relative max-w-[80%] min-w-0">
+      <div
+        className={cn(
+          'group relative max-w-[80%] min-w-0',
+          // Superseded failure (not the latest turn): dim the whole bubble incl. the
+          // overflowing copy menu, but not while a search deep-link highlights it.
+          hasError && !isLatest && !highlighted && 'opacity-50 transition-opacity',
+        )}
+      >
         {canCopyMarkdown && (
           <div
             ref={copyMenuRef}
@@ -469,7 +483,7 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
               </div>
             </div>
 
-            {message.is_retryable && (
+            {showRetry && (
               <button
                 onClick={handleRetry}
                 className={cn(

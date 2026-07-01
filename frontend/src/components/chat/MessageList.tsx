@@ -14,6 +14,11 @@ interface Props {
 export function MessageList({ messages, highlightedId, onRetry }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
   const firstUserIdx = messages.findIndex((m) => m.role === 'user');
+  // "Latest" for retry = the last actual chat turn, skipping trailing system events
+  // (model change, MCP connect/disconnect) so a failed turn keeps its retry affordance
+  // when a non-turn row lands after it. A genuine newer turn still supersedes it.
+  let lastChatIdx = messages.length - 1;
+  while (lastChatIdx >= 0 && messages[lastChatIdx].role === 'system') lastChatIdx--;
 
   return (
     <div className={cn(compact ? 'space-y-4' : 'space-y-6')}>
@@ -27,6 +32,7 @@ export function MessageList({ messages, highlightedId, onRetry }: Props) {
             message.id === highlightedId ||
             (highlightedId != null && (message.mergedIds?.includes(highlightedId) ?? false))
           }
+          isLatest={i === lastChatIdx}
           onRetry={onRetry}
         />
       ))}
