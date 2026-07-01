@@ -164,6 +164,70 @@ async def test_discovery_well_known_fallback_without_401() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discovery_root_resource_empty_prm_falls_back_to_origin() -> None:
+    """A root-path resource publishes only the root PRM (no path-aware form); an empty
+    ``authorization_servers`` there means 'no PRM info' → fall back to the origin as issuer."""
+    root_server = "https://mcp.example.com"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "" or path == "/":
+            return httpx.Response(405)  # no 401 challenge
+        if path == "/.well-known/oauth-protected-resource":
+            return httpx.Response(200, json={"authorization_servers": []})  # present but empty
+        if path == "/.well-known/oauth-authorization-server":
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://mcp.example.com",
+                    "authorization_endpoint": "https://mcp.example.com/authorize",
+                    "token_endpoint": "https://mcp.example.com/token",
+                },
+            )
+        return httpx.Response(404)
+
+    _use_transport(handler)
+    disco = await discover(root_server)
+    assert disco.issuer == "https://mcp.example.com"
+    assert disco.token_endpoint == "https://mcp.example.com/token"
+
+
+@pytest.mark.asyncio
+async def test_discovery_path_aware_prm_preferred_over_root() -> None:
+    """RFC 9728 §3.1: a sub-path resource (e.g. Coralogix ``/mgmt/api/v1/mcp``) publishes its PRM
+    path-aware. Probe that before the origin-root form, and prefer it when both exist."""
+    server_url = "https://mcp.example.com/mgmt/api/v1/mcp"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/mgmt/api/v1/mcp":
+            return httpx.Response(405)  # no 401 challenge → fall back to well-known probing
+        if path == "/.well-known/oauth-protected-resource/mgmt/api/v1/mcp":
+            return httpx.Response(200, json={"authorization_servers": ["https://as.example.com"]})
+        if path == "/.well-known/oauth-protected-resource":
+            # Root PRM also answers but points elsewhere — must be ignored in favour of path-aware.
+            return httpx.Response(
+                200, json={"authorization_servers": ["https://wrong.example.com"]}
+            )
+        if path == "/.well-known/oauth-authorization-server":
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://as.example.com",
+                    "authorization_endpoint": "https://as.example.com/authorize",
+                    "token_endpoint": "https://as.example.com/token",
+                    "registration_endpoint": "https://as.example.com/register",
+                },
+            )
+        return httpx.Response(404)
+
+    _use_transport(handler)
+    disco = await discover(server_url)
+    assert disco.issuer == "https://as.example.com"
+    assert disco.registration_endpoint == "https://as.example.com/register"
+
+
+@pytest.mark.asyncio
 async def test_discovery_rejects_cross_origin_resource_metadata() -> None:
     """RFC 9728 binds the PRM doc to the resource origin — a cross-origin pointer is an attack."""
 
@@ -326,6 +390,74 @@ async def test_discovery_rejects_issuer_mismatch() -> None:
                     "issuer": "https://evil.example.net",  # != requested issuer
                     "authorization_endpoint": "https://as.example.com/authorize",
                     "token_endpoint": "https://as.example.com/token",
+                },
+            )
+        return httpx.Response(404)
+
+    _use_transport(handler)
+    with pytest.raises(McpOauthError, match="issuer mismatch"):
+        await discover(SERVER_URL)
+
+
+@pytest.mark.asyncio
+async def test_discovery_split_host_issuer_via_origin_fallback() -> None:
+    """Split-host AS (Atlassian shape): no PRM, the origin serves AS metadata that self-declares
+    a DIFFERENT issuer host; accept it after re-validating at the declared issuer's own well-known.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # _http IP-pins the URL (host → resolved IP) but preserves the hostname in the Host header.
+        host, path = request.headers.get("host", ""), request.url.path
+        if host == "mcp.example.com" and path == "/mcp":
+            return httpx.Response(401)  # 401 without a resource_metadata pointer
+        if host == "mcp.example.com" and path == "/.well-known/oauth-protected-resource":
+            return httpx.Response(404)  # no PRM → issuer guessed as the origin
+        # Both the origin and the declared issuer serve metadata naming `cf.example.com`.
+        if path == "/.well-known/oauth-authorization-server" and host in (
+            "mcp.example.com",
+            "cf.example.com",
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://cf.example.com",
+                    "authorization_endpoint": "https://mcp.example.com/v1/authorize",
+                    "token_endpoint": "https://cf.example.com/v1/token",
+                    "registration_endpoint": "https://cf.example.com/v1/register",
+                },
+            )
+        return httpx.Response(404)
+
+    _use_transport(handler)
+    disco = await discover(SERVER_URL)
+    assert disco.issuer == "https://cf.example.com"
+    assert disco.authorization_endpoint == "https://mcp.example.com/v1/authorize"
+    assert disco.token_endpoint == "https://cf.example.com/v1/token"
+    assert disco.registration_endpoint == "https://cf.example.com/v1/register"
+
+
+@pytest.mark.asyncio
+async def test_discovery_split_host_rejects_non_self_consistent_issuer() -> None:
+    """Origin-guess fallback only bridges when the declared issuer vouches for itself: if the
+    declared issuer's own metadata names yet another issuer, reject (no blind endpoint trust)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host, path = request.headers.get("host", ""), request.url.path
+        if host == "mcp.example.com" and path == "/mcp":
+            return httpx.Response(401)
+        if host == "mcp.example.com" and path == "/.well-known/oauth-protected-resource":
+            return httpx.Response(404)
+        if path == "/.well-known/oauth-authorization-server":
+            # The origin points at cf.example.com, but cf's doc declares evil.example.net.
+            declared = (
+                "https://evil.example.net" if host == "cf.example.com" else "https://cf.example.com"
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": declared,
+                    "authorization_endpoint": f"https://{host}/authorize",
+                    "token_endpoint": f"https://{host}/token",
                 },
             )
         return httpx.Response(404)

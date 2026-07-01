@@ -241,6 +241,45 @@ describe('McpPanel', () => {
     await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
   });
 
+  it('surfaces the backend reason when starting authorization fails', async () => {
+    const popup = { closed: false, location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    // The backend 502/500 detail arrives as an Error message (ApiError extends Error).
+    mockStartAuth.mockRejectedValue(new Error('no usable authorization-server metadata'));
+
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
+
+    expect(
+      await screen.findByText(
+        'Failed to start MCP authorization: no usable authorization-server metadata',
+      ),
+    ).toBeInTheDocument();
+    expect(popup.close).toHaveBeenCalled(); // blank popup is closed, not left hanging
+    openSpy.mockRestore();
+  });
+
+  it('clears a prior connect error the instant the user retries', async () => {
+    const popup = { closed: false, location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    mockStartAuth.mockRejectedValueOnce(new Error('boom'));
+
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    const connect = await screen.findByRole('button', { name: 'Connect' });
+    fireEvent.click(connect);
+    expect(await screen.findByText('Failed to start MCP authorization: boom')).toBeInTheDocument();
+
+    // Retry: setError(null) runs BEFORE the in-flight guard, so the stale error clears at once —
+    // no dependency on the 2s poll freeing the guard (which is why this is deterministic).
+    fireEvent.click(connect);
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Failed to start MCP authorization: boom'),
+      ).not.toBeInTheDocument(),
+    );
+    openSpy.mockRestore();
+  });
+
   it('greys out an unavailable oauth server (sandbox disabled) with no Connect', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'unavailable' });
     expect(await screen.findByText('sandbox required')).toBeInTheDocument();

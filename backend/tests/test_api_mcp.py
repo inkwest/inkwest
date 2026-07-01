@@ -127,6 +127,31 @@ async def test_auth_start_rate_limited_when_too_many_pending(
 
 
 @pytest.mark.asyncio
+async def test_auth_start_discovery_failure_is_non_retryable_424(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """A discovery/DCR failure is deterministic → 424 Failed Dependency: a 4xx (kept out of the
+    5xx crash bucket, so a connector misconfig can't trip false outage pages) that is also
+    non-retryable (∉ the SPA's 502/503/504 retry set, so no false "backend unavailable" banner).
+    """
+    from app.services.mcp_oauth import McpOauthError
+
+    mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one=lambda: 0))
+    with (
+        patch("app.api.routes.mcp.get_oauth_server", return_value=MagicMock()),
+        patch("app.api.routes.mcp.get_settings") as settings,
+        patch(
+            "app.api.routes.mcp.mcp_oauth.build_authorize_url",
+            new=AsyncMock(side_effect=McpOauthError("no usable authorization-server metadata")),
+        ),
+    ):
+        settings.return_value.sandbox_enabled = True
+        resp = await authenticated_client.post("/api/mcp/notion/auth/start")
+    assert resp.status_code == 424
+    assert "no usable" in resp.json()["detail"]  # the real reason is surfaced, not masked
+
+
+@pytest.mark.asyncio
 async def test_callback_success_audits_and_closes(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:

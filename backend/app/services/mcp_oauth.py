@@ -307,31 +307,55 @@ async def discover(server_url: str) -> Discovery:
             resp.headers.get("WWW-Authenticate", "")
         )
 
-    # RFC 9728 binds the resource-metadata document to the resource's own origin.
-    if resource_metadata_url is None:
-        resource_metadata_url = f"{origin}/.well-known/oauth-protected-resource"
-    elif not _same_origin(resource_metadata_url, server_url):
-        raise McpOauthError("resource_metadata URL is cross-origin to the MCP server")
+    if resource_metadata_url is not None:
+        # RFC 9728 binds the resource-metadata document to the resource's own origin.
+        if not _same_origin(resource_metadata_url, server_url):
+            raise McpOauthError("resource_metadata URL is cross-origin to the MCP server")
+        candidates = [resource_metadata_url]
+    else:
+        # No 401 pointer: probe the well-known PRM locations. RFC 9728 §3.1 inserts the
+        # well-known segment BETWEEN host and path, so a resource at a sub-path (e.g. Coralogix
+        # ``/mgmt/api/v1/mcp``) publishes its PRM path-aware at
+        # ``/.well-known/oauth-protected-resource/mgmt/api/v1/mcp`` — not the origin root. Try the
+        # path-aware form first, then the root form (the only correct one for a resource at ``/``).
+        candidates = _prm_candidates(server_url, origin)
 
-    assert_public_https(resource_metadata_url)
-    issuer = await _fetch_issuer(resource_metadata_url, origin)
-    return await _fetch_as_metadata(issuer)
-
-
-async def _fetch_issuer(resource_metadata_url: str, origin: str) -> str:
-    resp = await _http("GET", resource_metadata_url, headers={"Accept": "application/json"})
-    if resp.status_code != 200:
-        # No PRM doc: fall back to treating the server origin as the issuer.
-        return origin
-    servers = resp.json().get("authorization_servers") or []
-    if not servers:
-        return origin
-    issuer = str(servers[0])
-    assert_public_https(issuer)
-    return issuer.rstrip("/")
+    issuer, authoritative = await _fetch_issuer(candidates, origin)
+    return await _fetch_as_metadata(issuer, issuer_authoritative=authoritative)
 
 
-async def _fetch_as_metadata(issuer: str) -> Discovery:
+def _prm_candidates(server_url: str, origin: str) -> list[str]:
+    """RFC 9728 well-known PRM URLs to probe, most-specific first (path-aware, then root)."""
+    path = urlsplit(server_url).path.rstrip("/")
+    base = f"{origin}/.well-known/oauth-protected-resource"
+    return [f"{base}{path}", base] if path else [base]
+
+
+async def _fetch_issuer(resource_metadata_urls: list[str], origin: str) -> tuple[str, bool]:
+    """Resolve the AS issuer for an MCP server. Returns ``(issuer, authoritative)``.
+
+    ``authoritative`` is True only when the issuer came from the resource's PRM doc (RFC 9728
+    ``authorization_servers``) — a value the resource explicitly vouches for. It is False when we
+    fell back to guessing ``issuer == server origin`` (no PRM), which split-host deployments
+    (e.g. Atlassian: resource ``mcp.atlassian.com`` / issuer ``cf.mcp.atlassian.com``) legitimately
+    violate; that case is reconciled in :func:`_fetch_as_metadata`.
+    """
+    for url in resource_metadata_urls:
+        assert_public_https(url)
+        resp = await _http("GET", url, headers={"Accept": "application/json"})
+        if resp.status_code != 200:
+            continue
+        servers = resp.json().get("authorization_servers") or []
+        if not servers:
+            continue
+        issuer = str(servers[0])
+        assert_public_https(issuer)
+        return issuer.rstrip("/"), True
+    # No PRM doc anywhere: fall back to the server origin as the (non-authoritative) issuer.
+    return origin, False
+
+
+async def _fetch_as_metadata(issuer: str, *, issuer_authoritative: bool) -> Discovery:
     # Try RFC 8414 then the OIDC discovery document.
     candidates = [
         f"{issuer}/.well-known/oauth-authorization-server",
@@ -346,11 +370,25 @@ async def _fetch_as_metadata(issuer: str) -> Discovery:
         authorization_endpoint = meta.get("authorization_endpoint")
         if not token_endpoint or not authorization_endpoint:
             continue
-        # RFC 8414 §3.3: the metadata's `issuer` MUST match the issuer we fetched it from,
-        # or a PRM-pointed AS could hand back attacker-chosen (still-public) endpoints.
         returned_issuer = str(meta.get("issuer", "")).rstrip("/")
         if returned_issuer and returned_issuer != issuer.rstrip("/"):
-            raise McpOauthError(f"AS metadata issuer mismatch: {returned_issuer!r} != {issuer!r}")
+            # RFC 8414 §3.3: when the issuer was authoritatively supplied (PRM), the metadata's
+            # `issuer` MUST match it — a PRM-pointed AS handing back a different issuer is an
+            # attack, so reject. When we only guessed `issuer == origin` (no PRM), a different
+            # self-declared issuer is the legitimate split-host case (Atlassian): re-discover at
+            # the declared issuer's OWN well-known and accept only if that doc is self-consistent,
+            # so the declared issuer must actually vouch for the endpoints it serves.
+            # SECURITY: this no-PRM path inherently trusts the resource origin — a server the
+            # operator explicitly added to the catalog. Such an origin can already point the flow
+            # at any public AS via its own metadata endpoints (with or without this branch); the
+            # self-consistency re-check adds a guard rather than new trust. assert_public_https on
+            # the declared issuer keeps the SSRF guard intact (no private-range redirect target).
+            if issuer_authoritative:
+                raise McpOauthError(
+                    f"AS metadata issuer mismatch: {returned_issuer!r} != {issuer!r}"
+                )
+            assert_public_https(returned_issuer)
+            return await _fetch_as_metadata(returned_issuer, issuer_authoritative=True)
         for ep in (token_endpoint, authorization_endpoint):
             assert_public_https(ep)
         return Discovery(
