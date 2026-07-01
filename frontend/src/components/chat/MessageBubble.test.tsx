@@ -114,6 +114,41 @@ describe('MessageBubble', () => {
     expect(screen.getByText(/retry/i)).toBeInTheDocument();
   });
 
+  it('hides retry and darkens the bubble when a failed message is not the latest', () => {
+    const msg: Message = {
+      ...baseMessage,
+      status: 'error',
+      error_message: 'Failed',
+      is_retryable: true,
+    };
+    const { container } = render(<MessageBubble message={msg} isLatest={false} />);
+    expect(screen.queryByText(/retry/i)).not.toBeInTheDocument();
+    expect(container.querySelector('.opacity-50')).toBeInTheDocument();
+  });
+
+  it('does not darken a non-latest failure while it is highlighted (search deep-link)', () => {
+    const msg: Message = {
+      ...baseMessage,
+      status: 'error',
+      error_message: 'Failed',
+      is_retryable: true,
+    };
+    const { container } = render(<MessageBubble message={msg} isLatest={false} highlighted />);
+    expect(container.querySelector('.opacity-50')).toBeNull();
+  });
+
+  it('keeps retry and does not darken the latest failed message', () => {
+    const msg: Message = {
+      ...baseMessage,
+      status: 'error',
+      error_message: 'Failed',
+      is_retryable: true,
+    };
+    const { container } = render(<MessageBubble message={msg} isLatest />);
+    expect(screen.getByText(/retry/i)).toBeInTheDocument();
+    expect(container.querySelector('.opacity-50')).toBeNull();
+  });
+
   it('fires onRetry with the message id when the retry button is clicked', () => {
     const onRetry = vi.fn();
     const msg: Message = {
