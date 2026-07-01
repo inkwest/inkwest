@@ -154,8 +154,13 @@ export function McpPanel({
   };
 
   const connectOauth = (key: string) => {
+    // Clear any stale error BEFORE the in-flight guard: a user re-clicking Connect must always get
+    // feedback (error gone), even if a prior attempt's poll still holds the key and we bail below.
+    setError(null);
     if (connecting.current.has(key)) return; // a poll is already in flight for this key
-    const popup = openMcpAuthPopup(key, () => setError('Failed to start MCP authorization'));
+    const popup = openMcpAuthPopup(key, (message) =>
+      setError(`Failed to start MCP authorization: ${message}`),
+    );
     connecting.current.add(key);
     // Poll the catalog while connecting; stop as soon as the grant lands ("connected"), the
     // popup closes, or a hard deadline elapses — so an abandoned popup can't poll forever.
@@ -173,6 +178,7 @@ export function McpPanel({
         // callback's own window.close() (blocked after the cross-origin round-trip,
         // and blocked outright by the prod CSP script-src 'self').
         if (connected) {
+          setError(null); // a late success clears an error raised earlier this attempt
           try {
             popup?.close();
           } catch {

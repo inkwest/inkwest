@@ -159,7 +159,14 @@ async def auth_start(
             db, server, user_id=current_user.id, redirect_uri=_redirect_uri()
         )
     except McpOauthError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        # 424 Failed Dependency: this is deterministic — the upstream authorization server this
+        # connector depends on couldn't be discovered/registered (bad URL, missing metadata) — not
+        # a transient gateway blip (502) nor a server fault (500). Choosing a 4xx keeps a connector
+        # misconfiguration OUT of the 5xx crash bucket (no false pages/SLO burn, indistinguishable
+        # from a real outage) and OFF the SPA's retry path (fetchWithRetry only retries 502/503/504
+        # and shows the global "backend unavailable" banner meanwhile). So the real reason surfaces
+        # immediately instead of after ~12 retries behind a wrong banner.
+        raise HTTPException(status_code=424, detail=str(e)) from e
     return AuthStartResponse(authorize_url=url)
 
 
