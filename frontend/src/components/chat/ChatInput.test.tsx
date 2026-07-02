@@ -649,6 +649,28 @@ describe('ChatInput', () => {
       expect(onSend).toHaveBeenCalledWith('list pods', undefined);
     });
 
+    it('confirms the modal with Enter (autofocused primary button)', async () => {
+      noConnectors();
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} sessionId="s1" />);
+      await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'list pods{enter}');
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      // Focus lands on the primary button; Enter confirms without touching the mouse.
+      await user.keyboard('{Enter}');
+      expect(onSend).toHaveBeenCalledWith('list pods', undefined);
+    });
+
+    it('sends only once when Enter confirms (no keydown+native-click double-fire)', async () => {
+      noConnectors();
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} sessionId="s1" />);
+      await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'list pods{enter}');
+      // preventDefault on the document keydown must cancel the focused button's own
+      // Enter activation — submit() is not idempotent, so a double-fire would double-send.
+      await user.keyboard('{Enter}');
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+
     it('does not send when the confirm modal is cancelled', async () => {
       noConnectors();
       const user = userEvent.setup();

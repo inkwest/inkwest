@@ -5,7 +5,10 @@ import { MarkdownContent } from './MarkdownContent';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 
 export function StreamingMessage() {
-  const { streamingBlocks } = useChatStore();
+  // Narrow selector: streaming pushes many unrelated store updates (cost, metrics) per
+  // turn — subscribe only to streamingBlocks so those don't re-render (and re-highlight)
+  // the whole streamed message.
+  const streamingBlocks = useChatStore((s) => s.streamingBlocks);
   const compact = useSettingsStore((s) => s.compactToolCards);
 
   // Render streaming blocks inline in order

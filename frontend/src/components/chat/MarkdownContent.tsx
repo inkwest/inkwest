@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
@@ -40,7 +40,7 @@ function remarkHardBreaks() {
 const remarkPlugins = [remarkGfm];
 const remarkPluginsWithBreaks = [remarkGfm, remarkHardBreaks];
 
-export function MarkdownContent({ content, breaks = false }: Props) {
+function MarkdownContentImpl({ content, breaks = false }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
 
   // Memoize so the custom-renderer function identities stay stable across
@@ -126,3 +126,7 @@ export function MarkdownContent({ content, breaks = false }: Props) {
     </div>
   );
 }
+
+// Memoized: streaming re-renders the message every token. Only the growing last block
+// changes content — earlier blocks keep the same props and skip re-parse + re-highlight.
+export const MarkdownContent = memo(MarkdownContentImpl);
