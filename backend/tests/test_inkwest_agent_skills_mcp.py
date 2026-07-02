@@ -6,6 +6,7 @@ read_skill / MCP tool calls.
 """
 
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -245,6 +246,82 @@ def test_load_mcp_config_reads_servers(tmp_path):
     p = tmp_path / "mcp.json"
     p.write_text(json.dumps({"mcpServers": {"cx": {"type": "http", "url": "https://x/mcp"}}}))
     assert load_mcp_config(str(p)) == {"cx": {"type": "http", "url": "https://x/mcp"}}
+
+
+def test_fit_tool_name_passthrough_when_short():
+    # A name within Converse's 64-char ToolName limit is left verbatim (Claude Code parity).
+    assert converse_mod.fit_tool_name("mcp__aws__list-buckets") == "mcp__aws__list-buckets"
+
+
+def test_fit_tool_name_sanitizes_illegal_chars():
+    # ToolName forbids '.'/':'/space etc.; an upstream tool name we don't control that uses
+    # them must be folded to '_' or Converse 400s on the pattern (not just the length).
+    assert converse_mod.fit_tool_name("mcp__aws__list.buckets") == "mcp__aws__list_buckets"
+    got = converse_mod.fit_tool_name("mcp__x__get user/all:v2")
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", got)
+
+
+def test_fit_tool_name_empty_stays_valid():
+    # ToolName is {1,64}: an empty (or all-illegal-then-stripped) name must NOT fold to ""
+    # (which fails the min-length and 400s Converse — the very thing fit_tool_name guards).
+    got = converse_mod.fit_tool_name("")
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", got)
+
+
+def test_fit_tool_name_idempotent():
+    # A fitted name is already a legal ToolName, so re-fitting (every replay turn) is a no-op.
+    # Guards replay stability against a future hash-length bump that could push past 64.
+    for raw in ("mcp__aws__s3-ls", "mcp__srv__weird.name:x", "mcp__" + "z" * 80):
+        once = converse_mod.fit_tool_name(raw)
+        assert converse_mod.fit_tool_name(once) == once
+        assert len(once) <= converse_mod._MAX_TOOL_NAME_LEN
+
+
+def test_fit_tool_name_boundary_exactly_64_passthrough():
+    # Exactly 64 is legal → verbatim; 65 folds. Pins the off-by-one on the '<=' bound.
+    at_64 = "m" * converse_mod._MAX_TOOL_NAME_LEN
+    assert converse_mod.fit_tool_name(at_64) == at_64
+    over = "m" * (converse_mod._MAX_TOOL_NAME_LEN + 1)
+    assert len(converse_mod.fit_tool_name(over)) == converse_mod._MAX_TOOL_NAME_LEN
+
+
+def test_fit_tool_name_folds_overflow_to_64():
+    # Bedrock Converse rejects a tool name > 64 chars (ToolName shape) and fails the whole
+    # turn; a long name we don't control must be folded down deterministically.
+    full = "mcp__AcmeOpsHub-production__get-tenant-account-member-permissions"
+    assert len(full) > converse_mod._MAX_TOOL_NAME_LEN  # the reported failure (65 chars)
+    name = converse_mod.fit_tool_name(full)
+    assert len(name) == converse_mod._MAX_TOOL_NAME_LEN
+    # Deterministic (replay coherence) + collision-resistant (hash of the FULL name).
+    assert name == converse_mod.fit_tool_name(full)
+    assert name != converse_mod.fit_tool_name(full + "-other")
+    # Only chars Converse allows ([a-zA-Z0-9_-]).
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", name)
+
+
+def test_advertised_name_matches_fit_of_full():
+    # _advertised_name delegates to fit_tool_name on the full namespaced string, so it agrees
+    # with what to_converse_message produces for a replayed history name (cross-engine).
+    server, tool = "AcmeOpsHub-production", "get-tenant-account-member-permissions"
+    full = f"mcp__{server}__{tool}"
+    assert mcp_mod._advertised_name(server, tool) == converse_mod.fit_tool_name(full)
+    assert mcp_mod._advertised_name("aws", "s3-ls") == "mcp__aws__s3-ls"  # short: verbatim
+
+
+def test_to_converse_message_folds_long_tool_use_name():
+    # Cross-engine: Claude Code persists the FULL >64 name into the shared messages table;
+    # replaying it to Converse must fold ToolUseBlock.name identically to the advertised name,
+    # else the turn 400s on messages[].content[].toolUse.name (same ToolName cap as toolConfig).
+    full = "mcp__AcmeOpsHub-production__get-tenant-account-member-permissions"
+    msg = {
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": "tu1", "name": full, "input": {"a": 1}}],
+    }
+    out = converse_mod.to_converse_message(msg)
+    tu = out["content"][0]["toolUse"]
+    assert tu["name"] == converse_mod.fit_tool_name(full)
+    assert len(tu["name"]) == converse_mod._MAX_TOOL_NAME_LEN
+    assert tu["toolUseId"] == "tu1" and tu["input"] == {"a": 1}
 
 
 def test_mcp_schema_to_converse_normalizes_missing_schema():

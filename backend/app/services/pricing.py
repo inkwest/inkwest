@@ -39,6 +39,12 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         input_price=Decimal("5.00"),
         output_price=Decimal("25.00"),
     ),
+    # Standard rate. This static table is the durable offline fallback, so we carry the
+    # post-intro price (never a time-boxed promo) to avoid silently under-billing later.
+    "claude-sonnet-5": ModelPricing(
+        input_price=Decimal("3.00"),
+        output_price=Decimal("15.00"),
+    ),
     "claude-sonnet-4-6": ModelPricing(
         input_price=Decimal("3.00"),
         output_price=Decimal("15.00"),

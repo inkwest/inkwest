@@ -33,6 +33,8 @@ from typing import Any
 
 from app.tools.definitions import get_tool_definitions
 
+from .converse import fit_tool_name
+
 logger = logging.getLogger(__name__)
 
 # Prefix + separator for advertised MCP tool names: ``mcp__<server>__<tool>`` (Claude
@@ -46,8 +48,14 @@ _CALL_TIMEOUT = 120.0
 
 
 def _advertised_name(server_key: str, tool_name: str) -> str:
-    """The cross-engine MCP tool name: ``mcp__<server>__<tool>``."""
-    return f"{_NS_PREFIX}{_NS_SEP}{server_key}{_NS_SEP}{tool_name}"
+    """The cross-engine MCP tool name: ``mcp__<server>__<tool>`` (≤64 chars for Converse).
+
+    Folded through ``converse.fit_tool_name`` so a long upstream server/tool pair we don't
+    control can't exceed Bedrock Converse's 64-char ``ToolName`` limit. The fold is on the
+    full string, so it matches what ``to_converse_message`` produces when the same name is
+    replayed from history — advertised toolSpec and history toolUse names stay identical.
+    """
+    return fit_tool_name(f"{_NS_PREFIX}{_NS_SEP}{server_key}{_NS_SEP}{tool_name}")
 
 
 def mcp_sdk_available() -> bool:
