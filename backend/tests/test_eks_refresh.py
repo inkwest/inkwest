@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
+from app.core.config import get_settings
 from app.services.connectors.base import MintedCredential
 from app.services.eks_refresh import refresh_session_eks
 from app.tools.connector_exec import cleanup_aws_files, session_kube_dir
@@ -85,8 +86,11 @@ async def test_refresh_generates_one_kubeconfig_per_cluster_in_tmpfs():
         assert count == 1
         path = os.path.join(session_kube_dir(sid), "config")  # single merged kubeconfig
         assert os.path.isfile(path)
-        # Mode 0600 (RAM, secret-adjacent) on the backend-local /dev/shm projection.
-        assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+        # File mode reflects the write target: 0644 on the shared sandbox creds volume
+        # (must be cross-uid readable — per-session dir isolation is the boundary, and the
+        # kubeconfig embeds no secrets), else 0600 on the backend-local /dev/shm projection.
+        expected_mode = "0o644" if get_settings().sandbox_creds_root else "0o600"
+        assert oct(os.stat(path).st_mode & 0o777) == expected_mode
 
         doc = yaml.safe_load(open(path).read())
         assert [ctx["name"] for ctx in doc["contexts"]] == ["acme0--eu-west-1--prod-cluster"]

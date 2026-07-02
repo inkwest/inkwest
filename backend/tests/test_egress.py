@@ -16,6 +16,15 @@ from app.api.routes.egress import parse_squid_line
 _SQUID_CONF = Path(__file__).resolve().parents[2] / "sandbox" / "squid.conf"
 
 
+def _require_squid_conf() -> None:
+    """Skip (don't error) when the ACL file isn't in this run context — e.g. a container
+    that mounts only ``backend/`` at the repo root, so the sibling ``sandbox/`` is absent.
+    The parser tests below don't need it; the allowlist-contract tests do and run in CI /
+    a full checkout where ``sandbox/squid.conf`` is present."""
+    if not _SQUID_CONF.exists():
+        pytest.skip(f"{_SQUID_CONF} not present in this run context")
+
+
 def test_parse_connect_allowed():
     line = (
         "1719500000.123    142 172.18.0.3 TCP_TUNNEL/200 4096 "
@@ -95,6 +104,7 @@ def test_parse_non_numeric_fields_are_tolerated():
 # --------------------------------------------------------------------------- #
 def _parse_squid_acls() -> tuple[list[str], dict[str, list[re.Pattern]]]:
     """Extract the dstdomain tokens of `allowed_domains` + the dstdom_regex ACLs."""
+    _require_squid_conf()
     domains: list[str] = []
     regexes: dict[str, list[re.Pattern]] = {}
     for raw in _SQUID_CONF.read_text().splitlines():
@@ -139,6 +149,7 @@ def _decide(host: str) -> str:
 def test_squid_http_access_order_is_what_the_emulator_assumes():
     # The emulator above hard-codes the rule order; assert the conf still matches it so a
     # reorder can't make these tests lie.
+    _require_squid_conf()
     text = _SQUID_CONF.read_text()
     order = [
         "http_access deny localnet aws_s3_re",
