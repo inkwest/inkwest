@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Copy, Check } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -11,7 +11,11 @@ interface Props {
   compact?: boolean;
 }
 
-export function CodeBlock({ children, language, inline, compact }: Props) {
+// Memoized: Prism re-highlighting is the streaming flicker source. As the last block
+// grows token-by-token the parent re-renders every delta; without memo every already-
+// rendered code block re-highlights each time. Same-prop blocks now skip it — only the
+// block whose content actually changed re-highlights.
+function CodeBlockImpl({ children, language, inline, compact }: Props) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -71,3 +75,5 @@ export function CodeBlock({ children, language, inline, compact }: Props) {
     </div>
   );
 }
+
+export const CodeBlock = memo(CodeBlockImpl);

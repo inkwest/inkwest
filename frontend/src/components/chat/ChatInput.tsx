@@ -179,6 +179,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   // where to fix it. The "send anyway" confirm is a modal rather than a native dialog.
   const [warnHover, setWarnHover] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
 
   // --- File attachments (sandbox/claude-cli only; needs a session to upload to) ---
   const attachmentsEnabled = useConfigStore((s) => s.config?.attachments_enabled ?? false);
@@ -464,6 +465,23 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     setConfirmOpen(false);
     submit();
   };
+
+  // Enter confirms the no-connector modal (Escape closes it via Modal). Autofocus the
+  // primary button so Enter reads naturally; document-level listener because the modal
+  // has no dedicated focus trap. Mirrors ConfirmDialog's pattern.
+  useEffect(() => {
+    if (!confirmOpen) return;
+    confirmButtonRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      confirmSendAnyway();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+    // confirmSendAnyway reads current state via submit(); re-bind only on open toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmOpen]);
 
   // Auto-submit the handed-off prompt once the WS is connected. Only fires for the
   // untouched seed: if the user has started editing it, we defer to them. If connect
@@ -967,7 +985,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
           <Button variant="secondary" onClick={() => setConfirmOpen(false)}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={confirmSendAnyway}>
+          <Button ref={confirmButtonRef} variant="primary" onClick={confirmSendAnyway}>
             {isStreaming ? 'Queue anyway' : 'Send anyway'}
           </Button>
         </div>
