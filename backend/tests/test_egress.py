@@ -171,6 +171,11 @@ def test_squid_http_access_order_is_what_the_emulator_assumes():
         "bedrock-agent-runtime.eu-west-1.amazonaws.com",
         "api.anthropic.com",  # claude-cli / Anthropic-direct
         "sts.amazonaws.com",  # global STS (creds)
+        "iam.amazonaws.com",  # global IAM
+        "dynamodb.eu-west-1.amazonaws.com",  # single-label control-plane service, in-region
+        "ec2.us-east-1.amazonaws.com",  # global/us-east-1 control plane
+        "abc123.gr7.eu-west-1.eks.amazonaws.com",  # EKS API server — region-agnostic, core use case
+        "cluster.eu-central-1.eks.amazonaws.com",  # EKS in another region still reachable
         # P1.7: the Coralogix MCP server — both engines reach it through this
         # proxy (claude-cli's in-CLI MCP + the inkwest-agent's in-sandbox MCP client). The
         # endpoint is api.<region>.coralogix.com/mgmt/api/v1/mcp; covered by .coralogix.com.
@@ -188,33 +193,52 @@ def test_model_and_aws_control_endpoints_allowed(host):
         "s3.eu-west-1.amazonaws.com",  # path-style S3 — denied before the broad allow
         "s3.amazonaws.com",
         "s3-accesspoint.eu-west-1.amazonaws.com",
+        # Virtual-hosted-style S3 (the default for the AWS CLI/SDKs) — now denied too, in
+        # every region and dualstack form (security fix; was the exfil bypass).
+        "my-bucket.s3.amazonaws.com",
+        "my-bucket.s3.eu-west-1.amazonaws.com",
+        "evil.s3.us-east-1.amazonaws.com",
+        "my.nested.bucket.s3.dualstack.us-east-1.amazonaws.com",
         "evil.example.com",  # arbitrary host — default deny (fail closed)
         "pastebin.com",
         # A remote MCP server on a non-allowlisted host is denied (P1.7): the in-sandbox MCP
         # client egresses through this proxy, so an MCP server outside the allowlist can't be
         # reached — onboarding a new remote MCP server requires a deliberate squid entry.
         "mcp.evil-server.com",
+        # AWS data-exfil vectors closed by dropping the blanket `.amazonaws.com` allow:
+        "abc123.execute-api.us-east-1.amazonaws.com",  # API Gateway invoke (2-label, attacker acct)
+        "my-queue.sqs.eu-west-1.amazonaws.com",  # SQS with a queue subdomain
+        "ec2.us-west-2.amazonaws.com",  # control-plane service in a non-allowlisted region
+        "dynamodb.ap-south-1.amazonaws.com",
+        "123456789012.dkr.ecr.eu-west-1.amazonaws.com",  # ECR data-plane (multi-label)
     ],
 )
 def test_exfil_and_unknown_hosts_denied(host):
     assert _decide(host) == "deny"
 
 
-def test_broad_amazonaws_allow_is_the_current_boundary():
-    # Documents the intentional (for now) broad `.amazonaws.com` allow — a non-S3 AWS
-    # service is reachable. Locked here so the deferred per-service tightening (a later
-    # custom-squid-rules stream) is a conscious, test-visible change rather than silent
-    # drift.
+def test_aws_egress_is_per_service_region_allowlist_not_blanket():
+    # The blanket `.amazonaws.com` allow is GONE — it was a cross-account data-exfil channel.
+    # AWS egress is now a per-service, per-region allowlist. Locked so a reintroduction of the
+    # catch-all is a conscious, test-visible change rather than silent drift.
+    assert "acl allowed_domains dstdomain .amazonaws.com" not in _SQUID_CONF.read_text()
+    # In-region single-label control-plane service: allowed.
     assert _decide("dynamodb.eu-west-1.amazonaws.com") == "allow"
-    assert "acl allowed_domains dstdomain .amazonaws.com" in _SQUID_CONF.read_text()
+    # Same service in a non-allowlisted region, and an attacker-usable data-plane endpoint:
+    # both denied (would have ridden the old blanket allow).
+    assert _decide("dynamodb.us-west-2.amazonaws.com") == "deny"
+    assert _decide("abc123.execute-api.us-east-1.amazonaws.com") == "deny"
 
 
-def test_known_gap_virtual_hosted_s3_leaks_under_broad_allow():
-    # KNOWN GAP (security, accepted for now): aws_s3_re only anchors PATH-style S3
-    # (`s3.<region>.amazonaws.com`). Virtual-hosted-style (`<bucket>.s3...`) is NOT matched,
-    # so the broad `.amazonaws.com` allow lets it through — S3 exfil is reachable despite
-    # the explicit S3 deny. To be closed when the per-service tightening stream lands
-    # (either drop the broad allow, or extend aws_s3_re to the `<bucket>.s3.` form). Pinned
-    # so the gap can't be forgotten and a future fix flips this test deliberately.
-    assert _decide("my-bucket.s3.amazonaws.com") == "allow"
-    assert _decide("my-bucket.s3.eu-west-1.amazonaws.com") == "allow"
+def test_virtual_hosted_s3_is_denied():
+    # Regression for the former exfil bypass: aws_s3_re used to anchor only PATH-style S3
+    # (`^s3.<region>...`), so virtual-hosted-style (`<bucket>.s3...`, the AWS CLI/SDK default)
+    # slipped past the deny and rode the broad `.amazonaws.com` allow — an anonymous-writable
+    # bucket was a clean exfil channel. aws_s3_re now matches the `s3` label after a dot too,
+    # so both styles are denied before any allow rule.
+    assert _decide("my-bucket.s3.amazonaws.com") == "deny"
+    assert _decide("my-bucket.s3.eu-west-1.amazonaws.com") == "deny"
+    assert _decide("bucket.s3.dualstack.us-east-1.amazonaws.com") == "deny"
+    # Non-S3 AWS services must remain unaffected by the widened deny.
+    assert _decide("ec2.eu-west-1.amazonaws.com") == "allow"
+    assert _decide("bedrock-runtime.eu-west-1.amazonaws.com") == "allow"

@@ -38,6 +38,13 @@ os.environ["AGENTIC_ENGINES"] = "claude-cli,inkwest-agent"
 os.environ["OIDC_ENABLED"] = "false"
 os.environ.pop("SANDBOX_CREDS_ROOT", None)
 
+# Disable the per-IP HTTP rate limiter for the suite: API tests fire many requests from a
+# single client identity and would otherwise trip 429s that have nothing to do with what they
+# assert. The limiter itself is covered directly in test_rate_limit.py (which builds its own
+# app with it enabled). `setdefault` lets an explicit env re-enable it. Production default
+# stays enabled (config.py).
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+
 # ============================================================================
 # Mock Claude API Response Builders
 # ============================================================================

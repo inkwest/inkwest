@@ -332,6 +332,7 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
     monkeypatch.setattr(app_main, "load_registry", AsyncMock())
     monkeypatch.setattr(app_main, "load_oauth_catalog", AsyncMock())
     monkeypatch.setattr(app_main, "refresh_catalog", AsyncMock())
+    monkeypatch.setattr(app_main, "validate_settings", lambda: None)
     reconcile = AsyncMock(side_effect=RuntimeError("boom"))
     monkeypatch.setattr(app_main, "reconcile_interrupted_turns", reconcile)
     monkeypatch.setattr(app_main, "purge_empty_sessions", AsyncMock(return_value=0))
@@ -373,6 +374,7 @@ async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
     monkeypatch.setattr(app_main, "load_registry", AsyncMock())
     monkeypatch.setattr(app_main, "load_oauth_catalog", AsyncMock())
     monkeypatch.setattr(app_main, "refresh_catalog", AsyncMock())
+    monkeypatch.setattr(app_main, "validate_settings", lambda: None)
     monkeypatch.setattr(app_main, "reconcile_interrupted_turns", AsyncMock(return_value=0))
     purge = AsyncMock(side_effect=RuntimeError("boom"))
     monkeypatch.setattr(app_main, "purge_empty_sessions", purge)
@@ -402,6 +404,7 @@ def _broker_lifespan_settings(*, llm_broker_enabled: bool) -> SimpleNamespace:
 
 
 def _patch_lifespan_startup(monkeypatch: Any) -> None:
+    monkeypatch.setattr(app_main, "validate_settings", lambda: None)
     monkeypatch.setattr(app_main, "init_db", AsyncMock())
     monkeypatch.setattr(app_main, "async_session_maker", lambda: _DummySession())
     monkeypatch.setattr(app_main, "ensure_default_system_prompt", AsyncMock())

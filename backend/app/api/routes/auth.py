@@ -19,12 +19,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import CurrentUser, get_db
 from app.core import metrics
 from app.core.auth import (
+    OIDC_STATE_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     AuthError,
+    clear_oidc_state_cookie,
     clear_session_cookie,
     create_session_token,
     create_ws_ticket,
     get_oidc_client,
+    set_oidc_state_cookie,
     set_session_cookie,
     verify_session_token,
 )
@@ -186,7 +189,12 @@ async def login(db: AsyncSession = Depends(get_db)) -> RedirectResponse:
 
     try:
         auth_url = await oidc_client.get_authorization_url(state)
-        return RedirectResponse(url=auth_url)
+        redirect = RedirectResponse(url=auth_url)
+        # Bind the state to this browser (CSRF): the callback requires the cookie to match
+        # the state query param, so a stolen (code, state) can't be replayed in a victim's
+        # browser.
+        set_oidc_state_cookie(redirect, state, OIDC_STATE_TTL_SECONDS)
+        return redirect
     except AuthError as e:
         logger.error(f"Failed to get authorization URL: {e}")
         raise HTTPException(
@@ -197,6 +205,7 @@ async def login(db: AsyncSession = Depends(get_db)) -> RedirectResponse:
 
 @router.get("/callback")
 async def callback(
+    request: Request,
     code: str = Query(..., description="Authorization code from OIDC provider"),
     state: str = Query(..., description="State for CSRF protection"),
     db: AsyncSession = Depends(get_db),
@@ -215,6 +224,14 @@ async def callback(
     if not oidc_client.is_enabled:
         return RedirectResponse(url=f"{frontend_callback}#error=OIDC+not+enabled")
 
+    # CSRF: the state must match the cookie set at /login on THIS browser (constant-time
+    # compare). Blocks a login-CSRF where an attacker's (code, state) is fed to a victim.
+    cookie_state = request.cookies.get(OIDC_STATE_COOKIE_NAME)
+    if not cookie_state or not secrets.compare_digest(cookie_state, state):
+        resp = RedirectResponse(url=f"{frontend_callback}#error=Invalid+or+expired+login+state")
+        clear_oidc_state_cookie(resp)
+        return resp
+
     # Atomic pop: DELETE RETURNING to consume and validate in one query
     state_result = await db.execute(
         delete(OidcPendingState)
@@ -228,7 +245,9 @@ async def callback(
     await db.commit()
 
     if row is None or row[0] < cutoff:
-        return RedirectResponse(url=f"{frontend_callback}#error=Invalid+or+expired+login+state")
+        resp = RedirectResponse(url=f"{frontend_callback}#error=Invalid+or+expired+login+state")
+        clear_oidc_state_cookie(resp)
+        return resp
 
     try:
         token_response = await oidc_client.exchange_code(code)
@@ -277,6 +296,7 @@ async def callback(
         # of browser history and unreadable by JS. Land on the SPA root directly.
         redirect = RedirectResponse(url=f"{settings.frontend_url}/")
         set_session_cookie(redirect, session_token)
+        clear_oidc_state_cookie(redirect)  # single-use: state consumed
         return redirect
 
     except AuthError as e:

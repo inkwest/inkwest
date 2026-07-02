@@ -90,6 +90,14 @@ class TestValidation:
         error = validate_tool_input("kubectl_get", {"resource": "hackme"})
         assert error is None
 
+    def test_validate_rejects_secret_reads(self):
+        """Secret reads are denied regardless of RBAC (base64 credential exfil path)."""
+        for kind in ("secret", "secrets", "secrets.v1.core"):
+            error = validate_tool_input("kubectl_get", {"resource": kind})
+            assert error is not None and "secret" in error.lower(), kind
+        # A well-formed non-secret kind is still allowed.
+        assert validate_tool_input("kubectl_get", {"resource": "configmaps"}) is None
+
     def test_validate_invalid_namespace(self):
         """Invalid namespace format should fail validation."""
         error = validate_tool_input("kubectl_get", {"resource": "pods", "namespace": "INVALID"})

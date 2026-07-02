@@ -280,9 +280,46 @@ async def test_budget_gate_allows_when_under_limit() -> None:
     assert result is None
 
 
+def test_turn_rate_gate_blocks_after_burst() -> None:
+    """The per-user WS turn limiter allows a burst then blocks; disabled → never blocks."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app.api.routes import chat
+
+    uid = uuid4()
+    # Enabled, tiny cap: capacity == rate == 2 → 2 allowed, 3rd blocked (same instant).
+    chat._turn_limiter = None
+    with patch.object(
+        chat,
+        "get_settings",
+        return_value=SimpleNamespace(
+            rate_limit_enabled=True, rate_limit_turn_per_user_per_minute=2
+        ),
+    ):
+        assert chat._turn_rate_block_reason(uid) is None
+        assert chat._turn_rate_block_reason(uid) is None
+        assert chat._turn_rate_block_reason(uid) is not None
+        # A different user has an independent bucket.
+        assert chat._turn_rate_block_reason(uuid4()) is None
+
+    # Disabled → always allowed regardless of rate.
+    chat._turn_limiter = None
+    with patch.object(
+        chat,
+        "get_settings",
+        return_value=SimpleNamespace(
+            rate_limit_enabled=False, rate_limit_turn_per_user_per_minute=1
+        ),
+    ):
+        assert all(chat._turn_rate_block_reason(uid) is None for _ in range(10))
+    chat._turn_limiter = None  # reset shared state for other tests
+
+
 @pytest.mark.asyncio
-async def test_budget_gate_fails_open_on_error() -> None:
-    """A budget-check error must allow the turn, never wedge chat."""
+async def test_budget_gate_fails_closed_on_error() -> None:
+    """With enforcement ON, a budget-check error must BLOCK the turn (fail-closed) rather
+    than silently allow unbounded LLM spend on a public endpoint."""
     from uuid import uuid4
 
     from app.api.routes import chat
@@ -294,4 +331,5 @@ async def test_budget_gate_fails_open_on_error() -> None:
     ):
         result = await chat._budget_block_reason(uuid4(), ["user"])
 
-    assert result is None
+    assert result is not None
+    assert "budget" in result.lower()

@@ -2,6 +2,8 @@
 Health check routes.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_db
 from app.core.config import get_settings
 from app.models.schemas import HealthResponse, ReadyResponse, VersionResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 
@@ -35,10 +39,10 @@ async def ready(db: AsyncSession = Depends(get_db)) -> ReadyResponse:
         await db.execute(text("SELECT 1"))
         return ReadyResponse(status="ready", database="connected")
     except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Database not ready: {str(e)}",
-        )
+        # Static client message — this probe is unauthenticated and public; the raw
+        # exception can disclose DB host/driver/auth details. Log it server-side only.
+        logger.warning("readiness_check_failed", exc_info=e)
+        raise HTTPException(status_code=503, detail="Database not ready") from e
 
 
 @router.get("/version", response_model=VersionResponse)

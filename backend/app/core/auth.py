@@ -60,6 +60,39 @@ def clear_session_cookie(response: Response) -> None:
     )
 
 
+# OIDC login CSRF: the `state` is also bound to a short-lived HttpOnly cookie so the browser
+# that STARTED the login is the only one that can complete it. Without this, an attacker who
+# holds a valid (code, state) for their own identity could feed it to a victim's callback and
+# log the victim into the attacker's account (login CSRF / session fixation).
+OIDC_STATE_COOKIE_NAME = "inkwest_oidc_state"
+
+
+def set_oidc_state_cookie(response: Response, state: str, max_age: int) -> None:
+    """Bind the OIDC state to the initiating browser (scoped to the callback path)."""
+    settings = get_settings()
+    response.set_cookie(
+        key=OIDC_STATE_COOKIE_NAME,
+        value=state,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.app_env == "production",
+        samesite="lax",
+        path="/api/auth",
+    )
+
+
+def clear_oidc_state_cookie(response: Response) -> None:
+    """Remove the OIDC state cookie. Attributes must match set_oidc_state_cookie."""
+    settings = get_settings()
+    response.delete_cookie(
+        key=OIDC_STATE_COOKIE_NAME,
+        path="/api/auth",
+        httponly=True,
+        secure=settings.app_env == "production",
+        samesite="lax",
+    )
+
+
 class AuthError(Exception):
     """Authentication error."""
 

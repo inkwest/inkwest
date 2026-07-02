@@ -168,6 +168,36 @@ def test_aws_call_rejects_bad_args():
     )
 
 
+@pytest.mark.parametrize(
+    "arg",
+    [
+        "--endpoint-url=http://169.254.169.254",  # SSRF redirect (=form)
+        "--endpoint-url",  # SSRF redirect (space form)
+        "--no-verify-ssl",  # TLS bypass
+        "--profile",  # credential-profile switch
+        "--debug",  # dumps request internals into output
+        "file:///root/.aws/credentials",  # local file spliced into a parameter
+        "--filters=file://payload.json",  # file:// anywhere in the value
+    ],
+)
+def test_aws_call_rejects_dangerous_flags(arg):
+    err = validate_aws_call({"service": "s3api", "operation": "list-buckets", "args": [arg]})
+    assert err is not None
+
+
+def test_aws_call_allows_normal_read_args():
+    assert (
+        validate_aws_call(
+            {
+                "service": "ec2",
+                "operation": "describe-instances",
+                "args": ["--region", "eu-west-1", "--max-items", "10"],
+            }
+        )
+        is None
+    )
+
+
 def test_gitlab_validation():
     assert validate_gitlab_api({"path": "/projects/1"}) is None
     assert validate_gitlab_api({"path": "projects/1"})  # no leading slash

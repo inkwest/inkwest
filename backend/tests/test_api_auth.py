@@ -161,6 +161,8 @@ async def test_callback_success_sets_cookie_no_fragment(
         patch("app.api.routes.auth.create_session_token", return_value="fake.jwt"),
         patch("app.core.auth.get_settings", return_value=MagicMock(app_env="development")),
     ):
+        # CSRF: the state cookie set at /login must match the state query param.
+        client.cookies.set("inkwest_oidc_state", "xyz")
         resp = await client.get("/api/auth/callback?code=abc&state=xyz", follow_redirects=False)
 
     assert resp.status_code == 307
@@ -170,6 +172,32 @@ async def test_callback_success_sets_cookie_no_fragment(
     set_cookie = resp.headers.get("set-cookie", "")
     assert "session_token=fake.jwt" in set_cookie
     assert "HttpOnly" in set_cookie
+
+
+@pytest.mark.asyncio
+async def test_callback_rejects_state_cookie_mismatch(
+    client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """Login CSRF: a (code, state) with no matching browser cookie is rejected before any
+    code exchange — blocks feeding an attacker's state to a victim's callback."""
+    oidc = MagicMock()
+    oidc.is_enabled = True
+    oidc.exchange_code = AsyncMock()  # must NOT be called
+
+    with (
+        patch("app.api.routes.auth.get_oidc_client", return_value=oidc),
+        patch(
+            "app.api.routes.auth.get_settings",
+            return_value=MagicMock(frontend_url="http://fe.local"),
+        ),
+        patch("app.core.auth.get_settings", return_value=MagicMock(app_env="development")),
+    ):
+        client.cookies.delete("inkwest_oidc_state")  # no state cookie on this browser
+        resp = await client.get("/api/auth/callback?code=abc&state=xyz", follow_redirects=False)
+
+    assert resp.status_code == 307
+    assert "error=Invalid" in resp.headers["location"]
+    oidc.exchange_code.assert_not_awaited()
 
 
 @pytest.mark.asyncio

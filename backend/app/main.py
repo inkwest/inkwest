@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
@@ -39,10 +40,11 @@ from app.api.routes import (
     system_prompts,
     usage,
 )
-from app.core.config import get_settings
+from app.core.config import get_settings, validate_settings
 from app.core.database import async_session_maker, close_db, init_db
 from app.core.logging import AccessLogMiddleware, access_log_config, get_logger, setup_logging
 from app.core.metrics_server import start_metrics_server, stop_metrics_server
+from app.core.rate_limit import RateLimitMiddleware
 from app.core.telemetry import shutdown_telemetry
 from app.services.app_settings import load_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
@@ -74,6 +76,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         commit_hash=settings.commit_hash,
         build_timestamp=settings.build_timestamp,
     )
+    # Fail fast on an unsafe/incomplete configuration (prod SECRET_KEY, OIDC, engines,
+    # connectors, role-filter regex) so a misconfigured deploy crash-loops instead of
+    # booting green — e.g. with the default secret or dev auto-login admin exposed.
+    validate_settings()
     # Start the metrics exporter first so the process is scrapeable even while the slow
     # startup steps below run. Best-effort: a bind clash (e.g. a second uvicorn worker
     # racing the same port) must degrade metrics, not crash the API.
@@ -194,7 +200,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("telemetry_shutdown")
 
 
-# Create FastAPI application
+# Create FastAPI application. In production the interactive docs and the OpenAPI schema
+# are disabled: they are unauthenticated and would expose the full API surface (admin,
+# proxy routes) to anonymous recon. Dev keeps them for convenience.
+_docs_enabled = settings.app_env != "production"
 app = FastAPI(
     title="Inkwest API",
     description=(
@@ -203,11 +212,30 @@ app = FastAPI(
     ),
     version=settings.version,
     lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 # Configure middleware (order matters - first added = outermost)
 # Access logging should be outermost to capture full request lifecycle
 app.add_middleware(AccessLogMiddleware, config=access_log_config)
+
+# Per-IP rate limiting sits just inside access logging (so 429s are logged) and outside
+# CORS/routing (so a flood is shed before doing real work). No-op when disabled.
+app.add_middleware(RateLimitMiddleware)
+
+# Host header validation (opt-in via TRUSTED_HOSTS). Blocks Host-header spoofing / cache
+# poisoning / absolute-URL injection. Left off by default so k8s/ALB probes (which send the
+# pod IP as Host) are not rejected; production warns when unset so it is a conscious choice.
+_trusted_hosts = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()]
+if _trusted_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
+elif settings.app_env == "production":
+    logger.warning(
+        "trusted_hosts_unset",
+        note="Set TRUSTED_HOSTS to your public hostname(s) to enable Host-header validation.",
+    )
 
 cors_origins = (
     [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
@@ -331,11 +359,20 @@ if mount_spa(app, Path(__file__).resolve().parent.parent / "static"):
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault(
             "Content-Security-Policy",
+            # connect-src 'self' also covers same-origin ws/wss (CSP3) — the SPA and the
+            # WebSocket are same-origin in the combined image, so no wildcard ws: is needed.
             # blob: lets attachment thumbnails render — they're fetched with the auth
             # header then shown via URL.createObjectURL() (a same-origin blob: URL).
-            "default-src 'self'; script-src 'self'; connect-src 'self' ws: wss:; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:",
+            "default-src 'self'; script-src 'self'; connect-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+            "frame-ancestors 'none'",
         )
+        # HSTS only in production (served over HTTPS via the ALB); pointless/counter-
+        # productive on plain-HTTP localhost in dev.
+        if settings.app_env == "production":
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+            )
         return response
 
 else:
