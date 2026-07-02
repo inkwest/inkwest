@@ -49,6 +49,7 @@ from app.core.secretbox import (
     unseal,
 )
 from app.models.mcp_oauth_catalog import McpOauthCatalog
+from app.services import pubsub
 
 
 class DuplicateKeyError(Exception):
@@ -339,6 +340,22 @@ async def list_oauth_entries(db: AsyncSession) -> list[dict[str, Any]]:
     ]
 
 
+async def _broadcast_catalog_change() -> None:
+    """Best-effort global broadcast that the OAuth-MCP catalog changed.
+
+    The *set* of servers is global (unlike per-user auth_status), so this fans out to every
+    connection (``user_id=None``) to drop the client-side catalog cache and reload. Emitted
+    after the in-memory snapshot is refreshed so a client reloading immediately sees the new
+    state. Swallowed on failure: the write is already durable, and clients also revalidate on
+    mount/popup-open (stale-while-revalidate), so a dropped notify is a missed live push, not
+    lost state — it must not turn a successful admin write into an error.
+    """
+    try:
+        await pubsub.notify({"type": "mcp_catalog_changed"}, user_id=None)
+    except Exception:  # noqa: BLE001 — broadcast is advisory; never fail the write on it
+        logger.warning("mcp_catalog_broadcast_failed", exc_info=True)
+
+
 async def upsert_oauth_server(
     db: AsyncSession,
     *,
@@ -426,6 +443,8 @@ async def upsert_oauth_server(
         await db.commit()
         await load_oauth_catalog(db)
 
+    await _broadcast_catalog_change()
+
 
 async def delete_oauth_server(db: AsyncSession, key: str) -> None:
     """Delete a catalog entry, then refresh the snapshot. Raises if the key is unknown."""
@@ -436,3 +455,6 @@ async def delete_oauth_server(db: AsyncSession, key: str) -> None:
             raise ValueError(f"Unknown MCP server key: {key}")
         await db.commit()
         await load_oauth_catalog(db)
+
+    # Only reached on a real delete; an unknown key raises above, before any broadcast.
+    await _broadcast_catalog_change()

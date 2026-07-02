@@ -9,11 +9,17 @@ vi.mock('@/services/api', () => ({
   wsBaseUrl: () => 'ws://test',
 }));
 vi.mock('@/lib/mcpDek', () => ({ dekReply: vi.fn() }));
+vi.mock('@/components/connector/mcpCatalogCache', () => ({ resetMcpCatalogCache: vi.fn() }));
 
 import { fetchWsTicket } from '@/services/api';
 import { dekReply } from '@/lib/mcpDek';
 import { useSyncSocket } from './useSyncSocket';
 import { useBackendStore } from '@/store/backend';
+import { useMcpStore } from '@/store/mcp';
+import { useSessionsStore } from '@/store/sessions';
+import { resetMcpCatalogCache } from '@/components/connector/mcpCatalogCache';
+
+const mockResetCatalog = resetMcpCatalogCache as unknown as ReturnType<typeof vi.fn>;
 
 const mockTicket = fetchWsTicket as unknown as ReturnType<typeof vi.fn>;
 const mockDekReply = dekReply as unknown as ReturnType<typeof vi.fn>;
@@ -120,6 +126,30 @@ describe('useSyncSocket — reconnect & give-up', () => {
 
     expect(mockDekReply).toHaveBeenCalledWith(frame);
     expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'mcp_dek_supply', dek: 'abc' }));
+    unmount();
+  });
+
+  it('on mcp_catalog_changed: resets the catalog cache, bumps the version, skips fetchSessions', async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    mockResetCatalog.mockClear();
+    useMcpStore.setState({ catalogVersion: 0 });
+    const fetchSessionsSpy = vi.fn();
+    useSessionsStore.setState({ fetchSessions: fetchSessionsSpy });
+
+    const { unmount } = renderHook(() => useSyncSocket());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const ws = FakeWS.instances[0];
+    ws.readyState = FakeWS.OPEN;
+    (ws.onmessage as unknown as (e: { data: string }) => void)?.({
+      data: JSON.stringify({ type: 'mcp_catalog_changed' }),
+    });
+
+    expect(mockResetCatalog).toHaveBeenCalledTimes(1);
+    expect(useMcpStore.getState().catalogVersion).toBe(1);
+    // Not a session event — must return before the unconditional fetchSessions().
+    expect(fetchSessionsSpy).not.toHaveBeenCalled();
     unmount();
   });
 

@@ -16,4 +16,11 @@ describe('useMcpStore', () => {
     useMcpStore.getState().clearAuthRequired('notion');
     expect(useMcpStore.getState().authRequired).toEqual(['slack']);
   });
+
+  it('bumps the catalog version monotonically (drives McpPanel live reload)', () => {
+    useMcpStore.setState({ catalogVersion: 0 });
+    useMcpStore.getState().bumpCatalogVersion();
+    useMcpStore.getState().bumpCatalogVersion();
+    expect(useMcpStore.getState().catalogVersion).toBe(2);
+  });
 });

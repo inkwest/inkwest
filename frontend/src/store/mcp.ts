@@ -16,6 +16,11 @@ interface McpState {
   // session has any MCP access without their own fetch.
   enabledBySession: Record<string, string[]>;
   setSessionEnabled: (sessionId: string, keys: string[]) => void;
+  // Bumped on an `mcp_catalog_changed` WS broadcast (an admin added/removed/reconfigured an
+  // OAuth MCP server). McpPanel watches it to re-load the (already reset) catalog cache live —
+  // the push half of push + revalidate-on-mount. Global: the *set* of servers is not per-user.
+  catalogVersion: number;
+  bumpCatalogVersion: () => void;
 }
 
 export const useMcpStore = create<McpState>((set) => ({
@@ -29,4 +34,6 @@ export const useMcpStore = create<McpState>((set) => ({
   // time, so a single entry is all that's ever read — this bounds the map instead of
   // accumulating a key per visited session for the tab's lifetime.
   setSessionEnabled: (sessionId, keys) => set({ enabledBySession: { [sessionId]: keys } }),
+  catalogVersion: 0,
+  bumpCatalogVersion: () => set((s) => ({ catalogVersion: s.catalogVersion + 1 })),
 }));

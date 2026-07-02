@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { McpPanel } from './McpPanel';
-import { resetMcpCatalogCache } from './mcpCatalogCache';
+import { resetMcpCatalogCache, primeMcpCatalog } from './mcpCatalogCache';
+import { useMcpStore } from '@/store/mcp';
 import type { McpServerEntry } from '@/services/api';
 
 vi.mock('@/services/api', () => ({
@@ -41,6 +42,7 @@ describe('McpPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetMcpCatalogCache(); // process-wide cache must not leak between tests
+    useMcpStore.setState({ catalogVersion: 0 }); // live-reload counter must start cold
   });
 
   it('renders nothing when the catalog is empty', async () => {
@@ -284,5 +286,96 @@ describe('McpPanel', () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'unavailable' });
     expect(await screen.findByText('sandbox required')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
+  });
+
+  // ---- stale-while-revalidate + live reload ------------------------------ //
+  it('renders the peek seed synchronously (no flicker) yet still force-revalidates on mount', async () => {
+    // Warm the process-wide cache: a remount must render the known catalog at once...
+    primeMcpCatalog(cat(['coralogix']));
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+
+    render(<McpPanel sessionId="s1" variant="row" showWhenEmpty />);
+    // ...synchronously — before any fetch resolves — the seeded key is already offered.
+    expect(screen.getByRole('button', { name: 'Configure' })).toBeInTheDocument();
+    // ...and it still force-fetches (SWR), so a since-changed catalog converges.
+    await waitFor(() => expect(mockGetCatalog).toHaveBeenCalled());
+  });
+
+  it('reloads the catalog when the store catalogVersion bumps (live WS invalidate)', async () => {
+    mockGetCatalog.mockResolvedValue(cat(['coralogix']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+
+    render(<McpPanel sessionId="s1" />);
+    await waitFor(() => expect(mockGetCatalog).toHaveBeenCalledTimes(1));
+
+    // A WS `mcp_catalog_changed` resets the cache then bumps the version; the effect re-loads.
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
+    act(() => {
+      resetMcpCatalogCache();
+      useMcpStore.getState().bumpCatalogVersion();
+    });
+    // Live-reload is jittered (0..1s) to smear the broadcast herd, so allow past the max delay.
+    await waitFor(() => expect(mockGetCatalog).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(await screen.findByText('0/2 enabled', {}, { timeout: 3000 })).toBeInTheDocument();
+  });
+
+  it('a live catalog change does not reset an open modal unsaved draft', async () => {
+    // Regression: a global `mcp_catalog_changed` bump must refresh the catalog set WITHOUT
+    // refetching the session selection — else it would clobber the user's in-progress toggles.
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+
+    render(<McpPanel sessionId="s1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    const gitlab = await screen.findByRole('checkbox', { name: 'gitlab' });
+    fireEvent.click(gitlab); // unsaved draft toggle
+    expect(gitlab).toBeChecked();
+
+    // An admin adds a server → WS bump. The new server must appear, the draft toggle must stay.
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab', 'newsrv']));
+    act(() => {
+      resetMcpCatalogCache();
+      useMcpStore.getState().bumpCatalogVersion();
+    });
+
+    // Jittered live-reload (0..1s) — wait past the max delay for the new server to appear.
+    expect(
+      await screen.findByRole('checkbox', { name: 'newsrv' }, { timeout: 3000 })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'gitlab' })).toBeChecked();
+    // The selection endpoint is fetched once (mount) — never again on the catalog bump.
+    expect(mockGetSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('a stale in-flight catalog fetch never clobbers a newer one (seq guard, out-of-order)', async () => {
+    // autoOpen fires both the mount load and the open revalidate concurrently. Resolve the
+    // later-sequenced (open) fetch FIRST, the earlier (mount) fetch LAST: the guard must let
+    // the newer result stand rather than the stale mount response overwriting it.
+    let resolveMount!: () => void;
+    let resolveOpen!: () => void;
+    mockGetCatalog
+      .mockReturnValueOnce(new Promise((r) => { resolveMount = () => r(cat(['stale'])); }))
+      .mockReturnValueOnce(new Promise((r) => { resolveOpen = () => r(cat(['fresh'])); }));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+
+    render(<McpPanel sessionId="s1" autoOpen />);
+    await act(async () => { resolveOpen(); });   // newer (seq 2) lands first
+    await act(async () => { resolveMount(); });   // stale (seq 1) lands last — must be dropped
+
+    expect(await screen.findByRole('checkbox', { name: 'fresh' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'stale' })).not.toBeInTheDocument();
+  });
+
+  it('revalidates the catalog when the modal opens (long-mounted, missed the WS bump)', async () => {
+    mockGetCatalog.mockResolvedValue(cat(['coralogix']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+
+    render(<McpPanel sessionId="s1" />);
+    await waitFor(() => expect(mockGetCatalog).toHaveBeenCalledTimes(1));
+
+    mockGetCatalog.mockResolvedValue(cat(['coralogix', 'gitlab']));
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    await waitFor(() => expect(mockGetCatalog).toHaveBeenCalledTimes(2));
   });
 });
