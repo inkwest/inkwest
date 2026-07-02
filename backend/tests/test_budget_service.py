@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.budget import BudgetPeriod
 from app.services.budget_service import (
@@ -15,6 +16,14 @@ from app.services.budget_service import (
     UsageSummary,
     get_period_start,
 )
+
+
+def _usage_db():
+    """AsyncSession stand-in: async flush/commit, sync add (spec-accurate) — avoids the
+    coroutine-never-awaited warning and catches a mistaken ``await db.add``."""
+    db = AsyncMock(spec=AsyncSession)
+    db.add = MagicMock()
+    return db
 
 
 class TestGetPeriodStart:
@@ -318,7 +327,7 @@ class TestBudgetServiceIntegration:
         """Should record usage correctly."""
         from app.services.budget_service import record_usage
 
-        mock_db = AsyncMock()
+        mock_db = _usage_db()
         session_id = uuid4()
         user_id = uuid4()
 
@@ -360,7 +369,7 @@ class TestBudgetServiceIntegration:
 
         with patch("app.services.budget_service.metrics.turn_engine", return_value="opencode"):
             record = await record_usage(
-                db=AsyncMock(),
+                db=_usage_db(),
                 user_id=uuid4(),
                 session_id=uuid4(),
                 input_tokens=1000,
@@ -382,7 +391,7 @@ class TestBudgetServiceIntegration:
             ) as calc,
         ):
             record = await record_usage(
-                db=AsyncMock(),
+                db=_usage_db(),
                 user_id=uuid4(),
                 session_id=uuid4(),
                 input_tokens=1,

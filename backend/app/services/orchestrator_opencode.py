@@ -131,6 +131,29 @@ def _detect_expired_aws(content: str | None, is_error: bool) -> bool:
     return bool(is_error and content and any(s in content for s in _AWS_EXPIRY_SIGNATURES))
 
 
+def _publish_workdir_file(workdir: str, filename: str, content: str) -> None:
+    """Symlink-safe publish of ``content`` to ``<workdir>/<filename>`` in the bind mount.
+
+    The workdir is world-writable and bind-mounted into the sandbox, so a prior turn's
+    (untrusted) agent can plant a symlink at the target — ``ln -s <backend-host-path>
+    <workdir>/AGENTS.md``. A naive ``open(target, "w")`` FOLLOWS that link and truncates
+    the host file (a write-escape out of the sandbox). Instead stage on a sibling OUTSIDE
+    the mount, then ``os.replace`` into place: rename REPLACES a symlink sitting at the
+    destination (it operates on the link, never its target), so the write can't be
+    redirected. A bind mount follows the inode, so renaming a file INTO the dir is
+    path-resolved and the warm container sees it. Same discipline as write_aws_profiles.
+    """
+    dest = os.path.join(workdir, filename)
+    staging = os.path.join(os.path.dirname(workdir), f".{filename}.{uuid.uuid4().hex}")
+    try:
+        with open(staging, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(staging, dest)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(staging)
+
+
 async def orchestrate_chat_opencode(
     db: AsyncSession,
     session_id: str | uuid.UUID,
@@ -319,6 +342,9 @@ async def orchestrate_chat_opencode(
             system_prompt += connector_prompt_hint(injected)
 
     container: str | None = None
+    # Path to the cred-bearing config; declared here so the finally can remove it even if the
+    # turn throws between ensure() and the write (None ⇒ nothing was published yet).
+    opencode_json: str | None = None
     # LLM auth broker grant + base. Declared here so the finally always burns the grant;
     # MINTED inside the try (below) so a failure can never leak a grant the finally can't see.
     broker_env: dict[str, str] = {}
@@ -381,12 +407,18 @@ async def orchestrate_chat_opencode(
         # <home>/.claude/skills — readable by opencode). Same cadence/dir as the other engines.
         apply_session_skills(session_id_str, active_skills)
 
+        # Single source of truth for the workdir paths (reused in the finally cleanup).
+        # Assigned before any await that could throw so the finally — guarded on
+        # `container is not None`, set at ensure() above — can always reference them.
+        workdir = os.path.join(sandbox.session_dir(session_id_str), "workdir")
+        os.makedirs(workdir, exist_ok=True)
+        opencode_json = os.path.join(workdir, "opencode.json")  # noqa: F841 — used in finally
+
         # Security: prune any cred-bearing opencode.json orphaned by a PRIOR turn whose broker
         # was SIGKILLed before its finally cleanup ran (it can embed MCP headers/JWTs). Done
         # right after ensure so stale creds never linger; the fresh one is written just below.
-        opencode_json = os.path.join(
-            sandbox.session_dir(session_id_str), "workdir", "opencode.json"
-        )
+        # islink-unlink first: a planted symlink at the target must not survive the prune (it
+        # would be re-followed by a naive reader), and os.remove on a link removes the link.
         with contextlib.suppress(FileNotFoundError):
             os.remove(opencode_json)
         # Security: also prune the project-level `.opencode/` tree (agents/commands/plugins
@@ -395,7 +427,7 @@ async def orchestrate_chat_opencode(
         # (`--pure` already blocks plugin loading; this clears prompt-level extensions too.)
         # rmtree REFUSES a symlink root (and ignore_errors would swallow that): unlink a
         # planted `.opencode -> elsewhere` link first or the prune is bypassable.
-        dot_opencode = os.path.join(sandbox.session_dir(session_id_str), "workdir", ".opencode")
+        dot_opencode = os.path.join(workdir, ".opencode")
         if os.path.islink(dot_opencode):
             with contextlib.suppress(OSError):
                 os.unlink(dot_opencode)
@@ -410,11 +442,10 @@ async def orchestrate_chat_opencode(
             yield mcp_auth_required_event(dead_key, session_id_str)
 
         # System prompt as AGENTS.md in the workdir (opencode reads it from --dir). Rewritten
-        # every turn so cluster/namespace context + the date anchor stay current. Not secret.
-        workdir = os.path.join(sandbox.session_dir(session_id_str), "workdir")
-        os.makedirs(workdir, exist_ok=True)
-        with open(os.path.join(workdir, "AGENTS.md"), "w", encoding="utf-8") as f:
-            f.write(system_prompt + "\n")
+        # every turn so cluster/namespace context + the date anchor stay current. Not secret,
+        # but published symlink-safe: the workdir is sandbox-writable, so a planted
+        # `AGENTS.md -> <host-path>` symlink must not redirect this write off the sandbox.
+        _publish_workdir_file(workdir, "AGENTS.md", system_prompt + "\n")
 
         # opencode.json (auto-loaded from --dir). Least-privilege tool surface: disable the
         # network-egress tools the investigation agent doesn't need (websearch has no provider
@@ -451,19 +482,11 @@ async def orchestrate_chat_opencode(
         # (AWS_BEARER_TOKEN_BEDROCK) rides the spawn env below. Off ⇒ no baseURL ⇒ direct Bedrock.
         if broker_base:
             opencode_cfg["provider"] = {"amazon-bedrock": {"options": {"baseURL": broker_base}}}
-        # Atomic publish into the bind-mounted workdir: stage on a sibling OUTSIDE the mount
-        # (a half-written cred-bearing file must be invisible to the container), then one
-        # os.replace into the dir. A bind mount follows the INODE, so we never swap the dir —
-        # renaming a file INTO it is path-resolved and the warm container sees it. Matches the
-        # cred-refresh discipline (eks_refresh / write_aws_profiles).
-        staging = os.path.join(os.path.dirname(workdir), f".opencode.json.{uuid.uuid4().hex}")
-        try:
-            with open(staging, "w", encoding="utf-8") as f:
-                json.dump(opencode_cfg, f)
-            os.replace(staging, opencode_json)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(staging)
+        # Atomic, symlink-safe publish into the bind-mounted workdir (a half-written
+        # cred-bearing file must be invisible to the container, and a planted symlink at the
+        # target must not redirect the write): stage on a sibling outside the mount, os.replace
+        # in. Same helper/discipline as the AGENTS.md write above.
+        _publish_workdir_file(workdir, "opencode.json", json.dumps(opencode_cfg))
 
         # Reconstruct role-correct messages from the flat event stream so the persisted
         # history round-trips (toolResult lives in a user turn, not the assistant one). A
@@ -521,6 +544,13 @@ async def orchestrate_chat_opencode(
                 cancel_event=cancel_event,
             )
             async for event in parse_opencode_response(output_stream):
+                # A terminal event (done/error) already reached the client and closed the
+                # turn's persisted state. The parser keeps DRAINING the stream after an error
+                # (so execute_opencode's cleanup runs deterministically), which can surface
+                # stray post-error text/tool parts — ignore them: don't re-yield, don't
+                # persist a trailing assistant message, don't re-fire connector_required.
+                if received_terminal and event.type not in ("done", "error"):
+                    continue
                 if event.type == "text_delta" and event.content:
                     if pending_results:
                         await _flush()
@@ -625,8 +655,8 @@ async def orchestrate_chat_opencode(
                 cost_override: Decimal | None = None
                 # Truthy check on purpose: opencode reports 0.0 when models.dev has no
                 # pricing for the model (a genuinely free turn doesn't exist — output
-                # tokens always bill), so zero means "unknown" → use the token×rate
-                # estimate. Negative/malformed values likewise fall back.
+                # tokens always bill), so zero means "unknown" → estimate. Negative/malformed
+                # values likewise fall back.
                 if oc_cost:
                     try:
                         cost_override = Decimal(str(oc_cost))
@@ -634,6 +664,18 @@ async def orchestrate_chat_opencode(
                         cost_override = None
                     if cost_override is not None and cost_override < 0:
                         cost_override = None
+                if cost_override is None:
+                    # Fallback estimate from NON-cache input only. in_tokens folds Bedrock
+                    # cache write/read (so session stats reflect real prompt size), but
+                    # calculate_cost bills every "input" token at the full prompt rate — passing
+                    # the cache-inflated count (record_usage's own fallback does) overcharges the
+                    # cached prefix ~10x. Cache read is near-free and cache write is model-priced;
+                    # absent cache-aware rates in the estimator, cost only the fresh prompt input.
+                    from app.services.budget_service import calculate_cost
+
+                    fresh_input = in_tokens - done_meta.get("cache_read_tokens", 0)
+                    fresh_input -= done_meta.get("cache_write_tokens", 0)
+                    cost_override = calculate_cost(model, max(fresh_input, 0), out_tokens)
                 await record_usage(
                     db,
                     user_id=user_id,
@@ -673,16 +715,12 @@ async def orchestrate_chat_opencode(
             # state (the config file, the container itself) then belongs to it, not us.
             with contextlib.suppress(Exception):
                 await sandbox.release(session_id_str)
-            if not sandbox.in_use(session_id_str):
+            if opencode_json is not None and not sandbox.in_use(session_id_str):
                 # Remove the cred-bearing opencode.json (MCP JWTs) — must not outlive the
                 # turn. Skipped when a next turn owns the pair: that turn wrote its OWN
                 # config (after pruning ours) and removes it in its own finally.
                 with contextlib.suppress(Exception):
-                    os.remove(
-                        os.path.join(
-                            sandbox.session_dir(session_id_str), "workdir", "opencode.json"
-                        )
-                    )
+                    os.remove(opencode_json)
                 if abnormal:
                     # Kill the container pair so any opencode-spawned child processes die
                     # with it; keep the durable dirs (remove_dir=False) so the next turn

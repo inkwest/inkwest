@@ -11,9 +11,11 @@ The sandboxed engines (Claude CLI, inkwest-agent, opencode) reach Bedrock only t
 compromised sandbox holds a valid Bedrock credential. The broker removes that: the sandbox
 carries only a short-lived, opaque **per-turn grant**; a backend reverse-proxy verifies it,
 swaps in the real bearer, and forwards to Bedrock. The real credential lives only in the
-backend process. Both the Claude CLI (`ANTHROPIC_BEDROCK_BASE_URL`) and boto3 (`endpoint_url`)
-send `Authorization: Bearer …` — **no SigV4** — so the broker is a pure header swap +
-transparent byte passthrough; the eventstream response is streamed back untouched.
+backend process. Every sandboxed transport sends `Authorization: Bearer …` — the Claude CLI
+(`ANTHROPIC_BEDROCK_BASE_URL`), the inkwest-agent's boto3 (`endpoint_url`), and opencode's AI
+SDK (`opencode.json` `provider.amazon-bedrock.options.baseURL`) — with **no SigV4**, so the
+broker is a pure header swap + transparent byte passthrough; the eventstream is streamed back
+untouched.
 
 ## Components
 
@@ -61,6 +63,14 @@ direct-Anthropic-key shape can be added later without touching the route body.
 > This leg also requires the `inkwest-agent` engine enabled via `AGENTIC_ENGINES` (the CLI leg
 > does not). Broker-OFF turns are unaffected: the orchestrator omits the unset field from the
 > turn-spec, so an older agent still parses it.
+
+> **opencode engine — rebuild the agent image + allowlist `models.dev`.** opencode ships in the
+> same agent image (pinned `OPENCODE_VERSION`), so enabling it needs an image rebuild + redeploy,
+> and its per-run model-catalog fetch needs `models.dev` on the squid allowlist. Broker wiring is
+> automatic (the orchestrator writes the proxy `baseURL` into the per-turn `opencode.json` and
+> injects the grant via `docker exec -e`); enable it via `AGENTIC_ENGINES` (e.g.
+> `claude-cli,opencode`). With the broker on, `AWS_REGION` must be set in the backend env
+> (`validate_settings` enforces it whenever the broker runs with a sandboxed engine).
 
 ## Rollback (fully reversible)
 

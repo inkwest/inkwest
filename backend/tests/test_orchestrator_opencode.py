@@ -6,6 +6,7 @@ live-captured fixtures; here we cover the spawn argv/resume/env, the broker's
 resume/guard/cancel behavior, and that get_orchestrator routes to opencode.
 """
 
+import json
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -49,8 +50,11 @@ class TestExecuteOpencode:
         proc = _proc([b'{"type":"step_finish","part":{"reason":"stop"}}\n'])
 
         def factory(*cmd, **kwargs):
-            captured["cmd"] = list(cmd)
-            captured["stdin"] = kwargs.get("stdin")
+            # execute_opencode spawns twice: the opencode run, then a best-effort
+            # `docker exec … rm -f <pidfile>` cleanup. Capture only the first (the run).
+            if "cmd" not in captured:
+                captured["cmd"] = list(cmd)
+                captured["stdin"] = kwargs.get("stdin")
             return proc
 
         with patch("asyncio.create_subprocess_exec", side_effect=factory):
@@ -87,7 +91,8 @@ class TestExecuteOpencode:
         proc = _proc([b'{"type":"step_finish","part":{"reason":"stop"}}\n'])
 
         def factory(*cmd, **kwargs):
-            captured["cmd"] = list(cmd)
+            if "cmd" not in captured:  # first spawn = the opencode run (2nd = pid rm)
+                captured["cmd"] = list(cmd)
             return proc
 
         with patch("asyncio.create_subprocess_exec", side_effect=factory):
@@ -103,8 +108,9 @@ class TestExecuteOpencode:
         proc = _proc([b'{"type":"step_finish","part":{"reason":"stop"}}\n'])
 
         def factory(*cmd, **kwargs):
-            captured["cmd"] = list(cmd)
-            captured["env"] = kwargs.get("env")
+            if "cmd" not in captured:  # first spawn = the opencode run (2nd = pid rm)
+                captured["cmd"] = list(cmd)
+                captured["env"] = kwargs.get("env")
             return proc
 
         env = {"GITLAB_TOKEN": "glpat-xxx", "KUBECONFIG": "/x/kube"}
@@ -150,6 +156,40 @@ class TestExecuteOpencode:
                     SESSION_ID, "x", container="c", model="m", resume=False, timeout=1
                 ):
                     pass
+
+    @pytest.mark.asyncio
+    async def test_inactivity_stall_times_out(self):
+        # M2: opencode holds stdout open but emits nothing → the between-line inactivity
+        # window (not just the post-EOF wait) must fire, kill the agent, and raise.
+        import asyncio as _a
+
+        from app.services import ai_cli_client as acc
+
+        proc = MagicMock()
+        proc.stdin = None
+
+        async def _hang():
+            await _a.sleep(5)  # never returns within the tiny inactivity window
+            return b""
+
+        proc.stdout = MagicMock()
+        proc.stdout.readline = _hang
+        proc.stderr = MagicMock()
+        proc.stderr.read = AsyncMock(return_value=b"")
+        proc.returncode = None
+        proc.wait = AsyncMock(return_value=0)
+        proc.kill = MagicMock()
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=proc),
+            patch.object(acc, "_stop_agent", AsyncMock()) as stop,
+        ):
+            with pytest.raises(TimeoutError, match="inactivity"):
+                async for _ in execute_opencode(
+                    SESSION_ID, "x", container="c", model="m", resume=False, timeout=0.05
+                ):
+                    pass
+            stop.assert_awaited()  # the stalled agent was killed
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +418,13 @@ class TestOrchestrateOpencode:
                     MagicMock(return_value={"AWS_BEARER_TOKEN_BEDROCK": "jwt-x"}),
                 ),
                 patch.object(oo.llm_broker, "burn_env", MagicMock()) as burn,
-                patch.object(oo.json, "dump", lambda cfg, f: captured_cfg.update(cfg)),
+                patch.object(
+                    oo,
+                    "_publish_workdir_file",
+                    lambda wd, name, content: captured_cfg.update(
+                        json.loads(content) if name == "opencode.json" else {}
+                    ),
+                ),
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
@@ -413,7 +459,13 @@ class TestOrchestrateOpencode:
             es,
             patch.object(oo.llm_broker, "agent_bedrock_endpoint_url", MagicMock(return_value=None)),
             patch.object(oo.llm_broker, "agent_broker_env", MagicMock(return_value={})),
-            patch.object(oo.json, "dump", lambda cfg, f: captured_cfg.update(cfg)),
+            patch.object(
+                oo,
+                "_publish_workdir_file",
+                lambda wd, name, content: captured_cfg.update(
+                    json.loads(content) if name == "opencode.json" else {}
+                ),
+            ),
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
@@ -438,7 +490,16 @@ class TestOrchestrateOpencode:
         es, cap = self._patch(
             history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
         )
-        with es, patch.object(oo.json, "dump", lambda cfg, f: captured_cfg.update(cfg)):
+        with (
+            es,
+            patch.object(
+                oo,
+                "_publish_workdir_file",
+                lambda wd, name, content: captured_cfg.update(
+                    json.loads(content) if name == "opencode.json" else {}
+                ),
+            ),
+        ):
             await _collect(
                 oo.orchestrate_chat_opencode(
                     db=AsyncMock(),
@@ -453,6 +514,10 @@ class TestOrchestrateOpencode:
         assert captured_cfg["small_model"] == "amazon-bedrock/m"  # session model from _patch
         assert captured_cfg["agent"]["title"]["disable"] is True
         assert captured_cfg["agent"]["summary"]["disable"] is True
+        # L1: defense-in-depth flags must be present — dropping any of these silently widens
+        # the sandbox (egress tools) or defeats the version pin (autoupdate).
+        assert captured_cfg["autoupdate"] is False
+        assert captured_cfg["tools"] == {"websearch": False, "webfetch": False, "skill": False}
 
     @pytest.mark.asyncio
     async def test_cred_bearing_opencode_json_removed(self):
@@ -864,8 +929,11 @@ class TestOrchestrateOpencode:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("raw_cost", ["0", "-0.5", '"broken"'])
     async def test_untrustworthy_cost_falls_back_to_estimate(self, raw_cost):
-        # Zero (= models.dev has no pricing), negative, or malformed cost must NOT be
-        # recorded verbatim — record_usage falls back to its token×rate estimate (None).
+        # Zero (= models.dev has no pricing), negative, or malformed cost must NOT be recorded
+        # verbatim — the orchestrator computes a non-cache-input token×rate estimate and passes
+        # THAT as cost_usd (so record_usage's own cache-inflated fallback never runs; H1).
+        from app.services.budget_service import calculate_cost
+
         line = (
             b'{"type":"step_finish","part":{"reason":"stop",'
             b'"tokens":{"input":10,"output":5},"cost":' + raw_cost.encode() + b"}}\n"
@@ -884,7 +952,37 @@ class TestOrchestrateOpencode:
                 )
             )
             oo.record_usage.assert_awaited_once()
-            assert oo.record_usage.await_args.kwargs["cost_usd"] is None
+            passed = oo.record_usage.await_args.kwargs["cost_usd"]
+            # No cache tokens in this turn → fresh input == 10; estimate, never the bogus value.
+            assert passed == calculate_cost("m", 10, 5)
+            assert passed is not None and passed >= 0
+
+    @pytest.mark.asyncio
+    async def test_cost_fallback_excludes_cache_tokens(self):
+        # H1: on the estimate fallback, cache write/read tokens (folded into input for stats)
+        # must NOT be billed at the full input rate — the estimate uses fresh input only.
+        from app.services.budget_service import calculate_cost
+
+        line = (
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":10,"output":5,"cache":{"write":8000,"read":4000}}}}\n'
+        )
+        es, _cap = self._patch(history=[], exec_lines=[line])
+        with es:
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            # stats see the full cache-inflated input; cost sees only the 10 fresh tokens.
+            assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 10 + 8000 + 4000
+            assert oo.record_usage.await_args.kwargs["cost_usd"] == calculate_cost("m", 10, 5)
 
     @pytest.mark.asyncio
     async def test_broker_on_with_no_enabled_models_errors_cleanly(self):
@@ -1153,3 +1251,131 @@ class TestOpencodeDispatch:
         assert err is not None, "expected a clean engine-unavailable error"
         assert err.metadata.get("reason") == "engine_unavailable"
         assert err.metadata.get("engine") == "opencode"
+
+
+# ---------------------------------------------------------------------------
+# _publish_workdir_file — symlink-safe write (C1)
+# ---------------------------------------------------------------------------
+
+
+def test_publish_workdir_file_replaces_planted_symlink(tmp_path):
+    # The workdir is sandbox-writable: a prior turn can plant `AGENTS.md -> <host file>`.
+    # The publish must NOT follow the link (no write to its target); it replaces the link
+    # with a real file, and cleans up its staging sibling.
+    workdir = tmp_path / "sid" / "workdir"
+    workdir.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("DO-NOT-TOUCH")
+    (workdir / "AGENTS.md").symlink_to(victim)
+
+    oo._publish_workdir_file(str(workdir), "AGENTS.md", "fresh content\n")
+
+    assert victim.read_text() == "DO-NOT-TOUCH"  # host file untouched — no write-escape
+    assert not (workdir / "AGENTS.md").is_symlink()
+    assert (workdir / "AGENTS.md").read_text() == "fresh content\n"
+    # staging sibling (outside the mount dir) is removed
+    assert list((tmp_path / "sid").glob(".AGENTS.md.*")) == []
+
+
+def test_publish_workdir_file_plain_write(tmp_path):
+    workdir = tmp_path / "sid" / "workdir"
+    workdir.mkdir(parents=True)
+    oo._publish_workdir_file(str(workdir), "opencode.json", '{"k":1}')
+    assert (workdir / "opencode.json").read_text() == '{"k":1}'
+
+
+# ---------------------------------------------------------------------------
+# Additional hardening coverage
+# ---------------------------------------------------------------------------
+
+
+class TestOpencodeHardening:
+    @pytest.mark.asyncio
+    async def test_events_after_error_are_not_persisted(self):
+        # L4: parser drains the stream past a terminal error; the orchestrator must ignore
+        # those stray events — one terminal error, no trailing assistant message, no 2nd
+        # connector_required.
+        lines = [
+            b'{"type":"error","error":{"message":"boom"}}\n',
+            b'{"type":"text","part":{"text":"late text, drained"}}\n',
+        ]
+        es, _cap = TestOrchestrateOpencode()._patch(history=[], exec_lines=lines)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            saved_roles = [c.args[2] for c in oo.save_message.await_args_list]
+        assert sum(1 for e in events if e.type == "error") == 1
+        assert not any(e.type == "text_delta" for e in events)  # drained text not re-yielded
+        assert "assistant" not in saved_roles  # nothing persisted after the terminal
+
+    @pytest.mark.asyncio
+    async def test_dot_opencode_symlink_unlinked_before_rmtree(self):
+        # M6: a planted `.opencode -> elsewhere` symlink (which rmtree refuses) must be
+        # unlinked first, or the prune is bypassable.
+        es, cap = TestOrchestrateOpencode()._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            with (
+                patch.object(oo.os.path, "islink", MagicMock(return_value=True)),
+                patch.object(oo.os, "unlink", MagicMock()) as unlink,
+            ):
+                await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=AsyncMock(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+            unlink.assert_any_call("/tmp/does-not-matter/workdir/.opencode")
+
+    @pytest.mark.asyncio
+    async def test_genuine_stop_then_cancel_keeps_completed_turn(self):
+        # L3: a Stop racing a GENUINE stop must not discard the completed turn nor emit a
+        # second terminal — the done already reached the client; flush + release normally.
+        import asyncio
+
+        cancel = asyncio.Event()
+
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"final answer"}}\n'
+            yield (
+                b'{"type":"step_finish","part":{"reason":"stop","tokens":{"input":3,"output":2}}}\n'
+            )
+            cancel.set()  # user hits Stop just after the genuine terminal
+
+        es, _cap = TestOrchestrateOpencode()._patch(history=[], exec_factory=exec_factory)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                    cancel_event=cancel,
+                )
+            )
+            from app.services import sandbox
+
+            saved_roles = [c.args[2] for c in oo.save_message.await_args_list]
+            sandbox.release.assert_awaited_once()
+            sandbox.teardown.assert_not_awaited()  # completed cleanly → warm release
+        dones = [e for e in events if e.type == "done"]
+        assert len(dones) == 1 and not dones[0].metadata.get("stopped")  # genuine done, not stopped
+        assert "assistant" in saved_roles  # the completed answer was persisted

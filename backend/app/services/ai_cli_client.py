@@ -7,6 +7,7 @@ enabling local development without API costs.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -915,7 +916,7 @@ async def execute_opencode(
     opencode_cmd: str = "opencode",
     workdir: str = "/workdir",
     extra_env: dict[str, str] | None = None,
-    timeout: int = 300,
+    timeout: float = 300,
     cancel_event: asyncio.Event | None = None,
 ) -> AsyncIterator[str]:
     """Spawn ``opencode run`` in the conversation sandbox; stream its NDJSON stdout.
@@ -985,11 +986,17 @@ async def execute_opencode(
                 container=container,
                 docker_path=docker_path,
                 pid_file=pid_file,
+                # Bound the gap between lines too, not just the post-EOF wait: a wedged opencode
+                # holding stdout open must not hang the turn (pinning slot + lease) forever.
+                idle_timeout=timeout,
             ):
                 yield line
         except asyncio.CancelledError:
             logger.warning("opencode stream cancelled")
             raise
+        except TimeoutError:
+            # Inactivity stall raised by _stream_stdout (agent already killed there).
+            raise TimeoutError(f"opencode timed out after {timeout}s of inactivity")
 
         if cancel_event and cancel_event.is_set():
             return
@@ -1020,3 +1027,19 @@ async def execute_opencode(
         except ProcessLookupError:
             pass
         raise
+    finally:
+        # Per-turn pid file would otherwise accumulate one-per-turn in the warm container's
+        # /tmp for the life of the conversation. Best-effort reap (the container may already be
+        # gone on an abnormal-teardown path — suppressed).
+        with contextlib.suppress(Exception):
+            rm = await asyncio.create_subprocess_exec(
+                docker_path,
+                "exec",
+                container,
+                "rm",
+                "-f",
+                pid_file,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(rm.wait(), timeout=5)
