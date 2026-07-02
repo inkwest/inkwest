@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Ban, Loader2, Plug, PlugZap } from 'lucide-react';
 import { McpIcon } from '@/components/icons/BrandIcons';
 import { ConnectorIconButton } from './ConnectorIconButton';
 import { Badge } from '@/components/ui/Badge';
@@ -79,6 +80,9 @@ export function McpPanel({
   const pollTimers = useRef<Set<number>>(new Set());
   // Keys with an in-flight connect poll, so a double-click doesn't spawn a second popup+poll.
   const connecting = useRef<Set<string>>(new Set());
+  // Reactive mirror of `connecting` for rendering the transient "connecting…" status icon
+  // (the ref alone can't drive a re-render).
+  const [connectingKeys, setConnectingKeys] = useState<Set<string>>(new Set());
   // Monotonic guard shared by every catalog fetch (mount load, live-reload, popup-open): all
   // force the same live endpoint, so an earlier-issued request resolving last must not clobber a
   // fresher one's result. Only the latest-sequenced fetch writes catalog/oauthServers state.
@@ -239,6 +243,7 @@ export function McpPanel({
       setError(`Failed to start MCP authorization: ${message}`),
     );
     connecting.current.add(key);
+    setConnectingKeys((prev) => new Set(prev).add(key));
     // Poll the catalog while connecting; stop as soon as the grant lands ("connected"), the
     // popup closes, or a hard deadline elapses — so an abandoned popup can't poll forever.
     // The timer is tracked in pollTimers so unmount cleanup always clears it.
@@ -251,6 +256,11 @@ export function McpPanel({
         window.clearInterval(timer);
         pollTimers.current.delete(timer);
         connecting.current.delete(key);
+        setConnectingKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
         // Close the popup from the opener once connected — reliable, unlike the
         // callback's own window.close() (blocked after the cross-origin round-trip,
         // and blocked outright by the prod CSP script-src 'self').
@@ -424,6 +434,39 @@ export function McpPanel({
                 const connected = s.auth_status === 'connected';
                 const needsAuth = s.auth_status === 'needs_auth';
                 const unavailable = s.auth_status === 'unavailable';
+                const isConnecting = connectingKeys.has(s.key);
+                // Fuse connection state + action into one right-aligned icon: color signals
+                // the state at a glance, the click runs the matching action, and the full
+                // text lives in title/aria-label (non-live) so the row stays compact.
+                let StatusIcon = Plug;
+                let iconClass = 'text-gray-500';
+                let statusLabel = `${s.key}: not connected — click to connect`;
+                let onStatusClick: (() => void) | undefined = () => connectOauth(s.key);
+                let statusDisabled = saving;
+                if (isConnecting) {
+                  // Keep it clickable during the poll: a re-click clears a stale error and the
+                  // in-flight guard dedups the popup — same affordance the old text button gave.
+                  StatusIcon = Loader2;
+                  iconClass = 'text-yellow-400 animate-spin';
+                  statusLabel = `${s.key}: connecting… — click to retry`;
+                  onStatusClick = () => connectOauth(s.key);
+                } else if (unavailable) {
+                  StatusIcon = Ban;
+                  iconClass = 'text-gray-600';
+                  statusLabel = `${s.key}: unavailable — sandbox required`;
+                  onStatusClick = undefined;
+                  statusDisabled = true;
+                } else if (connected) {
+                  StatusIcon = PlugZap;
+                  iconClass = 'text-green-400';
+                  statusLabel = `${s.key}: connected — click to disconnect`;
+                  onStatusClick = () => void disconnectOauth(s.key);
+                } else if (needsAuth) {
+                  StatusIcon = Plug;
+                  iconClass = 'text-yellow-400';
+                  statusLabel = `${s.key}: needs auth — click to reconnect`;
+                  onStatusClick = () => connectOauth(s.key);
+                }
                 return (
                   <div
                     key={s.key}
@@ -441,27 +484,17 @@ export function McpPanel({
                         className="h-4 w-4 accent-green-600 disabled:opacity-40"
                       />
                       <span className="text-sm text-gray-200">{s.key}</span>
-                      {connected && <Badge variant="success">connected</Badge>}
-                      {needsAuth && <Badge variant="default">needs auth</Badge>}
-                      {unavailable && <Badge variant="default">unavailable</Badge>}
                     </label>
-                    {unavailable ? (
-                      <span className="text-xs text-gray-500">sandbox required</span>
-                    ) : connected ? (
-                      <button
-                        onClick={() => void disconnectOauth(s.key)}
-                        className="text-xs text-red-400 hover:text-red-300"
-                      >
-                        Disconnect
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => connectOauth(s.key)}
-                        className="text-xs text-blue-400 hover:text-blue-300"
-                      >
-                        {needsAuth ? 'Reconnect' : 'Connect'}
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={onStatusClick}
+                      disabled={statusDisabled}
+                      title={statusLabel}
+                      aria-label={statusLabel}
+                      className="shrink-0 rounded p-1 hover:bg-gray-700 disabled:cursor-default disabled:hover:bg-transparent"
+                    >
+                      <StatusIcon className={`h-4 w-4 ${iconClass}`} />
+                    </button>
                   </div>
                 );
               })}

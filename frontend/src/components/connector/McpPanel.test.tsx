@@ -173,7 +173,7 @@ describe('McpPanel', () => {
 
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
 
-    const connect = await screen.findByRole('button', { name: 'Connect' });
+    const connect = await screen.findByRole('button', { name: /click to connect/i });
     fireEvent.click(connect);
     // Popup must open synchronously in the click handler (before the await) — else blocked.
     expect(openSpy).toHaveBeenCalledTimes(1);
@@ -188,10 +188,22 @@ describe('McpPanel', () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
     mockStartAuth.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize' });
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    const connect = await screen.findByRole('button', { name: 'Connect' });
+    const connect = await screen.findByRole('button', { name: /click to connect/i });
     fireEvent.click(connect);
     fireEvent.click(connect); // double-click: guard must drop this one
     expect(openSpy).toHaveBeenCalledTimes(1);
+    openSpy.mockRestore();
+  });
+
+  it('shows a spinning "connecting…" status while the connect poll is in flight', async () => {
+    // closed:false keeps the poll alive so the transient connecting state persists for the assert.
+    const popup = { closed: false, location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    mockStartAuth.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize' });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    fireEvent.click(await screen.findByRole('button', { name: /click to connect/i }));
+    // The status icon flips to the connecting affordance (still clickable to retry).
+    expect(await screen.findByRole('button', { name: /connecting/i })).toBeInTheDocument();
     openSpy.mockRestore();
   });
 
@@ -206,7 +218,7 @@ describe('McpPanel', () => {
     );
     render(<McpPanel sessionId="s1" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    fireEvent.click(await screen.findByRole('button', { name: /click to disconnect/i }));
     await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
     // setSessionMcp must have run first, so a failed revoke can't leave it enabled-but-revoked.
     expect(mockSetSession.mock.invocationCallOrder[0]).toBeLessThan(
@@ -229,17 +241,16 @@ describe('McpPanel', () => {
     expect(await screen.findByRole('checkbox')).toBeDisabled();
   });
 
-  it('shows a needs-auth badge and a Reconnect button for an expired grant', async () => {
+  it('shows a needs-auth status icon that reconnects for an expired grant', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'needs_auth' });
-    expect(await screen.findByText('needs auth')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+    // Status + action fused into one icon: its accessible name carries state + affordance.
+    expect(await screen.findByRole('button', { name: /needs auth — click to reconnect/i })).toBeInTheDocument();
   });
 
-  it('shows a connected badge and Disconnect, and disconnects on click', async () => {
+  it('shows a connected status icon and disconnects on click', async () => {
     mockDisconnect.mockResolvedValue(cat([], []));
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
-    expect(await screen.findByText('connected')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    fireEvent.click(await screen.findByRole('button', { name: /connected — click to disconnect/i }));
     await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
   });
 
@@ -250,7 +261,7 @@ describe('McpPanel', () => {
     mockStartAuth.mockRejectedValue(new Error('no usable authorization-server metadata'));
 
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
+    fireEvent.click(await screen.findByRole('button', { name: /click to connect/i }));
 
     expect(
       await screen.findByText(
@@ -267,7 +278,7 @@ describe('McpPanel', () => {
     mockStartAuth.mockRejectedValueOnce(new Error('boom'));
 
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    const connect = await screen.findByRole('button', { name: 'Connect' });
+    const connect = await screen.findByRole('button', { name: /click to connect/i });
     fireEvent.click(connect);
     expect(await screen.findByText('Failed to start MCP authorization: boom')).toBeInTheDocument();
 
@@ -282,10 +293,12 @@ describe('McpPanel', () => {
     openSpy.mockRestore();
   });
 
-  it('greys out an unavailable oauth server (sandbox disabled) with no Connect', async () => {
+  it('greys out an unavailable oauth server (sandbox disabled) with no connect action', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'unavailable' });
-    expect(await screen.findByText('sandbox required')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
+    // The status icon states "sandbox required" and is disabled — no connect affordance.
+    const status = await screen.findByRole('button', { name: /unavailable — sandbox required/i });
+    expect(status).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /click to connect/i })).not.toBeInTheDocument();
   });
 
   // ---- stale-while-revalidate + live reload ------------------------------ //
