@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { McpIcon } from '@/components/icons/BrandIcons';
 import { ConnectorIconButton } from './ConnectorIconButton';
 import { Badge } from '@/components/ui/Badge';
@@ -14,6 +14,13 @@ import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useSessionsStore } from '@/store/sessions';
 import { useMcpStore } from '@/store/mcp';
 import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCache';
+
+// A `mcp_catalog_changed` broadcast hits every connected client at once; each mounted McpPanel
+// would otherwise re-fetch the catalog simultaneously (a synchronized spike on one endpoint).
+// Delay the live-reload by a random 0..N ms so the fetches smear across the herd. Small enough
+// to still feel live; only the WS-triggered reload is jittered (mount/open fetches are already
+// spread by user action).
+const CATALOG_RELOAD_JITTER_MS = 1000;
 
 interface Props {
   sessionId: string;
@@ -62,25 +69,53 @@ export function McpPanel({
   // Mirror the per-session selection into the shared store so ChatInput's "no connector
   // activated" warning reacts to MCP enablement without its own fetch.
   const setSessionEnabled = useMcpStore((s) => s.setSessionEnabled);
+  // Bumped by the sync socket on an `mcp_catalog_changed` broadcast (the cache is reset there
+  // first). Drives a catalog-*set*-only refresh (see the live-reload effect below), deliberately
+  // NOT the mount effect: the session selection must not be refetched on a global catalog change
+  // (it would reset an open modal's unsaved draft).
+  const catalogVersion = useMcpStore((s) => s.catalogVersion);
   // Active connect-poll intervals, tracked so they're always cleared on unmount (otherwise a
   // popup left open would poll the catalog forever and setState on an unmounted component).
   const pollTimers = useRef<Set<number>>(new Set());
   // Keys with an in-flight connect poll, so a double-click doesn't spawn a second popup+poll.
   const connecting = useRef<Set<string>>(new Set());
+  // Monotonic guard shared by every catalog fetch (mount load, live-reload, popup-open): all
+  // force the same live endpoint, so an earlier-issued request resolving last must not clobber a
+  // fresher one's result. Only the latest-sequenced fetch writes catalog/oauthServers state.
+  const catalogSeq = useRef(0);
+  // Last catalogVersion the live-reload effect acted on. Seeded from the current value so the
+  // effect's initial run (and StrictMode's dev double-invoke) is a no-op — the mount effect
+  // already loads the catalog; only a genuine *later* bump triggers a reload.
+  const seenCatalogVersion = useRef(catalogVersion);
+
+  // Force-fetch the catalog *set* (keys + oauth servers), seq-guarded so a superseded response
+  // yields null instead of clobbering fresher state. Never touches the session selection/draft.
+  const fetchCatalogSet = useCallback(async () => {
+    const seq = ++catalogSeq.current;
+    const cat = await loadMcpCatalog(true);
+    if (seq !== catalogSeq.current) return null; // a newer fetch already ran
+    return { keys: cat.keys, oauth: cat.servers.filter((s) => s.kind === 'oauth2') };
+  }, []);
 
   useEffect(() => {
     const timers = pollTimers.current;
     return () => timers.forEach((t) => window.clearInterval(t));
   }, []);
 
+  // Mount / session-switch load: force-revalidate the catalog (stale-while-revalidate — the
+  // synchronous `peek` seed above still renders the last-known catalog instantly, no flicker)
+  // AND load this session's selection. Keyed on sessionId only; a global catalog change does
+  // NOT re-run this (that would refetch the selection and reset an open modal's unsaved draft).
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const cat = await loadMcpCatalog();
+        const set = await fetchCatalogSet();
         if (cancelled) return;
-        setCatalog(cat.keys);
-        setOauthServers(cat.servers.filter((s) => s.kind === 'oauth2'));
+        if (set) {
+          setCatalog(set.keys);
+          setOauthServers(set.oauth);
+        }
 
         if (!sessionId) {
           setEnabled(new Set());
@@ -103,7 +138,44 @@ export function McpPanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, setSessionEnabled]);
+  }, [sessionId, setSessionEnabled, fetchCatalogSet]);
+
+  // Live reload on a WS `mcp_catalog_changed` broadcast: refresh the catalog *set* only, so the
+  // toolbar badge and (if open) the modal reflect the change without touching the session
+  // selection/draft. Skips its initial run — the mount effect already loaded on first render.
+  useEffect(() => {
+    if (seenCatalogVersion.current === catalogVersion) return; // mount / StrictMode replay — no-op
+    seenCatalogVersion.current = catalogVersion;
+    let cancelled = false;
+    // Jitter: the broadcast is synchronized across all clients, so spread the re-fetch.
+    const timer = window.setTimeout(() => {
+      void fetchCatalogSet().then((set) => {
+        if (cancelled || !set) return;
+        setCatalog(set.keys);
+        setOauthServers(set.oauth);
+      });
+    }, Math.random() * CATALOG_RELOAD_JITTER_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [catalogVersion, fetchCatalogSet]);
+
+  // Revalidate the catalog whenever the modal opens: a panel mounted for a long time may hold
+  // a stale cache and have missed the WS bump (reconnect gap). Server *set* only — the
+  // selection is owned by the mount effect above. Failure keeps the last-known catalog.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void fetchCatalogSet().then((set) => {
+      if (cancelled || !set) return;
+      setCatalog(set.keys);
+      setOauthServers(set.oauth);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, fetchCatalogSet]);
 
   const toggleDraft = (key: string) => {
     if (saving) return;
@@ -142,10 +214,15 @@ export function McpPanel({
   const refreshOauth = async (): Promise<McpServerEntry[]> => {
     try {
       // Force-refresh: an OAuth connect just changed server state, so bypass the TTL.
+      const seq = ++catalogSeq.current;
       const cat = await loadMcpCatalog(true);
-      setCatalog(cat.keys);
       const oauth = cat.servers.filter((s) => s.kind === 'oauth2');
-      setOauthServers(oauth);
+      // Share the seq guard with the catalog effects so a concurrent live-reload/open fetch and
+      // this poll can't clobber each other's write; the poll's own return value is unaffected.
+      if (seq === catalogSeq.current) {
+        setCatalog(cat.keys);
+        setOauthServers(oauth);
+      }
       return oauth;
     } catch {
       /* transient; the panel keeps the last known statuses */

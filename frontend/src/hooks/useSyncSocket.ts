@@ -5,9 +5,11 @@ import { useChatStore } from '@/store/chat';
 import { useUpdateStore } from '@/store/update';
 import { useInvitesStore } from '@/store/invites';
 import { useBackendStore } from '@/store/backend';
+import { useMcpStore } from '@/store/mcp';
 import { fetchWsTicket, getVersion, wsBaseUrl } from '@/services/api';
 import { jitteredBackoff, createReconnectBudget, RECONNECT_BUDGET_MS } from '@/lib/backoff';
 import { dekReply } from '@/lib/mcpDek';
+import { resetMcpCatalogCache } from '@/components/connector/mcpCatalogCache';
 
 const WS_URL = wsBaseUrl();
 const RECONNECT_DELAY = 3000;
@@ -145,6 +147,14 @@ export function useSyncSocket() {
               invited_by_display_name: data.invited_by ?? null,
               created_at: new Date().toISOString(),
             });
+            return;
+          }
+          // The OAuth-MCP catalog changed globally (admin add/remove/reconfigure): drop the
+          // process-wide catalog cache and bump the version so a mounted McpPanel re-loads it
+          // live. Not a session event — return before the unconditional fetchSessions() below.
+          if (data.type === 'mcp_catalog_changed') {
+            resetMcpCatalogCache();
+            useMcpStore.getState().bumpCatalogVersion();
             return;
           }
           // Access was just revoked — surface a polite notice (with the title).

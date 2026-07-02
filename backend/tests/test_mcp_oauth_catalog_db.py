@@ -11,6 +11,7 @@ import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -46,6 +47,16 @@ def _reset_snapshot():
     mcp_oauth_catalog._servers = {}
     yield
     mcp_oauth_catalog._servers = {}
+
+
+@pytest.fixture(autouse=True)
+def notify_mock(monkeypatch):
+    """Capture (and neutralize) the catalog-change broadcast: upsert/delete call
+    ``pubsub.notify``, which otherwise opens a real DB connection via the app engine —
+    unwanted under the in-memory SQLite test engine. Yields the mock for assertions."""
+    mock = AsyncMock()
+    monkeypatch.setattr(mcp_oauth_catalog.pubsub, "notify", mock)
+    return mock
 
 
 @pytest.fixture(autouse=True)
@@ -328,3 +339,49 @@ async def test_delete_removes_and_unknown_raises(db: AsyncSession) -> None:
 
     with pytest.raises(ValueError, match="Unknown MCP server key"):
         await mcp_oauth_catalog.delete_oauth_server(db, "nope")
+
+
+@pytest.mark.asyncio
+async def test_upsert_broadcasts_catalog_change(db: AsyncSession, notify_mock) -> None:
+    await mcp_oauth_catalog.upsert_oauth_server(db, key="gh", url="https://gh.example.com/mcp")
+    notify_mock.assert_awaited_once_with({"type": "mcp_catalog_changed"}, user_id=None)
+
+
+@pytest.mark.asyncio
+async def test_delete_broadcasts_catalog_change(db: AsyncSession, notify_mock) -> None:
+    await mcp_oauth_catalog.upsert_oauth_server(db, key="gh", url="https://gh.example.com/mcp")
+    notify_mock.reset_mock()  # ignore the create's broadcast; assert the delete's alone
+    await mcp_oauth_catalog.delete_oauth_server(db, "gh")
+    notify_mock.assert_awaited_once_with({"type": "mcp_catalog_changed"}, user_id=None)
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_key_does_not_broadcast(db: AsyncSession, notify_mock) -> None:
+    # A no-op delete raises before the snapshot refresh — nothing changed, so no broadcast.
+    with pytest.raises(ValueError, match="Unknown MCP server key"):
+        await mcp_oauth_catalog.delete_oauth_server(db, "nope")
+    notify_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_upsert_does_not_broadcast(db: AsyncSession, notify_mock) -> None:
+    # A rejected write (duplicate under create_only, invalid url) must not signal a change.
+    await mcp_oauth_catalog.upsert_oauth_server(db, key="gh", url="https://gh.example.com/mcp")
+    notify_mock.reset_mock()
+    with pytest.raises(mcp_oauth_catalog.DuplicateKeyError):
+        await mcp_oauth_catalog.upsert_oauth_server(
+            db, key="gh", url="https://gh.example.com/mcp", create_only=True
+        )
+    with pytest.raises(ValueError, match="https"):
+        await mcp_oauth_catalog.upsert_oauth_server(db, key="bad", url="http://insecure/mcp")
+    notify_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_failure_does_not_fail_the_write(db: AsyncSession, notify_mock) -> None:
+    # A transient broadcast failure must not surface as a failed admin write — the row is
+    # already committed and clients also revalidate on mount/popup-open (SWR safety net).
+    notify_mock.side_effect = RuntimeError("pg down")
+    await mcp_oauth_catalog.upsert_oauth_server(db, key="gh", url="https://gh.example.com/mcp")
+    assert mcp_oauth_catalog.get_oauth_server("gh") is not None
+    notify_mock.assert_awaited_once()
