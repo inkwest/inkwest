@@ -147,6 +147,7 @@ async def _stream_stdout(
     container: str | None,
     docker_path: str,
     pid_file: str | None,
+    idle_timeout: float | None = None,
 ) -> AsyncIterator[str]:
     """Yield decoded stdout lines; on an explicit cancel, stop the agent and end.
 
@@ -156,6 +157,16 @@ async def _stream_stdout(
     is killed via the shared cancel-by-kill machinery and the stream ends — the
     caller surfaces the stopped state. Shared by the Claude CLI and the
     ``inkwest-agent`` spawn paths (identical spawn/stream/cancel mechanism).
+
+    ``idle_timeout`` (seconds) guards against a silently-stalled subprocess: a model
+    that never produces a first token, or a tool call that wedges (e.g. an MCP server
+    that never responds), emits no stdout and never exits, so without this the read
+    blocks forever and the single chat process loop is held — the whole session hangs
+    in "thinking". The window is per-read, so it *resets on every emitted line*: a live
+    turn (streaming tokens, finishing a slow tool) keeps renewing it; only genuine
+    silence for the full window trips it. On trip the agent is killed and ``TimeoutError``
+    is raised so the orchestrator surfaces a turn error and frees the loop. ``None``
+    disables the guard.
     """
     assert process.stdout is not None
     cancel_task = asyncio.ensure_future(cancel_event.wait()) if cancel_event else None
@@ -163,7 +174,23 @@ async def _stream_stdout(
         while True:
             read_task = asyncio.ensure_future(process.stdout.readline())
             waiters = {read_task} | ({cancel_task} if cancel_task else set())
-            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                waiters, timeout=idle_timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                # Neither a line nor a stop within the window → the subprocess is silent.
+                # Kill it and surface a timeout; the deadline having *not* reset (no line
+                # arrived this iteration) is exactly the stall signal we want to catch.
+                read_task.cancel()
+                await asyncio.gather(read_task, return_exceptions=True)
+                logger.error("Agent stream idle for %ss — stopping stalled agent", idle_timeout)
+                await _stop_agent(
+                    process,
+                    container=container,
+                    docker_path=docker_path,
+                    pid_file=pid_file,
+                )
+                raise TimeoutError(f"agent produced no output for {idle_timeout}s")
             if cancel_task is not None and cancel_task in done:
                 read_task.cancel()
                 await asyncio.gather(read_task, return_exceptions=True)
@@ -209,6 +236,7 @@ async def execute_claude_cli(
     docker_path: str = "docker",
     model: str | None = None,
     cancel_event: asyncio.Event | None = None,
+    idle_timeout: float | None = None,
 ) -> AsyncIterator[str]:
     """
     Execute Claude CLI and stream output.
@@ -332,6 +360,7 @@ async def execute_claude_cli(
                 container=container,
                 docker_path=docker_path,
                 pid_file=pid_file,
+                idle_timeout=idle_timeout,
             ):
                 yield line
         except asyncio.CancelledError:
@@ -556,6 +585,7 @@ async def execute_agent(
     extra_env: dict[str, str] | None = None,
     timeout: int = 300,
     cancel_event: asyncio.Event | None = None,
+    idle_timeout: float | None = None,
 ) -> AsyncIterator[str]:
     """Spawn the in-sandbox ``inkwest-agent`` for one turn; stream its NDJSON stdout.
 
@@ -646,6 +676,7 @@ async def execute_agent(
                 container=container,
                 docker_path=docker_path,
                 pid_file=pid_file,
+                idle_timeout=idle_timeout,
             ):
                 yield line
         except asyncio.CancelledError:

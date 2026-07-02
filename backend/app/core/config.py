@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # Claude CLI settings (for local development without API costs)
     claude_cli_path: str = "claude"  # Path to claude binary
     claude_cli_timeout: int = 120  # Longer timeout for CLI
+    # Inactivity guard for the agent/CLI stdout stream: if the subprocess emits no line
+    # for this many seconds it's treated as stalled (killed, turn errored) instead of
+    # hanging the chat process loop forever. Resets on every emitted line — a live turn
+    # (long tool call, model thinking) keeps it alive; only true silence trips it. Must
+    # exceed the worst-case legit gap (cold sandbox + MCP handshake + slow tool).
+    agent_stream_idle_timeout: int = 120
     # Comma-separated model IDs the CLI's backend serves (Anthropic API, Bedrock
     # profiles, gateway...). There is no catalog API for this provider, so the
     # operator declares it; selected models are passed via `claude --model`.

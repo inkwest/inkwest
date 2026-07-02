@@ -279,6 +279,7 @@ def _patch_broker(
         aws_region="eu-west-1",
         sandbox_home="/home/agent",
         claude_cli_timeout=120,
+        agent_stream_idle_timeout=120,
         app_env="development",
     )
     patches = [

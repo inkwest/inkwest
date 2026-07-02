@@ -725,6 +725,7 @@ class TestOrchestrateChatCliResume:
         settings = SimpleNamespace(
             claude_cli_path="claude",
             claude_cli_timeout=120,
+            agent_stream_idle_timeout=120,
             sandbox_enabled=False,
             sandbox_docker_path="docker",
         )
@@ -789,6 +790,7 @@ class TestOrchestrateChatCliResume:
         settings = SimpleNamespace(
             claude_cli_path="claude",
             claude_cli_timeout=120,
+            agent_stream_idle_timeout=120,
             sandbox_enabled=False,
             sandbox_docker_path="docker",
         )
@@ -876,6 +878,7 @@ class TestOrchestratorContentOrder:
                     sandbox_enabled=False,
                     claude_cli_path="claude",
                     claude_cli_timeout=120,
+                    agent_stream_idle_timeout=120,
                     sandbox_docker_path="docker",
                 ),
             ),

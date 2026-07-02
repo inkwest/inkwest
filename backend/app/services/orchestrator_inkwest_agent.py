@@ -460,6 +460,7 @@ async def orchestrate_chat_inkwest_agent(
                 extra_env=connector_env or None,
                 timeout=settings.claude_cli_timeout,
                 cancel_event=cancel_event,
+                idle_timeout=settings.agent_stream_idle_timeout,
             )
             async for event in parse_agent_response(output_stream):
                 # Cancellation is handled inside execute_agent (races each read against

@@ -22,10 +22,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # The suite assumes a deployment with BOTH agentic engines enabled (e.g. test_api_config
 # asserts engines == ["claude-cli", "inkwest-agent"]; engine-pin + dispatch tests need the
-# agent runnable). Pin it here so tests are hermetic and don't depend on a gitignored .env;
-# `setdefault` lets an explicit env override still win. Runs before any app import — the app
-# (and its cached Settings) is imported lazily inside fixtures, never at this module's top.
-os.environ.setdefault("AGENTIC_ENGINES", "claude-cli,inkwest-agent")
+# agent runnable). Pin it here so tests are hermetic — FORCE it rather than setdefault: a dev
+# runner (e.g. running pytest inside the app container) may export an ambient AGENTIC_ENGINES
+# with experimental values (`opencode`), which would leak in and make validate_settings raise
+# "unknown engine". A test needing a custom value still overrides per-test via monkeypatch.
+# Runs before any app import — the app (and its cached Settings) is imported lazily inside
+# fixtures, never at this module's top.
+os.environ["AGENTIC_ENGINES"] = "claude-cli,inkwest-agent"
+
+# Same hermeticity concern for the other ambient settings the suite asserts defaults on.
+# Running pytest inside the app container inherits the deployment env (OIDC on, a shared
+# sandbox creds volume), which flips code paths the tests were written against: dev-mode
+# auth (OIDC off → auto dev user) and backend-local kubectl paths (no sandbox projection).
+# Force the CI/host defaults; a test needing the sandbox/OIDC path overrides via monkeypatch.
+os.environ["OIDC_ENABLED"] = "false"
+os.environ.pop("SANDBOX_CREDS_ROOT", None)
 
 # ============================================================================
 # Mock Claude API Response Builders

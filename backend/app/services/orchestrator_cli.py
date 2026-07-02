@@ -325,6 +325,7 @@ required.
                     docker_path=settings.sandbox_docker_path,
                     model=model_choice,
                     cancel_event=cancel_event,
+                    idle_timeout=settings.agent_stream_idle_timeout,
                 )
 
                 async for event in parse_cli_response(output_stream):
@@ -471,8 +472,11 @@ required.
             yield done_event()
 
     except TimeoutError as e:
+        # Surface the actual cause — there are two timeout sources with distinct messages:
+        # the post-stream process.wait() cap and the per-line idle-stall guard. A hardcoded
+        # "after {claude_cli_timeout}s" would misreport the idle case.
         logger.error(f"Claude CLI timed out: {e}")
-        yield error_event(f"Request timed out after {settings.claude_cli_timeout}s")
+        yield error_event(f"Request timed out: {e}")
 
     except RuntimeError as e:
         logger.error(f"Claude CLI error: {e}")
