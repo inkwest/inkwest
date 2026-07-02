@@ -6,7 +6,7 @@ AI-powered investigation assistant — chat interface backed by Claude that brok
 
 - **Backend**: FastAPI + SQLAlchemy async + PostgreSQL + asyncpg
 - **Frontend**: React + TypeScript + Vite + Zustand + Tailwind CSS
-- **AI**: Claude Code CLI + sandboxed inkwest-agent (Bedrock Converse); engine-dispatched, no `AI_PROVIDER`
+- **AI**: Claude Code CLI + sandboxed inkwest-agent (Bedrock Converse) + sandboxed opencode CLI; engine-dispatched, no `AI_PROVIDER`
 - **Auth**: OIDC (optional) with JWT session tokens, dev mode auto-login
 
 ## Dev Setup

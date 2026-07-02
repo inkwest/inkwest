@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shlex
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -799,10 +800,36 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
     the terminal ``done`` (emitted when a ``step_finish`` reports ``reason == "stop"``).
     """
     in_tokens = out_tokens = tool_calls = iterations = 0
+    cache_read = cache_write = 0
     cost_usd = 0.0
     emitted_done = False
+    emitted_error = False
 
-    async for line in output_stream:
+    def _usage_meta() -> dict[str, Any]:
+        return {
+            "iterations": iterations,
+            "input_tokens": in_tokens,
+            "output_tokens": out_tokens,
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+            "tool_calls": tool_calls,
+            "cost_usd": cost_usd,
+        }
+
+    lines = aiter(output_stream)
+    while True:
+        try:
+            line = await anext(lines)
+        except StopAsyncIteration:
+            break
+        except (RuntimeError, TimeoutError) as e:
+            # Stream cut by a crash/timeout (non-zero exit raises here, before the
+            # trailing block below could run): surface the reason WITH the usage
+            # accumulated so far — a failed turn still burned Bedrock spend — then
+            # re-raise so the broker marks the turn abnormal.
+            if not emitted_done and not emitted_error:
+                yield error_event(str(e), metadata=_usage_meta())
+            raise
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
@@ -822,7 +849,10 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
             call_id = part.get("callID") or part.get("id") or ""
             state = _as_dict(part.get("state"))
             tool_input = _as_dict(state.get("input"))
-            output = state.get("output") or ""
+            # A crashed (non-completed) tool carries its message in ``state.error``, not
+            # ``output`` — fall through so the failure reason reaches the transcript (and
+            # the orchestrator's AWS-expiry sniffing) instead of an empty result.
+            output = state.get("output") or state.get("error") or ""
             meta = _as_dict(state.get("metadata"))
             exit_code = meta.get("exit")
             is_error = state.get("status") != "completed" or (exit_code not in (0, None))
@@ -832,42 +862,46 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
         elif etype == "step_finish":
             iterations += 1
             tokens = _as_dict(part.get("tokens"))
-            in_tokens += int(tokens.get("input") or 0)
+            cache = _as_dict(tokens.get("cache"))
+            # Bedrock prompt caching moves most of the prompt into cache.write/read (the
+            # live fixture shows input=3, cache.write=7949 on a step) — fold them into the
+            # input count so session token stats aren't off by orders of magnitude. USD cost
+            # is opencode's own cache-aware figure (cost_usd), unaffected by this sum.
+            in_tokens += (
+                int(tokens.get("input") or 0)
+                + int(cache.get("write") or 0)
+                + int(cache.get("read") or 0)
+            )
+            cache_read += int(cache.get("read") or 0)
+            cache_write += int(cache.get("write") or 0)
             out_tokens += int(tokens.get("output") or 0)
             cost = part.get("cost")
             if isinstance(cost, (int, float)):
                 cost_usd += float(cost)
-            if part.get("reason") == "stop":
+            # A stop after an error must not add a second terminal (the error won and its
+            # metadata carries the usage known at that point; these counters stay ≥ it).
+            if part.get("reason") == "stop" and not emitted_done and not emitted_error:
                 emitted_done = True
-                yield done_event(
-                    metadata={
-                        "iterations": iterations,
-                        "input_tokens": in_tokens,
-                        "output_tokens": out_tokens,
-                        "tool_calls": tool_calls,
-                        "cost_usd": cost_usd,
-                    }
-                )
+                yield done_event(metadata=_usage_meta())
         elif etype == "error":
-            yield error_event(_opencode_error_message(data))
-            return
+            # Carry the usage accumulated so far on the error: a failed turn still burned
+            # Bedrock spend that must be recorded. Keep DRAINING rather than return —
+            # returning would abandon the suspended execute_opencode generator (its
+            # process cleanup / exit-code check would then be GC-timed). Only the FIRST
+            # error is terminal for the client; later ones are logged, not re-yielded.
+            if emitted_error or emitted_done:
+                logger.warning(f"suppressing extra opencode error: {_opencode_error_message(data)}")
+                continue
+            emitted_error = True
+            yield error_event(_opencode_error_message(data), metadata=_usage_meta())
         # step_start and any unknown event types are intentionally ignored.
 
     # Stream ended without a terminal "stop" (max steps / abrupt end / killed). Still close
-    # the turn so the broker persists usage instead of hanging — but mark it ``truncated`` so
-    # the broker can tell this apart from a genuine ``stop``: a non-zero process exit after a
-    # truncated close is a real crash whose error must surface, not be masked by this done.
-    if not emitted_done:
-        yield done_event(
-            metadata={
-                "iterations": iterations,
-                "input_tokens": in_tokens,
-                "output_tokens": out_tokens,
-                "tool_calls": tool_calls,
-                "cost_usd": cost_usd,
-                "truncated": True,
-            }
-        )
+    # the turn so the broker persists usage instead of hanging — marked ``truncated`` so the
+    # broker can tell it apart from a genuine ``stop``. Skipped when an ``error`` was already
+    # surfaced: the turn already has its terminal event (usage rode its metadata).
+    if not emitted_done and not emitted_error:
+        yield done_event(metadata={**_usage_meta(), "truncated": True})
 
 
 async def execute_opencode(
@@ -894,7 +928,10 @@ async def execute_opencode(
     THIS conversation's single session. ``extra_env`` (connector creds) is forwarded as
     value-less ``-e KEY`` so secrets stay out of argv, exactly like the CLI/agent paths.
     """
-    pid_file = f"/tmp/inkwest-opencode-{session_id}.pid"
+    # Per-TURN pid file: the runner frees the session slot on the terminal event while the
+    # previous turn's generator tail may still run — a session-keyed name would let that
+    # tail's timeout/stop path signal the NEXT turn's opencode.
+    pid_file = f"/tmp/inkwest-opencode-{session_id}-{uuid.uuid4().hex[:8]}.pid"
     oc_cmd = [
         opencode_cmd,
         "run",
@@ -910,10 +947,15 @@ async def execute_opencode(
         # Isolated sandbox: no TTY to approve, so never leave a tool on "ask". The
         # environment (squid allowlist + scoped creds) is the boundary, not in-loop prompts.
         "--dangerously-skip-permissions",
+        # Security: no external plugins. A prompt-injected turn could otherwise drop a
+        # plugin under the durable /workdir that auto-executes on every later turn.
+        "--pure",
     ]
     if resume:
         oc_cmd.append("--continue")
-    oc_cmd.append(user_message)
+    # `--` terminates flag parsing so a message starting with `-` (a pasted diff hunk,
+    # "--help", "--model=...") rides as the prompt instead of injecting opencode flags.
+    oc_cmd += ["--", user_message]
 
     # `exec "$@"` replaces the shell with opencode so $$ (written to the PID file) IS the
     # process an explicit stop signals — docker exec does not forward signals.

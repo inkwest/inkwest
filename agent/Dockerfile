@@ -142,7 +142,11 @@ ENV PATH="/home/sandbox/.local/bin:$PATH"
 # opencode CLI — second in-sandbox coding-agent engine (anomalyco/opencode). Official
 # installer ships a self-contained compiled binary (bun; no Node runtime) into
 # $HOME/.opencode/bin. The broker spawns `opencode run --format json` per turn.
-RUN curl -fsSL https://opencode.ai/install | bash
+# PINNED: the backend parser (ai_cli_client.parse_opencode_response) was validated
+# against this version's NDJSON wire format — bump deliberately and re-capture
+# tests/fixtures/opencode_stream_*.jsonl; never float to whatever the installer serves.
+ARG OPENCODE_VERSION=1.17.10
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --version "${OPENCODE_VERSION}"
 ENV PATH="/home/sandbox/.opencode/bin:$PATH"
 # Warm opencode's one-time config/plugin bootstrap (@opencode-ai/sdk+plugin+zod from npm)
 # and prime the models.dev catalog, so the first real turn doesn't pay that round-trip.

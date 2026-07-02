@@ -69,9 +69,13 @@ class TestExecuteOpencode:
         assert "--format" in cmd and "json" in cmd
         assert "amazon-bedrock/amazon.nova-micro-v1:0" in cmd  # provider prefix applied
         assert "--dangerously-skip-permissions" in cmd
+        assert "--pure" in cmd  # no external plugins (workdir persistence vector)
         assert "--continue" not in cmd  # first turn → no resume
         assert cmd[-1] == "investigate the outage"  # prompt is the final argv element
-        assert any(f"/tmp/inkwest-opencode-{SESSION_ID}.pid" in p for p in cmd)
+        assert cmd[-2] == "--"  # flag terminator: a leading-dash prompt can't inject flags
+        # pid file is per-TURN (uuid suffix) so a lingering prior-turn tail can't signal
+        # this turn's process through a shared name.
+        assert any(f"/tmp/inkwest-opencode-{SESSION_ID}-" in p and ".pid" in p for p in cmd)
         # prompt rides argv, not stdin
         import asyncio as _a
 
@@ -128,9 +132,18 @@ class TestExecuteOpencode:
     @pytest.mark.asyncio
     async def test_timeout_raises(self):
         proc = _proc([b'{"type":"text","part":{"text":"hi"}}\n'])
+
+        # A plain async fn (not AsyncMock(side_effect=...)) that CLOSES the awaitable it
+        # was handed — the mock variant leaks every call site's un-awaited coroutine
+        # (RuntimeWarning) and silently short-circuits _stop_agent's helpers.
+        async def _timeout(awaitable, timeout=None):
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            raise TimeoutError
+
         with (
             patch("asyncio.create_subprocess_exec", return_value=proc),
-            patch("asyncio.wait_for", AsyncMock(side_effect=TimeoutError())),
+            patch("asyncio.wait_for", _timeout),
         ):
             with pytest.raises(TimeoutError, match="timed out"):
                 async for _ in execute_opencode(
@@ -153,6 +166,7 @@ class TestOrchestrateOpencode:
         cap: dict = {}
 
         async def fake_exec(session_id, user_message, **kwargs):
+            cap["message"] = user_message
             cap["resume"] = kwargs.get("resume")
             cap["model"] = kwargs.get("model")
             cap["extra_env"] = kwargs.get("extra_env")
@@ -182,6 +196,23 @@ class TestOrchestrateOpencode:
         es.enter_context(
             patch("app.services.model_registry.get_entry", MagicMock(return_value=entry))
         )
+        # Broker fail-closed pre-check consults enabled registry rows; default to one enabled
+        # so broker-on tests don't trip the "no models enabled" config error.
+        es.enter_context(
+            patch(
+                "app.services.model_registry.merged_entries",
+                MagicMock(return_value=[SimpleNamespace(enabled=True)]),
+            )
+        )
+        # EKS-context surfacing reads the session's generated kubeconfig — not under test
+        # here (and builtins.open is mocked below, which would break its YAML read).
+        es.enter_context(
+            patch("app.tools.connector_exec.session_kube_contexts", MagicMock(return_value=[]))
+        )
+        cap["rmtree"] = es.enter_context(patch.object(oo.shutil, "rmtree", MagicMock()))
+        # Admission control is real code with in-process state — stub it so these tests
+        # don't depend on the empty-registry accident (its raising branch has its own test).
+        es.enter_context(patch("app.services.sandbox.enforce_user_sandbox_cap", AsyncMock()))
         es.enter_context(
             patch("app.services.sandbox.ensure", AsyncMock(return_value="inkwest_conv_x"))
         )
@@ -426,6 +457,8 @@ class TestOrchestrateOpencode:
     @pytest.mark.asyncio
     async def test_cred_bearing_opencode_json_removed(self):
         # opencode.json can embed MCP creds/JWT headers → it must not outlive the turn.
+        # Two removals of the same path are expected: the pre-turn stale prune AND the
+        # finally cleanup — asserting ≥2 keeps this from passing on the prune alone.
         es, cap = self._patch(
             history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
         )
@@ -442,8 +475,446 @@ class TestOrchestrateOpencode:
                 )
             )
         cred_path = "/tmp/does-not-matter/workdir/opencode.json"
-        assert any(c.args and c.args[0] == cred_path for c in cap["os_remove"].call_args_list), (
-            "opencode.json must be removed so creds don't outlive the turn"
+        removals = [c for c in cap["os_remove"].call_args_list if c.args and c.args[0] == cred_path]
+        assert len(removals) >= 2, (
+            "opencode.json must be removed both at turn start (stale prune) and in the "
+            "finally (creds must not outlive the turn)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_drops_partial_and_tears_down(self):
+        # Cancel mid-stream: discard partial blocks (no dangling tool_use persisted), emit a
+        # single stopped done, and TEAR DOWN the container (reap opencode's children).
+        import asyncio
+
+        cancel = asyncio.Event()
+
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"partial"}}\n'
+            yield (
+                b'{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+                b'"state":{"status":"completed","input":{},"output":"o","metadata":{"exit":0}}}}\n'
+            )
+            cancel.set()
+            # Kill artifact: the parser closes a cut stream with a truncated done.
+
+        es, _cap = self._patch(history=[], exec_factory=exec_factory)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                    cancel_event=cancel,
+                )
+            )
+            from app.services import sandbox
+
+            # Our lease is always dropped first; abnormal then tears down (idle-guarded).
+            sandbox.release.assert_awaited_once()
+            sandbox.teardown.assert_awaited_once()  # abnormal → reap children
+            assert sandbox.teardown.await_args.kwargs.get("only_if_idle") is True
+            oo.save_message.assert_awaited_once()  # ONLY the user message — no partial flush
+            assert oo.save_message.await_args.args[2] == "user"
+        dones = [e for e in events if e.type == "done"]
+        assert len(dones) == 1 and dones[0].metadata.get("stopped") is True
+        assert not any(e.type == "done" and e.metadata.get("truncated") for e in events)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exc", [RuntimeError, TimeoutError])
+    async def test_silent_crash_surfaces_error_burns_grant_and_tears_down(self, exc):
+        # Nonzero exit / timeout with nothing terminal: error to the user, grant burned,
+        # container torn down (not released warm).
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"partial"}}\n'
+            raise exc("opencode failed: squid blocked")
+
+        es, _cap = self._patch(history=[], exec_factory=exec_factory)
+        with es:
+            with (
+                patch.object(
+                    oo.llm_broker,
+                    "agent_broker_env",
+                    MagicMock(return_value={"AWS_BEARER_TOKEN_BEDROCK": "jwt-x"}),
+                ),
+                patch.object(
+                    oo.llm_broker, "agent_bedrock_endpoint_url", MagicMock(return_value="http://b")
+                ),
+                patch.object(oo.llm_broker, "burn_env", MagicMock()) as burn,
+            ):
+                events = await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=AsyncMock(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+                burn.assert_called_once()  # grant dead even on crash
+            from app.services import sandbox
+
+            sandbox.release.assert_awaited_once()
+            sandbox.teardown.assert_awaited_once()
+        assert any(e.type == "error" and "squid blocked" in (e.content or "") for e in events)
+
+    @pytest.mark.asyncio
+    async def test_error_event_records_usage_and_tears_down(self):
+        # A parser `error` (e.g. Bedrock 403) is terminal: the container is torn down
+        # (opencode's state is unknown) and the usage accumulated up to the failure —
+        # carried on the error's metadata — is still recorded.
+        lines = [
+            b'{"type":"step_finish","part":{"reason":"tool-calls",'
+            b'"tokens":{"input":10,"output":5},"cost":0.01}}\n',
+            b'{"type":"error","error":{"name":"APIError","data":{"message":"Forbidden"}}}\n',
+        ]
+        es, _cap = self._patch(history=[], exec_lines=lines)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            from decimal import Decimal
+
+            from app.services import sandbox
+
+            sandbox.release.assert_awaited_once()
+            sandbox.teardown.assert_awaited_once()
+            oo.update_session_stats.assert_awaited_once()
+            assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 10
+            assert oo.update_session_stats.await_args.kwargs["output_tokens"] == 5
+            oo.record_usage.assert_awaited_once()
+            # cost accumulated before the error rides its metadata → authoritative override
+            assert oo.record_usage.await_args.kwargs["cost_usd"] == Decimal("0.01")
+        assert any(e.type == "error" and "Forbidden" in (e.content or "") for e in events)
+        # The parser suppresses its trailing truncated done after an error — one terminal.
+        assert not any(e.type == "done" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_stop_then_nonzero_exit_keeps_result_and_usage(self):
+        # A genuine stop followed by a nonzero process exit: the user already has the
+        # outcome — no second terminal error — but usage is still recorded and the
+        # container is torn down (abnormal exit).
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"answer"}}\n'
+            yield (
+                b'{"type":"step_finish","part":{"reason":"stop",'
+                b'"tokens":{"input":10,"output":5},"cost":0.01}}\n'
+            )
+            raise RuntimeError("opencode failed: Exit code 1")
+
+        es, _cap = self._patch(history=[], exec_factory=exec_factory)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            from app.services import sandbox
+
+            sandbox.release.assert_awaited_once()
+            sandbox.teardown.assert_awaited_once()
+            oo.update_session_stats.assert_awaited_once()
+            # The assistant text that streamed before the crash is persisted.
+            saved_roles = [c.args[2] for c in oo.save_message.await_args_list]
+            assert "assistant" in saved_roles
+        assert not any(e.type == "error" for e in events)
+        assert any(e.type == "done" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_assistant_and_tool_results_persisted_with_roles(self):
+        # The _flush state machine: assistant text+tool_use ride an assistant message,
+        # tool results ride a separate tool_result message, in order.
+        lines = [
+            b'{"type":"text","part":{"text":"looking"}}\n',
+            b'{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+            b'"state":{"status":"completed","input":{"command":"ls"},"output":"a",'
+            b'"metadata":{"exit":0}}}}\n',
+            b'{"type":"text","part":{"text":"done"}}\n',
+            b'{"type":"step_finish","part":{"reason":"stop","tokens":{"input":1,"output":1}}}\n',
+        ]
+        es, _cap = self._patch(history=[], exec_lines=lines)
+        with es:
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            calls = oo.save_message.await_args_list
+            roles = [c.args[2] for c in calls]
+            assert roles == ["user", "assistant", "tool_result", "assistant"]
+            first_assistant = calls[1].args[3]
+            assert first_assistant[0] == {"type": "text", "text": "looking"}
+            assert first_assistant[1]["type"] == "tool_use"
+            assert first_assistant[1]["id"] == "c1"
+            tool_results = calls[2].args[3]
+            assert tool_results[0]["tool_use_id"] == "c1"
+            assert calls[3].args[3] == [{"type": "text", "text": "done"}]
+            # user turn carries author attribution (shared conversations)
+            assert calls[0].kwargs["author_user_id"] == USER_ID
+
+    @pytest.mark.asyncio
+    async def test_expired_aws_reauth_emitted_once_per_turn(self):
+        # An agent retrying `aws` on expired creds must not spam "Give access".
+        tool = (
+            b'{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"%s",'
+            b'"state":{"status":"completed","input":{"command":"aws s3 ls"},'
+            b'"output":"An error occurred (ExpiredToken)","metadata":{"exit":255}}}}\n'
+        )
+        lines = [tool % b"c1", tool % b"c2", b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        es, _cap = self._patch(history=[], exec_lines=lines)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                )
+            )
+        assert sum(1 for e in events if e.type == "connector_required") == 1
+
+    @pytest.mark.asyncio
+    async def test_sandbox_cap_exceeded_errors_cleanly(self):
+        from app.services import sandbox as sandbox_mod
+
+        es, _cap = self._patch(history=[])
+        with es:
+            with patch(
+                "app.services.sandbox.enforce_user_sandbox_cap",
+                AsyncMock(side_effect=sandbox_mod.SandboxCapExceededError(active=3, hard_cap=3)),
+            ):
+                events = await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=AsyncMock(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+            from app.services import sandbox
+
+            sandbox.ensure.assert_not_awaited()  # refused before provisioning
+        assert any(
+            e.type == "error" and "Too many conversations" in (e.content or "") for e in events
+        )
+
+    @pytest.mark.asyncio
+    async def test_attachments_only_turn_synthesizes_prompt(self):
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="   ",
+                    user_id=USER_ID,
+                    attachments=[{"filename": "report.csv"}],
+                )
+            )
+        assert cap["message"] == "Please review the attached file(s): /workdir/report.csv"
+
+    @pytest.mark.asyncio
+    async def test_attachments_with_message_appends_filenames(self):
+        # "summarize the attached file" must reach opencode WITH the /workdir path —
+        # parity with the cli's @/workdir refs / the agent's AttachmentSpec.
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="summarize the attached file",
+                    user_id=USER_ID,
+                    attachments=[{"filename": "report.csv"}],
+                )
+            )
+        assert cap["message"].startswith("summarize the attached file")
+        assert "/workdir/report.csv" in cap["message"]
+
+    @pytest.mark.asyncio
+    async def test_eks_contexts_surface_in_prompt_and_cluster_label(self):
+        # Discovered EKS contexts rewrite the cluster label and land in AGENTS.md so the
+        # model doesn't claim it has no Kubernetes access.
+        writes: list[str] = []
+        open_mock = MagicMock()
+        open_mock.return_value.__enter__.return_value.write = lambda s: writes.append(s)
+        es, _cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            with (
+                patch(
+                    "app.tools.connector_exec.session_kube_contexts",
+                    MagicMock(return_value=["ctx-a", "ctx-b"]),
+                ),
+                patch("builtins.open", open_mock),
+            ):
+                await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=AsyncMock(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+            oo.get_system_prompt.assert_called_once()
+            assert oo.get_system_prompt.call_args.args[0] == "EKS via AWS access (2 cluster(s))"
+        agents_md = "".join(writes)
+        assert "## Kubernetes (EKS) access" in agents_md
+        assert "ctx-a" in agents_md and "ctx-b" in agents_md
+        assert "kubectl --context" in agents_md
+
+    @pytest.mark.asyncio
+    async def test_connector_hint_lands_in_prompt(self):
+        # Injected connector creds must be ANNOUNCED to the model (env alone is invisible).
+        writes: list[str] = []
+        open_mock = MagicMock()
+        open_mock.return_value.__enter__.return_value.write = lambda s: writes.append(s)
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            with (
+                patch(
+                    "app.tools.connector_exec.build_connector_env",
+                    AsyncMock(return_value=({"GITLAB_TOKEN": "glpat-x"}, ["gitlab"])),
+                ),
+                patch("builtins.open", open_mock),
+            ):
+                await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=AsyncMock(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+        agents_md = "".join(writes)
+        assert "External access is available" in agents_md
+        assert cap["extra_env"]["GITLAB_TOKEN"] == "glpat-x"
+
+    @pytest.mark.asyncio
+    async def test_dot_opencode_pruned_at_turn_start(self):
+        es, cap = self._patch(
+            history=[], exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n']
+        )
+        with es:
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+        cap["rmtree"].assert_called_once_with(
+            "/tmp/does-not-matter/workdir/.opencode", ignore_errors=True
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_cost", ["0", "-0.5", '"broken"'])
+    async def test_untrustworthy_cost_falls_back_to_estimate(self, raw_cost):
+        # Zero (= models.dev has no pricing), negative, or malformed cost must NOT be
+        # recorded verbatim — record_usage falls back to its token×rate estimate (None).
+        line = (
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":10,"output":5},"cost":' + raw_cost.encode() + b"}}\n"
+        )
+        es, _cap = self._patch(history=[], exec_lines=[line])
+        with es:
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            oo.record_usage.assert_awaited_once()
+            assert oo.record_usage.await_args.kwargs["cost_usd"] is None
+
+    @pytest.mark.asyncio
+    async def test_broker_on_with_no_enabled_models_errors_cleanly(self):
+        # Fail-closed broker + empty registry would 403 mid-turn — surface a config error.
+        es, _cap = self._patch(history=[])
+        with es:
+            with (
+                patch.object(
+                    oo.llm_broker,
+                    "agent_broker_env",
+                    MagicMock(return_value={"AWS_BEARER_TOKEN_BEDROCK": "jwt-x"}),
+                ),
+                patch(
+                    "app.services.model_registry.merged_entries",
+                    MagicMock(return_value=[SimpleNamespace(enabled=False)]),
+                ),
+            ):
+                events = await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=AsyncMock(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+        assert any(
+            e.type == "error" and "No models are enabled" in (e.content or "") for e in events
         )
 
     @pytest.mark.asyncio
@@ -498,6 +969,32 @@ def test_to_opencode_mcp_shape():
 
 
 class TestOpencodeMcp:
+    @pytest.mark.asyncio
+    async def test_static_servers_are_brokered(self):
+        # Static catalog servers must go through build_session_static_servers (proxy URL +
+        # internal JWT — real headers never enter the sandbox), same as the sibling engines.
+        with (
+            patch(
+                "app.services.mcp_config.build_session_static_servers",
+                MagicMock(return_value={"coralogix": {"url": "http://proxy/x"}}),
+            ) as build_static,
+            patch(
+                "app.services.mcp_config.oauth_proxy_servers_for",
+                AsyncMock(return_value=({}, [])),
+            ),
+            patch.object(oo, "get_settings") as gs,
+        ):
+            gs.return_value.mcp_proxy_base_url = "http://backend:8000"
+            mcp, dead = await oo._opencode_mcp_block(
+                SESSION_ID, ["coralogix"], user_id=USER_ID, db=AsyncMock()
+            )
+        assert dead == []
+        assert mcp["coralogix"]["type"] == "remote"
+        kwargs = build_static.call_args.kwargs
+        assert kwargs["base"] == "http://backend:8000"
+        assert kwargs["user_id"] == USER_ID
+        assert kwargs["session_id"] == SESSION_ID
+
     @pytest.mark.asyncio
     async def test_dead_oauth_grant_emits_mcp_auth_required(self):
         es, _cap = TestOrchestrateOpencode()._patch(

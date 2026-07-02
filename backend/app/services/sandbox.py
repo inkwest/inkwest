@@ -442,6 +442,19 @@ async def release(session_id: str) -> None:
         sb.last_used = _now()
 
 
+def in_use(session_id: str) -> bool:
+    """Whether a live turn currently holds this conversation's pair.
+
+    The runner frees a session's turn slot on the terminal event while the previous
+    turn's generator tail is still running — that tail must not touch shared state
+    (config files, the container) a NEW turn may now own. Registry read, no lock:
+    callers only use it as a best-effort guard, races are re-checked under the lock
+    by :func:`teardown` (``only_if_idle``).
+    """
+    sb = _sandboxes.get(session_id)
+    return bool(sb and sb.in_use > 0)
+
+
 # Idle pairs (reclaimable) are always reaped back down to the soft cap. Busy pairs (a live
 # turn — never killable) may burst above it up to a hard ceiling — at least 2 over, or +25%
 # of the cap, whichever is larger (so a small cap still gets a usable burst) — then a new
@@ -553,7 +566,7 @@ async def _teardown_unlocked(session_id: str, *, remove_dir: bool) -> None:
     logger.info("sandbox_torn_down", session_id=session_id, removed_dir=remove_dir)
 
 
-async def teardown(session_id: str, *, remove_dir: bool = True) -> None:
+async def teardown(session_id: str, *, remove_dir: bool = True, only_if_idle: bool = False) -> None:
     """Remove a conversation's containers + networks (best-effort), UNDER the per-session
     lock so it can't race ``ensure()`` provisioning the same conversation (which would
     orphan a freshly-built pair or rmtree a dir a new turn just populated).
@@ -561,8 +574,17 @@ async def teardown(session_id: str, *, remove_dir: bool = True) -> None:
     ``remove_dir`` also deletes the durable ``…/<sid>/`` tree — set for an explicit
     session delete, but cleared by the idle reaper so a later turn can resume. Callers
     already holding the lock must use :func:`_teardown_unlocked` instead.
+
+    ``only_if_idle`` skips the teardown when a live turn holds the pair (``in_use > 0``,
+    checked under the same lock ``ensure`` uses) — for a finished turn's abnormal-exit
+    cleanup, which must not kill a NEXT turn that already re-leased the container.
     """
     async with _locks[session_id]:
+        if only_if_idle:
+            sb = _sandboxes.get(session_id)
+            if sb is not None and sb.in_use > 0:
+                logger.info("sandbox_teardown_skipped_in_use", session_id=session_id)
+                return
         await _teardown_unlocked(session_id, remove_dir=remove_dir)
 
 

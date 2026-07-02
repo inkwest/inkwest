@@ -255,3 +255,77 @@ def test_engine_for_turn_honors_opencode_pin():
             assert engines.engine_for_turn("anthropic.claude-opus-4-8", "opencode") == "opencode"
             llama = "meta.llama3-1-70b-instruct-v1:0"
             assert engines.engine_for_turn(llama, "opencode") == "opencode"
+
+
+def _validate_settings_stub(**overrides):
+    """A minimal settings stand-in for validate_settings (config-side attrs only)."""
+    base = dict(
+        app_env="development",
+        secret_key="x",
+        aws_region=None,
+        llm_broker_enabled=False,
+        sandbox_enabled=True,
+        aws_bearer_token_bedrock=None,
+        connectors_enabled=False,
+        aws_sso_role_filter=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.parametrize(
+    "enabled_engines",
+    [["claude-cli"], ["claude-cli", "inkwest-agent"], ["claude-cli", "opencode"]],
+)
+def test_validate_settings_requires_bearer_when_broker_on(enabled_engines):
+    # The broker swaps in the backend-held bearer for EVERY sandboxed engine (claude-cli's
+    # cli_broker_env included) — booting without it would fail every turn mid-stream.
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(llm_broker_enabled=True, aws_region="eu-west-1")
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings(*enabled_engines)),
+    ):
+        with pytest.raises(ValueError, match="AWS_BEARER_TOKEN_BEDROCK is required"):
+            config_mod.validate_settings()
+
+
+def test_validate_settings_requires_region_when_broker_on():
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(llm_broker_enabled=True, aws_bearer_token_bedrock="tok")
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(
+            engines, "get_settings", return_value=_engine_settings("claude-cli", "opencode")
+        ),
+    ):
+        with pytest.raises(ValueError, match="AWS_REGION is required"):
+            config_mod.validate_settings()
+
+
+def test_validate_settings_broker_on_sandbox_off_needs_no_aws():
+    # Broker only serves sandboxed engines; without the sandbox it is inert — no gate.
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(llm_broker_enabled=True, sandbox_enabled=False)
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        config_mod.validate_settings()  # must not raise
+
+
+def test_validate_settings_opencode_broker_off_needs_no_aws():
+    # Broker off: opencode's creds ride sandbox.env (opaque to the backend) — no gate.
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub()
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(
+            engines, "get_settings", return_value=_engine_settings("claude-cli", "opencode")
+        ),
+    ):
+        config_mod.validate_settings()  # must not raise

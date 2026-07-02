@@ -263,7 +263,7 @@ export interface ModelInfo {
   label: string;
   /** Older generation, kept for cost reporting — not recommended for use. */
   legacy: boolean;
-  /** Enabled engines that can run this model (Claude → both; others → inkwest-agent). */
+  /** Enabled engines that can run this model (Claude → any; others → agent engines). */
   engines: string[];
   /** Input modalities from the live catalog (TEXT/IMAGE/VIDEO/SPEECH). "IMAGE" ⇒ the
    *  picker shows the image icon and uploads are accepted. Empty = text-only/unknown. */

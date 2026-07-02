@@ -81,18 +81,18 @@ def get_orchestrator():
     Return the engine-dispatched orchestrator.
 
     Engine is resolved per turn from the session's model (and any explicit
-    Engine·Model pin), decoupled from the inference backend. A turn routes to the
-    sandboxed inkwest-agent (custom Bedrock Converse loop) when that engine is
-    enabled and a sandbox is available; otherwise to the Claude Code CLI — its
-    native path, and the dev-local fallback that needs no sandbox.
+    Engine·Model pin), decoupled from the inference backend. A turn routes to a
+    sandboxed agent engine (inkwest-agent's Converse loop, or opencode) when that
+    engine is enabled and a sandbox is available; otherwise to the Claude Code CLI —
+    its native path, and the dev-local fallback that needs no sandbox.
 
     Returns:
         Orchestrator function
     """
     # Engine is decoupled from the inference backend: the default deployment can
-    # additionally enable the sandboxed inkwest-agent (custom Converse loop). Resolve
-    # the engine per turn from the session's model — a non-Claude model needs the
-    # agent (the CLI is Claude-only). Claude models stay on the CLI (its native path).
+    # additionally enable sandboxed agent engines (inkwest-agent, opencode). Resolve
+    # the engine per turn from the session's model — a non-Claude model needs an
+    # agent engine (the CLI is Claude-only). Claude models default to the CLI.
     from app.services.engines import (
         CLAUDE_CLI,
         INKWEST_AGENT,

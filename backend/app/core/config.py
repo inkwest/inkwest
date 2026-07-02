@@ -426,16 +426,23 @@ def validate_settings() -> None:
     # The inkwest-agent engine runs a Bedrock Converse loop, so it needs an AWS region
     # (orchestrator_inkwest_agent passes settings.aws_region to the agent). Credentials
     # are NOT required here in general: with the broker off they ride sandbox_env_file
-    # (opaque to the backend); only the broker — which swaps in the backend-held bearer —
-    # is checkable, so require aws_bearer_token_bedrock just in that case. The default
-    # claude-cli-only deployment needs no AWS at all (dev-local parity preserved).
-    if inkwest_agent_enabled():
-        if not settings.aws_region:
-            raise ValueError("AWS_REGION is required when the 'inkwest-agent' engine is enabled")
-        if settings.llm_broker_enabled and not settings.aws_bearer_token_bedrock:
+    # (opaque to the backend). The broker — which swaps in the backend-held bearer and
+    # streams to bedrock-runtime.<region> — serves EVERY sandboxed engine (claude-cli's
+    # cli_broker_env included, not just the agent engines), so when it is on the bearer +
+    # region must exist or every turn dies on an opaque mid-turn broker 4xx/5xx instead
+    # of failing at boot. Default claude-cli-only/broker-off deployment needs no AWS.
+    if inkwest_agent_enabled() and not settings.aws_region:
+        raise ValueError("AWS_REGION is required when the 'inkwest-agent' engine is enabled")
+    if settings.llm_broker_enabled and settings.sandbox_enabled:
+        if not settings.aws_bearer_token_bedrock:
             raise ValueError(
-                "AWS_BEARER_TOKEN_BEDROCK is required when 'inkwest-agent' runs with "
-                "LLM_BROKER_ENABLED (the broker swaps it in for the sandbox grant)"
+                "AWS_BEARER_TOKEN_BEDROCK is required when LLM_BROKER_ENABLED is true "
+                "(the broker swaps it in for the per-turn sandbox grant)"
+            )
+        if not settings.aws_region:
+            raise ValueError(
+                "AWS_REGION is required when LLM_BROKER_ENABLED is true "
+                "(the broker streams to bedrock-runtime.<region>)"
             )
 
     # Connectors: validate each enabled connector's required config in production.

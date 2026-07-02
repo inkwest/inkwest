@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -99,17 +100,24 @@ async def _opencode_mcp_block(
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Build opencode's ``mcp`` block for the enabled servers; return (mcp, dead_keys).
 
-    Reuses the SAME inputs as the claude-cli / inkwest-agent engines (static catalog +
-    OAuth2 proxy servers carrying a mint-stable internal JWT) so MCP brokering is identical
-    across engines — only the on-disk config shape differs. ``dead_keys`` are enabled OAuth2
-    servers with no active grant (surfaced to the user as ``mcp_auth_required``).
+    Reuses the SAME inputs as the claude-cli / inkwest-agent engines: static catalog
+    servers are BROKERED via :func:`build_session_static_servers` (HTTP servers become
+    the in-app ``/api/mcp-proxy/{key}/`` URL + a mint-stable internal JWT, so their real
+    headers/API key never enter the sandbox; stdio stays verbatim; no proxy base or no
+    user ⇒ verbatim fallback, same as the siblings) + OAuth2 proxy servers. ``dead_keys``
+    are enabled OAuth2 servers with no active grant (surfaced as ``mcp_auth_required``).
     """
     if not enabled_keys:
         return {}, []
-    from app.services.mcp_catalog import build_mcp_servers
-    from app.services.mcp_config import oauth_proxy_servers_for
+    from app.services.mcp_config import build_session_static_servers, oauth_proxy_servers_for
 
-    static = build_mcp_servers(enabled_keys)
+    static = build_session_static_servers(
+        enabled_keys,
+        base=get_settings().mcp_proxy_base_url,
+        user_id=user_id,
+        session_id=session_id,
+        existing={},
+    )
     oauth, dead = await oauth_proxy_servers_for(session_id, enabled_keys, user_id=user_id, db=db)
     return _to_opencode_mcp({**static, **oauth}), dead
 
@@ -173,7 +181,12 @@ async def orchestrate_chat_opencode(
     if persist_user_message:
         try:
             await save_message(
-                db, session_id, "user", user_message, attachments=attachments or None
+                db,
+                session_id,
+                "user",
+                user_message,
+                attachments=attachments or None,
+                author_user_id=user_id,
             )
         except Exception as e:
             logger.error(f"Failed to save user message: {e}")
@@ -186,7 +199,28 @@ async def orchestrate_chat_opencode(
                 logger.warning(f"Failed to set session title: {e}")
 
     base_prompt = await resolve_session_system_prompt(db, session_id)
-    system_prompt = get_system_prompt(cluster_name, namespaces, base_prompt=base_prompt)
+    # With no statically-configured cluster, surface the EKS clusters discovered from the
+    # user's AWS access (same as the inkwest-agent path): KUBECONFIG in the projected
+    # connector env already points at the generated contexts, so the base prompt must not
+    # claim "no Kubernetes access". opencode drives kubectl via bash, so tell it to use
+    # `kubectl --context <name>` rather than the connector engines' `context` tool arg.
+    from app.tools.connector_exec import session_kube_contexts
+
+    eks_contexts = session_kube_contexts(session_uuid) if kubeconfig_path is None else []
+    effective_cluster_name = cluster_name
+    if cluster_name is None and eks_contexts:
+        effective_cluster_name = f"EKS via AWS access ({len(eks_contexts)} cluster(s))"
+    system_prompt = get_system_prompt(effective_cluster_name, namespaces, base_prompt=base_prompt)
+    if eks_contexts:
+        listed = "\n".join(f"- {c}" for c in eks_contexts)
+        system_prompt += (
+            "\n\n## Kubernetes (EKS) access\n"
+            "kubectl is available for the EKS clusters discovered from your AWS access — "
+            "KUBECONFIG is already set with one context per cluster. Use "
+            "`kubectl --context <name>` to target a specific cluster; omit it for the "
+            "current one. Do NOT run `aws eks update-kubeconfig` — the contexts are "
+            "already configured. Available contexts:\n" + listed
+        )
     model = await resolve_session_model(db, session_id)
 
     # opencode selects the model with `-m amazon-bedrock/<id>` and resolves <id> against its
@@ -205,13 +239,21 @@ async def orchestrate_chat_opencode(
             "session on the inkwest-agent engine."
         )
         return
+    # Registry max_tokens override: opencode has no per-run output-token knob we can drive
+    # (the agent engine honors it via its Converse call) — surface the mismatch in logs
+    # rather than silently ignoring the admin's setting.
+    if entry and isinstance((getattr(entry, "options", None) or {}).get("max_tokens"), int):
+        logger.warning(
+            "Registry max_tokens override for %s is not honored by the opencode engine", model
+        )
 
     # Make the agent model/date-aware (opencode/Bedrock models aren't told their deployment
     # identity, and open-weight models routinely guess the year wrong). Same anchors as the
     # inkwest-agent broker; DATE (not instant) granularity keeps any future prompt cache stable.
+    display_model = (getattr(entry, "label", None) or model) if entry else model
     system_prompt += (
         "\n\n## Runtime identity\n"
-        f"You are running as the **{model}** model on the Inkwest opencode engine "
+        f"You are running as the **{display_model}** model on the Inkwest opencode engine "
         "(Amazon Bedrock). When asked which model or engine you are, answer with this."
     )
     today = datetime.now(UTC).date().isoformat()
@@ -260,9 +302,9 @@ async def orchestrate_chat_opencode(
     # connector env (model + bash still work) rather than failing the turn.
     connector_env: dict[str, str] = {}
     if user_id is not None:
-        try:
-            from app.tools.connector_exec import build_connector_env
+        from app.tools.connector_exec import build_connector_env, connector_prompt_hint
 
+        try:
             connector_env, injected = await build_connector_env(user_id, session_uuid)
         except Exception as e:
             logger.warning(f"Failed to project connector credentials: {e}")
@@ -272,6 +314,9 @@ async def orchestrate_chat_opencode(
                 "Projecting connector credentials to opencode",
                 extra={"session_id": session_id_str, "connectors": injected},
             )
+            # Tell the model the access exists (parity with the cli engine's hint / the
+            # agent's tool defs) — env alone leaves it claiming it has no AWS/GitLab.
+            system_prompt += connector_prompt_hint(injected)
 
     container: str | None = None
     # LLM auth broker grant + base. Declared here so the finally always burns the grant;
@@ -321,6 +366,17 @@ async def orchestrate_chat_opencode(
         broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
         broker_base = llm_broker.agent_bedrock_endpoint_url()
 
+        # The broker is fail-closed: with NO enabled registry models nothing is invocable,
+        # and the turn would die on an opaque mid-stream 403 from inside opencode. Surface
+        # it as a clear config error instead (parity with the claude-cli broker path).
+        if broker_env:
+            if not any(e.enabled for e in model_registry.merged_entries()):
+                yield error_event(
+                    "No models are enabled for the LLM broker. Enable at least one model "
+                    "in admin settings before using the broker."
+                )
+                return
+
         # Materialize this turn's skill bodies into the sandbox (claude/skills, mounted at
         # <home>/.claude/skills — readable by opencode). Same cadence/dir as the other engines.
         apply_session_skills(session_id_str, active_skills)
@@ -333,6 +389,17 @@ async def orchestrate_chat_opencode(
         )
         with contextlib.suppress(FileNotFoundError):
             os.remove(opencode_json)
+        # Security: also prune the project-level `.opencode/` tree (agents/commands/plugins
+        # auto-loaded from --dir). A prompt-injected turn could drop persistence there that
+        # re-executes on every later turn of the conversation; nothing legitimate writes it.
+        # (`--pure` already blocks plugin loading; this clears prompt-level extensions too.)
+        # rmtree REFUSES a symlink root (and ignore_errors would swallow that): unlink a
+        # planted `.opencode -> elsewhere` link first or the prune is bypassable.
+        dot_opencode = os.path.join(sandbox.session_dir(session_id_str), "workdir", ".opencode")
+        if os.path.islink(dot_opencode):
+            with contextlib.suppress(OSError):
+                os.unlink(dot_opencode)
+        shutil.rmtree(dot_opencode, ignore_errors=True)
 
         # MCP servers for the turn (static catalog + OAuth2 proxy URLs carrying a mint-stable
         # JWT). dead = enabled OAuth2 servers with no active grant → tell the user to reconnect.
@@ -359,6 +426,10 @@ async def orchestrate_chat_opencode(
         # The `mcp` block can embed creds/JWT headers → this file is removed on turn end (finally).
         opencode_cfg: dict[str, Any] = {
             "$schema": "https://opencode.ai/config.json",
+            # Never self-update: the image pins the exact version the NDJSON parser was
+            # validated against (agent/Dockerfile OPENCODE_VERSION); a silent runtime
+            # update would defeat the pin (wire-format drift + unpinned code execution).
+            "autoupdate": False,
             "tools": {"websearch": False, "webfetch": False, "skill": False},
             # Defensive pin: opencode's built-in amazon-bedrock small model is claude-haiku,
             # which isn't an enabled registry model → the broker (fail-closed) would 403 any
@@ -400,11 +471,8 @@ async def orchestrate_chat_opencode(
         assistant_blocks: list[dict[str, Any]] = []
         pending_results: list[dict[str, Any]] = []
         received_terminal = False
-        # The parser tags a stream-end ``done`` with no genuine ``stop`` as ``truncated``
-        # (max steps / killed / crash). We persist its usage but DON'T let it mask a non-zero
-        # process exit: on a truncated turn the RuntimeError below still surfaces as an error.
-        truncated = False
         done_meta: dict[str, Any] = {}
+        aws_reauth_sent = False
 
         async def _flush() -> None:
             nonlocal assistant_blocks, pending_results
@@ -424,17 +492,21 @@ async def orchestrate_chat_opencode(
             pending_results = []
 
         # opencode takes the prompt as argv and ignores the attachments list, but uploaded
-        # files already live in /workdir (attachments.py). An attachments-only turn would
-        # otherwise send an empty prompt and silently no-op; point the agent at the files by
-        # name so it doesn't have to discover them.
+        # files already live in /workdir (attachments.py). ALWAYS surface the filenames
+        # (parity with the cli's @/workdir refs / the agent's AttachmentSpec) — "summarize
+        # the attached file" must not leave the agent guessing what/where the upload is;
+        # an attachments-only turn would otherwise send an empty prompt and silently no-op.
         agent_message = user_message
-        if not agent_message.strip() and attachments:
+        if attachments:
             names = ", ".join(f"/workdir/{a['filename']}" for a in attachments if a.get("filename"))
-            agent_message = (
-                f"Please review the attached file(s): {names}"
-                if names
-                else "Please review the attached file(s) in /workdir."
-            )
+            if not agent_message.strip():
+                agent_message = (
+                    f"Please review the attached file(s): {names}"
+                    if names
+                    else "Please review the attached file(s) in /workdir."
+                )
+            elif names:
+                agent_message += f"\n\n(Attached file(s) for this message: {names})"
 
         try:
             output_stream = execute_opencode(
@@ -480,29 +552,39 @@ async def orchestrate_chat_opencode(
                     # Best-effort re-auth affordance: opencode's bash `aws` has no structured
                     # connector tool, so surface "Give access" when a failed result smells of
                     # expired AWS creds (parity with the connector engines' NEEDS_AUTH event).
-                    if _detect_expired_aws(event.content, event.is_error):
+                    # Once per turn — an agent retrying `aws` must not spam the banner.
+                    if not aws_reauth_sent and _detect_expired_aws(event.content, event.is_error):
+                        aws_reauth_sent = True
                         yield event  # stream the tool_result first
                         yield connector_required_event("aws", session_id_str)
                         continue
                 elif event.type in ("done", "error"):
                     if event.type == "done":
                         done_meta = event.metadata or {}
-                        if done_meta.get("truncated"):
-                            # On cancel this is the kill artifact — drop it; the cancel
-                            # branch below emits the single terminal event. Otherwise mark
-                            # truncated so a non-zero exit still surfaces as an error.
-                            if cancel_event and cancel_event.is_set():
-                                continue
-                            truncated = True
+                        # A truncated done is the kill artifact on cancel — drop it; the
+                        # cancel branch below emits the single terminal event.
+                        if done_meta.get("truncated") and cancel_event and cancel_event.is_set():
+                            continue
+                    else:
+                        # In-container opencode's state after an error is unknown (it may
+                        # still be running) → abnormal, so the finally tears the container
+                        # down instead of releasing it warm with live connector creds. The
+                        # parser keeps the error's accumulated usage in its metadata so a
+                        # failed turn's Bedrock spend is still recorded below.
+                        abnormal = True
+                        if event.metadata:
+                            done_meta = event.metadata
                     received_terminal = True
                 yield event
 
-            if cancel_event and cancel_event.is_set():
+            if cancel_event and cancel_event.is_set() and not received_terminal:
                 # Cancel = the in-container opencode was SIGKILLed mid-turn: assistant_blocks
                 # may hold a tool_use whose tool_result never arrived. Persisting that leaves a
                 # dangling tool_use that breaks the NEXT turn's history — so discard the partial
                 # (skip _flush) and emit a single terminal stopped done. (Do NOT move _flush
                 # above this check.) Mirrors orchestrate_chat_inkwest_agent / orchestrate_chat_cli.
+                # Gated on received_terminal: a Stop racing a GENUINE stop must not discard a
+                # completed turn (its done already reached the client) nor double-terminate.
                 logger.info("opencode chat cancelled by user")
                 abnormal = True  # tear down → reap any opencode-spawned children
                 yield done_event(stopped=True)
@@ -510,14 +592,19 @@ async def orchestrate_chat_opencode(
 
             await _flush()
         except (RuntimeError, TimeoutError) as e:
-            # Surface when nothing genuinely terminal came through (silent crash) OR the turn
-            # was truncated — a non-zero exit after a truncated stream is a real failure
-            # (bad creds, model-not-found, squid block) whose reason must reach the user.
+            # A non-zero exit / timeout raises INSIDE the parser's async-for, before its
+            # trailing truncated-done can run — so a caught exception here means the stream
+            # was cut. Surface it when nothing terminal reached the user (silent crash: bad
+            # creds, model-not-found, squid block); when a terminal error/stop DID come
+            # through, the user already has the outcome — fall through so the usage
+            # accumulated up to the failure still gets recorded.
             abnormal = True
-            if not received_terminal or truncated:
+            if not received_terminal:
                 logger.error(f"opencode failed: {e}")
                 yield error_event(str(e))
-            return
+                return
+            logger.warning(f"opencode exited abnormally after a terminal event: {e}")
+            await _flush()  # persist what streamed before the failure (pairs can't dangle)
 
         in_tokens = done_meta.get("input_tokens", 0)
         out_tokens = done_meta.get("output_tokens", 0)
@@ -536,10 +623,16 @@ async def orchestrate_chat_opencode(
                 # a malformed value degrades to the token estimate rather than failing the turn.
                 oc_cost = done_meta.get("cost_usd")
                 cost_override: Decimal | None = None
+                # Truthy check on purpose: opencode reports 0.0 when models.dev has no
+                # pricing for the model (a genuinely free turn doesn't exist — output
+                # tokens always bill), so zero means "unknown" → use the token×rate
+                # estimate. Negative/malformed values likewise fall back.
                 if oc_cost:
                     try:
                         cost_override = Decimal(str(oc_cost))
                     except (InvalidOperation, ValueError):
+                        cost_override = None
+                    if cost_override is not None and cost_override < 0:
                         cost_override = None
                 await record_usage(
                     db,
@@ -574,14 +667,28 @@ async def orchestrate_chat_opencode(
         # Burn this turn's broker grant: the injected AWS_BEARER_TOKEN_BEDROCK is dead the moment
         # the turn ends, bounding a leaked grant to the turn. No-op when the broker was off.
         llm_broker.burn_env(broker_env)
-        # Remove the cred-bearing opencode.json (MCP headers/JWT) — must not outlive the turn.
-        with contextlib.suppress(Exception):
-            os.remove(os.path.join(sandbox.session_dir(session_id_str), "workdir", "opencode.json"))
         if container is not None:
-            if abnormal:
-                # Kill the container pair so any opencode-spawned child processes die with it;
-                # keep the durable dirs (remove_dir=False) so the next turn re-provisions clean.
-                with contextlib.suppress(Exception):
-                    await sandbox.teardown(session_id_str, remove_dir=False)
-            else:
+            # Drop OUR lease first: the runner frees the session slot on the terminal event
+            # while this tail still runs, so a NEXT turn may already hold the pair — shared
+            # state (the config file, the container itself) then belongs to it, not us.
+            with contextlib.suppress(Exception):
                 await sandbox.release(session_id_str)
+            if not sandbox.in_use(session_id_str):
+                # Remove the cred-bearing opencode.json (MCP JWTs) — must not outlive the
+                # turn. Skipped when a next turn owns the pair: that turn wrote its OWN
+                # config (after pruning ours) and removes it in its own finally.
+                with contextlib.suppress(Exception):
+                    os.remove(
+                        os.path.join(
+                            sandbox.session_dir(session_id_str), "workdir", "opencode.json"
+                        )
+                    )
+                if abnormal:
+                    # Kill the container pair so any opencode-spawned child processes die
+                    # with it; keep the durable dirs (remove_dir=False) so the next turn
+                    # re-provisions clean. only_if_idle re-checks the lease under the
+                    # sandbox lock — never kills a container a new turn just re-leased.
+                    with contextlib.suppress(Exception):
+                        await sandbox.teardown(session_id_str, remove_dir=False, only_if_idle=True)
+        # container None (turn died before ensure): the config is written after ensure,
+        # so there is nothing to clean.

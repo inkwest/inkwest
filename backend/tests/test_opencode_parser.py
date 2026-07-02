@@ -56,7 +56,12 @@ async def test_tool_turn_emits_start_result_and_aggregates_usage() -> None:
     meta = events[-1].metadata
     assert meta["tool_calls"] == 1
     assert meta["iterations"] == 2  # two step_finish events
-    assert meta["input_tokens"] == 3 + 6
+    # Cache write/read tokens count as input: Bedrock prompt caching moves most of the
+    # prompt there (step 1: input=3, cache.write=7949) — ignoring them would under-report
+    # session token stats by orders of magnitude.
+    assert meta["input_tokens"] == (3 + 7949 + 0) + (6 + 72 + 7949)
+    assert meta["cache_write_tokens"] == 7949 + 72
+    assert meta["cache_read_tokens"] == 0 + 7949
     assert meta["output_tokens"] == 57 + 2
     assert meta["cost_usd"] == pytest.approx(0.01022425 + 0.0009009)
 
@@ -187,3 +192,126 @@ async def test_error_event_terminates() -> None:
     assert len(events) == 1
     assert events[0].type == "error"
     assert events[0].content and "Forbidden" in events[0].content
+
+
+@pytest.mark.asyncio
+async def test_error_drains_stream_and_carries_usage() -> None:
+    # An error must NOT abandon the stream (returning would leave the suspended
+    # execute_opencode generator's cleanup to the GC); it drains, carries the usage
+    # accumulated so far in its metadata, and suppresses the trailing truncated done.
+    lines = [
+        '{"type":"step_finish","part":{"reason":"tool-calls","tokens":{"input":10,"output":5},'
+        '"cost":0.02}}',
+        '{"type":"error","error":{"name":"APIError","data":{"message":"Forbidden"}}}',
+        '{"type":"text","part":{"text":"late line, still drained"}}',
+    ]
+
+    async def _gen():
+        for line in lines:
+            yield line
+
+    events = [e async for e in parse_opencode_response(_gen())]
+    assert [e.type for e in events] == ["error", "text_delta"]  # drained past the error
+    assert events[0].metadata["input_tokens"] == 10
+    assert events[0].metadata["output_tokens"] == 5
+    assert events[0].metadata["cost_usd"] == pytest.approx(0.02)
+    assert not any(e.type == "done" for e in events)  # no second terminal after the error
+
+
+@pytest.mark.asyncio
+async def test_second_stop_does_not_emit_second_done() -> None:
+    lines = [
+        '{"type":"step_finish","part":{"reason":"stop","tokens":{"input":1,"output":1}}}',
+        '{"type":"step_finish","part":{"reason":"stop","tokens":{"input":1,"output":1}}}',
+    ]
+
+    async def _gen():
+        for line in lines:
+            yield line
+
+    events = [e async for e in parse_opencode_response(_gen())]
+    assert sum(1 for e in events if e.type == "done") == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_after_error_does_not_add_second_terminal() -> None:
+    lines = [
+        '{"type":"error","error":{"message":"boom"}}',
+        '{"type":"step_finish","part":{"reason":"stop","tokens":{"input":1,"output":1}}}',
+    ]
+
+    async def _gen():
+        for line in lines:
+            yield line
+
+    events = [e async for e in parse_opencode_response(_gen())]
+    assert [e.type for e in events] == ["error"]  # the error won; no done after it
+
+
+@pytest.mark.asyncio
+async def test_only_first_error_is_forwarded() -> None:
+    lines = [
+        '{"type":"error","error":{"message":"first"}}',
+        '{"type":"error","error":{"message":"second"}}',
+    ]
+
+    async def _gen():
+        for line in lines:
+            yield line
+
+    events = [e async for e in parse_opencode_response(_gen())]
+    assert [e.type for e in events] == ["error"]
+    assert events[0].content == "first"
+
+
+@pytest.mark.asyncio
+async def test_stream_crash_yields_error_with_usage_then_reraises() -> None:
+    # A nonzero-exit/timeout raises from the source mid-iteration: the parser must
+    # surface the reason WITH the usage accumulated so far, then re-raise.
+    async def _gen():
+        yield (
+            '{"type":"step_finish","part":{"reason":"tool-calls",'
+            '"tokens":{"input":7,"output":3},"cost":0.05}}'
+        )
+        raise RuntimeError("opencode failed: Exit code 1")
+
+    events = []
+    with pytest.raises(RuntimeError, match="Exit code 1"):
+        async for e in parse_opencode_response(_gen()):
+            events.append(e)
+    assert [e.type for e in events] == ["error"]
+    assert events[0].metadata["input_tokens"] == 7
+    assert events[0].metadata["cost_usd"] == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_string_cost_is_ignored() -> None:
+    line = (
+        '{"type":"step_finish","part":{"reason":"stop",'
+        '"tokens":{"input":1,"output":1},"cost":"broken"}}'
+    )
+
+    async def _one():
+        yield line
+
+    events = [e async for e in parse_opencode_response(_one())]
+    assert events[-1].metadata["cost_usd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_crashed_tool_surfaces_state_error_as_content() -> None:
+    # A non-completed tool carries its message in state.error, not output — it must reach
+    # the transcript (and the orchestrator's AWS-expiry sniffing) instead of "".
+    line = (
+        '{"type":"tool_use","part":{"type":"tool","tool":"bash","callID":"c1",'
+        '"state":{"status":"error","input":{"command":"aws s3 ls"},'
+        '"error":"An error occurred (ExpiredToken)"}}}'
+    )
+
+    async def _one():
+        yield line
+
+    events = [e async for e in parse_opencode_response(_one())]
+    assert events[1].type == "tool_result"
+    assert events[1].is_error is True
+    assert events[1].content is not None and "ExpiredToken" in events[1].content

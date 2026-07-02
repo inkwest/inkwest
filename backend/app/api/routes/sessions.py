@@ -84,7 +84,7 @@ def check_engine_selectable(engine: str | None, model: str | None) -> None:
 
     The pin is only meaningful with more than one engine enabled (the Engine·Model
     picker). When a model is also given, the pair must be runnable
-    (Claude → claude-cli or inkwest-agent; other vendors → inkwest-agent only).
+    (Claude → any engine; other vendors → an agent engine, see app.services.engines).
     """
     if engine is None:
         return

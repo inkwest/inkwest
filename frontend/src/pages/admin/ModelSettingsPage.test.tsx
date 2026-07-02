@@ -458,4 +458,19 @@ describe('ModelSettingsPage', () => {
 
     expect(screen.queryByLabelText(/Include all Bedrock vendors/)).not.toBeInTheDocument();
   });
+
+  it('shows the all-vendors toggle on an opencode-only deployment (no inkwest-agent)', async () => {
+    // The gate is open_catalog_enabled (any agent engine), not inkwest_agent_enabled —
+    // an opencode-only deployment must still surface the toggle.
+    mockedApi.getModelSettings.mockResolvedValue({
+      ...structuredClone(SETTINGS),
+      inkwest_agent_enabled: false,
+      open_catalog_enabled: true,
+      engines: ['claude-cli', 'opencode'],
+    });
+    render(<ModelSettingsPage />);
+    await screen.findByLabelText('Offer Opus 4.8 on Claude Code');
+
+    expect(screen.getByLabelText(/Include all Bedrock vendors/)).toBeInTheDocument();
+  });
 });

@@ -352,3 +352,42 @@ class TestBudgetServiceIntegration:
                 # 500 output at $15/M = $0.0075
                 # Total = $0.0105
                 assert record.cost_usd == Decimal("0.0105")
+
+    @pytest.mark.asyncio
+    async def test_record_usage_honors_engine_reported_cost(self):
+        """An engine-reported authoritative cost (opencode) overrides the token×rate estimate."""
+        from app.services.budget_service import record_usage
+
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="opencode"):
+            record = await record_usage(
+                db=AsyncMock(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=1000,
+                output_tokens=500,
+                model="amazon.nova-micro-v1:0",
+                cost_usd=Decimal("0.0123"),
+            )
+        assert record.cost_usd == Decimal("0.0123")
+
+    @pytest.mark.asyncio
+    async def test_record_usage_falls_back_to_estimate_when_cost_is_none(self):
+        from app.services.budget_service import record_usage
+
+        with (
+            patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"),
+            patch("app.services.budget_service.default_model", return_value="m"),
+            patch(
+                "app.services.budget_service.calculate_cost", return_value=Decimal("0.5")
+            ) as calc,
+        ):
+            record = await record_usage(
+                db=AsyncMock(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=None,
+            )
+        calc.assert_called_once()
+        assert record.cost_usd == Decimal("0.5")

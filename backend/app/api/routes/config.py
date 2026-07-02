@@ -28,7 +28,7 @@ class ModelInfo(BaseModel):
     id: str
     label: str
     legacy: bool
-    # Enabled engines that can run this model (Claude → both; others → inkwest-agent
+    # Enabled engines that can run this model (Claude → any; others → agent engines
     # only). The picker pairs Engine·Model from these when more than one engine is on.
     engines: list[str]
     # Input modalities from the live catalog (P1.8): the chat picker shows a TEXT icon (when

@@ -125,7 +125,7 @@ class Session(Base, TimestampMixin):
         comment="AI model for this session; NULL = global default",
     )
 
-    # Agentic engine for this session (claude-cli | inkwest-agent); NULL = resolve
+    # Agentic engine for this session (claude-cli | inkwest-agent | opencode); NULL = resolve
     # per turn from AGENTIC_ENGINES + the model (see app.services.engines). Reserved
     # first-class now; a per-session engine picker is a next step (today: model-only
     # UI). See docs/SANDBOXED_AGENT_RUNTIME.md (decision #7).
