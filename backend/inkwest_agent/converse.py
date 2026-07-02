@@ -13,7 +13,9 @@ This is the only Converse implementation: the former in-process
 driver of a turn), so these helpers live here alone.
 """
 
+import hashlib
 import os
+import re
 from typing import Any
 
 import boto3
@@ -176,6 +178,48 @@ def tool_result_text(content: Any) -> str:
     return str(content)
 
 
+# Bedrock Converse constrains every tool name to the ``ToolName`` shape — ``[a-zA-Z0-9_-]``
+# AND max 64 chars — applied to BOTH ``toolConfig`` ToolSpecification.name AND history
+# ToolUseBlock.name, and fails the whole turn on a violation of *either* half (the Anthropic
+# Messages API has no such limit, so this bites only the Converse engine). A namespaced
+# ``mcp__<server>__<tool>`` name from an upstream server we don't control can break both:
+# a ``.``/``:``/space in the upstream tool name (illegal char) and/or an over-64 length. So
+# ``fit_tool_name`` makes any name a legal ToolName — sanitize illegal chars to ``_`` first,
+# then fold overflow to exactly 64 (a readable head + short sha256 of the ORIGINAL name, so
+# distinct names never collide after truncation). Both steps are deterministic on the full
+# string, so the SAME name is produced whether built for the toolConfig or replayed from
+# history another engine persisted (Claude Code uses the same ``mcp__…`` names) — history and
+# toolConfig agree. The route map — not the name's shape — drives dispatch, so this never
+# breaks routing. Idempotent: a fitted name is already legal+≤64 and passes through unchanged.
+_MAX_TOOL_NAME_LEN = 64
+_NAME_HASH_LEN = 7
+# Anything outside Converse's ToolName charset; folded to ``_`` so an upstream ``get.user`` /
+# ``list:all`` can't fail the pattern (same "we don't control upstream names" rationale as length).
+_ILLEGAL_TOOL_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def fit_tool_name(name: str) -> str:
+    """Fold a tool name to Converse's ``ToolName`` shape (``[a-zA-Z0-9_-]{1,64}``).
+
+    Sanitizes illegal chars to ``_`` then caps length at 64 with a hash suffix. Deterministic
+    and idempotent — a name already within the shape passes through unchanged (Claude Code
+    parity for the common case). The hash keys off the ORIGINAL name so two names that only
+    differ in an illegal char still fold apart when they overflow. Below the length cap the
+    sanitize is lossy, so two short names differing only by an illegal char (``a.b``/``a:b``)
+    collide to one advertised name — resolved at connect time by ``MCPManager`` dedupe (skip +
+    ``mcp_tool_name_collision`` warn), never a silent mis-route.
+    """
+    # ToolName is ``{1,64}`` — an empty/all-nothing name must not fold to ``""`` (which fails
+    # the pattern's min-length, the very 400 this guards against). No live path feeds empty,
+    # but keep the invariant local rather than trusting every caller.
+    safe = _ILLEGAL_TOOL_NAME_CHARS.sub("_", name) or "_"
+    if len(safe) <= _MAX_TOOL_NAME_LEN:
+        return safe
+    digest = hashlib.sha256(name.encode()).hexdigest()[:_NAME_HASH_LEN]
+    head = safe[: _MAX_TOOL_NAME_LEN - _NAME_HASH_LEN - 1]
+    return f"{head}-{digest}"
+
+
 def to_converse_message(message: dict[str, Any]) -> dict[str, Any]:
     """Translate one Anthropic-shaped history message into a Converse message."""
     content = message["content"]
@@ -194,7 +238,10 @@ def to_converse_message(message: dict[str, Any]) -> dict[str, Any]:
                     {
                         "toolUse": {
                             "toolUseId": block["id"],
-                            "name": block["name"],
+                            # Fold here too: history may carry a >64 name persisted by another
+                            # engine (Claude Code), which Converse rejects on ToolUseBlock.name
+                            # exactly as on the toolSpec. Same fold ⇒ matches the advertised name.
+                            "name": fit_tool_name(block["name"]),
                             "input": block.get("input") or {},
                         }
                     }

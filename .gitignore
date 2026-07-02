@@ -76,3 +76,7 @@ backend/htmlcov/
 
 # Local-only dev scratch (build/proving helpers); never committed.
 /.local/
+
+# Compose local override (auto-merged by `docker compose`); per-dev port remaps etc.
+docker-compose.override.yml
+docker-compose.override.yaml

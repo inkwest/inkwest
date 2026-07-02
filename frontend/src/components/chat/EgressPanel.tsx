@@ -62,14 +62,20 @@ function EgressRow({ e }: { e: EgressEvent }) {
       <span className="flex-1 min-w-0 truncate font-mono text-gray-200">
         {e.host}{e.port ? `:${e.port}` : ''}
       </span>
-      {(blocked || errored) && (
-        <span className={cn('w-44 shrink-0 text-[11px] font-mono', blocked ? 'text-red-400' : 'text-amber-400')}>
-          {e.status} · {blocked ? 'proxy block' : 'upstream error'}
-        </span>
-      )}
+      {/* Fixed-width, left-aligned status/method cells so their left edges line up
+          into clean columns across rows; the cell is always present (empty for an
+          allowed event) so the method column never shifts. */}
       <span
         className={cn(
-          'shrink-0 text-[11px]',
+          'w-40 shrink-0 text-left text-[11px] font-mono',
+          blocked ? 'text-red-400' : 'text-amber-400'
+        )}
+      >
+        {(blocked || errored) && `${e.status} · ${blocked ? 'proxy block' : 'upstream error'}`}
+      </span>
+      <span
+        className={cn(
+          'w-20 shrink-0 text-left text-[11px] font-mono',
           blocked ? 'text-red-400' : errored ? 'text-amber-400' : 'text-gray-500'
         )}
       >
