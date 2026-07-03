@@ -131,6 +131,12 @@ export function McpPanel({
   const [connectingKeys, setConnectingKeys] = useState<Set<string>>(new Set());
   // Server selected in the modal's left list → its tools slide out on the right (one at a time).
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
+  // The server the right panel is rendering. Lags `selectedServer` on a SWITCH: the content stays
+  // mounted while the panel retracts (so the shrink is visible with content), then swaps + reopens.
+  const [shownServer, setShownServer] = useState<string | null>(null);
+  // Panel width state (open = expanded). Separate from shownServer so the retract animates with
+  // the OLD content still shown, then we swap content and expand.
+  const [panelOpen, setPanelOpen] = useState(false);
   // Monotonic guard shared by every catalog fetch (mount load, live-reload, popup-open): all
   // force the same live endpoint, so an earlier-issued request resolving last must not clobber a
   // fresher one's result. Only the latest-sequenced fetch writes catalog/oauthServers state.
@@ -229,6 +235,37 @@ export function McpPanel({
     };
   }, [open, fetchCatalogSet]);
 
+  // Drive the retract-then-reopen on a server switch. Depends ONLY on selectedServer so it fires
+  // just once per selection change: collapse the panel (shownServer=null), then reopen with the
+  // new server after the slide. First open (panel already collapsed) reopens immediately; a real
+  // switch waits the transition so the retract is visible. (shownServer is read but intentionally
+  // not a dep — adding it would re-fire on the collapse and skip the retract.)
+  useEffect(() => {
+    if (selectedServer === null) {
+      setPanelOpen(false); // deselect/close → retract
+      return;
+    }
+    if (shownServer === null) {
+      // first open: mount content + expand.
+      setShownServer(selectedServer);
+      setPanelOpen(true);
+      return;
+    }
+    if (selectedServer === shownServer) {
+      setPanelOpen(true); // re-select the shown server → ensure open
+      return;
+    }
+    // Real switch: retract with the OLD content still shown, then swap content + reopen after
+    // the transition (> duration-200) so the shrink is fully visible.
+    setPanelOpen(false);
+    const t = window.setTimeout(() => {
+      setShownServer(selectedServer);
+      setPanelOpen(true);
+    }, 260);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedServer]);
+
   const toggleDraft = (key: string) => {
     if (saving) return;
     const next = new Set(draftEnabled);
@@ -240,6 +277,8 @@ export function McpPanel({
     setDraftEnabled(new Set(enabled));
     setError(null);
     setSelectedServer(null);
+    setShownServer(null);
+    setPanelOpen(false);
     setOpen(false);
   };
 
@@ -573,18 +612,18 @@ export function McpPanel({
           {/* Right: slides out when a server is selected — its per-conversation tool permissions. */}
           <div
             className={`overflow-hidden transition-all duration-200 ${
-              selectedServer ? 'w-[560px] border-l border-gray-700 pl-3 opacity-100' : 'w-0 opacity-0'
+              panelOpen ? 'w-[560px] border-l border-gray-700 pl-3 opacity-100' : 'w-0 opacity-0'
             }`}
           >
-            {selectedServer && (
+            {shownServer && (
               <div className="h-full overflow-y-auto">
                 <div className="mb-2 text-xs font-medium text-gray-400">
-                  Tools — {selectedServer} (this conversation)
+                  Tools — {shownServer} (this conversation)
                 </div>
                 {sessionId ? (
                   <McpToolPolicyEditor
-                    key={selectedServer}
-                    serverKey={selectedServer}
+                    key={shownServer}
+                    serverKey={shownServer}
                     scope="session"
                     sessionId={sessionId}
                   />
