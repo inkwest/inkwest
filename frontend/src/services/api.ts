@@ -206,6 +206,19 @@ export async function fetchAPI<T>(
     } catch {
       // response body not JSON
     }
+    // 5xx = the app itself is broken on this endpoint (gateway 502/503/504 never
+    // reach here — fetchWithRetry absorbs those as "unavailable"). Report centrally
+    // BEFORE throwing: many callers are best-effort (`catch {}`), which must not
+    // silently bury a persistent backend bug (e.g. a missed migration 500ing).
+    if (response.status >= 500) {
+      useBackendStore
+        .getState()
+        .reportServerError(
+          `${(options?.method ?? 'GET').toUpperCase()} ${endpoint.split('?')[0]}`,
+          response.status,
+          detail,
+        );
+    }
     throw new ApiError(response.status, detail);
   }
 
