@@ -242,6 +242,22 @@ describe('sessionsStore sort/filter + pagination', () => {
     expect(params?.activity_before).toBeUndefined();
   });
 
+  it('does not flash the Loading gate when refetching from an empty filtered result', async () => {
+    // Empty *result* ≠ never loaded: after a filter that matched nothing, switching to
+    // one that matches must swap in place, not unmount the sidebar behind "Loading...".
+    useSessionsStore.setState({ sessions: [], hasLoaded: true, isLoading: false });
+    let resolve!: (v: ReturnType<typeof envelope>) => void;
+    const deferred = new Promise<ReturnType<typeof envelope>>((r) => {
+      resolve = r;
+    });
+    vi.spyOn(api, 'getSessions').mockReturnValueOnce(deferred as never);
+    const p = useSessionsStore.getState().fetchSessions();
+    expect(useSessionsStore.getState().isLoading).toBe(false); // mid-flight: no gate
+    resolve(envelope(['a'], 1));
+    await p;
+    expect(useSessionsStore.getState().sessions.map((s) => s.id)).toEqual(['a']);
+  });
+
   it('drops a stale fetch that resolves after a newer one (rapid sort toggle race)', async () => {
     // Fetch A (old sort) is slow; fetch B (new sort) starts later but resolves first.
     // Without the token guard, A's late resolution would overwrite B's fresh list.

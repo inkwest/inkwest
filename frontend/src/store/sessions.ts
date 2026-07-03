@@ -98,6 +98,10 @@ interface SessionsState {
   total: number;
   loadedPages: number;
   isLoadingMore: boolean;
+  // True once any list fetch has succeeded. Drives the "Loading..." gate: an empty
+  // *result* (filter matched nothing) is not an initial load — treating it as one made
+  // the whole sidebar flash "Loading..." on the next filter change.
+  hasLoaded: boolean;
 
   fetchSessions: () => Promise<void>;
   loadMoreSessions: () => Promise<void>;
@@ -148,15 +152,19 @@ export const useSessionsStore = create<SessionsState>()(
       total: 0,
       loadedPages: 1,
       isLoadingMore: false,
+      hasLoaded: false,
 
       // Reload every page currently shown (loadedPages), preserving a "load more"
       // expansion across a live sync / manual refresh. Sequential fetches aren't a
       // consistent snapshot, so dedupe by id in case a session shifts between pages.
       fetchSessions: async () => {
-        const { sessions, sortMode, sortOrder, filters, dateRange, customFrom, customTo, loadedPages } =
+        const { hasLoaded, sortMode, sortOrder, filters, dateRange, customFrom, customTo, loadedPages } =
           get();
         const token = ++listFetchToken;
-        const isInitialLoad = sessions.length === 0;
+        // Only a true first load gates the sidebar behind "Loading..." — a refetch whose
+        // *current result* happens to be empty (filter matched nothing) must swap in
+        // place, or every filter change from an empty list flashes the whole sidebar.
+        const isInitialLoad = !hasLoaded;
         if (isInitialLoad) {
           set({ isLoading: true, error: null });
         }
@@ -186,7 +194,7 @@ export const useSessionsStore = create<SessionsState>()(
             if (acc.length >= total) break; // fetched everything that exists
           }
           if (token !== listFetchToken) return; // superseded by a newer fetch — drop
-          set({ sessions: acc, total, isLoading: false });
+          set({ sessions: acc, total, isLoading: false, hasLoaded: true });
         } catch (error) {
           if (isInitialLoad && token === listFetchToken) {
             set({ error: (error as Error).message, isLoading: false, sessions: [] });
