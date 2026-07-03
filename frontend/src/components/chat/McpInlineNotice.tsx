@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
-import { loadMcpCatalog } from '@/components/connector/mcpCatalogCache';
-import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useMcpStore } from '@/store/mcp';
+import { useMcpOauthConnect } from '@/hooks/useMcpOauthConnect';
 
 /**
  * In-conversation banner for OAuth2 MCP servers the backend flagged as needing a reconnect
@@ -12,16 +11,10 @@ import { useMcpStore } from '@/store/mcp';
 export function McpInlineNotice({ sessionId }: { sessionId?: string }) {
   const authRequired = useMcpStore((s) => s.authRequired);
   const clearAuthRequired = useMcpStore((s) => s.clearAuthRequired);
-  // Track poll timers so they're always cleared on unmount (never poll forever).
-  const timers = useRef<Set<number>>(new Set());
-  // Keys with an in-flight reconnect poll, so a double-click doesn't spawn a second popup+poll.
-  const reconnecting = useRef<Set<string>>(new Set());
   const prevSession = useRef<string | undefined>(undefined);
-
-  useEffect(() => {
-    const live = timers.current;
-    return () => live.forEach((t) => window.clearInterval(t));
-  }, []);
+  // Shared connect+poll: clears the banner for a key once its grant lands (the poll force-fetches
+  // the catalog, so it also clears when the user reconnects via the panel while polling).
+  const { connect: reconnect } = useMcpOauthConnect((_servers, key) => clearAuthRequired(key));
 
   // The flagged set is global but enablement is per-conversation — clear it when the session
   // actually CHANGES (not on first mount) so a banner from session A doesn't linger on B (B
@@ -34,35 +27,6 @@ export function McpInlineNotice({ sessionId }: { sessionId?: string }) {
   }, [sessionId]);
 
   if (authRequired.length === 0) return null;
-
-  const reconnect = (key: string) => {
-    if (reconnecting.current.has(key)) return; // a poll is already in flight for this key
-    openMcpAuthPopup(key);
-    reconnecting.current.add(key);
-    const startedAt = Date.now();
-    const DEADLINE_MS = 5 * 60 * 1000;
-    // Poll the catalog (not the popup) until the grant lands or a deadline — so the banner
-    // also clears when the user reconnects via the panel or the popup was blocked. Force a
-    // live fetch each tick (a cached read would never observe the status flip) but route it
-    // through loadMcpCatalog so it also primes the shared cache: a McpPanel remount then sees
-    // the reconnected server without its own refetch.
-    const timer = window.setInterval(async () => {
-      let connected = false;
-      try {
-        const cat = await loadMcpCatalog(true);
-        connected = cat.servers.find((s) => s.key === key)?.auth_status === 'connected';
-      } catch {
-        /* transient; keep polling until connected or the deadline */
-      }
-      if (connected) clearAuthRequired(key);
-      if (connected || Date.now() - startedAt > DEADLINE_MS) {
-        window.clearInterval(timer);
-        timers.current.delete(timer);
-        reconnecting.current.delete(key);
-      }
-    }, 2000);
-    timers.current.add(timer);
-  };
 
   return (
     <div className="sticky top-0 z-10 mb-3 space-y-2">

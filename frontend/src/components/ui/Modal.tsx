@@ -1,8 +1,7 @@
-import { HTMLAttributes, forwardRef, useEffect, useRef, type CSSProperties } from 'react';
+import { HTMLAttributes, forwardRef, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { clsx } from 'clsx';
 import { X } from 'lucide-react';
-import { useSettingsStore } from '@/store/settings';
 
 // Stack of currently-open modals so stacked modals behave: only the TOPMOST responds to
 // Escape (otherwise every modal's document-level listener fires and they all close), and the
@@ -13,7 +12,7 @@ export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
   isOpen: boolean;
   onClose: () => void;
   title?: string;
-  size?: 'sm' | 'md' | 'lg' | 'xl';
+  size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl';
   /**
    * Vertical alignment. 'top' keeps the modal anchored to a fixed top offset
    * so content-height changes (e.g. live filtering) don't make it jump.
@@ -29,10 +28,6 @@ export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
 
 export const Modal = forwardRef<HTMLDivElement, ModalProps>(
   ({ className, isOpen, onClose, title, size = 'md', align = 'center', bodyClassName, children, ...props }, ref) => {
-    // Center over the content area, not the whole window: offset the stage by the live
-    // sidebar width (+4px resize handle) on desktop. The .modal-stage CSS only applies
-    // the offset at md+, so mobile (overlay sidebar) stays full-width.
-    const sidebarWidth = useSettingsStore((s) => s.sidebarWidth);
     // Stable identity for this modal instance in the stack.
     const idRef = useRef<symbol>();
     if (!idRef.current) idRef.current = Symbol('modal');
@@ -72,6 +67,7 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
       md: 'max-w-lg',
       lg: 'max-w-2xl',
       xl: 'max-w-4xl',
+      '2xl': 'max-w-6xl',
     };
 
     const alignments = {
@@ -93,11 +89,10 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
       top: 'max-h-[calc(100vh-6rem)]',
     };
 
+    // Full-viewport stage so the dialog centers on the whole screen (not offset to the
+    // chat region right of the sidebar).
     return createPortal(
-      <div
-        className="modal-stage fixed inset-y-0 right-0 z-50 overflow-y-auto"
-        style={{ '--modal-left': `${sidebarWidth + 4}px` } as CSSProperties}
-      >
+      <div className="fixed inset-0 z-50 overflow-y-auto">
         <div className={clsx('flex min-h-full justify-center p-4', alignments[align])}>
           <div
             className="fixed inset-0 bg-black/70 transition-opacity"

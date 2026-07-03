@@ -2,14 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Modals center over the content area (right of the sidebar) on desktop so they sit
-   in the chat region, not the whole window. On mobile the sidebar is an overlay, so
-   the stage spans full width. `--modal-left` is set inline to the live sidebar width. */
-.modal-stage { left: 0; }
-@media (min-width: 768px) {
-  .modal-stage { left: var(--modal-left, 0); }
-}
-
 @keyframes flash-btn {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }

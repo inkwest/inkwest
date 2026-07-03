@@ -41,7 +41,10 @@ describe('McpInlineNotice', () => {
     useMcpStore.getState().flagAuthRequired('notion');
     render(<McpInlineNotice />);
     fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
-    await waitFor(() => expect(openMcpAuthPopup).toHaveBeenCalledWith('notion'));
+    // The shared hook passes an onError callback as the 2nd arg (popup-blocker surfacing).
+    await waitFor(() =>
+      expect(openMcpAuthPopup).toHaveBeenCalledWith('notion', expect.any(Function)),
+    );
   });
 
   it('ignores a second Reconnect click while a poll is already in flight', async () => {

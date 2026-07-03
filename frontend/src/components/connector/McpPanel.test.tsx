@@ -26,6 +26,7 @@ import {
   setSessionMcp,
   startMcpAuth,
   disconnectMcpAuth,
+  getMcpServerTools,
 } from '@/services/api';
 
 const mockGetCatalog = vi.mocked(getMcpCatalog);
@@ -275,6 +276,24 @@ describe('McpPanel', () => {
   it('disables the enable toggle until the oauth server is connected', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
     expect(await screen.findByRole('switch')).toBeDisabled();
+  });
+
+  it('selecting a not_connected server shows a Connect prompt, never enumerating its tools', async () => {
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    fireEvent.click(await screen.findByText('notion')); // select the row → right pane slides out
+    expect(
+      await screen.findByText(/Connect it to enable it and configure its tools/),
+    ).toBeInTheDocument();
+    // The hung-enumeration bug: an unconnected server must not hit the tools endpoint at all.
+    expect(vi.mocked(getMcpServerTools)).not.toHaveBeenCalled();
+  });
+
+  it('hovering the disabled toggle explains that the server must be connected first', async () => {
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    const toggle = await screen.findByRole('switch');
+    // The disabled toggle can't emit its own hover; the wrapping span owns it.
+    fireEvent.mouseEnter(toggle.parentElement as HTMLElement);
+    expect(screen.getByText(/Sign in to enable/)).toBeInTheDocument();
   });
 
   it('shows a needs-auth status icon that reconnects for an expired grant', async () => {

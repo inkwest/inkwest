@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuthStore } from '@/store/admin';
 import { useOnboardingStore } from '@/store/onboarding';
@@ -89,6 +89,7 @@ export function OnboardingTour() {
 
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<Box | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Reliable positioning: measure the CURRENT step's anchor synchronously whenever the
   // step changes. useLayoutEffect runs after the DOM commit but before paint, so the
@@ -123,6 +124,25 @@ export function OnboardingTour() {
   useEffect(() => {
     if (active) setIndex(0);
   }, [active]);
+
+  // Enter advances the tour (last step → done). Capture phase + stop/prevent so the key
+  // never reaches the composer behind the overlay, whose Enter handler would send a
+  // message. When focus is on a bubble button (Back/Skip/Next), we bow out and let its
+  // native Enter→click run instead — so Back/Skip aren't overridden into "advance". A
+  // held Enter (e.repeat) is ignored so it can't blast through the whole tour at once.
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.repeat) return;
+      if (dialogRef.current?.contains(document.activeElement)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (index === STEPS.length - 1) complete();
+      else setIndex((i) => i + 1);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [active, index, complete]);
 
   if (!active) return null;
 
@@ -172,6 +192,7 @@ export function OnboardingTour() {
       {!spot && <div className="absolute inset-0 bg-black/65" />}
 
       <div
+        ref={dialogRef}
         role="dialog"
         aria-label="Inkwest tutorial"
         className="absolute w-80 max-w-[calc(100vw-1rem)] rounded-lg border border-gray-700 bg-gray-900 p-4 shadow-xl"
