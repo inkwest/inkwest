@@ -2,12 +2,27 @@
 Session management routes.
 """
 
+from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import ColumnElement, String, and_, cast, false, func, or_, select
+from sqlalchemy import (
+    ColumnElement,
+    String,
+    and_,
+    asc,
+    case,
+    cast,
+    desc,
+    exists,
+    false,
+    func,
+    or_,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -49,6 +64,12 @@ from app.services.session_access import (
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
+def _to_naive_utc(dt: datetime) -> datetime:
+    """Drop tz info to naive UTC so a client-supplied cutoff compares cleanly against
+    the naive-UTC timestamp columns (Message/Session.created_at)."""
+    return dt.astimezone(UTC).replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
 def check_model_selectable(model: str | None) -> None:
     """Raise 400 when the requested model is not in the admin-enabled list."""
     if model is not None and model not in selectable_models():
@@ -87,11 +108,37 @@ async def list_sessions(
     cluster_id: UUID | None = None,
     search: str | None = None,
     include_archived: bool = False,
+    sort: Literal["manual", "activity", "created"] = "manual",
+    order: Literal["asc", "desc"] = "desc",
+    share: list[str] | None = Query(None),
+    activity_after: datetime | None = Query(None),
+    activity_before: datetime | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ) -> SessionList:
-    query = select(Session).options(selectinload(Session.cluster))
+    # Newest message per session — drives the "activity" sort and surfaces a
+    # last_message_at on every row. Grouped so it's one row per session: the outer
+    # join stays 1:1 and never inflates the count.
+    #
+    # Trade-off (accepted): this aggregates the whole messages table per list call
+    # (and again in the count via query.subquery()), on a hot path (also re-run on every
+    # LISTEN/NOTIFY session event). It's index-backed by ix_messages_session_created and
+    # fine at current scale; if messages grows large, denormalize last_message_at onto
+    # sessions (bump on message insert) and drop this join — see review escalation.
+    last_msg_sq = (
+        select(
+            Message.session_id.label("session_id"),
+            func.max(Message.created_at).label("last_message_at"),
+        )
+        .group_by(Message.session_id)
+        .subquery()
+    )
+    query = (
+        select(Session, last_msg_sq.c.last_message_at)
+        .options(selectinload(Session.cluster))
+        .outerjoin(last_msg_sq, last_msg_sq.c.session_id == Session.id)
+    )
     # The sidebar shows sessions the user owns plus those shared with them via an
     # accepted invitation (see SessionShare). Pending/declined shares never surface.
     shared_ids = select(SessionShare.session_id).where(
@@ -119,17 +166,87 @@ async def list_sessions(
         patterns = [f"%{_escape_like(tok)}%" for tok in _search_tokens(search)]
         query = query.where(_title_summary_match(patterns) if patterns else false())
 
+    # Sharing-bucket filter: multi-select checkboxes, OR'd together, applied before the
+    # count so pagination reflects the filtered set. "Shared out" = a non-declined
+    # participant or an active anonymous link (mirrors the share_count computed below).
+    if share:
+        allowed = {"shared_with_me", "shared_by_me", "private"}
+        unknown = set(share) - allowed
+        if unknown:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown share filter: {', '.join(sorted(unknown))}",
+            )
+        owned = Session.user_id == str(current_user.id)
+        shared_out = or_(
+            exists().where(
+                SessionShare.session_id == Session.id,
+                SessionShare.status != ShareStatus.DECLINED.value,
+            ),
+            exists().where(
+                SessionShareLink.session_id == Session.id,
+                SessionShareLink.is_active == True,  # noqa: E712
+            ),
+        )
+        buckets: list[ColumnElement[bool]] = []
+        if "shared_with_me" in share:
+            buckets.append(Session.user_id != str(current_user.id))
+        if "shared_by_me" in share:
+            buckets.append(and_(owned, shared_out))
+        if "private" in share:
+            buckets.append(and_(owned, ~shared_out))
+        query = query.where(or_(*buckets))
+
+    # Date-window filter on the same activity value the sort uses (newest message, else
+    # created_at). The client computes ISO bounds (from a preset or a custom from–to);
+    # both are optional and applied before the count so paging tracks the window.
+    activity_col = func.coalesce(last_msg_sq.c.last_message_at, Session.created_at)
+    if activity_after is not None:
+        query = query.where(activity_col >= _to_naive_utc(activity_after))
+    if activity_before is not None:
+        query = query.where(activity_col <= _to_naive_utc(activity_before))
+
     count_query = select(func.count()).select_from(query.subquery())
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
-    # Stable, user-defined order (ASC = top); created_at/id break ties so the
-    # arrangement never reshuffles on activity. Reordering is explicit (see below).
-    query = query.order_by(Session.position.asc(), Session.created_at.desc(), Session.id)
+    # Ordering. 'manual' is the stable user-defined arrangement (ASC = top; created_at/id
+    # break ties so it never reshuffles on activity — reordering is explicit, see below).
+    # 'created'/'activity' are recency sorts; created_at + id are the stable tie-breakers
+    # so equal keys keep a deterministic order across pages.
+    direction = desc if order == "desc" else asc
+    if sort == "created":
+        query = query.order_by(direction(Session.created_at), Session.id)
+    elif sort == "activity":
+        activity = func.coalesce(last_msg_sq.c.last_message_at, Session.created_at)
+        query = query.order_by(direction(activity), Session.created_at.desc(), Session.id)
+    else:  # manual
+        # Per-user order: owned rows use sessions.position (the owner's arrangement);
+        # shared-in rows use the caller's own session_shares.position. Join the caller's
+        # accepted-share positions and coalesce so each user arranges their own sidebar.
+        my_share_pos = (
+            select(
+                SessionShare.session_id.label("session_id"),
+                SessionShare.position.label("my_position"),
+            )
+            .where(
+                SessionShare.user_id == str(current_user.id),
+                SessionShare.status == ShareStatus.ACCEPTED.value,
+            )
+            .subquery()
+        )
+        query = query.outerjoin(my_share_pos, my_share_pos.c.session_id == Session.id)
+        effective_position = case(
+            (Session.user_id == str(current_user.id), Session.position),
+            else_=func.coalesce(my_share_pos.c.my_position, 0),
+        )
+        query = query.order_by(effective_position.asc(), Session.created_at.desc(), Session.id)
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
-    sessions = result.scalars().all()
+    rows = result.all()
+    sessions = [row[0] for row in rows]
+    last_message_at = {row[0].id: row[1] for row in rows}
 
     # Tag shared-in sessions with the caller's role + owner name. Only query roles
     # when this page actually contains sessions the caller doesn't own. An admin
@@ -177,6 +294,7 @@ async def list_sessions(
     items: list[SessionResponse] = []
     for s in sessions:
         resp = SessionResponse.model_validate(s)
+        resp.last_message_at = last_message_at.get(s.id)
         if is_real_owner(s, current_user):
             resp.is_owner = True
             resp.share_count = share_counts.get(str(s.id), 0)
@@ -279,26 +397,40 @@ async def reorder_sessions(
 ) -> None:
     """Set the sidebar order from a full top-to-bottom list of session ids.
 
-    Only the caller's own sessions are repositioned (foreign/unknown ids are
-    ignored); position is assigned 0..n by request order, so 0 is the top.
+    Repositions the caller's own sessions (via sessions.position) and their
+    shared-in sessions (via their own session_shares.position) in one contiguous
+    0..n sequence by request order, so 0 is the top. Foreign/unknown ids are ignored.
     """
     ids = [str(i) for i in payload.session_ids]
     if not ids:
         return None
 
-    result = await db.execute(
+    # Owned sessions the caller reorders via sessions.position.
+    owned_result = await db.execute(
         select(Session).where(
             Session.id.in_(ids),
             Session.user_id == str(current_user.id),
         )
     )
-    owned = {str(s.id): s for s in result.scalars().all()}
+    owned = {str(s.id): s for s in owned_result.scalars().all()}
+
+    # Shared-in sessions the caller reorders via their OWN session_shares.position —
+    # sessions.position belongs to the owner's arrangement, not the participant's.
+    shares_result = await db.execute(
+        select(SessionShare).where(
+            SessionShare.session_id.in_(ids),
+            SessionShare.user_id == str(current_user.id),
+            SessionShare.status == ShareStatus.ACCEPTED.value,
+        )
+    )
+    shares = {str(sh.session_id): sh for sh in shares_result.scalars().all()}
 
     pos = 0
     for sid in ids:
-        session = owned.get(sid)
-        if session is not None:
-            session.position = pos
+        # A row is either owned or shared-in (never both); both carry a `position`.
+        target = owned.get(sid) or shares.get(sid)
+        if target is not None:
+            target.position = pos
             pos += 1
 
     await db.commit()

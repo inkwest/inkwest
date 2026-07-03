@@ -252,7 +252,7 @@ async def test_list_sessions_includes_shared(
     count_result = MagicMock()
     count_result.scalar.return_value = 1
     list_result = MagicMock()
-    list_result.scalars.return_value.all.return_value = [mock_session_obj]
+    list_result.all.return_value = [(mock_session_obj, None)]
     roles_result = MagicMock()
     roles_result.all.return_value = [(mock_session_obj.id, "editor")]
     mock_db.execute = AsyncMock(side_effect=[count_result, list_result, roles_result])

@@ -345,16 +345,40 @@ export async function createCluster(data: {
 }
 
 // Sessions
-interface PaginatedSessions {
+export interface PaginatedSessions {
   items: Session[];
   total: number;
   page: number;
   page_size: number;
 }
 
-export async function getSessions(): Promise<Session[]> {
-  const response = await fetchAPI<PaginatedSessions>('/api/sessions');
-  return response.items;
+export type SessionSort = 'manual' | 'activity' | 'created';
+export type SessionOrder = 'asc' | 'desc';
+export type ShareFilter = 'shared_with_me' | 'shared_by_me' | 'private';
+
+export interface SessionListParams {
+  page?: number;
+  page_size?: number;
+  sort?: SessionSort;
+  order?: SessionOrder;
+  share?: ShareFilter[];
+  /** ISO cutoff: keep only sessions active at/after this instant. */
+  activity_after?: string;
+  /** ISO cutoff: keep only sessions active at/before this instant. */
+  activity_before?: string;
+}
+
+export async function getSessions(params: SessionListParams = {}): Promise<PaginatedSessions> {
+  const qs = new URLSearchParams();
+  if (params.page) qs.set('page', String(params.page));
+  if (params.page_size) qs.set('page_size', String(params.page_size));
+  if (params.sort) qs.set('sort', params.sort);
+  if (params.order) qs.set('order', params.order);
+  for (const s of params.share ?? []) qs.append('share', s);
+  if (params.activity_after) qs.set('activity_after', params.activity_after);
+  if (params.activity_before) qs.set('activity_before', params.activity_before);
+  const query = qs.toString();
+  return fetchAPI<PaginatedSessions>(`/api/sessions${query ? `?${query}` : ''}`);
 }
 
 export async function createSession(data: {

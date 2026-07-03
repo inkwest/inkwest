@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { SessionItem } from './SessionItem';
+import { useSessionsStore } from '@/store/sessions';
 import type { Session } from '@/types/api';
 
 const session: Session = {
@@ -64,5 +65,35 @@ describe('SessionItem shared indicator', () => {
     renderWith({ is_owner: false, owner_display_name: 'Alice', share_count: 0 });
     expect(screen.getByText('External')).toBeInTheDocument();
     expect(screen.queryByTitle(/Shared with/)).not.toBeInTheDocument();
+  });
+});
+
+describe('SessionItem timestamp tracks the active sort', () => {
+  // Distinct ages so the shown time reveals which field is displayed.
+  const timed: Session = {
+    id: 's1',
+    title: 'T',
+    created_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), // 3h ago
+    updated_at: new Date().toISOString(),
+    last_message_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(), // 5m ago
+  };
+
+  function renderWithSort(sortMode: 'activity' | 'created') {
+    useSessionsStore.setState({ sortMode });
+    return render(
+      <MemoryRouter>
+        <SessionItem session={timed} isDragging={false} dragHandleProps={dragHandleProps} />
+      </MemoryRouter>,
+    );
+  }
+
+  it('shows last-activity time under the activity sort', () => {
+    renderWithSort('activity');
+    expect(screen.getByText('5m ago')).toBeInTheDocument();
+  });
+
+  it('shows creation time under the created sort (matches the ordering)', () => {
+    renderWithSort('created');
+    expect(screen.getByText('3h ago')).toBeInTheDocument();
   });
 });

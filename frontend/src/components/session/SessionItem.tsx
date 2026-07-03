@@ -33,7 +33,14 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
   // delete and rename are owner-only and would 403.
   const isShared = session.is_owner === false;
   const { deleteSession, leaveSession, renameSession } = useSessionsStore();
+  const sortMode = useSessionsStore((s) => s.sortMode);
   const setSidebarOpen = useSettingsStore((s) => s.setSidebarOpen);
+
+  // Show the timestamp that matches the active sort so the shown time tracks the order:
+  // creation date under the "created" sort, otherwise last activity (newest message;
+  // updated_at only as a fallback — it diverges from real activity, see the sort fix).
+  const shownTime =
+    sortMode === 'created' ? session.created_at : session.last_message_at ?? session.updated_at;
 
   const [isHovered, setIsHovered] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -185,7 +192,7 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
                   <span className="text-gray-600">&middot;</span>
                 </>
               )}
-              <span className="shrink-0">{formatRelativeTime(session.updated_at)}</span>
+              <span className="shrink-0">{formatRelativeTime(shownTime)}</span>
               {(session.total_input_tokens || session.total_output_tokens) ? (
                 <>
                   <span className="text-gray-600">&middot;</span>

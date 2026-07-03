@@ -47,10 +47,14 @@ describe('sessionsStore ordering', () => {
 
   it('persistSessionOrder re-syncs from the server when saving fails', async () => {
     vi.spyOn(api, 'reorderSessions').mockRejectedValue(new Error('boom'));
+    // Restore the real action afterward so later tests don't inherit the stub
+    // (store state, unlike vi mocks, isn't reset by restoreAllMocks).
+    const realFetch = useSessionsStore.getState().fetchSessions;
     const fetchSpy = vi.fn();
     useSessionsStore.setState({ fetchSessions: fetchSpy });
     await useSessionsStore.getState().persistSessionOrder();
     expect(fetchSpy).toHaveBeenCalled();
+    useSessionsStore.setState({ fetchSessions: realFetch });
   });
 });
 
@@ -119,5 +123,174 @@ describe('sessionsStore ensureSessionTitle', () => {
     });
     useSessionsStore.getState().ensureSessionTitle('a', 'first message');
     expect(useSessionsStore.getState().currentSession?.title).toBe('first message');
+  });
+});
+
+describe('sessionsStore sort/filter + pagination', () => {
+  const envelope = (ids: string[], total: number, page = 1) => ({
+    items: ids.map(session),
+    total,
+    page,
+    page_size: 20,
+  });
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    useSessionsStore.setState({
+      sessions: [],
+      total: 0,
+      loadedPages: 1,
+      isLoadingMore: false,
+      sortMode: 'manual',
+      sortOrder: 'desc',
+      filters: [],
+      dateRange: 'all',
+      customFrom: '',
+      customTo: '',
+    });
+  });
+
+  it('fetchSessions forwards the current sort/order/filters and stores items + total', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope(['a', 'b'], 2));
+    useSessionsStore.setState({ sortMode: 'activity', sortOrder: 'asc', filters: ['shared_with_me'] });
+    await useSessionsStore.getState().fetchSessions();
+    expect(spy).toHaveBeenCalledWith({
+      page: 1,
+      page_size: 20,
+      sort: 'activity',
+      order: 'asc',
+      share: ['shared_with_me'],
+    });
+    expect(useSessionsStore.getState().sessions.map((s) => s.id)).toEqual(['a', 'b']);
+    expect(useSessionsStore.getState().total).toBe(2);
+  });
+
+  it('loadMoreSessions appends the next page and advances loadedPages', async () => {
+    useSessionsStore.setState({ sessions: [session('a'), session('b')], total: 3, loadedPages: 1 });
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope(['c'], 3, 2));
+    await useSessionsStore.getState().loadMoreSessions();
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+    expect(useSessionsStore.getState().sessions.map((s) => s.id)).toEqual(['a', 'b', 'c']);
+    expect(useSessionsStore.getState().loadedPages).toBe(2);
+  });
+
+  it('loadMoreSessions is a no-op once everything is loaded', async () => {
+    useSessionsStore.setState({ sessions: [session('a')], total: 1 });
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope([], 1));
+    await useSessionsStore.getState().loadMoreSessions();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('fetchSessions reloads all loaded pages so a load-more expansion survives a refresh', async () => {
+    useSessionsStore.setState({ sessions: [session('a'), session('b')], total: 4, loadedPages: 2 });
+    const spy = vi
+      .spyOn(api, 'getSessions')
+      .mockResolvedValueOnce(envelope(['a', 'b'], 4, 1))
+      .mockResolvedValueOnce(envelope(['c', 'd'], 4, 2));
+    await useSessionsStore.getState().fetchSessions();
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(useSessionsStore.getState().sessions.map((s) => s.id)).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('toggleFilter flips a sharing filter and refetches from page 1', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope([], 0));
+    useSessionsStore.getState().toggleFilter('private');
+    expect(useSessionsStore.getState().filters).toEqual(['private']);
+    expect(useSessionsStore.getState().loadedPages).toBe(1);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ share: ['private'], page: 1 }));
+    useSessionsStore.getState().toggleFilter('private');
+    expect(useSessionsStore.getState().filters).toEqual([]);
+  });
+
+  it('setFilters replaces the whole set; all-selected collapses to no filter on the wire', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope([], 0));
+    // Selecting every bucket ≡ no filter, so the request sends share: [].
+    useSessionsStore.getState().setFilters(['shared_with_me', 'shared_by_me', 'private']);
+    expect(useSessionsStore.getState().filters).toEqual(['shared_with_me', 'shared_by_me', 'private']);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ share: [], page: 1 }));
+    // A proper subset is sent verbatim.
+    useSessionsStore.getState().setFilters(['private']);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ share: ['private'] }));
+  });
+
+  it('setDateRange sends an activity_after cutoff, and "all" clears it', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope([], 0));
+    useSessionsStore.getState().setDateRange('7d');
+    expect(useSessionsStore.getState().dateRange).toBe('7d');
+    expect(typeof spy.mock.calls[0]?.[0]?.activity_after).toBe('string');
+    useSessionsStore.getState().setDateRange('all');
+    expect(spy.mock.calls.at(-1)?.[0]?.activity_after).toBeUndefined();
+  });
+
+  it('setCustomRange sends both from/to ISO bounds with from < to', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope([], 0));
+    useSessionsStore.getState().setCustomRange('2026-06-01', '2026-06-30');
+    expect(useSessionsStore.getState().dateRange).toBe('custom');
+    const params = spy.mock.calls.at(-1)?.[0];
+    // TZ-independent: both bounds are valid ISO instants and ordered (from start-of-day
+    // to end-of-day). Asserting the exact date text would break off the UTC-boundary.
+    expect(new Date(params!.activity_after!).getTime()).toBeLessThan(
+      new Date(params!.activity_before!).getTime()
+    );
+  });
+
+  it('custom range with only a "from" leaves the upper bound open', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope([], 0));
+    useSessionsStore.getState().setCustomRange('2026-06-01', '');
+    const params = spy.mock.calls.at(-1)?.[0];
+    expect(typeof params?.activity_after).toBe('string');
+    expect(params?.activity_before).toBeUndefined();
+  });
+
+  it('drops a stale fetch that resolves after a newer one (rapid sort toggle race)', async () => {
+    // Fetch A (old sort) is slow; fetch B (new sort) starts later but resolves first.
+    // Without the token guard, A's late resolution would overwrite B's fresh list.
+    let resolveA!: (v: ReturnType<typeof envelope>) => void;
+    const slowA = new Promise<ReturnType<typeof envelope>>((r) => {
+      resolveA = r;
+    });
+    const spy = vi.spyOn(api, 'getSessions');
+    spy.mockReturnValueOnce(slowA as never);
+    const pA = useSessionsStore.getState().fetchSessions();
+    spy.mockResolvedValueOnce(envelope(['fresh'], 1));
+    const pB = useSessionsStore.getState().fetchSessions();
+    await pB;
+    resolveA(envelope(['stale'], 1));
+    await pA;
+    expect(useSessionsStore.getState().sessions.map((s) => s.id)).toEqual(['fresh']);
+  });
+
+  it('ignores an unparsable persisted custom date instead of throwing', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope(['a'], 1));
+    useSessionsStore.setState({ dateRange: 'custom', customFrom: 'not-a-date', customTo: '' });
+    await useSessionsStore.getState().fetchSessions();
+    // The bad bound is skipped (not sent, no RangeError) and the fetch still lands.
+    expect(spy.mock.calls.at(-1)?.[0]?.activity_after).toBeUndefined();
+    expect(useSessionsStore.getState().sessions.map((s) => s.id)).toEqual(['a']);
+  });
+
+  it('resetView restores every view field to its default and refetches', async () => {
+    const spy = vi.spyOn(api, 'getSessions').mockResolvedValue(envelope([], 0));
+    useSessionsStore.setState({
+      sortMode: 'created',
+      sortOrder: 'asc',
+      filters: ['private'],
+      dateRange: 'custom',
+      customFrom: '2026-06-01',
+      customTo: '2026-06-30',
+    });
+    useSessionsStore.getState().resetView();
+    const s = useSessionsStore.getState();
+    expect(s.sortMode).toBe('activity');
+    expect(s.sortOrder).toBe('desc');
+    // Default = all buckets selected (boxes checked); collapses to share: [] on the wire.
+    expect(s.filters).toEqual(['shared_with_me', 'shared_by_me', 'private']);
+    expect(s.dateRange).toBe('all');
+    expect(s.customFrom).toBe('');
+    expect(s.customTo).toBe('');
+    const params = spy.mock.calls.at(-1)?.[0];
+    expect(params).toMatchObject({ sort: 'activity', order: 'desc', share: [] });
+    expect(params?.activity_after).toBeUndefined();
+    expect(params?.activity_before).toBeUndefined();
   });
 });

@@ -70,14 +70,24 @@ describe('createCluster', () => {
 });
 
 describe('getSessions', () => {
-  it('returns session items', async () => {
+  it('returns the paginated envelope', async () => {
     const sessions = [{ id: 's1', cluster_id: 'c1', title: 'Test' }];
     mockFetch.mockReturnValue(
       jsonResponse({ items: sessions, total: 1, page: 1, page_size: 20 }),
     );
 
     const result = await getSessions();
-    expect(result).toEqual(sessions);
+    expect(result).toEqual({ items: sessions, total: 1, page: 1, page_size: 20 });
+  });
+
+  it('encodes sort/order and repeats the share filter as query params', async () => {
+    mockFetch.mockReturnValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 20 }));
+    await getSessions({ sort: 'activity', order: 'asc', share: ['shared_with_me', 'private'] });
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain('sort=activity');
+    expect(url).toContain('order=asc');
+    expect(url).toContain('share=shared_with_me');
+    expect(url).toContain('share=private');
   });
 });
 
@@ -266,7 +276,7 @@ describe('503 / backend-down retry', () => {
     const p = getSessions();
     await vi.runAllTimersAsync();
 
-    await expect(p).resolves.toEqual([]);
+    await expect(p).resolves.toEqual({ items: [], total: 0 });
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
@@ -349,7 +359,7 @@ describe('503 / backend-down retry', () => {
     const p = getSessions();
     await vi.runAllTimersAsync();
 
-    await expect(p).resolves.toEqual([]);
+    await expect(p).resolves.toEqual({ items: [], total: 0 });
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 

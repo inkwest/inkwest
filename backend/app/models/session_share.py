@@ -12,7 +12,15 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -82,6 +90,15 @@ class SessionShare(Base):
     responded_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    # The participant's OWN sidebar slot for this session (ASC = top). sessions.position
+    # is the owner's arrangement; a shared-in participant orders via this column so a
+    # drag on a shared-with-me row persists instead of reverting to the owner's order.
+    position: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
     )
 
     # CHECKs mirror the migration so model-built (SQLite) test schemas enforce them
