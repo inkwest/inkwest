@@ -355,6 +355,7 @@ async def record_usage(
     output_tokens: int,
     model: str | None = None,
     provider: str | None = None,
+    cost_usd: Decimal | None = None,
 ) -> UsageRecord:
     """
     Record token usage for budget tracking.
@@ -378,7 +379,10 @@ async def record_usage(
         # token/cost metrics label by (the dispatcher sets it before orchestrating).
         provider = metrics.turn_engine()
 
-    cost = calculate_cost(model, input_tokens, output_tokens)
+    # Prefer an engine-reported authoritative cost (e.g. opencode's per-turn USD, which
+    # accounts for cache-token pricing) over the token×rate estimate; fall back to the
+    # estimate when the engine doesn't report one (Anthropic/Converse paths).
+    cost = cost_usd if cost_usd is not None else calculate_cost(model, input_tokens, output_tokens)
 
     # Per-model token/cost rates for Prometheus: the resolved model is known here, and this
     # is the single sink every orchestrator funnels usage through. Best-effort — a metrics

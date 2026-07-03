@@ -30,7 +30,7 @@ from anthropic import AsyncAnthropic
 
 from app.core.config import get_settings
 from app.services.app_settings import BEDROCK_INCLUDE_OPEN_KEY, get_bool_setting
-from app.services.engines import inkwest_agent_enabled
+from app.services.engines import open_catalog_enabled
 from app.services.pricing import MODEL_PRICING, model_label
 
 logger = logging.getLogger(__name__)
@@ -194,12 +194,12 @@ def _model_sort_key(model_id: str) -> tuple:
 def bedrock_include_open() -> bool:
     """Whether the catalog includes non-Anthropic (open-weight) Bedrock models.
 
-    Requires the inkwest-agent engine (only it can run them via Converse). When that
-    engine is enabled the default is ON — surfacing the whole-Bedrock catalog is the
-    point of enabling it — while an explicit admin toggle (persisted) still overrides.
-    Without the engine, never include them (they'd be unusable in the picker).
+    Requires an agent engine (inkwest-agent or opencode — both run any vendor via
+    Bedrock). When one is enabled the default is ON — surfacing the whole-Bedrock
+    catalog is the point of enabling it — while an explicit admin toggle (persisted)
+    still overrides. Without an agent engine, never include them (unusable in the picker).
     """
-    if not inkwest_agent_enabled():
+    if not open_catalog_enabled():
         return False
     return get_bool_setting(BEDROCK_INCLUDE_OPEN_KEY, default=True)
 

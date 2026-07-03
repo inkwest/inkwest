@@ -556,7 +556,7 @@ async def test_fetch_bedrock_models_engine_gate_forces_claude_only():
         patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
         patch.object(model_catalog, "get_bool_setting", return_value=True),
-        patch.object(model_catalog, "inkwest_agent_enabled", return_value=False),
+        patch.object(model_catalog, "open_catalog_enabled", return_value=False),
     ):
         await model_catalog._fetch_bedrock_models()
 
@@ -577,7 +577,7 @@ async def test_fetch_bedrock_models_engine_enabled_and_flag_surfaces_open():
         patch.object(model_catalog, "get_settings", return_value=_settings()),
         patch.object(model_catalog, "_aws_json", side_effect=fake_aws_json),
         patch.object(model_catalog, "get_bool_setting", return_value=True),
-        patch.object(model_catalog, "inkwest_agent_enabled", return_value=True),
+        patch.object(model_catalog, "open_catalog_enabled", return_value=True),
     ):
         await model_catalog._fetch_bedrock_models()
 
@@ -805,9 +805,9 @@ async def test_fetch_bedrock_profiles_open_vendor_gated_off_under_claude_only():
 def test_bedrock_include_open_defaults_on_with_agent_engine():
     """The open-vendor catalog defaults ON when inkwest-agent is enabled (surfacing the
     whole-Bedrock set is the point), an explicit admin toggle overriding; OFF without it."""
-    with patch.object(model_catalog, "inkwest_agent_enabled", return_value=False):
+    with patch.object(model_catalog, "open_catalog_enabled", return_value=False):
         assert model_catalog.bedrock_include_open() is False  # no engine → never
-    with patch.object(model_catalog, "inkwest_agent_enabled", return_value=True):
+    with patch.object(model_catalog, "open_catalog_enabled", return_value=True):
         # Unset setting → the default passed by the caller (True) is honored.
         with patch.object(model_catalog, "get_bool_setting", lambda k, default=False: default):
             assert model_catalog.bedrock_include_open() is True

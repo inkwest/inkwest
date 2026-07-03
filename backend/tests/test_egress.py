@@ -181,6 +181,8 @@ def test_squid_http_access_order_is_what_the_emulator_assumes():
         # endpoint is api.<region>.coralogix.com/mgmt/api/v1/mcp; covered by .coralogix.com.
         "api.eu2.coralogix.com",
         "api.coralogix.com",
+        # opencode engine: provider/model catalog fetched from models.dev every run.
+        "models.dev",
     ],
 )
 def test_model_and_aws_control_endpoints_allowed(host):

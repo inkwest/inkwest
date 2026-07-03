@@ -230,7 +230,11 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
         root, "claude"
     )  # CLAUDE_CONFIG_DIR -> durable Claude state (--resume)
     work_dir = os.path.join(root, "workdir")
-    for path in (logs_dir, claude_dir, work_dir):
+    # opencode engine: its per-conversation session store (SQLite opencode.db + storage/)
+    # lives at $HOME/.local/share/opencode in-container; bind-mount it durably so a turn's
+    # `--continue` resumes THIS conversation's session across turns + sandbox rebuilds.
+    opencode_dir = os.path.join(root, "opencode")
+    for path in (logs_dir, claude_dir, work_dir, opencode_dir):
         os.makedirs(path, exist_ok=True)
         # World-writable so the proxy (squid's uid) and the toolbox (its own uid, which may
         # differ from the backend's) can write their state. Per-conversation -> not a leak.
@@ -349,6 +353,10 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
             f"{claude_dir}:{sandbox_home}/.claude",
             "-v",
             f"{work_dir}:/workdir",
+            # opencode engine session store (durable; default data dir is $HOME-based, so the
+            # target mirrors the image's HOME). Idle for the claude-cli/inkwest-agent engines.
+            "-v",
+            f"{opencode_dir}:{sandbox_home}/.local/share/opencode",
             # RAM-only creds: the session's ~/.aws/~/.kube, bind-mounted from the shared
             # tmpfs creds volume (or an empty tmpfs when no such volume is configured).
             *creds_mounts,
@@ -432,6 +440,19 @@ async def release(session_id: str) -> None:
         if sb.in_use > 0:
             sb.in_use -= 1
         sb.last_used = _now()
+
+
+def in_use(session_id: str) -> bool:
+    """Whether a live turn currently holds this conversation's pair.
+
+    The runner frees a session's turn slot on the terminal event while the previous
+    turn's generator tail is still running — that tail must not touch shared state
+    (config files, the container) a NEW turn may now own. Registry read, no lock:
+    callers only use it as a best-effort guard, races are re-checked under the lock
+    by :func:`teardown` (``only_if_idle``).
+    """
+    sb = _sandboxes.get(session_id)
+    return bool(sb and sb.in_use > 0)
 
 
 # Idle pairs (reclaimable) are always reaped back down to the soft cap. Busy pairs (a live
@@ -545,7 +566,7 @@ async def _teardown_unlocked(session_id: str, *, remove_dir: bool) -> None:
     logger.info("sandbox_torn_down", session_id=session_id, removed_dir=remove_dir)
 
 
-async def teardown(session_id: str, *, remove_dir: bool = True) -> None:
+async def teardown(session_id: str, *, remove_dir: bool = True, only_if_idle: bool = False) -> None:
     """Remove a conversation's containers + networks (best-effort), UNDER the per-session
     lock so it can't race ``ensure()`` provisioning the same conversation (which would
     orphan a freshly-built pair or rmtree a dir a new turn just populated).
@@ -553,8 +574,17 @@ async def teardown(session_id: str, *, remove_dir: bool = True) -> None:
     ``remove_dir`` also deletes the durable ``…/<sid>/`` tree — set for an explicit
     session delete, but cleared by the idle reaper so a later turn can resume. Callers
     already holding the lock must use :func:`_teardown_unlocked` instead.
+
+    ``only_if_idle`` skips the teardown when a live turn holds the pair (``in_use > 0``,
+    checked under the same lock ``ensure`` uses) — for a finished turn's abnormal-exit
+    cleanup, which must not kill a NEXT turn that already re-leased the container.
     """
     async with _locks[session_id]:
+        if only_if_idle:
+            sb = _sandboxes.get(session_id)
+            if sb is not None and sb.in_use > 0:
+                logger.info("sandbox_teardown_skipped_in_use", session_id=session_id)
+                return
         await _teardown_unlocked(session_id, remove_dir=remove_dir)
 
 

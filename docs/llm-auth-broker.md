@@ -6,14 +6,16 @@ itself.
 
 ## TL;DR
 
-The sandboxed engines (Claude CLI, inkwest-agent) reach Bedrock only through squid. Today the
+The sandboxed engines (Claude CLI, inkwest-agent, opencode) reach Bedrock only through squid. Today the
 **real** `AWS_BEARER_TOKEN_BEDROCK` is mounted into the sandbox via `sandbox_env_file`, so a
 compromised sandbox holds a valid Bedrock credential. The broker removes that: the sandbox
 carries only a short-lived, opaque **per-turn grant**; a backend reverse-proxy verifies it,
 swaps in the real bearer, and forwards to Bedrock. The real credential lives only in the
-backend process. Both the Claude CLI (`ANTHROPIC_BEDROCK_BASE_URL`) and boto3 (`endpoint_url`)
-send `Authorization: Bearer …` — **no SigV4** — so the broker is a pure header swap +
-transparent byte passthrough; the eventstream response is streamed back untouched.
+backend process. Every sandboxed transport sends `Authorization: Bearer …` — the Claude CLI
+(`ANTHROPIC_BEDROCK_BASE_URL`), the inkwest-agent's boto3 (`endpoint_url`), and opencode's AI
+SDK (`opencode.json` `provider.amazon-bedrock.options.baseURL`) — with **no SigV4**, so the
+broker is a pure header swap + transparent byte passthrough; the eventstream is streamed back
+untouched.
 
 ## Components
 
@@ -22,7 +24,7 @@ transparent byte passthrough; the eventstream response is streamed back untouche
 | Broker route (data plane) | `app/api/routes/llm_proxy.py` | `POST /api/llm-proxy/model/{id}/{op}` — verify grant, RESTRICT (`model_id` ∈ enabled registry models/ARNs, `op` ∈ `converse`/`converse-stream`/`invoke`/`invoke-with-response-stream`), swap `Authorization` → real bearer, stream to `bedrock-runtime.<region>.amazonaws.com`. |
 | Broker route (control plane) | same file | `GET /api/llm-proxy/{resource}` for a read-only allowlist (`inference-profiles`, `foundation-models`) → `bedrock.<region>.amazonaws.com`. Claude Code lists these to resolve a model to its **regional inference profile** (bare on-demand ids aren't invocable in regions like `eu-west-1`) and points the GETs at the same base URL — without this leg, resolution 404s and the data-plane invoke then fails. Same grant verify + bearer swap. |
 | Grant store | `app/services/llm_proxy_token.py` | In-process registry of opaque per-turn grants. `mint` at turn start, `verify` by lookup, `burn` at turn end. **Not a JWT** — a JWT can't be revoked before expiry; the grant must die when the turn ends. |
-| Wiring | `app/services/llm_broker.py` | `cli_broker_env` / `agent_broker_env` (inject), `agent_bedrock_endpoint_url`, `burn_env` (revoke). The single gate + base-URL derivation for both engines. |
+| Wiring | `app/services/llm_broker.py` | `cli_broker_env` / `agent_broker_env` (inject), `agent_bedrock_endpoint_url`, `burn_env` (revoke). The single gate + base-URL derivation for all three engines (opencode reuses `agent_broker_env` + points its `provider.amazon-bedrock.options.baseURL` at the broker via its per-turn `opencode.json`). |
 | Backend bearer | `Settings.aws_bearer_token_bedrock` | The real Bedrock API key, read from the backend process env `AWS_BEARER_TOKEN_BEDROCK`. |
 
 Upstream is structured as a dispatch (`_UPSTREAMS`, `bedrock-bearer` today) so a Mantle /
@@ -61,6 +63,14 @@ direct-Anthropic-key shape can be added later without touching the route body.
 > This leg also requires the `inkwest-agent` engine enabled via `AGENTIC_ENGINES` (the CLI leg
 > does not). Broker-OFF turns are unaffected: the orchestrator omits the unset field from the
 > turn-spec, so an older agent still parses it.
+
+> **opencode engine — rebuild the agent image + allowlist `models.dev`.** opencode ships in the
+> same agent image (pinned `OPENCODE_VERSION`), so enabling it needs an image rebuild + redeploy,
+> and its per-run model-catalog fetch needs `models.dev` on the squid allowlist. Broker wiring is
+> automatic (the orchestrator writes the proxy `baseURL` into the per-turn `opencode.json` and
+> injects the grant via `docker exec -e`); enable it via `AGENTIC_ENGINES` (e.g.
+> `claude-cli,opencode`). With the broker on, `AWS_REGION` must be set in the backend env
+> (`validate_settings` enforces it whenever the broker runs with a sandboxed engine).
 
 ## Rollback (fully reversible)
 
@@ -113,6 +123,6 @@ Bedrock credential inside the sandbox it is no longer a credentialed Bedrock egr
 
 ## Scope
 
-In scope: both sandboxed engines (CLI + inkwest-agent) — they cross the sandbox boundary, so the
+In scope: all three sandboxed engines (CLI + inkwest-agent + opencode) — they cross the sandbox boundary, so the
 broker keeps the real Bedrock credential out of the container. (There is no non-sandboxed
 in-process inference path anymore; the legacy SDK/Converse orchestrators were removed.)

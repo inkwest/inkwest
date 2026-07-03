@@ -72,11 +72,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     htop \
     sysstat \
     file \
-    # Data wrangling / editors
+    # Data wrangling / editors / search
     jq \
     yq \
     less \
     emacs-nox \
+    # ripgrep: opencode's grep/file-search tooling shells out to `rg`; without it the
+    # agent's search degrades and `which rg` fails inside its bash tool.
+    ripgrep \
     # Python (system-wide; the agent runs from a dedicated venv below)
     python3 \
     # Misc clients
@@ -135,6 +138,21 @@ ENV HOME=/home/sandbox
 WORKDIR /home/sandbox
 RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/home/sandbox/.local/bin:$PATH"
+
+# opencode CLI — second in-sandbox coding-agent engine (anomalyco/opencode). Official
+# installer ships a self-contained compiled binary (bun; no Node runtime) into
+# $HOME/.opencode/bin. The broker spawns `opencode run --format json` per turn.
+# PINNED: the backend parser (ai_cli_client.parse_opencode_response) was validated
+# against this version's NDJSON wire format — bump deliberately and re-capture
+# tests/fixtures/opencode_stream_*.jsonl; never float to whatever the installer serves.
+ARG OPENCODE_VERSION=1.17.10
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --version "${OPENCODE_VERSION}"
+ENV PATH="/home/sandbox/.opencode/bin:$PATH"
+# Warm opencode's one-time config/plugin bootstrap (@opencode-ai/sdk+plugin+zod from npm)
+# and prime the models.dev catalog, so the first real turn doesn't pay that round-trip.
+# Best-effort: guarded with `|| true` so an offline/registry-flaky build still succeeds
+# (npm + models.dev are squid-allowlisted, so a cold container just refetches at runtime).
+RUN opencode --version && (opencode models >/dev/null 2>&1 || true)
 
 # ── inkwest_agent — LEAN bake (carved runtime deps only) ─────────────
 USER root

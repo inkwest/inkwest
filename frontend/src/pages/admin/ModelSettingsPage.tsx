@@ -424,11 +424,11 @@ export function ModelSettingsPage() {
                 </div>
               </div>
 
-              {/* Show this toggle only when it's actually useful — i.e. the
-                  inkwest-agent engine (custom Converse loop) is enabled and can
-                  run non-Anthropic Bedrock models. Under claude-cli only, the CLI
-                  can't drive them, so the toggle is hidden (catalog stays Claude-only). */}
-              {settings.inkwest_agent_enabled && (
+              {/* Show this toggle only when it's actually useful — i.e. an agent engine
+                  (inkwest-agent or opencode) is enabled and can run non-Anthropic Bedrock
+                  models. Under claude-cli only, the CLI can't drive them, so the toggle is
+                  hidden (catalog stays Claude-only). */}
+              {settings.open_catalog_enabled && (
                 <label className="flex items-center gap-3 text-sm text-gray-300 cursor-pointer">
                   <input
                     type="checkbox"

@@ -251,8 +251,10 @@ export interface ModelSettings {
   enabled_models: string[];
   /** Whether all Bedrock vendors (not just Anthropic) are surfaced. */
   include_all_vendors: boolean;
-  /** Whether the custom (inkwest-agent) engine is enabled — gates the toggle. */
+  /** Whether the custom (inkwest-agent) engine is enabled (back-compat). */
   inkwest_agent_enabled: boolean;
+  /** Whether any agent engine (inkwest-agent or opencode) is enabled — gates the toggle. */
+  open_catalog_enabled: boolean;
   /** Engines enabled in this deployment — one admin section per engine. */
   engines: string[];
   catalog: CatalogStatus;

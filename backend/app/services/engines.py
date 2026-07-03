@@ -8,13 +8,15 @@ turn, decoupled from the inference backend (the CLI/sandbox configures its own):
 - ``inkwest-agent`` — the custom Converse loop; every Bedrock vendor (Claude
   included, via Converse). The limiter for ``claude-cli`` is the *client*, not
   Bedrock — see docs/SANDBOXED_AGENT_RUNTIME.md (Engine model).
+- ``opencode``      — the opencode CLI agent in the sandbox; every Bedrock vendor
+  (its ``amazon-bedrock`` provider resolves models via models.dev).
 
 The set of engines enabled in a deployment comes from ``AGENTIC_ENGINES``
 (default ``claude-cli`` → today's behavior unchanged). Two things derive from it:
 
-- the **catalog gate** (``inkwest_agent_enabled``): non-Claude Bedrock models are
-  only surfaced when an engine that can run them is enabled — pointless to offer
-  models no enabled engine can drive;
+- the **catalog gate** (``open_catalog_enabled``: any AGENT engine on): non-Claude
+  Bedrock models are only surfaced when an engine that can run them is enabled —
+  pointless to offer models no enabled engine can drive;
 - the **per-turn engine** (``resolve_engine`` / ``engine_for_turn``): how
   ``get_orchestrator`` dispatches a turn (sandboxed agent vs CLI), reconciled
   against the resolved model and any explicit ``session.engine`` pin.
@@ -24,11 +26,17 @@ from app.core.config import get_settings
 
 CLAUDE_CLI = "claude-cli"
 INKWEST_AGENT = "inkwest-agent"
-KNOWN_ENGINES = frozenset({CLAUDE_CLI, INKWEST_AGENT})
+OPENCODE = "opencode"
+KNOWN_ENGINES = frozenset({CLAUDE_CLI, INKWEST_AGENT, OPENCODE})
 
 # Engine applied to a Claude model when the choice is ambiguous (multiple engines
 # enabled): Claude Code is the native, lowest-overhead path for Claude.
 DEFAULT_ENGINE = CLAUDE_CLI
+
+# Agent engines: in-sandbox coding agents that speak Bedrock Converse and can run
+# ANY vendor (Claude included). claude-cli is the only Claude-only client, so it is
+# the sole non-agent engine. Anything here opens the whole-Bedrock catalog.
+AGENT_ENGINES = KNOWN_ENGINES - {CLAUDE_CLI}
 
 
 def enabled_engines() -> list[str]:
@@ -37,8 +45,20 @@ def enabled_engines() -> list[str]:
 
 
 def inkwest_agent_enabled() -> bool:
-    """Whether the custom Converse engine is enabled (gates the open catalog)."""
+    """Whether the custom Converse engine is enabled."""
     return INKWEST_AGENT in enabled_engines()
+
+
+def opencode_enabled() -> bool:
+    """Whether the opencode engine is enabled."""
+    return OPENCODE in enabled_engines()
+
+
+def open_catalog_enabled() -> bool:
+    """Whether any agent engine is enabled — gates the whole-Bedrock (all-vendor)
+    catalog. Pointless to surface non-Claude models no enabled engine can run.
+    """
+    return any(e in AGENT_ENGINES for e in enabled_engines())
 
 
 def _speaks_anthropic_provider(provider: str | None, model_id: str) -> bool:
@@ -127,7 +147,14 @@ def engine_for_turn(model_id: str, pinned: str | None = None) -> str:
         return runnable[0]
     # Nothing offered (engine off / admin disabled every pairing): fall back to the
     # capability default so the turn still resolves to a sane engine.
-    return DEFAULT_ENGINE if _speaks_anthropic(model_id) else INKWEST_AGENT
+    if _speaks_anthropic(model_id):
+        return DEFAULT_ENGINE
+    # Non-Claude needs an agent engine. Pick the operator's first-declared enabled agent
+    # (AGENTIC_ENGINES order — deterministic, the deployment's primary) so the downstream
+    # "engine unavailable" error names a real engine (not inkwest-agent on an opencode-only
+    # deployment). Fall back to INKWEST_AGENT only when no agent engine is enabled at all.
+    enabled_agents = [e for e in enabled_engines() if e in AGENT_ENGINES]
+    return enabled_agents[0] if enabled_agents else INKWEST_AGENT
 
 
 def resolve_engine(model_id: str) -> str:

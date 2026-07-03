@@ -226,6 +226,24 @@ async def test_teardown_soft_keeps_dir(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_teardown_only_if_idle_skips_leased_pair(tmp_path):
+    # A finished turn's abnormal cleanup must not kill a container a NEXT turn re-leased.
+    sandbox._sandboxes["sid"] = sandbox.Sandbox("sid", "c", "p", "i", "e", 0.0, in_use=1)
+    td = AsyncMock()
+    with patch.object(sandbox, "_teardown_unlocked", td):
+        await sandbox.teardown("sid", remove_dir=False, only_if_idle=True)
+    td.assert_not_awaited()
+    assert sandbox.in_use("sid") is True
+
+    # Idle pair → proceeds.
+    sandbox._sandboxes["sid"].in_use = 0
+    with patch.object(sandbox, "_teardown_unlocked", td):
+        await sandbox.teardown("sid", remove_dir=False, only_if_idle=True)
+    td.assert_awaited_once_with("sid", remove_dir=False)
+    del sandbox._sandboxes["sid"]
+
+
+@pytest.mark.asyncio
 async def test_teardown_serializes_on_session_lock(tmp_path):
     """H2: delete-path teardown must take the per-session lock so it can't `docker rm -f`
     a pair while a turn holds the lock provisioning/using the same conversation."""

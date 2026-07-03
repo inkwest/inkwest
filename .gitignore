@@ -80,3 +80,6 @@ backend/htmlcov/
 # Compose local override (auto-merged by `docker compose`); per-dev port remaps etc.
 docker-compose.override.yml
 docker-compose.override.yaml
+
+# Handoff docs — local working notes, not committed.
+docs/HANDOFF-*.md
