@@ -943,7 +943,8 @@ async def test_get_budget_settings_default(admin_client: AsyncClient) -> None:
     resp = await admin_client.get("/api/admin/settings/budget")
     assert resp.status_code == 200
     data = resp.json()
-    # No override set -> effective equals the env defaults (off, no cap).
+    # No override set -> effective equals the env defaults (off, no cap;
+    # enable via admin PUT / env when a spend ceiling is wanted).
     assert data["enabled"] is False
     assert data["default_monthly_cost_limit_usd"] == 0.0
 

@@ -528,6 +528,22 @@ def _require_attachments_enabled() -> None:
         )
 
 
+async def _read_upload_capped(upload: UploadFile, limit: int) -> bytes | None:
+    """Read an upload in 1 MiB chunks, returning None once it exceeds ``limit`` bytes.
+
+    Bounds peak memory to ~limit per file rather than reading an unbounded body in full
+    before the size is checked.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await upload.read(1024 * 1024):
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/{session_id}/attachments", response_model=list[AttachmentDescriptor])
 async def upload_attachments(
     session_id: UUID,
@@ -546,9 +562,18 @@ async def upload_attachments(
             detail=f"At most {max_per} files per message",
         )
 
+    limit = get_settings().attachment_max_bytes
     descriptors: list[AttachmentDescriptor] = []
     for upload in files:
-        data = await upload.read()
+        # Read in bounded chunks and abort past the cap, instead of buffering an
+        # arbitrarily large body in memory before the size check (memory-exhaustion DoS).
+        data = await _read_upload_capped(upload, limit)
+        if data is None:
+            limit_mib = limit // (1024 * 1024)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File exceeds the {limit_mib} MiB limit",
+            )
         try:
             desc = attachments.write_attachment(
                 str(session_id),

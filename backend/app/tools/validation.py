@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 # Resources allowed for kubectl_top
 ALLOWED_TOP_RESOURCES: set[str] = {"pods", "nodes", "pod", "node"}
 
+# Resource kinds denied outright: `kubectl get secret -o yaml` returns base64 secret
+# material verbatim, and a granted read-only role commonly can read Secrets. On a public
+# deployment that is a direct credential-exfil path, so block the kind here regardless of
+# RBAC. Matched on the first dot-segment so `secret`, `secrets`, `secrets.v1.core` are all
+# covered. (Onboarding note: granted cluster roles should also exclude Secret read.)
+DENIED_RESOURCE_KINDS: set[str] = {"secret", "secrets"}
+
 # Enum allow-lists. These MUST stay in sync with the matching ``enum`` in the tool
 # schema (app/tools/definitions.py); test_tools.py pins them together so any future
 # drift fails CI rather than silently rejecting a schema-advertised value.
@@ -89,6 +96,10 @@ def validate_tool_input(tool_name: str, tool_input: dict[str, Any]) -> str | Non
         if not RESOURCE_PATTERN.match(resource):
             logger.warning(f"Invalid resource value: {resource}")
             return f"Invalid resource: {resource}"
+        # Security: block Secret reads (base64 credential material) regardless of RBAC.
+        if resource.split(".", 1)[0] in DENIED_RESOURCE_KINDS:
+            logger.warning(f"Denied secret resource kind: {resource}")
+            return "Reading Secrets is not permitted."
         if tool_name == "kubectl_top" and resource not in ALLOWED_TOP_RESOURCES:
             logger.warning(f"Invalid resource for top command: {resource}")
             return f"kubectl_top only supports 'pods' or 'nodes', got: {resource}"

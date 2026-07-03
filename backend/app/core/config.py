@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     app_env: Literal["development", "production"] = "development"
     frontend_url: str = "http://localhost:3000"
     cors_origins: str = ""  # Comma-separated allowed origins; empty = frontend_url only
+    # Comma-separated Host header allowlist (TrustedHostMiddleware). Empty = disabled.
+    # Opt-in on purpose: a strict allowlist would reject k8s/ALB liveness probes that send
+    # the pod IP as Host, so the operator sets the public hostname(s) here explicitly
+    # (wildcards like `*.example.com` are supported). Production warns when left empty.
+    trusted_hosts: str = ""
     secret_key: str = "change-me-in-production"  # For JWT signing
     system_prompt_extra: str = ""  # Extra instructions appended to the default system prompt
 
@@ -110,6 +115,10 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Budget Management
     # ==========================================================================
+    # Off by default: Inkwest targets trusted single-org deployments, so LLM cost abuse is not a
+    # front-line concern. The mechanism is fully available — enable it (admin UI or env) to
+    # get a server-side spend ceiling; when on, the chat gate fails CLOSED on a check error
+    # (see chat._budget_block_reason). Admin-overridable at runtime.
     budget_enabled: bool = False
     # Per-user default spend cap in USD/month applied to every user without a more
     # specific (user/role/global) budget row. 0 = no default cap. Admin-overridable
@@ -119,6 +128,24 @@ class Settings(BaseSettings):
     default_monthly_token_limit: int = 2000000  # Default monthly limit per user
     global_daily_token_limit: int = 1000000  # Global daily limit
     global_monthly_token_limit: int = 20000000  # Global monthly limit
+
+    # ==========================================================================
+    # Rate limiting (in-process; single-replica, like the other in-RAM stores)
+    # ==========================================================================
+    # Abuse/DoS/cost control. Per-IP token buckets on HTTP routes (a stricter bucket on
+    # /api/auth to blunt credential brute-force) plus a per-user cap on WS turn starts (the
+    # expensive LLM path). OFF by default for trusted single-org deployments. The
+    # mechanism is fully available — enable it (and tune the limits below) if the tool is
+    # ever exposed more broadly. In-process (single-replica); pair with an ingress/WAF limit.
+    rate_limit_enabled: bool = False
+    rate_limit_ip_per_minute: int = 120  # general /api/* requests per client IP
+    rate_limit_auth_ip_per_minute: int = 20  # /api/auth/* per client IP (login/callback/ticket)
+    rate_limit_turn_per_user_per_minute: int = 30  # WS chat turn starts (message/retry) per user
+    # Trusted reverse-proxy hops in front of the app (ALB = 1). The client IP is taken
+    # `n` positions from the RIGHT of X-Forwarded-For (the entry the trusted proxy appended),
+    # so a client-spoofed leading XFF cannot evade the per-IP limit. 0 = ignore XFF entirely
+    # (use the socket peer) for a directly-exposed deployment.
+    rate_limit_trusted_proxy_hops: int = 1
 
     # ==========================================================================
     # Interactive Flow
@@ -239,6 +266,17 @@ class Settings(BaseSettings):
     # extensions are accepted (comma-separated, case-insensitive, no dots).
     attachment_max_bytes: int = 10 * 1024 * 1024  # 10 MiB per file
     attachment_max_per_message: int = 10
+
+    # Max characters accepted in a single chat message (WS `message`/`retry`). Bounds input
+    # token cost, DB row size and prompt-cache churn; oversize turns are rejected before the
+    # LLM call. Also set the uvicorn WS frame cap (`--ws-max-size`) for a transport-level
+    # backstop. ~48k chars ≈ well under typical context limits while allowing pasted logs.
+    max_message_chars: int = 48_000
+    # Max concurrent WebSocket connections per authenticated user (across all sessions) and,
+    # separately, per anonymous share-link token. Bounds socket/memory growth and the O(n)
+    # presence fan-out on the single replica. 0 = unlimited.
+    max_ws_connections_per_user: int = 20
+    max_ws_connections_per_share: int = 30
     attachment_allowed_extensions: str = (
         "png,jpg,jpeg,gif,webp,svg,pdf,txt,md,log,json,yaml,yml,"
         "csv,tsv,toml,ini,conf,xml,html,sh,py,js,ts,go,sql"
@@ -370,6 +408,13 @@ def validate_settings() -> None:
             raise ValueError("SECRET_KEY must not be empty in production")
         if settings.secret_key == default_secret:
             raise ValueError("SECRET_KEY must be changed from default in production")
+        # Security: with OIDC off, get_current_user auto-issues an admin dev user with no
+        # credential (dependencies.py). That is a dev-only convenience; in production it means
+        # unauthenticated admin access to the whole surface, so refuse to boot.
+        if not settings.oidc_enabled:
+            raise ValueError(
+                "OIDC_ENABLED must be true in production (dev auto-login grants admin without auth)"
+            )
 
     # Engines validated here (local import: app.services.engines reads settings).
     from app.services.engines import inkwest_agent_enabled, validate_engines

@@ -34,7 +34,7 @@ from app.models.session_share import SessionShare, ShareRole, ShareStatus
 from app.models.session_share_link import SessionShareLink
 from app.models.user import User
 from app.services.pubsub import notify
-from app.services.session_access import check_session_owner
+from app.services.session_access import check_real_owner, check_session_owner
 
 router = APIRouter(tags=["sharing"])
 
@@ -57,6 +57,26 @@ async def _load_session_as_owner(session_id: UUID, user: CurrentUser, db: AsyncS
             detail=f"Session with ID '{session_id}' not found",
         )
     check_session_owner(session, user)
+    return session
+
+
+async def _load_session_as_real_owner(
+    session_id: UUID, user: CurrentUser, db: AsyncSession
+) -> Session:
+    """Like ``_load_session_as_owner`` but excludes admins — for GRANTING access.
+
+    Sharing a conversation (inviting a user, minting a public link) must be the real
+    owner's decision; an admin inspector re-sharing someone else's private session would be
+    a confidentiality escalation. Revoke/list remain owner-or-admin for break-glass.
+    """
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{session_id}' not found",
+        )
+    check_real_owner(session, user)
     return session
 
 
@@ -89,8 +109,8 @@ async def create_share(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> ParticipantResponse:
-    """Invite a user to collaborate, as viewer or editor. Owner only."""
-    session = await _load_session_as_owner(session_id, current_user, db)
+    """Invite a user to collaborate, as viewer or editor. Real owner only (not admins)."""
+    session = await _load_session_as_real_owner(session_id, current_user, db)
 
     if str(body.user_id) == str(current_user.id):
         raise HTTPException(
@@ -359,8 +379,12 @@ async def create_share_link(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> ShareLinkResponse:
-    """Mint a revokable anonymous read-only link to this conversation. Owner only."""
-    await _load_session_as_owner(session_id, current_user, db)
+    """Mint a revokable anonymous read-only link to this conversation. Real owner only.
+
+    Admins are excluded here on purpose: a public link is an unauthenticated exposure of the
+    full transcript, so only the conversation's actual owner may create one.
+    """
+    await _load_session_as_real_owner(session_id, current_user, db)
     link = SessionShareLink(
         session_id=session_id,
         token=secrets.token_urlsafe(32),

@@ -87,3 +87,19 @@ def check_session_owner(session: Session, user: User) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the session owner can perform this action",
         )
+
+
+def check_real_owner(session: Session, user: User) -> None:
+    """Real-owner only — admins are NOT admitted.
+
+    For actions that *grant others access* to a conversation (inviting a participant,
+    minting an anonymous public share link). An admin is a read-only inspector, so letting
+    them re-share someone else's private session (especially via a public link) would be a
+    confidentiality escalation, not legitimate management. Break-glass revoke/list stays on
+    ``check_session_owner`` so an admin can still clean up.
+    """
+    if not is_real_owner(session, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the session owner can share this conversation",
+        )

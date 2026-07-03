@@ -104,6 +104,28 @@ def test_check_session_owner_allows_owner(mock_user: MagicMock) -> None:
     check_session_owner(session, mock_user)  # must not raise
 
 
+def test_check_real_owner_rejects_admin_on_foreign_session(mock_admin_user: MagicMock) -> None:
+    """Sharing (invite / public link) is real-owner-only: an admin inspector must NOT be able
+    to re-share someone else's private conversation."""
+    from app.services.session_access import check_real_owner, check_session_owner
+
+    session = MagicMock()
+    session.user_id = str(uuid.uuid4())  # not the admin
+    with pytest.raises(HTTPException) as exc:
+        check_real_owner(session, mock_admin_user)
+    assert exc.value.status_code == 403
+    # But the admin IS still admitted by the management (revoke/list) path.
+    check_session_owner(session, mock_admin_user)  # must not raise
+
+
+def test_check_real_owner_allows_real_owner(mock_user: MagicMock) -> None:
+    from app.services.session_access import check_real_owner
+
+    session = MagicMock()
+    session.user_id = str(mock_user.id)
+    check_real_owner(session, mock_user)  # must not raise
+
+
 # ---------------------------------------------------------------------------
 # HTTP-level: read access for participants, owner-only for mutations
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from app.core import metrics
 from app.core.auth import extract_ws_ticket, verify_ws_ticket
 from app.core.config import get_settings
 from app.core.database import async_session_maker
+from app.core.rate_limit import TokenBucket
 from app.models.cluster import Cluster
 from app.models.session import Session
 from app.models.session_share_link import SessionShareLink
@@ -46,6 +47,13 @@ router = APIRouter()
 
 active_connections: dict[str, set[WebSocket]] = defaultdict(set)
 _connections_lock = asyncio.Lock()
+
+# Per-owner socket registry for connection caps: key is "user:<id>" for authenticated
+# sockets or "share:<token>" for anonymous guests. Bounds concurrent sockets (and the O(n)
+# presence fan-out) on the single replica. socket_owner is the reverse map so disconnect can
+# decrement without the caller re-supplying the key. Same single-replica scope as the rest.
+owner_connections: dict[str, set[WebSocket]] = defaultdict(set)
+socket_owner: dict[WebSocket, str] = {}
 
 
 @dataclass(frozen=True)
@@ -266,11 +274,30 @@ async def _follow_turns(
         await _pump_turn(websocket, session_id, snapshot, queue, sanitize)
 
 
-async def connect(session_id: str, websocket: WebSocket) -> None:
-    """Register a WebSocket connection for a session."""
+async def connect(
+    session_id: str,
+    websocket: WebSocket,
+    *,
+    owner_key: str | None = None,
+    max_per_owner: int = 0,
+) -> bool:
+    """Register a WebSocket connection for a session.
+
+    When ``owner_key`` + ``max_per_owner`` are given, refuse (return False, WITHOUT
+    accepting) if that owner already holds ``max_per_owner`` sockets — the caller closes
+    the handshake. Returns True once registered.
+    """
+    if owner_key is not None and max_per_owner:
+        async with _connections_lock:
+            if len(owner_connections[owner_key]) >= max_per_owner:
+                logger.warning("ws_connection_cap_reached", extra={"owner": owner_key})
+                return False
     await websocket.accept(subprotocol="inkwest")
     async with _connections_lock:
         active_connections[session_id].add(websocket)
+        if owner_key is not None:
+            owner_connections[owner_key].add(websocket)
+            socket_owner[websocket] = owner_key
         count = len(active_connections[session_id])
         active_total = sum(len(s) for s in active_connections.values())
     metrics.ws_connections_total.inc()
@@ -284,6 +311,7 @@ async def connect(session_id: str, websocket: WebSocket) -> None:
             "active_connections": count,
         },
     )
+    return True
 
 
 async def disconnect(session_id: str, websocket: WebSocket) -> None:
@@ -292,6 +320,11 @@ async def disconnect(session_id: str, websocket: WebSocket) -> None:
         active_connections[session_id].discard(websocket)
         if not active_connections[session_id]:
             del active_connections[session_id]
+        owner_key = socket_owner.pop(websocket, None)
+        if owner_key is not None:
+            owner_connections[owner_key].discard(websocket)
+            if not owner_connections[owner_key]:
+                del owner_connections[owner_key]
         remaining = len(active_connections.get(session_id, set()))
         active_total = sum(len(s) for s in active_connections.values())
     metrics.ws_connections_active.set(active_total)
@@ -422,11 +455,34 @@ async def close_session_connections(session_id: str) -> None:
             pass
 
 
+# Per-user cap on WS turn starts (message/retry) — the expensive LLM path. Keyed by user id
+# so one client can't drive unbounded Bedrock/Anthropic spend or subprocess churn. In-process
+# (single-replica assumption, like the HTTP limiter); lazily built so a settings change on
+# restart is picked up and tests can patch get_settings first.
+_turn_limiter: TokenBucket | None = None
+
+
+def _turn_rate_block_reason(user_id: UUID | None) -> str | None:
+    """User-facing message if this user is starting turns too fast, else None."""
+    settings = get_settings()
+    if not settings.rate_limit_enabled:
+        return None
+    global _turn_limiter
+    if _turn_limiter is None:
+        _turn_limiter = TokenBucket(settings.rate_limit_turn_per_user_per_minute)
+    if _turn_limiter.allow(str(user_id)):
+        return None
+    return "You're sending messages too quickly. Please wait a moment before trying again."
+
+
 async def _budget_block_reason(user_id: UUID | None, user_roles: list[str]) -> str | None:
     """User-facing message if the user's spend budget bars a new turn, else None.
 
-    No-op (no DB hit) while enforcement is disabled — the default. Fails open: a
-    budget-check fault must never wedge chat, so a transient DB error allows the turn.
+    No-op (no DB hit) while enforcement is disabled — the default. When enforcement IS
+    enabled the operator has opted into cost control, so a budget-check fault fails
+    CLOSED (blocks the turn): silently allowing unbounded LLM spend on a transient error
+    would defeat the control on a public endpoint. A check fault means the DB is already
+    unavailable, so chat is degraded regardless — better to block than to burn budget.
     """
     if not is_budget_enabled():
         return None
@@ -434,8 +490,11 @@ async def _budget_block_reason(user_id: UUID | None, user_roles: list[str]) -> s
         async with async_session_maker() as db:
             status = await check_budget(db, user_id, user_roles)
     except Exception:
-        logger.warning("Budget check failed; allowing turn", exc_info=True)
-        return None
+        logger.warning("Budget check failed; blocking turn (fail-closed)", exc_info=True)
+        return (
+            "Usage budget could not be verified right now. Please retry in a moment; "
+            "contact an administrator if this persists."
+        )
     if not status.is_allowed and status.hard_limit_action == "block":
         return (
             "You've reached your usage budget for this period. "
@@ -501,7 +560,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 context_name=cluster.context_name,
             )
 
-    await connect(session_id, websocket)
+    if not await connect(
+        session_id,
+        websocket,
+        owner_key=f"user:{user_id}",
+        max_per_owner=get_settings().max_ws_connections_per_user,
+    ):
+        await websocket.close(code=4009)  # too many concurrent connections
+        return
 
     logger.info(
         "Session validated",
@@ -569,6 +635,20 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 if not content and not attachments:
                     await websocket.send_json({"type": "error", "content": "Empty message content"})
                     continue
+                max_chars = get_settings().max_message_chars
+                if max_chars and len(content) > max_chars:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": f"Message too long (max {max_chars} characters).",
+                        }
+                    )
+                    continue
+                if len(attachments) > get_settings().attachment_max_per_message:
+                    await websocket.send_json(
+                        {"type": "error", "content": "Too many attachments in one message."}
+                    )
+                    continue
 
                 logger.info(
                     "Received message",
@@ -586,6 +666,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 # P1.8). Without a sandbox there is no /workdir to land them in.
                 if attachments and get_settings().sandbox_enabled:
                     turn_kwargs["attachments"] = attachments
+                rate_reason = _turn_rate_block_reason(user_id)
+                if rate_reason:
+                    await websocket.send_json({"type": "error", "content": rate_reason})
+                    continue
                 block_reason = await _budget_block_reason(user_id, user_roles)
                 if block_reason:
                     await websocket.send_json({"type": "error", "content": block_reason})
@@ -632,6 +716,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
 
                 logger.info("Retry requested", extra={"session_id": session_id})
 
+                rate_reason = _turn_rate_block_reason(user_id)
+                if rate_reason:
+                    await websocket.send_json({"type": "error", "content": rate_reason})
+                    continue
                 block_reason = await _budget_block_reason(user_id, user_roles)
                 if block_reason:
                     await websocket.send_json({"type": "error", "content": block_reason})
@@ -748,7 +836,14 @@ async def websocket_shared(websocket: WebSocket, token: str) -> None:
             await websocket.close(code=4004)
             return
 
-    await connect(session_id, websocket)
+    if not await connect(
+        session_id,
+        websocket,
+        owner_key=f"share:{token}",
+        max_per_owner=get_settings().max_ws_connections_per_share,
+    ):
+        await websocket.close(code=4009)  # too many concurrent guests on this link
+        return
     # Anonymous guests show in the roster as "Guest"; a per-socket id keeps each
     # guest a distinct chip (and is never tied to a real account).
     guest_id = f"guest:{id(websocket)}"

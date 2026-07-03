@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
+from app.services import attachments as attachments_svc
 from app.services import llm_broker, model_registry
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
 from app.services.ai_client import resolve_session_model_choice
@@ -211,7 +212,25 @@ required.
     # /workdir mount (the local fallback dir holds no uploads). Appended AFTER the
     # verbatim user message so a leading "/skill" still resolves (see system-prompt note).
     if attachments and settings.sandbox_enabled:
-        refs = " ".join(f"@/workdir/{a['filename']}" for a in attachments if a.get("filename"))
+        # SECURITY: attachment descriptors are echoed by the client over the WS, so `filename`
+        # is untrusted. Validate each through attachments.resolve_existing (rejects any path
+        # component / dot-segment and confirms the file lives in THIS session's workdir via
+        # realpath+commonpath) before building an @-file ref — otherwise a crafted name like
+        # "../.aws/credentials" would have Claude Code read+exfiltrate an arbitrary file.
+        # Mirrors orchestrator_inkwest_agent's guard; bad entries are dropped.
+        safe_names: list[str] = []
+        for a in attachments:
+            name = a.get("filename")
+            if not name:
+                continue
+            name = str(name)
+            try:
+                attachments_svc.resolve_existing(session_id_str, name)
+            except attachments_svc.AttachmentError as e:
+                logger.warning("attachment_rejected", extra={"attachment": name, "error": str(e)})
+                continue
+            safe_names.append(name)
+        refs = " ".join(f"@/workdir/{name}" for name in safe_names)
         if refs:
             prompt = f"{user_message}\n\n{refs}" if user_message else refs
 
