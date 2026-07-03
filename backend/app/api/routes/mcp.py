@@ -17,7 +17,7 @@ import html
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -32,7 +32,7 @@ from app.models.connector_audit import ConnectorAuditLog
 from app.models.mcp_oauth_pending_state import McpOauthPendingState
 from app.models.mcp_user_token import McpUserToken
 from app.models.user import User
-from app.services import mcp_oauth, mcp_tools
+from app.services import mcp_ask_store, mcp_oauth, mcp_tools
 from app.services.mcp_catalog import catalog_keys
 from app.services.mcp_oauth import GrantDeadError, McpOauthError
 from app.services.mcp_oauth_catalog import get_oauth_server, oauth_catalog_keys
@@ -187,6 +187,49 @@ async def get_server_tools(
         tools=[McpToolInfo(**t) for t in tools],
         fetched_at=row.updated_at if row else None,
     )
+
+
+class McpAskDecision(BaseModel):
+    verdict: Literal["allow", "deny"]
+
+
+class McpPendingAsk(BaseModel):
+    ask_id: str
+    mcp_key: str
+    tool: str
+
+
+@router.get("/ask/pending", response_model=list[McpPendingAsk])
+async def pending_asks(
+    current_user: CurrentUser,
+    session_id: uuid.UUID = Query(...),
+) -> list[McpPendingAsk]:
+    """Live tool-permission asks held for this user on one conversation.
+
+    Rehydrates the inline ask banners after a page reload — the WS ``mcp_tool_ask`` frame
+    is fire-and-forget, so a tab that (re)connects mid-hold would otherwise never see it.
+    """
+    return [
+        McpPendingAsk(ask_id=a.ask_id, mcp_key=a.server_key, tool=a.tool)
+        for a in mcp_ask_store.pending_for(user_id=str(current_user.id), session_id=str(session_id))
+    ]
+
+
+@router.post("/ask/{ask_id}")
+async def decide_ask(
+    ask_id: str,
+    decision: McpAskDecision,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Resolve a held tool-permission ask (the proxy is parked on its Future).
+
+    404 covers unknown, expired (the proxy's timeout already denied it), already-decided,
+    AND another user's ask — indistinguishable on purpose, so ask_ids can't be probed.
+    """
+    ok = mcp_ask_store.resolve(ask_id, decision.verdict, user_id=str(current_user.id))
+    if not ok:
+        raise HTTPException(status_code=404, detail="Ask not found or already resolved")
+    return {"status": "ok"}
 
 
 @router.post("/{key}/auth/start", response_model=AuthStartResponse)

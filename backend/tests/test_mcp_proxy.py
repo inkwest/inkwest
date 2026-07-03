@@ -536,3 +536,205 @@ async def test_non_tool_call_bypasses_policy_and_forwards() -> None:
     finally:
         for p in ps:
             p.stop()
+
+
+# ---- runtime ask gate (P6) --------------------------------------------------- //
+from app.services import mcp_ask_store  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clean_ask_store():
+    mcp_ask_store._asks.clear()
+    yield
+    mcp_ask_store._asks.clear()
+
+
+def _ask_send_mock(decide: str | None = None):
+    """A send_to_user_in_session stub reaching 1 socket; optionally resolves the ask
+    (as the decision endpoint would) the moment the mcp_tool_ask frame goes out."""
+    frames: list[dict] = []
+
+    async def send(session_id: str, user_id: str, payload: dict) -> int:
+        frames.append(payload)
+        if decide is not None and payload["type"] == "mcp_tool_ask":
+            assert mcp_ask_store.resolve(payload["ask_id"], decide, user_id=str(_U))
+        return 1
+
+    return send, frames
+
+
+@pytest.mark.asyncio
+async def test_ask_verdict_allow_decision_forwards() -> None:
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    send, frames = _ask_send_mock(decide="allow")
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="ask"))
+    )
+    ps.append(patch("app.api.routes.chat.send_to_user_in_session", send))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"q"}}',
+            )
+        assert resp.status_code == 200
+        assert resp.content == b'{"ok":true}'
+        assert called["n"] == 1
+        # Prompt frame then a resolution frame (clears the banner on the user's other tabs).
+        assert [f["type"] for f in frames] == ["mcp_tool_ask", "mcp_tool_ask_resolved"]
+        assert frames[0]["mcp_key"] == "notion"
+        assert frames[0]["tool"] == "q"
+        assert frames[1]["verdict"] == "allow"
+        assert mcp_ask_store._asks == {}  # discarded after the hold
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_ask_verdict_deny_decision_errors_without_forwarding() -> None:
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    send, frames = _ask_send_mock(decide="deny")
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="ask"))
+    )
+    ps.append(patch("app.api.routes.chat.send_to_user_in_session", send))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"q"}}',
+            )
+        body = resp.json()
+        assert body["error"]["code"] == _mp._TOOL_DENIED_CODE
+        assert body["id"] == 7
+        assert called["n"] == 0
+        assert frames[1] == {
+            "type": "mcp_tool_ask_resolved",
+            "ask_id": frames[0]["ask_id"],
+            "verdict": "deny",
+        }
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_ask_timeout_denies(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    send, frames = _ask_send_mock(decide=None)  # nobody ever answers
+    monkeypatch.setattr(mcp_ask_store, "ASK_TIMEOUT_SECONDS", 0.01)
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="ask"))
+    )
+    ps.append(patch("app.api.routes.chat.send_to_user_in_session", send))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"q"}}',
+            )
+        assert resp.json()["error"]["code"] == _mp._TOOL_DENIED_CODE
+        assert called["n"] == 0
+        assert frames[1]["verdict"] == "deny"
+        assert mcp_ask_store._asks == {}
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_ask_with_no_ws_client_denies_immediately() -> None:
+    """Locked decision: no live tab to ask -> deny without burning the 60s hold."""
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    frames: list[dict] = []
+
+    async def send_nobody(session_id: str, user_id: str, payload: dict) -> int:
+        frames.append(payload)
+        return 0
+
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="ask"))
+    )
+    ps.append(patch("app.api.routes.chat.send_to_user_in_session", send_nobody))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"q"}}',
+            )
+        assert resp.json()["error"]["code"] == _mp._TOOL_DENIED_CODE
+        assert called["n"] == 0
+        assert frames[-1]["type"] == "mcp_tool_ask_resolved"  # banner still cleared
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_ask_allowed_but_client_gone_does_not_forward() -> None:
+    """The sandbox client's own MCP timeout can fire during the hold; a late Allow must
+    not execute the tool upstream behind the model's back (double-execution risk)."""
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    send, frames = _ask_send_mock(decide="allow")
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="ask"))
+    )
+    ps.append(patch("app.api.routes.chat.send_to_user_in_session", send))
+    ps.append(patch("fastapi.Request.is_disconnected", AsyncMock(return_value=True)))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"q"}}',
+            )
+        assert resp.json()["error"]["code"] == _mp._TOOL_DENIED_CODE
+        assert called["n"] == 0  # allowed too late: upstream never invoked
+    finally:
+        for p in ps:
+            p.stop()

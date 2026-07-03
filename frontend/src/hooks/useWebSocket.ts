@@ -197,6 +197,22 @@ export function useWebSocket(sessionId: string) {
         break;
       }
 
+      case 'mcp_tool_ask':
+        // The proxy is holding a tool call on this user's decision — stack an ask banner.
+        if (event.ask_id && event.mcp_key && event.tool) {
+          useMcpStore.getState().addAsk({
+            askId: event.ask_id,
+            mcpKey: event.mcp_key,
+            tool: event.tool,
+          });
+        }
+        break;
+
+      case 'mcp_tool_ask_resolved':
+        // Decided on another tab, timed out, or denied for lack of a client — clear it.
+        if (event.ask_id) useMcpStore.getState().removeAsk(event.ask_id);
+        break;
+
       case 'presence':
         setPresence(event.users || []);
         break;

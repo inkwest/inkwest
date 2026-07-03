@@ -6,10 +6,23 @@ import { create } from 'zustand';
  * in-conversation reconnect banner (McpInlineNotice). Global (not per-session): the grant
  * is per-user, and the banner clears once the key reconnects.
  */
+// A held MCP tool call awaiting the user's allow/deny (runtime "ask" gate). Fed by the
+// targeted `mcp_tool_ask` WS frame plus the pending-asks rehydrate fetch on mount; drives
+// the stacked McpAskNotice banners. Server-side each ask times out to deny after 60s.
+export interface PendingMcpAsk {
+  askId: string;
+  mcpKey: string;
+  tool: string;
+}
+
 interface McpState {
   authRequired: string[];
   flagAuthRequired: (key: string) => void;
   clearAuthRequired: (key: string) => void;
+  pendingAsks: PendingMcpAsk[];
+  addAsk: (ask: PendingMcpAsk) => void;
+  removeAsk: (askId: string) => void;
+  setAsks: (asks: PendingMcpAsk[]) => void;
   // Enabled MCP server keys for the conversation whose composer is currently mounted,
   // mirrored from McpPanel (its load/apply/disconnect writes) so other surfaces — e.g.
   // ChatInput's "no connector activated" warning — can reactively tell whether the
@@ -29,6 +42,14 @@ export const useMcpStore = create<McpState>((set) => ({
     set((s) => (s.authRequired.includes(key) ? s : { authRequired: [...s.authRequired, key] })),
   clearAuthRequired: (key) =>
     set((s) => ({ authRequired: s.authRequired.filter((k) => k !== key) })),
+  pendingAsks: [],
+  addAsk: (ask) =>
+    set((s) =>
+      s.pendingAsks.some((a) => a.askId === ask.askId) ? s : { pendingAsks: [...s.pendingAsks, ask] }
+    ),
+  removeAsk: (askId) =>
+    set((s) => ({ pendingAsks: s.pendingAsks.filter((a) => a.askId !== askId) })),
+  setAsks: (asks) => set({ pendingAsks: asks }),
   enabledBySession: {},
   // Replace the whole map (not merge): only one conversation's composer is mounted at a
   // time, so a single entry is all that's ever read — this bounds the map instead of

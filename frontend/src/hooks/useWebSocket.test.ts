@@ -236,4 +236,36 @@ describe('useWebSocket', () => {
     expect(useChatStore.getState().isStreaming).toBe(false);
     spy.mockRestore();
   });
+
+  it('mcp_tool_ask stacks a pending ask; mcp_tool_ask_resolved clears it', async () => {
+    const { useMcpStore } = await import('@/store/mcp');
+    useMcpStore.setState({ pendingAsks: [] });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[0];
+
+    act(() =>
+      ws.emit({ type: 'mcp_tool_ask', ask_id: 'a1', mcp_key: 'notion', tool: 'search' })
+    );
+    expect(useMcpStore.getState().pendingAsks).toEqual([
+      { askId: 'a1', mcpKey: 'notion', tool: 'search' },
+    ]);
+
+    // Duplicate frame (reconnect replay) must not double the banner.
+    act(() =>
+      ws.emit({ type: 'mcp_tool_ask', ask_id: 'a1', mcp_key: 'notion', tool: 'search' })
+    );
+    expect(useMcpStore.getState().pendingAsks).toHaveLength(1);
+
+    act(() => ws.emit({ type: 'mcp_tool_ask_resolved', ask_id: 'a1', verdict: 'deny' }));
+    expect(useMcpStore.getState().pendingAsks).toEqual([]);
+  });
+
+  it('mcp_tool_ask without required fields is ignored', async () => {
+    const { useMcpStore } = await import('@/store/mcp');
+    useMcpStore.setState({ pendingAsks: [] });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[0];
+    act(() => ws.emit({ type: 'mcp_tool_ask', ask_id: 'a1' })); // no key/tool
+    expect(useMcpStore.getState().pendingAsks).toEqual([]);
+  });
 });

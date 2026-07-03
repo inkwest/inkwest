@@ -752,6 +752,26 @@ export async function setSessionMcpPolicy(
   });
 }
 
+// Runtime "ask" gate (P6): a held tool call awaiting the user's allow/deny.
+export interface McpPendingAsk {
+  ask_id: string;
+  mcp_key: string;
+  tool: string;
+}
+
+/** Live asks held for the current user on one conversation (banner rehydrate on reload). */
+export async function getPendingMcpAsks(sessionId: string): Promise<McpPendingAsk[]> {
+  return fetchAPI(`/api/mcp/ask/pending?session_id=${encodeURIComponent(sessionId)}`);
+}
+
+/** Resolve a held ask. 404 = expired / already decided (the banner should just clear). */
+export async function decideMcpAsk(askId: string, verdict: 'allow' | 'deny'): Promise<void> {
+  await fetchAPI(`/api/mcp/ask/${encodeURIComponent(askId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ verdict }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Current-user self-service: preferences + personal skills.
 // All scoped to the authenticated user — no admin role.

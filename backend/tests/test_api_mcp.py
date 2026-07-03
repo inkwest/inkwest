@@ -509,3 +509,69 @@ async def test_set_my_mcp_policy_unknown_server_400(authenticated_client: AsyncC
         )
     assert resp.status_code == 400
     setter.assert_not_awaited()
+
+
+# ---- runtime ask decision + rehydrate (P6) ----------------------------------- //
+import uuid as _uuid  # noqa: E402
+
+from app.services import mcp_ask_store  # noqa: E402
+
+_ASK_UID = "00000000-0000-4000-8000-000000000001"  # conftest mock_user id
+_ASK_SID = "00000000-0000-4000-8000-000000000002"
+
+
+@pytest.fixture(autouse=True)
+def _clean_ask_store():
+    mcp_ask_store._asks.clear()
+    yield
+    mcp_ask_store._asks.clear()
+
+
+@pytest.mark.asyncio
+async def test_decide_ask_allow_resolves_future(authenticated_client) -> None:
+    ask = mcp_ask_store.create(
+        user_id=_ASK_UID, session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    resp = await authenticated_client.post(f"/api/mcp/ask/{ask.ask_id}", json={"verdict": "allow"})
+    assert resp.status_code == 200
+    assert await ask.future == "allow"
+
+
+@pytest.mark.asyncio
+async def test_decide_ask_unknown_or_foreign_is_404(authenticated_client) -> None:
+    foreign = mcp_ask_store.create(
+        user_id=str(_uuid.uuid4()), session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    unknown = await authenticated_client.post("/api/mcp/ask/nope", json={"verdict": "deny"})
+    other = await authenticated_client.post(
+        f"/api/mcp/ask/{foreign.ask_id}", json={"verdict": "deny"}
+    )
+    assert unknown.status_code == 404
+    assert other.status_code == 404  # indistinguishable from unknown: no ask_id probing
+    assert not foreign.future.done()
+
+
+@pytest.mark.asyncio
+async def test_decide_ask_bad_verdict_is_422(authenticated_client) -> None:
+    ask = mcp_ask_store.create(
+        user_id=_ASK_UID, session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    resp = await authenticated_client.post(f"/api/mcp/ask/{ask.ask_id}", json={"verdict": "maybe"})
+    assert resp.status_code == 422
+    assert not ask.future.done()
+
+
+@pytest.mark.asyncio
+async def test_pending_asks_scoped_to_user_and_session(authenticated_client) -> None:
+    mine = mcp_ask_store.create(
+        user_id=_ASK_UID, session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    mcp_ask_store.create(  # other user, same session — must not leak
+        user_id=str(_uuid.uuid4()), session_id=_ASK_SID, server_key="notion", tool="x"
+    )
+    mcp_ask_store.create(  # same user, other session
+        user_id=_ASK_UID, session_id=str(_uuid.uuid4()), server_key="notion", tool="y"
+    )
+    resp = await authenticated_client.get(f"/api/mcp/ask/pending?session_id={_ASK_SID}")
+    assert resp.status_code == 200
+    assert resp.json() == [{"ask_id": mine.ask_id, "mcp_key": "notion", "tool": "search"}]

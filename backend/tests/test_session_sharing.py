@@ -645,6 +645,41 @@ async def test_presence_roster_dedupes_by_user() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_to_user_in_session_targets_only_that_user() -> None:
+    """The MCP tool-ask prompt must reach only the asking user's tabs — never a peer's
+    or a guest's (guests carry synthetic guest:* presence ids)."""
+    from app.api.routes.chat import Presence, send_to_user_in_session, session_presence
+
+    sid = "sess-ask"
+    tab_mine = MagicMock()
+    tab_mine.send_json = AsyncMock()
+    tab_mine_dead = MagicMock()
+    tab_mine_dead.send_json = AsyncMock(side_effect=RuntimeError("closed"))
+    tab_peer = MagicMock()
+    tab_peer.send_json = AsyncMock()
+    tab_guest = MagicMock()
+    tab_guest.send_json = AsyncMock()
+    session_presence[sid] = {
+        tab_mine: Presence("me", "Me"),
+        tab_mine_dead: Presence("me", "Me"),
+        tab_peer: Presence("peer", "Peer"),
+        tab_guest: Presence("guest:1", "Guest"),
+    }
+    try:
+        sent = await send_to_user_in_session(sid, "me", {"type": "mcp_tool_ask"})
+    finally:
+        session_presence.pop(sid, None)
+
+    assert sent == 1  # dead socket skipped, still counted only when the send succeeded
+    tab_mine.send_json.assert_awaited_once()
+    tab_peer.send_json.assert_not_called()
+    tab_guest.send_json.assert_not_called()
+
+    # No socket at all for the user → 0, the proxy's immediate-deny signal.
+    assert await send_to_user_in_session("no-such-session", "me", {}) == 0
+
+
+@pytest.mark.asyncio
 async def test_close_user_session_connections_targets_one_user() -> None:
     from app.api.routes.chat import Presence, close_user_session_connections, session_presence
 
