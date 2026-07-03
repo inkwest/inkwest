@@ -102,6 +102,8 @@ export interface Session {
   owner_display_name?: string | null;
   /** How many people + active links this conversation is shared with (owner view). */
   share_count?: number;
+  /** Timestamp of the newest message; drives the "last activity" sort. Null when empty. */
+  last_message_at?: string | null;
 }
 
 // Conversation sharing

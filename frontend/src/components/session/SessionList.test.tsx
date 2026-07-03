@@ -38,6 +38,13 @@ describe('SessionList', () => {
       error: null,
       searchResults: null,
       isSearching: false,
+      // Start each test from the default view so sort state doesn't leak between tests.
+      // Default = all sharing buckets selected (shows everything, boxes checked).
+      sortMode: 'activity',
+      sortOrder: 'desc',
+      filters: ['shared_with_me', 'shared_by_me', 'private'],
+      dateRange: 'all',
+      total: 0,
       fetchSessions: noop,
       searchGlobal: noop,
       clearSearch: noop,
@@ -128,6 +135,67 @@ describe('SessionList', () => {
     expect(screen.getByPlaceholderText(/search all sessions/i)).toBeInTheDocument();
   });
 
+  it('reset button is disabled in the default view, enabled + wired once changed', () => {
+    const resetView = vi.fn();
+    useSessionsStore.setState({ isLoading: false, sessions: [], resetView });
+    renderWithRouter();
+    fireEvent.click(screen.getByRole('button', { name: /sort and filter/i }));
+    // Default view → disabled, clicking does nothing.
+    const reset = screen.getByRole('button', { name: /reset to default/i });
+    expect(reset).toBeDisabled();
+    // A non-default sort enables it.
+    act(() => {
+      useSessionsStore.setState({ sortMode: 'manual' });
+    });
+    fireEvent.click(screen.getByRole('button', { name: /reset to default/i }));
+    expect(resetView).toHaveBeenCalled();
+  });
+
+  it('hides the sort/filter dot in the default view and shows it after a change', () => {
+    useSessionsStore.setState({
+      isLoading: false,
+      sessions: [],
+      sortMode: 'activity',
+      sortOrder: 'desc',
+      filters: ['shared_with_me', 'shared_by_me', 'private'],
+      dateRange: 'all',
+    });
+    renderWithRouter();
+    // Default view (latest activity, desc, all buckets) → no dot.
+    expect(screen.queryByTestId('sort-active-dot')).not.toBeInTheDocument();
+    act(() => {
+      useSessionsStore.setState({ sortMode: 'manual' });
+    });
+    expect(screen.getByTestId('sort-active-dot')).toBeInTheDocument();
+  });
+
+  it('keeps sort + filter options behind the popover and drives the store', () => {
+    const setSortMode = vi.fn();
+    const toggleFilter = vi.fn();
+    useSessionsStore.setState({
+      isLoading: false,
+      sessions: [
+        {
+          id: 's1',
+          cluster_id: 'c1',
+          title: 'A',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+      setSortMode,
+      toggleFilter,
+    });
+    renderWithRouter();
+    // Collapsed by default — options aren't in the DOM until the icon is clicked.
+    expect(screen.queryByText('Last activity')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /sort and filter/i }));
+    fireEvent.click(screen.getByText('Last activity'));
+    expect(setSortMode).toHaveBeenCalledWith('activity');
+    fireEvent.click(screen.getByRole('checkbox', { name: /shared with me/i }));
+    expect(toggleFilter).toHaveBeenCalledWith('shared_with_me');
+  });
+
   it('deep-links a matched message result to the conversation + message anchor', () => {
     useSessionsStore.setState({
       isLoading: false,
@@ -175,6 +243,8 @@ describe('SessionList', () => {
       moveSession.mockClear();
       persistSessionOrder.mockClear();
       useSessionsStore.setState({
+        // Drag reorder is only wired in manual mode (the default is now 'activity').
+        sortMode: 'manual',
         sessions: [session('s1'), session('s2'), session('s3')],
         moveSession,
         persistSessionOrder,

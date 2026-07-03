@@ -415,6 +415,9 @@ class SessionResponse(SessionBase):
     # Timestamps
     created_at: datetime
     updated_at: datetime
+    # Newest message timestamp — drives the "last activity" sort. None when the session
+    # has no messages yet. Populated by the list route, not by model_validate.
+    last_message_at: datetime | None = None
 
 
 class SessionWithMessages(SessionResponse):

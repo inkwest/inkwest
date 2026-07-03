@@ -14,7 +14,7 @@ async def test_list_sessions_empty(authenticated_client: AsyncClient, mock_db: A
     count_result = MagicMock()
     count_result.scalar.return_value = 0
     list_result = MagicMock()
-    list_result.scalars.return_value.all.return_value = []
+    list_result.all.return_value = []
     mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
 
     resp = await authenticated_client.get("/api/sessions")
@@ -33,7 +33,7 @@ async def test_list_sessions_returns_items(
     count_result = MagicMock()
     count_result.scalar.return_value = 1
     list_result = MagicMock()
-    list_result.scalars.return_value.all.return_value = [mock_session_obj]
+    list_result.all.return_value = [(mock_session_obj, None)]
     share_agg = MagicMock()
     share_agg.all.return_value = []  # owned session: no shares / links
     mock_db.execute = AsyncMock(side_effect=[count_result, list_result, share_agg, share_agg])
@@ -57,7 +57,7 @@ async def test_list_sessions_owned_share_count(
     count_result = MagicMock()
     count_result.scalar.return_value = 1
     list_result = MagicMock()
-    list_result.scalars.return_value.all.return_value = [mock_session_obj]
+    list_result.all.return_value = [(mock_session_obj, None)]
     people_agg = MagicMock()
     people_agg.all.return_value = [(mock_session_obj.id, 2)]  # 2 invited/accepted
     link_agg = MagicMock()
@@ -72,13 +72,118 @@ async def test_list_sessions_owned_share_count(
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_populates_last_message_at(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+) -> None:
+    """The list surfaces the newest message time (joined MAX) so the client can sort
+    by activity; None when the session has no messages."""
+    count_result = MagicMock()
+    count_result.scalar.return_value = 1
+    list_result = MagicMock()
+    list_result.all.return_value = [(mock_session_obj, datetime(2026, 1, 2, 3, 4, 5))]
+    share_agg = MagicMock()
+    share_agg.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result, share_agg, share_agg])
+
+    resp = await authenticated_client.get("/api/sessions?sort=activity&order=desc")
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["last_message_at"].startswith("2026-01-02T03:04:05")
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_activity_sort_orders_by_last_message(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """sort=activity orders by coalesce(last_message_at, created_at)."""
+    count_result = MagicMock()
+    count_result.scalar.return_value = 0
+    list_result = MagicMock()
+    list_result.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
+
+    resp = await authenticated_client.get("/api/sessions?sort=activity&order=asc")
+    assert resp.status_code == 200
+    list_query = str(mock_db.execute.call_args_list[1].args[0]).lower()
+    assert "coalesce" in list_query
+    assert "max(" in list_query
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_shared_by_me_filter_builds_exists(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """share=shared_by_me narrows to owned sessions that have a participant or link."""
+    count_result = MagicMock()
+    count_result.scalar.return_value = 0
+    list_result = MagicMock()
+    list_result.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
+
+    resp = await authenticated_client.get("/api/sessions?share=shared_by_me")
+    assert resp.status_code == 200
+    # The filter is applied before the count so pagination reflects it.
+    count_query = str(mock_db.execute.call_args_list[0].args[0]).lower()
+    assert "exists" in count_query
+    assert "session_shares" in count_query
+    assert "session_share_links" in count_query
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_rejects_unknown_share_filter(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    resp = await authenticated_client.get("/api/sessions?share=bogus")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_activity_after_filters_by_cutoff(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """activity_after keeps only sessions active at/after the cutoff, before the count."""
+    count_result = MagicMock()
+    count_result.scalar.return_value = 0
+    list_result = MagicMock()
+    list_result.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
+
+    resp = await authenticated_client.get("/api/sessions?activity_after=2026-07-01T00:00:00Z")
+    assert resp.status_code == 200
+    count_query = str(mock_db.execute.call_args_list[0].args[0]).lower()
+    assert "coalesce" in count_query
+    assert ">=" in count_query
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_custom_range_bounds_both_ends(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """A custom from–to window applies both activity_after (>=) and activity_before (<=)."""
+    count_result = MagicMock()
+    count_result.scalar.return_value = 0
+    list_result = MagicMock()
+    list_result.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
+
+    resp = await authenticated_client.get(
+        "/api/sessions?activity_after=2026-06-01T00:00:00Z&activity_before=2026-06-30T23:59:59Z"
+    )
+    assert resp.status_code == 200
+    count_query = str(mock_db.execute.call_args_list[0].args[0]).lower()
+    assert ">=" in count_query
+    assert "<=" in count_query
+
+
+@pytest.mark.asyncio
 async def test_list_sessions_excludes_sessions_without_messages(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
     count_result = MagicMock()
     count_result.scalar.return_value = 0
     list_result = MagicMock()
-    list_result.scalars.return_value.all.return_value = []
+    list_result.all.return_value = []
     mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
 
     resp = await authenticated_client.get("/api/sessions")
@@ -98,7 +203,7 @@ async def test_list_sessions_search_is_word_independent(
     count_result = MagicMock()
     count_result.scalar.return_value = 1
     list_result = MagicMock()
-    list_result.scalars.return_value.all.return_value = [mock_session_obj]
+    list_result.all.return_value = [(mock_session_obj, None)]
     share_agg = MagicMock()
     share_agg.all.return_value = []
     mock_db.execute = AsyncMock(side_effect=[count_result, list_result, share_agg, share_agg])
@@ -119,7 +224,7 @@ async def test_list_sessions_whitespace_search_matches_nothing(
     count_result = MagicMock()
     count_result.scalar.return_value = 0
     list_result = MagicMock()
-    list_result.scalars.return_value.all.return_value = []
+    list_result.all.return_value = []
     mock_db.execute = AsyncMock(side_effect=[count_result, list_result])
 
     # Whitespace-only search yields no tokens: a constant-false predicate is added so
@@ -258,9 +363,12 @@ async def test_reorder_sessions_assigns_positions_by_request_order(
     for s in (s1, s2, s3):
         s.user_id = str(mock_user.id)
 
-    result = MagicMock()
-    result.scalars.return_value.all.return_value = [s1, s2, s3]
-    mock_db.execute = AsyncMock(return_value=result)
+    owned_result = MagicMock()
+    owned_result.scalars.return_value.all.return_value = [s1, s2, s3]
+    shares_result = MagicMock()
+    shares_result.scalars.return_value.all.return_value = []  # no shared-in sessions
+    # reorder issues two selects: owned sessions, then the caller's accepted shares.
+    mock_db.execute = AsyncMock(side_effect=[owned_result, shares_result])
     mock_db.commit = AsyncMock()
 
     # Request a new top-to-bottom order: s3, s1, s2.
@@ -288,9 +396,11 @@ async def test_reorder_sessions_ignores_unowned_ids(
     owned.user_id = str(mock_user.id)
 
     # The query only returns the caller's own sessions; a foreign id is filtered out.
-    result = MagicMock()
-    result.scalars.return_value.all.return_value = [owned]
-    mock_db.execute = AsyncMock(return_value=result)
+    owned_result = MagicMock()
+    owned_result.scalars.return_value.all.return_value = [owned]
+    shares_result = MagicMock()
+    shares_result.scalars.return_value.all.return_value = []
+    mock_db.execute = AsyncMock(side_effect=[owned_result, shares_result])
     mock_db.commit = AsyncMock()
 
     foreign_id = uuid.uuid4()
@@ -303,6 +413,39 @@ async def test_reorder_sessions_ignores_unowned_ids(
     assert resp.status_code == 204
     # Owned session takes position 0 (the foreign id at index 0 is skipped).
     assert owned.position == 0
+
+
+@pytest.mark.asyncio
+async def test_reorder_sessions_positions_shared_in_via_session_share(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_user: MagicMock,
+) -> None:
+    """A shared-with-me session is repositioned on the caller's own SessionShare row,
+    interleaved with owned sessions in one contiguous 0..n sequence."""
+    owned = MagicMock()
+    owned.id = uuid.uuid4()
+    owned.user_id = str(mock_user.id)
+    share = MagicMock()  # the caller's accepted share of someone else's session
+    share.session_id = uuid.uuid4()
+
+    owned_result = MagicMock()
+    owned_result.scalars.return_value.all.return_value = [owned]
+    shares_result = MagicMock()
+    shares_result.scalars.return_value.all.return_value = [share]
+    mock_db.execute = AsyncMock(side_effect=[owned_result, shares_result])
+    mock_db.commit = AsyncMock()
+
+    # Put the shared-in session on top, owned below it.
+    with patch("app.api.routes.sessions.notify", return_value=None):
+        resp = await authenticated_client.post(
+            "/api/sessions/reorder",
+            json={"session_ids": [str(share.session_id), str(owned.id)]},
+        )
+
+    assert resp.status_code == 204
+    assert share.position == 0  # persisted on the participant's SessionShare row
+    assert owned.position == 1
 
 
 @pytest.mark.asyncio
