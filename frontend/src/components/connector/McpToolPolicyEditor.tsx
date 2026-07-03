@@ -69,23 +69,26 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     setLoading(true);
     setError(null);
     const load = async () => {
-      try {
-        const [toolsRes, globalRes, convRes] = await Promise.all([
-          getMcpServerTools(serverKey),
-          getMyMcpPolicy(),
-          scope === 'session' && sessionId
-            ? getSessionMcpPolicy(sessionId)
-            : Promise.resolve({ policies: [] as McpPolicyEntry[] }),
-        ]);
-        if (cancelled) return;
-        setTools(toolsRes.tools);
-        setGlobalMap(toMap(globalRes.policies, serverKey));
-        setConvMap(toMap(convRes.policies, serverKey));
-      } catch {
-        if (!cancelled) setError('Failed to load tools or permissions');
-      } finally {
-        if (!cancelled) setLoading(false);
+      // Settle independently: a failed tool enumeration must not blank the whole editor — the
+      // policy still loads and the server-default control still renders.
+      const [toolsRes, globalRes, convRes] = await Promise.allSettled([
+        getMcpServerTools(serverKey),
+        getMyMcpPolicy(),
+        scope === 'session' && sessionId
+          ? getSessionMcpPolicy(sessionId)
+          : Promise.resolve({ policies: [] as McpPolicyEntry[] }),
+      ]);
+      if (cancelled) return;
+      if (toolsRes.status === 'fulfilled') {
+        setTools(toolsRes.value.tools);
+      } else {
+        // Enumeration failed (backend 500 — an app error, deliberately not the retried 502+
+        // class). Surface it; the server-default control still renders below.
+        setError("Couldn't list this server's tools (it may be unreachable or not connected).");
       }
+      if (globalRes.status === 'fulfilled') setGlobalMap(toMap(globalRes.value.policies, serverKey));
+      if (convRes.status === 'fulfilled') setConvMap(toMap(convRes.value.policies, serverKey));
+      setLoading(false);
     };
     void load();
     return () => {

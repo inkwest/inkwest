@@ -170,7 +170,14 @@ async def get_server_tools(
                 tools=[McpToolInfo(**t) for t in cached.tools],
                 fetched_at=cached.updated_at,
             )
-        raise HTTPException(status_code=502, detail="Failed to enumerate MCP tools") from e
+        # No cache and enumeration failed (server unreachable / not connected / cold). Raise 500
+        # — a genuine application error the UI surfaces as such. Deliberately NOT 502/503/504:
+        # those are the gateway/backend-unavailable class the client retries (~12x) and shows as
+        # "backend reconnecting", which would both flood an unreachable server and mislead.
+        raise HTTPException(
+            status_code=500,
+            detail="Couldn't list this server's tools (it may be unreachable or not connected).",
+        ) from e
     row = await mcp_tools.get_cached_tools(db, key)
     return McpServerToolsResponse(
         key=key,

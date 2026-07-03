@@ -341,7 +341,12 @@ async def test_get_tools_unknown_key_404(authenticated_client: AsyncClient) -> N
 
 
 @pytest.mark.asyncio
-async def test_get_tools_enum_failure_no_cache_502(authenticated_client: AsyncClient) -> None:
+async def test_get_tools_enum_failure_no_cache_returns_500_not_retryable(
+    authenticated_client: AsyncClient,
+) -> None:
+    # An enumeration failure with no cache must be a 500 (application error the UI shows as
+    # such), NOT a 502/503/504 — those are the gateway class the client retries ~12x and
+    # renders as "backend unavailable", flooding an unreachable server and misleading the user.
     from app.services.mcp_tools import McpEnumError
 
     with (
@@ -354,7 +359,8 @@ async def test_get_tools_enum_failure_no_cache_502(authenticated_client: AsyncCl
         ),
     ):
         resp = await authenticated_client.get("/api/mcp/notion/tools")
-    assert resp.status_code == 502
+    assert resp.status_code == 500
+    assert resp.status_code not in (502, 503, 504)  # not the retried backend-unavailable class
 
 
 @pytest.mark.asyncio

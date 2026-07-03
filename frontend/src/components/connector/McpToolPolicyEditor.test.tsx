@@ -88,6 +88,16 @@ describe('McpToolPolicyEditor — session scope', () => {
     expect(select.value).toBe('ask');
   });
 
+  it('degrades gracefully when enumeration fails: shows an error but still renders the default', async () => {
+    // A 500 from /tools rejects; the policy load must still succeed and the '*' default control render.
+    mGetTools.mockRejectedValue(new Error('500'));
+    mGetGlobal.mockResolvedValue({ policies: [] });
+    render(<McpToolPolicyEditor serverKey="k" scope="global" />);
+    expect(await screen.findByText(/couldn't list this server's tools/i)).toBeInTheDocument();
+    // The server-default row still renders so the user can set a default despite no tool list.
+    expect(screen.getByLabelText('Permission for server default')).toBeInTheDocument();
+  });
+
   it('locks every dropdown while a save is in flight (no lost-update race)', async () => {
     mGetTools.mockResolvedValue(tools('query', 'search'));
     let resolveSave: (v: { policies: [] }) => void = () => {};
