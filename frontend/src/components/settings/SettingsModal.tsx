@@ -4,11 +4,21 @@ import { Button, Modal } from '@/components/ui';
 import { SkillsManager } from '@/components/skills/SkillsManager';
 import { McpPolicySettingsTab } from '@/components/settings/McpPolicySettingsTab';
 import { usePreferencesStore } from '@/store/preferences';
+import { SETTINGS_TABS, type SettingsTab } from '@/store/settingsUi';
 import { useSettingsStore } from '@/store/settings';
 import { getSkills } from '@/services/api';
 import type { ConfigExport, Skill } from '@/types/api';
 
-type Tab = 'display' | 'skills' | 'mcp' | 'io';
+// Tab keys come from the canonical SETTINGS_TABS in settingsUi.ts; only the
+// human labels live here — Record<SettingsTab, …> turns a missed label into a
+// type error when a tab is added to the canonical list.
+type Tab = SettingsTab;
+const TAB_LABELS: Record<SettingsTab, string> = {
+  display: 'Display',
+  skills: 'Skills',
+  mcp: 'MCP tools',
+  io: 'Import / Export',
+};
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -45,12 +55,7 @@ export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: Setti
       bodyClassName={tab === 'mcp' ? 'flex min-h-0 flex-col overflow-hidden' : undefined}
     >
       <div className="flex shrink-0 gap-2 border-b border-gray-700 -mt-2 mb-4">
-        {([
-          ['display', 'Display'],
-          ['skills', 'Skills'],
-          ['mcp', 'MCP tools'],
-          ['io', 'Import / Export'],
-        ] as [Tab, string][]).map(([key, label]) => (
+        {SETTINGS_TABS.map((key) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -60,7 +65,7 @@ export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: Setti
                 : 'border-transparent text-gray-400 hover:text-gray-200'
             }`}
           >
-            {label}
+            {TAB_LABELS[key]}
           </button>
         ))}
       </div>

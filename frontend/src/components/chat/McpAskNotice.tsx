@@ -1,40 +1,54 @@
 import { useEffect, useRef, useState } from 'react';
-import { decideMcpAsk, getPendingMcpAsks } from '@/services/api';
+import { getPendingMcpAsks } from '@/services/api';
+import { useChatStore } from '@/store/chat';
 import { useMcpStore } from '@/store/mcp';
 
 /**
- * Stacked in-conversation banners for MCP tool calls the proxy is holding on this user's
- * decision (`mcp_tool_ask` targeted WS frames; 60s server-side timeout → deny). Mirrors
- * McpInlineNotice. Shows the tool name only — full tool input is already visible in the
- * transcript's tool card, so the banner deliberately carries no args.
+ * FALLBACK surface for MCP tool calls the proxy is holding on this user's decision
+ * (`mcp_tool_ask` targeted WS frames; 60s server-side timeout → deny). The primary
+ * decision UI is the in-bubble bar on the matching transcript ToolCallCard — this
+ * banner stack only backstops asks no visible card has claimed (e.g. after a
+ * mid-hold reload). Shows the tool name only — full tool input is already visible
+ * in the transcript's tool card, so the banner deliberately carries no args.
  *
- * On mount / session switch it rehydrates from GET /api/mcp/ask/pending: the WS frame is
- * fire-and-forget, so a tab that reloads mid-hold would otherwise never see the banner.
+ * Rehydrates from GET /api/mcp/ask/pending on mount, on session switch, and on every
+ * chat-WS reconnect: the WS frame is fire-and-forget, so a tab that reloads — or
+ * whose socket was down when the ask was minted — would otherwise never see it.
  */
 export function McpAskNotice({ sessionId }: { sessionId?: string }) {
   const pendingAsks = useMcpStore((s) => s.pendingAsks);
   const claimedAsks = useMcpStore((s) => s.claimedAsks);
-  const removeAsk = useMcpStore((s) => s.removeAsk);
+  const decideAsk = useMcpStore((s) => s.decideAsk);
   const setAsks = useMcpStore((s) => s.setAsks);
+  // Chat-socket state: an ask minted while the socket was down never sent its frame
+  // to this tab, so every reconnect (rising edge) must rehydrate too — otherwise the
+  // hold silently times out to deny with no prompt ever shown. The effect below also
+  // re-runs on the falling edge but skips the fetch (pointless during an outage).
+  const wsConnected = useChatStore((s) => s.isConnected);
   // Ask ids with an in-flight decision POST, so a double-click can't fire twice.
   const [deciding, setDeciding] = useState<Set<string>>(new Set());
 
   // The store is global but asks are per-conversation: clear it when the session actually
   // CHANGES (not on first mount — a WS frame may already have landed), then rehydrate from
   // the server and MERGE (a live frame can race the fetch; addAsk dedups by ask_id).
+  // Re-runs on WS reconnect (wsConnected dep) to pick up asks missed during the blip.
   const prevSession = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (prevSession.current !== undefined && prevSession.current !== sessionId) {
       setAsks([]);
     }
     prevSession.current = sessionId;
-    if (!sessionId) return;
+    // Fetch only while the socket is up: a falling-edge run would just burn the
+    // HTTP retry budget mid-outage; the rising edge re-runs this effect anyway.
+    if (!sessionId || !wsConnected) return;
     let stale = false;
     getPendingMcpAsks(sessionId)
       .then((asks) => {
         if (stale) return;
         const add = useMcpStore.getState().addAsk;
-        asks.forEach((a) => add({ askId: a.ask_id, mcpKey: a.mcp_key, tool: a.tool }));
+        asks.forEach((a) =>
+          add({ askId: a.ask_id, mcpKey: a.mcp_key, tool: a.tool, sessionId: a.session_id }),
+        );
       })
       .catch(() => {
         /* rehydrate is best-effort; live WS frames still arrive */
@@ -42,23 +56,20 @@ export function McpAskNotice({ sessionId }: { sessionId?: string }) {
     return () => {
       stale = true;
     };
-  }, [sessionId, setAsks]);
+  }, [sessionId, setAsks, wsConnected]);
 
   // Asks claimed by a transcript tool card render Allow/Deny in the bubble itself; the
   // banner only backstops asks with no visible card (e.g. after a mid-hold reload).
   const visibleAsks = pendingAsks.filter((a) => !claimedAsks[a.askId]);
   if (visibleAsks.length === 0) return null;
 
+  // The shared store action owns the 404/timeout semantics (and removes the ask).
   const decide = async (askId: string, verdict: 'allow' | 'deny') => {
     if (deciding.has(askId)) return;
     setDeciding((s) => new Set(s).add(askId));
     try {
-      await decideMcpAsk(askId, verdict);
-    } catch {
-      // 404 = already resolved/timed out; anything else — the hold will time out to
-      // deny on its own. Either way the banner is dead weight now.
+      await decideAsk(askId, verdict);
     } finally {
-      removeAsk(askId);
       setDeciding((s) => {
         const next = new Set(s);
         next.delete(askId);

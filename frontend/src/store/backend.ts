@@ -17,7 +17,7 @@ import { create } from 'zustand';
 // broken server-side. Unlike the retry/unavailable machinery these must be
 // SURFACED, not absorbed — a caller's best-effort `catch {}` otherwise hides a
 // real backend bug (e.g. a missed migration 500ing every poll) indefinitely.
-export interface ServerErrorEntry {
+interface ServerErrorEntry {
   status: number;
   message: string;
   count: number;
@@ -41,9 +41,17 @@ interface BackendState {
   markGaveUp: () => void;
   // A request got a 5xx from the app itself — record it for the banner.
   reportServerError: (key: string, status: number, message: string) => void;
+  // The same endpoint answered fine again (deploy finished, bug fixed): self-heal
+  // its strip entry instead of leaving a stale red alert until manual dismiss.
+  clearServerError: (key: string) => void;
   // User acknowledged the errors; a NEW failure re-surfaces the strip.
   dismissServerErrors: () => void;
 }
+
+// Bound the strip: a systemic outage (DB down, app up) can 500 many distinct
+// endpoints; beyond this the oldest entries are evicted — the survivors plus the
+// per-key counts still tell the story without growing the store/DOM unboundedly.
+export const MAX_SERVER_ERRORS = 8;
 
 export const useBackendStore = create<BackendState>((set, get) => ({
   unavailable: false,
@@ -70,12 +78,23 @@ export const useBackendStore = create<BackendState>((set, get) => ({
   reportServerError: (key, status, message) =>
     set((s) => {
       const prev = s.serverErrors[key];
-      return {
-        serverErrors: {
-          ...s.serverErrors,
-          [key]: { status, message, count: (prev?.count ?? 0) + 1 },
-        },
+      const serverErrors = {
+        ...s.serverErrors,
+        [key]: { status, message, count: (prev?.count ?? 0) + 1 },
       };
+      // Evict oldest (insertion order) once over the cap; a repeat bump keeps its slot.
+      const keys = Object.keys(serverErrors);
+      for (const k of keys.slice(0, Math.max(0, keys.length - MAX_SERVER_ERRORS))) {
+        delete serverErrors[k];
+      }
+      return { serverErrors };
+    }),
+  clearServerError: (key) =>
+    set((s) => {
+      if (!(key in s.serverErrors)) return s; // no-op guard: don't churn subscribers
+      const serverErrors = { ...s.serverErrors };
+      delete serverErrors[key];
+      return { serverErrors };
     }),
   dismissServerErrors: () => set({ serverErrors: {} }),
 }));

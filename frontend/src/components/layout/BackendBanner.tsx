@@ -16,7 +16,9 @@ function ServerErrorStrip() {
       className="bg-red-900/60 border-b border-red-500 text-red-100 px-4 py-2 flex items-start gap-2 text-sm"
     >
       <ServerCrash className="h-4 w-4 shrink-0 mt-0.5" />
-      <div className="flex-1 min-w-0 space-y-0.5">
+      {/* Bounded: the store caps entries, and the list scrolls past ~5 rows so a
+          systemic outage can't shove the app below the fold. */}
+      <div className="flex-1 min-w-0 space-y-0.5 max-h-32 overflow-y-auto">
         {entries.map(([key, e]) => (
           <div key={key} className="truncate" title={`${key} → ${e.status}: ${e.message}`}>
             <span className="font-mono">{key}</span> → {e.status}

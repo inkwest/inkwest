@@ -11,6 +11,9 @@ import {
   getFailedMessages,
   searchGlobal,
   fetchWsTicket,
+  decideMcpAsk,
+  uploadAttachments,
+  fetchAttachmentBlob,
 } from './api';
 import { useBackendStore } from '@/store/backend';
 
@@ -390,6 +393,9 @@ describe('503 / backend-down retry', () => {
     // exhausted call doesn't leave the banner stuck on with no holder. During a
     // real outage other in-flight retriers / WS reconnects keep it up.
     expect(useBackendStore.getState().unavailable).toBe(false);
+    // A gateway status returned after exhaustion means "unreachable" (amber banner
+    // territory) — it must NOT land in the red 5xx strip.
+    expect(useBackendStore.getState().serverErrors).toEqual({});
   });
 
   it('does not call fetch when the caller signal is already aborted', async () => {
@@ -398,6 +404,62 @@ describe('503 / backend-down retry', () => {
 
     await expect(fetchWsTicket(controller.signal)).rejects.toThrow();
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('central 5xx reporting', () => {
+  beforeEach(() => {
+    useBackendStore.setState({ unavailable: false, retrying: 0, serverErrors: {} });
+  });
+
+  it('reports an app-emitted 500 keyed METHOD /path (UUIDs collapsed) before throwing', async () => {
+    mockFetch.mockReturnValueOnce(errorResponse(500));
+    await expect(getSession('123e4567-e89b-4d3c-8456-426614174000')).rejects.toThrow('error');
+    expect(useBackendStore.getState().serverErrors).toEqual({
+      'GET /api/sessions/:id': { status: 500, message: 'error', count: 1 },
+    });
+  });
+
+  it('does not report 4xx errors', async () => {
+    mockFetch.mockReturnValueOnce(errorResponse(404));
+    await expect(getClusters()).rejects.toThrow('error');
+    expect(useBackendStore.getState().serverErrors).toEqual({});
+  });
+
+  it('self-heals the strip entry when the same route succeeds again', async () => {
+    useBackendStore.getState().reportServerError('GET /api/clusters', 500, 'boom');
+    mockFetch.mockReturnValueOnce(jsonResponse([]));
+    await getClusters();
+    expect(useBackendStore.getState().serverErrors).toEqual({});
+  });
+
+  it('collapses opaque token path segments (ask ids) in the key', async () => {
+    mockFetch.mockReturnValueOnce(errorResponse(500));
+    // token_urlsafe(16) shape: 22 url-safe chars — must not mint one key per ask.
+    await expect(decideMcpAsk('Ab3dEf6hIj9kLm2nOp5qRs', 'allow')).rejects.toThrow('error');
+    expect(Object.keys(useBackendStore.getState().serverErrors)).toEqual(['POST /api/mcp/ask/:id']);
+  });
+
+  it('attachment upload mirrors the report and self-heals on the next success', async () => {
+    const sid = '123e4567-e89b-4d3c-8456-426614174000';
+    mockFetch.mockReturnValueOnce(errorResponse(500));
+    await expect(uploadAttachments(sid, [new File(['x'], 'a.txt')])).rejects.toThrow('error');
+    expect(Object.keys(useBackendStore.getState().serverErrors)).toEqual([
+      'POST /api/sessions/:id/attachments',
+    ]);
+    mockFetch.mockReturnValueOnce(jsonResponse([]));
+    await uploadAttachments(sid, [new File(['x'], 'a.txt')]);
+    expect(useBackendStore.getState().serverErrors).toEqual({});
+  });
+
+  it('attachment blob failures dedupe under a :file placeholder (no per-filename fan-out)', async () => {
+    const sid = '123e4567-e89b-4d3c-8456-426614174000';
+    mockFetch.mockReturnValue(errorResponse(500));
+    await expect(fetchAttachmentBlob(sid, 'one.png')).rejects.toThrow('Failed to load attachment');
+    await expect(fetchAttachmentBlob(sid, 'two.png')).rejects.toThrow('Failed to load attachment');
+    const errs = useBackendStore.getState().serverErrors;
+    expect(Object.keys(errs)).toEqual(['GET /api/sessions/:id/attachments/:file']);
+    expect(errs['GET /api/sessions/:id/attachments/:file'].count).toBe(2);
   });
 });
 

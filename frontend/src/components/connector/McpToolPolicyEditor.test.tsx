@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { McpToolPolicyEditor } from './McpToolPolicyEditor';
-import { useMcpPolicyVersion } from '@/store/mcpPolicy';
+import { useMcpPolicyVersion, resetPolicySaveChainForTests } from '@/store/mcpPolicy';
 import * as api from '@/services/api';
 
 vi.mock('@/services/api', () => ({
@@ -28,6 +28,8 @@ function tools(...names: string[]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The hung-PUT optimistic test would otherwise wedge the shared save chain.
+  resetPolicySaveChainForTests();
   mGetTools.mockResolvedValue(tools('query'));
   mGetGlobal.mockResolvedValue({ policies: [] });
   mGetConv.mockResolvedValue({ policies: [] });
@@ -178,6 +180,40 @@ describe('McpToolPolicyEditor — session scope (inherit / local override + rese
     const before = mGetGlobal.mock.calls.length;
     act(() => useMcpPolicyVersion.getState().bumpGlobal()); // a global-scope write happened above
     await waitFor(() => expect(mGetGlobal.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it('re-fetches the global policy on a bump in GLOBAL scope too (ask bar "always")', async () => {
+    render(<McpToolPolicyEditor serverKey="k" scope="global" />);
+    await screen.findByRole('button', { name: 'Ask query' });
+    const before = mGetGlobal.mock.calls.length;
+    act(() => useMcpPolicyVersion.getState().bumpGlobal());
+    await waitFor(() => expect(mGetGlobal.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it('re-fetches the conversation overrides when the SESSION policy changes elsewhere', async () => {
+    render(<McpToolPolicyEditor serverKey="k" scope="session" sessionId="s1" />);
+    await screen.findByRole('button', { name: 'Ask query' });
+    const before = mGetConv.mock.calls.length;
+    act(() => useMcpPolicyVersion.getState().bumpSession()); // the ask bar wrote "for this conversation"
+    await waitFor(() => expect(mGetConv.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it('skips the refetch for its OWN global save (self-caused bump must not clobber optimistic edits)', async () => {
+    render(<McpToolPolicyEditor serverKey="k" scope="global" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Deny query' }));
+    await waitFor(() => expect(mSetGlobal).toHaveBeenCalled());
+    // The save bumps the version, but the editor marked it self-caused: no extra GET.
+    await waitFor(() => expect(useMcpPolicyVersion.getState().global).toBeGreaterThan(0));
+    expect(mGetGlobal).toHaveBeenCalledTimes(1); // the initial load only
+  });
+
+  it('skips the refetch for its OWN conversation save (self-caused session bump)', async () => {
+    render(<McpToolPolicyEditor serverKey="k" scope="session" sessionId="s1" />);
+    const before = useMcpPolicyVersion.getState().session;
+    fireEvent.click(await screen.findByRole('button', { name: 'Deny query' }));
+    await waitFor(() => expect(mSetConv).toHaveBeenCalled());
+    await waitFor(() => expect(useMcpPolicyVersion.getState().session).toBeGreaterThan(before));
+    expect(mGetConv).toHaveBeenCalledTimes(1); // the initial load only
   });
 
   it('"Deny all" in a conversation writes conv-scope deny for tools, NOT the server default', async () => {

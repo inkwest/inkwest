@@ -574,4 +574,6 @@ async def test_pending_asks_scoped_to_user_and_session(authenticated_client) -> 
     )
     resp = await authenticated_client.get(f"/api/mcp/ask/pending?session_id={_ASK_SID}")
     assert resp.status_code == 200
-    assert resp.json() == [{"ask_id": mine.ask_id, "mcp_key": "notion", "tool": "search"}]
+    assert resp.json() == [
+        {"ask_id": mine.ask_id, "mcp_key": "notion", "tool": "search", "session_id": _ASK_SID}
+    ]

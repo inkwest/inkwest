@@ -33,7 +33,8 @@ export function ToggleSwitch({
       aria-checked={checked}
       disabled={disabled}
       onClick={(e) => {
-        // Let callers intercept (e.g. stopPropagation inside a clickable row).
+        // Runs before onChange so a caller can e.g. stopPropagation inside a
+        // clickable row — it cannot cancel the toggle (onChange always fires).
         onClick?.(e);
         onChange(!checked);
       }}

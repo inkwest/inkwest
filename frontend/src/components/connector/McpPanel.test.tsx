@@ -223,6 +223,17 @@ describe('McpPanel', () => {
     expect(await screen.findByText(/Tools — coralogix/i)).toBeInTheDocument();
   });
 
+  it('veils the tools pane for a disabled server and lifts the veil once toggled on', async () => {
+    mockGetCatalog.mockResolvedValue(cat(['coralogix']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+    render(<McpPanel sessionId="s1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    fireEvent.click(screen.getByText('coralogix'));
+    expect(await screen.findByText(/This MCP is off for this conversation/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('switch', { name: /coralogix/i })); // enable in the draft
+    expect(screen.queryByText(/This MCP is off for this conversation/i)).not.toBeInTheDocument();
+  });
+
   it('per-server cog opens global tool settings on the MCP tab, preselecting that server', async () => {
     useSettingsUi.setState({ isOpen: false, initialTab: 'display', initialServer: null });
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });

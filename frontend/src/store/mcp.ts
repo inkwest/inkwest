@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { decideMcpAsk } from '@/services/api';
 
 /**
  * OAuth2 MCP servers the backend flagged as needing a reconnect (an `mcp_auth_required`
@@ -13,6 +14,10 @@ export interface PendingMcpAsk {
   askId: string;
   mcpKey: string;
   tool: string;
+  // The conversation the held call belongs to (from the ask frame / rehydrate).
+  // Scope-"conversation" policy writes MUST target this, not the currently selected
+  // session — the user may switch sessions while the call is held.
+  sessionId: string;
 }
 
 interface McpState {
@@ -23,6 +28,9 @@ interface McpState {
   addAsk: (ask: PendingMcpAsk) => void;
   removeAsk: (askId: string) => void;
   setAsks: (asks: PendingMcpAsk[]) => void;
+  // Resolve a held ask — shared by the in-bubble decision bar and the fallback
+  // banner so the 404/timeout semantics can't drift between the two surfaces.
+  decideAsk: (askId: string, verdict: 'allow' | 'deny') => Promise<void>;
   // Ask ids currently rendered inline by a transcript tool card. The fallback banner
   // (McpAskNotice) skips claimed asks so the decision UI shows in exactly one place —
   // the bubble when the running tool card is on screen, the banner otherwise (e.g.
@@ -61,6 +69,17 @@ export const useMcpStore = create<McpState>((set) => ({
       return { pendingAsks: s.pendingAsks.filter((a) => a.askId !== askId), claimedAsks };
     }),
   setAsks: (asks) => set({ pendingAsks: asks }),
+  decideAsk: async (askId, verdict) => {
+    try {
+      await decideMcpAsk(askId, verdict);
+    } catch {
+      // 404 = already resolved/timed out; anything else — the hold times out to deny
+      // server-side (fail-closed). A 5xx surfaces via the central banner strip and a
+      // network failure via the amber reconnecting banner, so no extra UI here.
+    } finally {
+      useMcpStore.getState().removeAsk(askId);
+    }
+  },
   claimedAsks: {},
   claimAsk: (askId) =>
     set((s) => (s.claimedAsks[askId] ? s : { claimedAsks: { ...s.claimedAsks, [askId]: true } })),

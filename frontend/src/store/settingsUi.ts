@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 
-// Which Settings tab to show. Kept in sync with SettingsModal's own Tab union.
-export type SettingsTab = 'display' | 'skills' | 'mcp' | 'io';
+// Single source of truth for the Settings tab keys: SettingsModal derives its tab list
+// from it and Header validates ?settings= deep-links against it.
+export const SETTINGS_TABS = ['display', 'skills', 'mcp', 'io'] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
+
+export function isSettingsTab(v: string): v is SettingsTab {
+  return (SETTINGS_TABS as readonly string[]).includes(v);
+}
 
 // Cross-component control of the Settings modal: lets a deep component (e.g. the composer's
 // MCP panel) open Settings on a specific tab without prop-drilling through the layout.

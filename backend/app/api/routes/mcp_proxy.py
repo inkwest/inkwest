@@ -164,7 +164,15 @@ async def _ask_user(key: str, tool: str, *, user_id: uuid.UUID, session_id: uuid
         sent = await send_to_user_in_session(
             str(session_id),
             str(user_id),
-            {"type": "mcp_tool_ask", "ask_id": ask.ask_id, "mcp_key": key, "tool": tool},
+            {
+                "type": "mcp_tool_ask",
+                "ask_id": ask.ask_id,
+                "mcp_key": key,
+                "tool": tool,
+                # Lets the client scope a "for this conversation" policy write to the
+                # ask's own session even if the user switched sessions mid-hold.
+                "session_id": str(session_id),
+            },
         )
         if sent == 0:
             # Locked decision: no WS client connected → deny (waiting would only burn

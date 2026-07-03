@@ -197,6 +197,10 @@ class McpPendingAsk(BaseModel):
     ask_id: str
     mcp_key: str
     tool: str
+    # The conversation the held call belongs to: the client must scope a "for this
+    # conversation" policy write to the ASK's session, not whichever session happens
+    # to be selected when the user clicks (a switch mid-hold would misroute it).
+    session_id: str
 
 
 @router.get("/ask/pending", response_model=list[McpPendingAsk])
@@ -210,7 +214,7 @@ async def pending_asks(
     is fire-and-forget, so a tab that (re)connects mid-hold would otherwise never see it.
     """
     return [
-        McpPendingAsk(ask_id=a.ask_id, mcp_key=a.server_key, tool=a.tool)
+        McpPendingAsk(ask_id=a.ask_id, mcp_key=a.server_key, tool=a.tool, session_id=a.session_id)
         for a in mcp_ask_store.pending_for(user_id=str(current_user.id), session_id=str(session_id))
     ]
 

@@ -10,14 +10,9 @@ import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { SettingsModal } from '@/components/settings/SettingsModal';
-import { useSettingsUi, type SettingsTab } from '@/store/settingsUi';
+import { useSettingsUi, isSettingsTab } from '@/store/settingsUi';
 import { devSwitchUser } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
-
-// Settings has no page of its own (it's a modal), so ?settings=<tab> is its
-// linkable address: the menu entry is a real <Link> carrying it, making
-// middle-click / ⌘-click open Settings in a new tab like any other nav entry.
-const SETTINGS_TABS: readonly SettingsTab[] = ['display', 'skills', 'mcp', 'io'];
 
 export function Header() {
   const navigate = useNavigate();
@@ -62,14 +57,15 @@ export function Header() {
     }
   }, [isAuthenticated, fetchConfig, loadPreferences]);
 
-  // Open the modal when the URL carries ?settings=<tab> (a middle-clicked menu
-  // entry landing in a fresh tab), then strip the param so reload/back don't
-  // re-open it. Runs in Header because it renders the modal on every layout.
+  // Settings has no page of its own (it's a modal), so ?settings=<tab> is its
+  // linkable address: open the modal when the URL carries it (a middle-clicked
+  // menu entry landing in a fresh tab), then strip the param so reload/back
+  // don't re-open it. Runs in Header because it renders the modal on every layout.
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const tab = params.get('settings');
     if (tab === null) return;
-    openSettings(SETTINGS_TABS.includes(tab as SettingsTab) ? (tab as SettingsTab) : undefined);
+    openSettings(isSettingsTab(tab) ? tab : undefined);
     params.delete('settings');
     navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
   }, [location.search, location.pathname, navigate, openSettings]);

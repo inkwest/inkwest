@@ -593,6 +593,9 @@ async def test_ask_verdict_allow_decision_forwards() -> None:
         assert [f["type"] for f in frames] == ["mcp_tool_ask", "mcp_tool_ask_resolved"]
         assert frames[0]["mcp_key"] == "notion"
         assert frames[0]["tool"] == "q"
+        # The client scopes "for this conversation" decisions to this field — dropping
+        # it degrades the frontend silently (conversation scope hidden), so pin it.
+        assert frames[0]["session_id"] == str(_S)
         assert frames[1]["verdict"] == "allow"
         assert mcp_ask_store._asks == {}  # discarded after the hold
     finally:

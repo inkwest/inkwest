@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useBackendStore } from './backend';
+import { useBackendStore, MAX_SERVER_ERRORS } from './backend';
 
 describe('useBackendStore', () => {
   beforeEach(() => {
-    useBackendStore.setState({ unavailable: false, retrying: 0, gaveUp: false });
+    useBackendStore.setState({ unavailable: false, retrying: 0, gaveUp: false, serverErrors: {} });
   });
 
   it('shows unavailable while at least one call is retrying', () => {
@@ -76,5 +76,48 @@ describe('useBackendStore', () => {
     s.markGaveUp();
     expect(notifications).toBe(0);
     unsub();
+  });
+
+  it('reportServerError dedupes by key, bumping the count and keeping the latest message', () => {
+    const s = useBackendStore.getState();
+    s.reportServerError('GET /api/x', 500, 'first');
+    s.reportServerError('GET /api/x', 502, 'second');
+    expect(useBackendStore.getState().serverErrors).toEqual({
+      'GET /api/x': { status: 502, message: 'second', count: 2 },
+    });
+  });
+
+  it('caps serverErrors, evicting the oldest key (a repeat bump keeps its slot)', () => {
+    const s = useBackendStore.getState();
+    for (let i = 0; i < MAX_SERVER_ERRORS + 2; i++) {
+      s.reportServerError(`GET /api/e${i}`, 500, 'boom');
+    }
+    const keys = Object.keys(useBackendStore.getState().serverErrors);
+    expect(keys).toHaveLength(MAX_SERVER_ERRORS);
+    expect(keys).not.toContain('GET /api/e0');
+    expect(keys).not.toContain('GET /api/e1');
+    expect(keys).toContain(`GET /api/e${MAX_SERVER_ERRORS + 1}`);
+  });
+
+  it('clearServerError self-heals one key and is churn-free when absent', () => {
+    const s = useBackendStore.getState();
+    s.reportServerError('GET /api/x', 500, 'boom');
+    s.reportServerError('GET /api/y', 500, 'boom');
+    s.clearServerError('GET /api/x');
+    expect(Object.keys(useBackendStore.getState().serverErrors)).toEqual(['GET /api/y']);
+    let notifications = 0;
+    const unsub = useBackendStore.subscribe(() => {
+      notifications++;
+    });
+    s.clearServerError('GET /api/nope');
+    expect(notifications).toBe(0);
+    unsub();
+  });
+
+  it('dismissServerErrors clears the whole strip', () => {
+    const s = useBackendStore.getState();
+    s.reportServerError('GET /api/x', 500, 'boom');
+    s.dismissServerErrors();
+    expect(useBackendStore.getState().serverErrors).toEqual({});
   });
 });

@@ -244,20 +244,44 @@ describe('useWebSocket', () => {
     const ws = MockWS.instances[0];
 
     act(() =>
-      ws.emit({ type: 'mcp_tool_ask', ask_id: 'a1', mcp_key: 'notion', tool: 'search' })
+      ws.emit({
+        type: 'mcp_tool_ask',
+        ask_id: 'a1',
+        mcp_key: 'notion',
+        tool: 'search',
+        session_id: 'session-1',
+      })
     );
     expect(useMcpStore.getState().pendingAsks).toEqual([
-      { askId: 'a1', mcpKey: 'notion', tool: 'search' },
+      { askId: 'a1', mcpKey: 'notion', tool: 'search', sessionId: 'session-1' },
     ]);
 
     // Duplicate frame (reconnect replay) must not double the banner.
     act(() =>
-      ws.emit({ type: 'mcp_tool_ask', ask_id: 'a1', mcp_key: 'notion', tool: 'search' })
+      ws.emit({
+        type: 'mcp_tool_ask',
+        ask_id: 'a1',
+        mcp_key: 'notion',
+        tool: 'search',
+        session_id: 'session-1',
+      })
     );
     expect(useMcpStore.getState().pendingAsks).toHaveLength(1);
 
     act(() => ws.emit({ type: 'mcp_tool_ask_resolved', ask_id: 'a1', verdict: 'deny' }));
     expect(useMcpStore.getState().pendingAsks).toEqual([]);
+  });
+
+  it('mcp_tool_ask from a pre-session_id backend downgrades to an empty sessionId', async () => {
+    const { useMcpStore } = await import('@/store/mcp');
+    useMcpStore.setState({ pendingAsks: [] });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[0];
+    act(() => ws.emit({ type: 'mcp_tool_ask', ask_id: 'a1', mcp_key: 'notion', tool: 'search' }));
+    // '' hides the conversation scope in the decision bar instead of misrouting the write.
+    expect(useMcpStore.getState().pendingAsks).toEqual([
+      { askId: 'a1', mcpKey: 'notion', tool: 'search', sessionId: '' },
+    ]);
   });
 
   it('mcp_tool_ask without required fields is ignored', async () => {

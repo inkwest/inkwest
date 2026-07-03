@@ -53,9 +53,17 @@ describe('BackendBanner', () => {
 
   it('shows the 5xx strip alongside the reconnecting notice', () => {
     useBackendStore.setState({ unavailable: true });
-    useBackendStore.getState().reportServerError('GET /api/y', 503, 'oops');
+    useBackendStore.getState().reportServerError('GET /api/y', 500, 'oops');
     render(<BackendBanner />);
     expect(screen.getByText('Backend unavailable — reconnecting…')).toBeInTheDocument();
+    expect(screen.getByText('GET /api/y')).toBeInTheDocument();
+  });
+
+  it('shows the 5xx strip alongside the give-up reload prompt too', () => {
+    useBackendStore.setState({ gaveUp: true });
+    useBackendStore.getState().reportServerError('GET /api/y', 500, 'oops');
+    render(<BackendBanner />);
+    expect(screen.getByText('Backend unreachable — reconnection gave up.')).toBeInTheDocument();
     expect(screen.getByText('GET /api/y')).toBeInTheDocument();
   });
 });

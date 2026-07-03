@@ -179,6 +179,30 @@ export function wsBaseUrl(): string {
   return 'ws://localhost:8000';
 }
 
+// Dedupe key for the 5xx banner strip: one row per ROUTE, not per resource — the
+// query string is dropped and path-embedded resource ids are collapsed to ':id',
+// else a single broken route fans out into unbounded entries. Two id shapes exist:
+// dashed UUIDs (sessions, attachments) and opaque url-safe tokens (ask ids are
+// token_urlsafe(16) = 22 chars; no real route segment is that long).
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const TOKEN_SEGMENT_RE = /\/[A-Za-z0-9_-]{22,}(?=\/|$)/g;
+function serverErrorKey(method: string | undefined, endpoint: string): string {
+  const path = endpoint.split('?')[0].replace(UUID_RE, ':id').replace(TOKEN_SEGMENT_RE, '/:id');
+  return `${(method ?? 'GET').toUpperCase()} ${path}`;
+}
+
+// 5xx = the app itself is broken on this endpoint. Gateway 502/503/504 are excluded:
+// fetchWithRetry normally absorbs them, and even when one is returned after retry
+// exhaustion it means "backend unreachable" — the amber banner's story, not the red
+// strip's. Report centrally BEFORE throwing: many callers are best-effort
+// (`catch {}`), which must not silently bury a persistent backend bug (e.g. a missed
+// migration 500ing).
+function reportIfServerError(method: string | undefined, endpoint: string, response: Response, detail: string): void {
+  if (response.status >= 500 && !RETRYABLE_STATUSES.has(response.status)) {
+    useBackendStore.getState().reportServerError(serverErrorKey(method, endpoint), response.status, detail);
+  }
+}
+
 export async function fetchAPI<T>(
   endpoint: string,
   options?: RequestInit
@@ -206,21 +230,12 @@ export async function fetchAPI<T>(
     } catch {
       // response body not JSON
     }
-    // 5xx = the app itself is broken on this endpoint (gateway 502/503/504 never
-    // reach here — fetchWithRetry absorbs those as "unavailable"). Report centrally
-    // BEFORE throwing: many callers are best-effort (`catch {}`), which must not
-    // silently bury a persistent backend bug (e.g. a missed migration 500ing).
-    if (response.status >= 500) {
-      useBackendStore
-        .getState()
-        .reportServerError(
-          `${(options?.method ?? 'GET').toUpperCase()} ${endpoint.split('?')[0]}`,
-          response.status,
-          detail,
-        );
-    }
+    reportIfServerError(options?.method, endpoint, response, detail);
     throw new ApiError(response.status, detail);
   }
+
+  // Self-heal the 5xx strip: the route answering fine again proves it recovered.
+  useBackendStore.getState().clearServerError(serverErrorKey(options?.method, endpoint));
 
   if (response.status === 204) return undefined as unknown as T;
 
@@ -246,8 +261,15 @@ export async function uploadAttachments(
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body?.detail || `Upload failed: ${response.status}`);
+    const detail = body?.detail || `Upload failed: ${response.status}`;
+    // Attachments bypass fetchAPI (multipart), so mirror its central 5xx report.
+    reportIfServerError('POST', `/api/sessions/${sessionId}/attachments`, response, detail);
+    throw new Error(detail);
   }
+  // ...and mirror its self-heal too, so a recovered route clears its strip entry.
+  useBackendStore
+    .getState()
+    .clearServerError(serverErrorKey('POST', `/api/sessions/${sessionId}/attachments`));
   return response.json();
 }
 
@@ -264,7 +286,20 @@ export async function fetchAttachmentBlob(sessionId: string, filename: string): 
     `${API_URL}/api/sessions/${sessionId}/attachments/${encodeURIComponent(filename)}`,
     { credentials: 'include' },
   );
-  if (!response.ok) throw new Error(`Failed to load attachment: ${response.status}`);
+  // ':file' literal, not the real filename: N broken attachments must dedupe into ONE
+  // strip row (per route), not fan out and evict unrelated errors from the capped list.
+  const reportPath = `/api/sessions/${sessionId}/attachments/:file`;
+  if (!response.ok) {
+    // Blob fetch bypasses fetchAPI too — keep the central 5xx report consistent.
+    reportIfServerError(
+      'GET',
+      reportPath,
+      response,
+      `Failed to load attachment: ${response.status}`,
+    );
+    throw new Error(`Failed to load attachment: ${response.status}`);
+  }
+  useBackendStore.getState().clearServerError(serverErrorKey('GET', reportPath));
   return response.blob();
 }
 
@@ -770,6 +805,9 @@ export interface McpPendingAsk {
   ask_id: string;
   mcp_key: string;
   tool: string;
+  // The conversation the held call belongs to — scope-"conversation" decisions
+  // must write to THIS session, not whichever one is selected at click time.
+  session_id: string;
 }
 
 /** Live asks held for the current user on one conversation (banner rehydrate on reload). */

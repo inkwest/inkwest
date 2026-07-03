@@ -45,6 +45,8 @@ export interface ChatEvent {
   mcp_key?: string;
   tool?: string;
   verdict?: string;
+  // mcp_tool_ask: the conversation the held call belongs to
+  session_id?: string;
 }
 
 export interface SendMessage {

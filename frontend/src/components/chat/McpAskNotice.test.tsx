@@ -7,15 +7,18 @@ vi.mock('@/services/api', () => ({
 }));
 
 import { McpAskNotice } from './McpAskNotice';
+import { useChatStore } from '@/store/chat';
 import { useMcpStore } from '@/store/mcp';
 import { decideMcpAsk, getPendingMcpAsks } from '@/services/api';
 
-const ASK = { askId: 'a1', mcpKey: 'notion', tool: 'search' };
+const ASK = { askId: 'a1', mcpKey: 'notion', tool: 'search', sessionId: 's1' };
 
 describe('McpAskNotice', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useMcpStore.setState({ pendingAsks: [] });
+    // The rehydrate fetch is gated on the chat socket being up.
+    useChatStore.setState({ isConnected: true });
   });
 
   it('renders nothing when no ask is pending', () => {
@@ -25,7 +28,7 @@ describe('McpAskNotice', () => {
 
   it('shows a banner per pending ask with Allow/Deny', () => {
     useMcpStore.setState({
-      pendingAsks: [ASK, { askId: 'a2', mcpKey: 'notion', tool: 'write' }],
+      pendingAsks: [ASK, { askId: 'a2', mcpKey: 'notion', tool: 'write', sessionId: 's1' }],
     });
     render(<McpAskNotice sessionId="s1" />);
     expect(screen.getByText('search')).toBeInTheDocument();
@@ -77,16 +80,28 @@ describe('McpAskNotice', () => {
 
   it('rehydrates pending asks for the session on mount', async () => {
     vi.mocked(getPendingMcpAsks).mockResolvedValueOnce([
-      { ask_id: 'a9', mcp_key: 'grafana', tool: 'query' },
+      { ask_id: 'a9', mcp_key: 'grafana', tool: 'query', session_id: 's1' },
     ]);
     render(<McpAskNotice sessionId="s1" />);
     await waitFor(() =>
       expect(useMcpStore.getState().pendingAsks).toEqual([
-        { askId: 'a9', mcpKey: 'grafana', tool: 'query' },
+        { askId: 'a9', mcpKey: 'grafana', tool: 'query', sessionId: 's1' },
       ])
     );
     expect(getPendingMcpAsks).toHaveBeenCalledWith('s1');
     expect(screen.getByText('grafana')).toBeInTheDocument();
+  });
+
+  it('rehydrates again on WS reconnect (rising edge), not on the drop', async () => {
+    const { act } = await import('@testing-library/react');
+    render(<McpAskNotice sessionId="s1" />);
+    await waitFor(() => expect(getPendingMcpAsks).toHaveBeenCalledTimes(1));
+    // Socket drops: no fetch (pointless mid-outage; would just burn retry budget).
+    act(() => useChatStore.setState({ isConnected: false }));
+    expect(getPendingMcpAsks).toHaveBeenCalledTimes(1);
+    // Socket reopens: an ask minted during the blip never sent its frame — refetch.
+    act(() => useChatStore.setState({ isConnected: true }));
+    await waitFor(() => expect(getPendingMcpAsks).toHaveBeenCalledTimes(2));
   });
 
   it('session switch resets stale asks then rehydrates for the new session', async () => {

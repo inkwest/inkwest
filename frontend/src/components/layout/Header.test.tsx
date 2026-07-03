@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
 import { Header } from './Header';
 import { useSessionsStore } from '@/store/sessions';
@@ -8,19 +8,31 @@ import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { usePreferencesStore } from '@/store/preferences';
+import { useSettingsUi } from '@/store/settingsUi';
 import * as api from '@/services/api';
 
 vi.mock('@/components/chat/ConnectionStatus', () => ({
   ConnectionStatus: () => <div data-testid="connection-status">Connected</div>,
 }));
 
+// The mcp tab's real content fetches the catalog on mount — irrelevant here.
+vi.mock('@/components/settings/McpPolicySettingsTab', () => ({
+  McpPolicySettingsTab: () => <div data-testid="mcp-tab" />,
+}));
+
 const mockCheckAuth = vi.fn();
 const mockLogout = vi.fn();
+
+function LocationProbe() {
+  const loc = useLocation();
+  return <div data-testid="location-search">{loc.search}</div>;
+}
 
 function renderHeader(route = '/') {
   return render(
     <MemoryRouter initialEntries={[route]}>
       <Header />
+      <LocationProbe />
     </MemoryRouter>,
   );
 }
@@ -46,6 +58,22 @@ describe('Header', () => {
     // Stub the prefs hydrate (mount effect) + the modal's admin-skill fetch.
     usePreferencesStore.setState({ loaded: true, load: vi.fn(), skills: [], disabledAdmin: [], document: {} });
     vi.spyOn(api, 'getSkills').mockResolvedValue([]);
+    useSettingsUi.setState({ isOpen: false, initialTab: 'display', initialServer: null });
+  });
+
+  it('opens Settings on the requested tab from a ?settings= deep-link and strips the param', async () => {
+    renderHeader('/?settings=mcp');
+    await waitFor(() => expect(useSettingsUi.getState().isOpen).toBe(true));
+    expect(useSettingsUi.getState().initialTab).toBe('mcp');
+    expect(screen.getByTestId('mcp-tab')).toBeInTheDocument();
+    // Param stripped (replace-navigate) so reload/back don't re-open the modal.
+    await waitFor(() => expect(screen.getByTestId('location-search')).toHaveTextContent(/^$/));
+  });
+
+  it('falls back to the default tab for an unknown ?settings= value', async () => {
+    renderHeader('/?settings=bogus');
+    await waitFor(() => expect(useSettingsUi.getState().isOpen).toBe(true));
+    expect(useSettingsUi.getState().initialTab).toBe('display');
   });
 
   it('renders Inkwest branding', () => {

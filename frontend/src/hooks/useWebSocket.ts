@@ -204,6 +204,9 @@ export function useWebSocket(sessionId: string) {
             askId: event.ask_id,
             mcpKey: event.mcp_key,
             tool: event.tool,
+            // '' (frame from a pre-session_id backend) hides the conversation scope
+            // in the decision bar rather than misrouting the write.
+            sessionId: event.session_id ?? '',
           });
         }
         break;

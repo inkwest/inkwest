@@ -32,14 +32,15 @@ function ServerRow({
   label,
   selected,
   onSelect,
-  checkbox,
+  control,
   right,
   dimmed = false,
 }: {
   label: string;
   selected: boolean;
   onSelect: () => void;
-  checkbox: ReactNode;
+  // The enable/disable ToggleSwitch (acts on its own; stopPropagation inside).
+  control: ReactNode;
   right: ReactNode;
   // Fades the label while the server is not enabled for this conversation.
   dimmed?: boolean;
@@ -61,7 +62,7 @@ function ServerRow({
       }`}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        {checkbox}
+        {control}
         <span className={`truncate text-sm ${dimmed ? 'text-gray-500' : 'text-gray-200'}`}>
           {label}
         </span>
@@ -95,7 +96,7 @@ interface Props {
 
 /**
  * Per-conversation MCP selector. Opens a modal listing the catalog of available
- * MCP servers, one per line with a checkbox. Toggling persists the selection and
+ * MCP servers, one per line with an enable toggle. Toggling persists the selection and
  * re-merges the conversation's .claude.json server-side; it takes effect on the
  * NEXT message (the CLI reads its config at launch). Renders as a connector-style
  * item in both the chat bar ('inline') and the start screen ('row').
@@ -521,7 +522,7 @@ export function McpPanel({
           Enable MCP servers for this conversation; select one to set its per-tool permissions.
         </p>
         <div className="flex h-[520px] min-h-0 gap-3">
-          {/* Left: server list — checkbox enables, the row selects (slides the tools out). */}
+          {/* Left: server list — the toggle enables, the row selects (slides the tools out). */}
           {/* pl-1 mirrors the tools pane's p-1 (veil padding) so both outer margins match. */}
           <div className="w-64 shrink-0 space-y-1 overflow-y-auto pl-1 pr-1">
             {catalog.map((key) => (
@@ -531,7 +532,7 @@ export function McpPanel({
                 selected={selectedServer === key}
                 onSelect={() => setSelectedServer(key)}
                 dimmed={!draftEnabled.has(key)}
-                checkbox={
+                control={
                   <ToggleSwitch
                     aria-label={key}
                     checked={draftEnabled.has(key)}
@@ -588,7 +589,7 @@ export function McpPanel({
                       selected={selectedServer === s.key}
                       onSelect={() => setSelectedServer(s.key)}
                       dimmed={!draftEnabled.has(s.key)}
-                      checkbox={
+                      control={
                         <ToggleSwitch
                           aria-label={s.key}
                           checked={draftEnabled.has(s.key)}

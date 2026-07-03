@@ -5,32 +5,8 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 import { useSettingsStore } from '@/store/settings';
 import { useMcpStore } from '@/store/mcp';
-import { useSessionsStore } from '@/store/sessions';
-import { useMcpPolicyVersion } from '@/store/mcpPolicy';
-import {
-  decideMcpAsk,
-  getMyMcpPolicy,
-  getSessionMcpPolicy,
-  setMyMcpPolicy,
-  setSessionMcpPolicy,
-  type McpPolicyEntry,
-  type McpVerdict,
-} from '@/services/api';
-
-// The policy PUTs are FULL-STATE per server: merge the new verdict into the server's
-// current entries, else a one-tool write from the ask bar would wipe the others.
-function mergePolicyEntry(
-  policies: McpPolicyEntry[],
-  serverKey: string,
-  tool: string,
-  verdict: McpVerdict,
-): { tool: string; verdict: McpVerdict }[] {
-  const entries = policies
-    .filter((e) => e.server_key === serverKey && e.tool !== tool)
-    .map((e) => ({ tool: e.tool, verdict: e.verdict }));
-  entries.push({ tool, verdict });
-  return entries;
-}
+import { persistToolVerdict } from '@/store/mcpPolicy';
+import { matchesMcpToolName } from '@/lib/mcpToolName';
 
 type AskScope = 'once' | 'conversation' | 'global';
 
@@ -41,12 +17,16 @@ function DecisionButton({
   solidClass,
   menuClass,
   disabled,
+  showConversationScope,
   onDecide,
 }: {
   label: string;
   solidClass: string;
   menuClass: string;
   disabled: boolean;
+  // Hide "for this conversation" when the ask carries no session id (a stale
+  // backend frame) — a silent no-write downgrade to "once" would mislead.
+  showConversationScope: boolean;
   onDecide: (scope: AskScope) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -90,7 +70,7 @@ function DecisionButton({
           {(
             [
               ['once', 'once'],
-              ['conversation', 'for this conversation'],
+              ...(showConversationScope ? [['conversation', 'for this conversation']] : []),
               ['global', 'always (all conversations)'],
             ] as [AskScope, string][]
           ).map(([scope, text]) => (
@@ -143,64 +123,68 @@ export function ToolCallCard({ name, input, result, isError, isLoading, autoColl
   // (claim → release ping-pong ⇒ "Maximum update depth exceeded").
   const myClaim = useRef<string | null>(null);
   const [deciding, setDeciding] = useState(false);
-  // Match while the call has NO result yet (not on isLoading: streaming re-renders can
-  // drop the loading flag mid-hold, which bounced the bar back to the fallback banner).
-  // A pending ask is by definition in flight, so a result-less matching card owns it.
-  // Engines drift on the separator: claude-cli has been seen emitting BOTH
-  // mcp__<key>__<tool> and mcp_<key>_<tool> — accept either.
+  // Only an ACTIVELY-LOADING card may take a NEW claim: results render as separate
+  // tool_result cards, so `result` never arrives on a tool_use card and a result-less
+  // guard alone would let a stale/completed card of the same tool steal the ask (bar
+  // on the wrong bubble — args the user isn't looking at). Persisted transcript cards
+  // (MessageBubble passes no isLoading) never claim; the banner backstops those.
+  // Once claimed, the bar sticks via myClaim even if streaming re-renders drop the
+  // loading flag mid-hold (that bounce was the original white-flicker bug).
   const ask = !result && !isError
     ? pendingAsks.find(
         (a) =>
-          (name === `mcp__${a.mcpKey}__${a.tool}` || name === `mcp_${a.mcpKey}_${a.tool}`) &&
-          (a.askId === myClaim.current || !claimedAsks[a.askId]),
+          matchesMcpToolName(name, a.mcpKey, a.tool) &&
+          (a.askId === myClaim.current || (isLoading === true && !claimedAsks[a.askId])),
       )
     : undefined;
   const askId = ask?.askId ?? null;
   useEffect(() => {
     if (!askId) return;
+    const store = useMcpStore.getState();
+    // Arbitrate: sibling cards matching the same tool all render before any claim
+    // commits, so each may compute the SAME ask. First effect to run wins; a loser
+    // must neither claim nor (on cleanup) release the winner's claim — the store
+    // update from the winning claim re-renders the loser onto the next free ask
+    // (or none, hiding its bar).
+    if (store.claimedAsks[askId] && myClaim.current !== askId) return;
     myClaim.current = askId;
-    useMcpStore.getState().claimAsk(askId);
+    store.claimAsk(askId);
     return () => {
+      if (myClaim.current !== askId) return; // not ours to release
       myClaim.current = null;
       useMcpStore.getState().releaseAsk(askId);
     };
   }, [askId]);
 
-  const currentSessionId = useSessionsStore((s) => s.currentSession?.id);
   const decide = async (verdict: 'allow' | 'deny', scope: AskScope) => {
     if (!askId || !ask || deciding) return;
     setDeciding(true);
     try {
-      // Persist the broader-scope policy FIRST so future calls skip the gate even if
-      // the decision below races the 60s hold timeout. Fetch→merge→PUT because the
-      // endpoint replaces the server's full entry set. Best-effort: a failed write must
-      // not block resolving the held call. Bump the matching policy version so any open
-      // editor (conversation popup / global Settings) re-fetches and reflects it live.
-      if (scope === 'conversation' && currentSessionId) {
-        await getSessionMcpPolicy(currentSessionId)
-          .then((cur) =>
-            setSessionMcpPolicy(
-              currentSessionId,
+      // Kick the broader-scope policy write off FIRST (so it lands even if the
+      // decision below races the 60s hold timeout) but do NOT await it before the
+      // decision POST: the shared save chain can be busy behind a slow editor PUT,
+      // and blocking on it would let the hold expire into a deny the user didn't
+      // choose. persistToolVerdict serializes with editor saves and bumps the
+      // policy version; it's best-effort here — a failed write must not block the
+      // decision (a 5xx surfaces via the banner strip, a network failure via the
+      // amber banner). The conversation scope targets the ASK's session, not the
+      // selected one — the user may have switched sessions while the call was held.
+      const persist =
+        scope === 'conversation' && ask.sessionId
+          ? persistToolVerdict(
+              { scope: 'session', sessionId: ask.sessionId },
               ask.mcpKey,
-              mergePolicyEntry(cur.policies, ask.mcpKey, ask.tool, verdict),
-            ),
-          )
-          .then(() => useMcpPolicyVersion.getState().bumpSession())
-          .catch(() => undefined);
-      } else if (scope === 'global') {
-        await getMyMcpPolicy()
-          .then((cur) =>
-            setMyMcpPolicy(ask.mcpKey, mergePolicyEntry(cur.policies, ask.mcpKey, ask.tool, verdict)),
-          )
-          .then(() => useMcpPolicyVersion.getState().bumpGlobal())
-          .catch(() => undefined);
-      }
-      await decideMcpAsk(askId, verdict);
-    } catch {
-      // 404 = already resolved/timed out; otherwise the hold times out to deny on its
-      // own. Either way the prompt is dead weight now.
+              ask.tool,
+              verdict,
+            ).catch(() => undefined)
+          : scope === 'global'
+            ? persistToolVerdict({ scope: 'global' }, ask.mcpKey, ask.tool, verdict).catch(
+                () => undefined,
+              )
+            : Promise.resolve();
+      await useMcpStore.getState().decideAsk(askId, verdict);
+      await persist;
     } finally {
-      useMcpStore.getState().removeAsk(askId);
       setDeciding(false);
     }
   };
@@ -334,7 +318,8 @@ export function ToolCallCard({ name, input, result, isError, isLoading, autoColl
       </button>
 
       {/* Held on the runtime ask gate: prominent in-bubble decision bar (60s → deny).
-          "Always" persists the per-conversation tool policy, then resolves the hold. */}
+          "Always" persists the user's GLOBAL tool policy, "for this conversation" the
+          session-scoped one; both then resolve the hold. */}
       {ask && (
         <div className={cn(
           'flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-blue-600/50 bg-blue-900/40 px-3 py-2',
@@ -352,6 +337,7 @@ export function ToolCallCard({ name, input, result, isError, isLoading, autoColl
               solidClass="bg-green-600 hover:bg-green-500"
               menuClass="border-gray-600 bg-gray-800"
               disabled={deciding}
+              showConversationScope={Boolean(ask.sessionId)}
               onDecide={(scope) => void decide('allow', scope)}
             />
             <DecisionButton
@@ -359,6 +345,7 @@ export function ToolCallCard({ name, input, result, isError, isLoading, autoColl
               solidClass="bg-red-600/80 hover:bg-red-600"
               menuClass="border-gray-600 bg-gray-800"
               disabled={deciding}
+              showConversationScope={Boolean(ask.sessionId)}
               onDecide={(scope) => void decide('deny', scope)}
             />
           </span>

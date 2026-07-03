@@ -10,7 +10,7 @@ import {
   type McpToolInfo,
   type McpVerdict,
 } from '@/services/api';
-import { useMcpPolicyVersion } from '@/store/mcpPolicy';
+import { useMcpPolicyVersion, runPolicySave } from '@/store/mcpPolicy';
 
 // The server-wide default row is stored under tool '*'; tools inherit it unless overridden.
 const SERVER_DEFAULT = '*';
@@ -135,14 +135,9 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
   // Latest maps, read synchronously by change handlers (state commits are async).
   const globalRef = useRef<VerdictMap>({});
   const convRef = useRef<VerdictMap>({});
-  // Serialize per-server full-state PUTs so out-of-order delivery can't regress the server to
-  // an older (subset) snapshot — the last enqueued save (latest state) always lands last.
-  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
-  const runSave = (fn: () => Promise<unknown>): Promise<unknown> => {
-    const p = saveChain.current.then(fn, fn); // run in order, regardless of prior outcome
-    saveChain.current = p.catch(() => {}); // a rejection must not break the chain
-    return p;
-  };
+  // Saves go through the module-wide runPolicySave chain (see store/mcpPolicy.ts):
+  // out-of-order delivery can't regress the server to an older (subset) snapshot, and
+  // the in-bubble ask bar's fetch→merge→PUT can't interleave with an optimistic save.
   const setGlobal = (m: VerdictMap) => {
     globalRef.current = m;
     setGlobalMap(m);
@@ -161,6 +156,16 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
   const seenPolicyVersion = useRef(globalPolicyVersion);
   const sessionPolicyVersion = useMcpPolicyVersion((s) => s.session);
   const seenSessionVersion = useRef(sessionPolicyVersion);
+  // Bump after a local save, marking it self-caused so the matching refetch effect
+  // skips it (a refetch racing rapid optimistic edits could clobber the in-flight map).
+  const bumpGlobalSelf = () => {
+    bumpGlobalPolicy();
+    seenPolicyVersion.current = useMcpPolicyVersion.getState().global;
+  };
+  const bumpSessionSelf = () => {
+    useMcpPolicyVersion.getState().bumpSession();
+    seenSessionVersion.current = useMcpPolicyVersion.getState().session;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -282,13 +287,8 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
       const next = { ...globalRef.current };
       for (const n of [SERVER_DEFAULT, ...toolNames]) next[n] = verdict;
       setGlobal(next);
-      void runSave(() => setMyMcpPolicy(serverKey, toEntries(next)))
-        .then(() => {
-          // Mark this bump as self-caused so the refetch effect skips it (a refetch
-          // racing rapid optimistic edits could clobber the in-flight map).
-          bumpGlobalPolicy();
-          seenPolicyVersion.current = useMcpPolicyVersion.getState().global;
-        })
+      void runPolicySave(() => setMyMcpPolicy(serverKey, toEntries(next)))
+        .then(bumpGlobalSelf)
         .catch(() => {
           setError('Failed to save permission');
           void resyncGlobal();
@@ -297,12 +297,14 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
       const next = { ...convRef.current };
       for (const n of toolNames) next[n] = verdict;
       setConv(next);
-      void runSave(() =>
-        sessionId ? setSessionMcpPolicy(sessionId, serverKey, toEntries(next)) : Promise.resolve()
-      ).catch(() => {
-        setError('Failed to save permission');
-        void resyncSession();
-      });
+      void runPolicySave(async () => {
+        if (sessionId) await setSessionMcpPolicy(sessionId, serverKey, toEntries(next));
+      })
+        .then(bumpSessionSelf)
+        .catch(() => {
+          setError('Failed to save permission');
+          void resyncSession();
+        });
     }
   };
 
@@ -310,13 +312,8 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     const next = { ...globalRef.current, [tool]: verdict };
     setGlobal(next); // optimistic — instant, no disable/flicker
     setError(null);
-    void runSave(() => setMyMcpPolicy(serverKey, toEntries(next)))
-      .then(() => {
-          // Mark this bump as self-caused so the refetch effect skips it (a refetch
-          // racing rapid optimistic edits could clobber the in-flight map).
-          bumpGlobalPolicy();
-          seenPolicyVersion.current = useMcpPolicyVersion.getState().global;
-        })
+    void runPolicySave(() => setMyMcpPolicy(serverKey, toEntries(next)))
+      .then(bumpGlobalSelf)
       .catch(() => {
         setError('Failed to save permission');
         void resyncGlobal();
@@ -328,12 +325,14 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
   const saveConv = (next: VerdictMap) => {
     setConv(next);
     setError(null);
-    void runSave(() =>
-      sessionId ? setSessionMcpPolicy(sessionId, serverKey, toEntries(next)) : Promise.resolve()
-    ).catch(() => {
-      setError('Failed to save permission');
-      void resyncSession();
-    });
+    void runPolicySave(async () => {
+      if (sessionId) await setSessionMcpPolicy(sessionId, serverKey, toEntries(next));
+    })
+      .then(bumpSessionSelf)
+      .catch(() => {
+        setError('Failed to save permission');
+        void resyncSession();
+      });
   };
 
   // Session only: drop every local override for this server → all tools revert to inherited.
