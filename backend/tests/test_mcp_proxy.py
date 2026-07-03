@@ -420,3 +420,119 @@ async def test_static_dot_segment_is_400() -> None:
         from app.api.routes import mcp_proxy
 
         mcp_proxy._transport = None
+
+
+# ---- per-tool permission gate (P5) ------------------------------------------ //
+from app.api.routes import mcp_proxy as _mp  # noqa: E402
+
+
+def test_tool_call_names_parses_single_and_batch() -> None:
+    assert _mp._tool_call_names(b'{"method":"tools/call","params":{"name":"q"}}') == ["q"]
+    assert _mp._tool_call_names(b'{"method":"tools/list"}') == []
+    assert _mp._tool_call_names(b'{"method":"tools/call","params":{}}') == []  # no name
+    assert _mp._tool_call_names(b"not json") == []
+    assert _mp._tool_call_names(b"") == []
+    # JSON-RPC batch (array): every tools/call name is returned so none can bypass the gate.
+    batch = (
+        b'[{"method":"tools/call","params":{"name":"a"}},'
+        b'{"method":"tools/list"},'
+        b'{"method":"tools/call","params":{"name":"b"}}]'
+    )
+    assert _mp._tool_call_names(batch) == ["a", "b"]
+
+
+def test_jsonrpc_error_response_echoes_request_id() -> None:
+    resp = _mp._jsonrpc_error_response(b'{"id":42}', -32001, "denied")
+    import json as _json
+
+    payload = _json.loads(bytes(resp.body))
+    assert payload["id"] == 42
+    assert payload["error"]["code"] == -32001
+
+
+@pytest.mark.asyncio
+async def test_tool_call_denied_returns_jsonrpc_error_and_does_not_forward() -> None:
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="deny"))
+    )
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"rm"}}',
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["id"] == 9
+        assert body["error"]["code"] == _mp._TOOL_DENIED_CODE
+        assert called["n"] == 0  # denied before reaching the upstream
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_allowed_forwards_to_upstream() -> None:
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch(
+            "app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="allow")
+        )
+    )
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ok"}}',
+            )
+        assert resp.status_code == 200
+        assert resp.content == b'{"ok":true}'
+        assert called["n"] == 1
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_non_tool_call_bypasses_policy_and_forwards() -> None:
+    resolve = AsyncMock(return_value="deny")  # even a deny must not affect a non-tools/call
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _streaming(200, b'{"ok":true}')
+
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", resolve))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+            )
+        assert resp.status_code == 200
+        assert resp.content == b'{"ok":true}'
+        resolve.assert_not_called()  # gate only engages for tools/call
+    finally:
+        for p in ps:
+            p.stop()
