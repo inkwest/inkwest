@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Ban, Loader2, Plug, PlugZap, Settings } from 'lucide-react';
 import { McpIcon } from '@/components/icons/BrandIcons';
 import { ConnectorIconButton } from './ConnectorIconButton';
@@ -24,6 +24,48 @@ import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCac
 // to still feel live; only the WS-triggered reload is jittered (mount/open fetches are already
 // spread by user action).
 const CATALOG_RELOAD_JITTER_MS = 1000;
+
+// One server row in the modal's left list: the whole row selects (slides out its tools); the
+// checkbox and the right-side controls (status/cog) act on their own (stopPropagation).
+function ServerRow({
+  label,
+  selected,
+  onSelect,
+  checkbox,
+  right,
+}: {
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+  checkbox: ReactNode;
+  right: ReactNode;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className={`flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-2 ${
+        selected ? 'bg-blue-600/30' : 'hover:bg-gray-800'
+      }`}
+    >
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        {checkbox}
+        <span className="truncate text-sm text-gray-200">{label}</span>
+      </div>
+      <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        {right}
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   sessionId: string;
@@ -87,8 +129,8 @@ export function McpPanel({
   // Reactive mirror of `connecting` for rendering the transient "connecting…" status icon
   // (the ref alone can't drive a re-render).
   const [connectingKeys, setConnectingKeys] = useState<Set<string>>(new Set());
-  // Which enabled server's per-tool permissions are expanded in the modal (one at a time).
-  const [expandedPolicy, setExpandedPolicy] = useState<string | null>(null);
+  // Server selected in the modal's left list → its tools slide out on the right (one at a time).
+  const [selectedServer, setSelectedServer] = useState<string | null>(null);
   // Monotonic guard shared by every catalog fetch (mount load, live-reload, popup-open): all
   // force the same live endpoint, so an earlier-issued request resolving last must not clobber a
   // fresher one's result. Only the latest-sequenced fetch writes catalog/oauthServers state.
@@ -197,6 +239,7 @@ export function McpPanel({
   const handleClose = () => {
     setDraftEnabled(new Set(enabled));
     setError(null);
+    setSelectedServer(null);
     setOpen(false);
   };
 
@@ -422,149 +465,143 @@ export function McpPanel({
         </div>
       )}
 
-      <Modal isOpen={open && hasCatalog} onClose={handleClose} title="MCP servers" size="sm">
-        <p className="text-sm text-gray-400 mb-3">
-          Choose which MCP servers this conversation can use.
+      <Modal isOpen={open && hasCatalog} onClose={handleClose} title="MCP servers" size="xl">
+        <p className="mb-3 text-sm text-gray-400">
+          Enable MCP servers for this conversation; select one to set its per-tool permissions.
         </p>
-        <div className="space-y-1">
-          {catalog.map((key) => {
-            const on = draftEnabled.has(key);
-            return (
-              <div
+        <div className="flex h-[520px] gap-3">
+          {/* Left: server list — checkbox enables, the row selects (slides the tools out). */}
+          <div className="w-64 shrink-0 space-y-1 overflow-y-auto pr-1">
+            {catalog.map((key) => (
+              <ServerRow
                 key={key}
-                className="flex items-center justify-between gap-2 rounded px-2 py-2 hover:bg-gray-800"
-              >
-                <label className="flex flex-1 cursor-pointer items-center gap-3">
+                label={key}
+                selected={selectedServer === key}
+                onSelect={() => setSelectedServer(key)}
+                checkbox={
                   <input
                     type="checkbox"
-                    checked={on}
+                    aria-label={key}
+                    checked={draftEnabled.has(key)}
                     disabled={saving}
+                    onClick={(e) => e.stopPropagation()}
                     onChange={() => toggleDraft(key)}
                     className="h-4 w-4 accent-green-600 disabled:opacity-50"
                   />
-                  <span className="text-sm text-gray-200">{key}</span>
-                </label>
-                {policyCog(key)}
+                }
+                right={policyCog(key)}
+              />
+            ))}
+
+            {oauthServers.length > 0 && (
+              <div className="mt-3 border-t border-gray-700 pt-2">
+                <div className="mb-1 px-2 text-xs font-medium text-gray-400">OAuth servers</div>
+                {oauthServers.map((s) => {
+                  const connected = s.auth_status === 'connected';
+                  const needsAuth = s.auth_status === 'needs_auth';
+                  const unavailable = s.auth_status === 'unavailable';
+                  const isConnecting = connectingKeys.has(s.key);
+                  // Fuse connection state + action into one icon: color signals the state, the
+                  // click runs the matching action, full text lives in title/aria-label.
+                  let StatusIcon = Plug;
+                  let iconClass = 'text-gray-500';
+                  let statusLabel = `${s.key}: not connected — click to connect`;
+                  let onStatusClick: (() => void) | undefined = () => connectOauth(s.key);
+                  let statusDisabled = saving;
+                  if (isConnecting) {
+                    StatusIcon = Loader2;
+                    iconClass = 'text-yellow-400 animate-spin';
+                    statusLabel = `${s.key}: connecting… — click to retry`;
+                    onStatusClick = () => connectOauth(s.key);
+                  } else if (unavailable) {
+                    StatusIcon = Ban;
+                    iconClass = 'text-gray-600';
+                    statusLabel = `${s.key}: unavailable — sandbox required`;
+                    onStatusClick = undefined;
+                    statusDisabled = true;
+                  } else if (connected) {
+                    StatusIcon = PlugZap;
+                    iconClass = 'text-green-400';
+                    statusLabel = `${s.key}: connected — click to disconnect`;
+                    onStatusClick = () => void disconnectOauth(s.key);
+                  } else if (needsAuth) {
+                    StatusIcon = Plug;
+                    iconClass = 'text-yellow-400';
+                    statusLabel = `${s.key}: needs auth — click to reconnect`;
+                    onStatusClick = () => connectOauth(s.key);
+                  }
+                  return (
+                    <ServerRow
+                      key={s.key}
+                      label={s.key}
+                      selected={selectedServer === s.key}
+                      onSelect={() => setSelectedServer(s.key)}
+                      checkbox={
+                        <input
+                          type="checkbox"
+                          aria-label={s.key}
+                          checked={draftEnabled.has(s.key)}
+                          disabled={saving || !connected}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => toggleDraft(s.key)}
+                          className="h-4 w-4 accent-green-600 disabled:opacity-40"
+                        />
+                      }
+                      right={
+                        <>
+                          <button
+                            type="button"
+                            onClick={onStatusClick}
+                            disabled={statusDisabled}
+                            title={statusLabel}
+                            aria-label={statusLabel}
+                            className="rounded p-1 hover:bg-gray-700 disabled:cursor-default disabled:hover:bg-transparent"
+                          >
+                            <StatusIcon className={`h-4 w-4 ${iconClass}`} />
+                          </button>
+                          {/* Cog rightmost — consistent even for servers without a status icon. */}
+                          {policyCog(s.key)}
+                        </>
+                      }
+                    />
+                  );
+                })}
               </div>
-            );
-          })}
+            )}
+          </div>
+
+          {/* Right: slides out when a server is selected — its per-conversation tool permissions. */}
+          <div
+            className={`overflow-hidden transition-all duration-200 ${
+              selectedServer ? 'w-[560px] border-l border-gray-700 pl-3 opacity-100' : 'w-0 opacity-0'
+            }`}
+          >
+            {selectedServer && (
+              <div className="h-full overflow-y-auto">
+                <div className="mb-2 text-xs font-medium text-gray-400">
+                  Tools — {selectedServer} (this conversation)
+                </div>
+                {sessionId ? (
+                  <McpToolPolicyEditor
+                    key={selectedServer}
+                    serverKey={selectedServer}
+                    scope="session"
+                    sessionId={sessionId}
+                  />
+                ) : (
+                  <p className="text-xs text-gray-500">
+                    Start the conversation to set per-tool permissions.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
-        {oauthServers.length > 0 && (
-          <div className="mt-4 border-t border-gray-700 pt-3">
-            <div className="mb-2 text-xs font-medium text-gray-400">
-              OAuth servers (connect once per account)
-            </div>
-            <div className="space-y-1">
-              {oauthServers.map((s) => {
-                const connected = s.auth_status === 'connected';
-                const needsAuth = s.auth_status === 'needs_auth';
-                const unavailable = s.auth_status === 'unavailable';
-                const isConnecting = connectingKeys.has(s.key);
-                // Fuse connection state + action into one right-aligned icon: color signals
-                // the state at a glance, the click runs the matching action, and the full
-                // text lives in title/aria-label (non-live) so the row stays compact.
-                let StatusIcon = Plug;
-                let iconClass = 'text-gray-500';
-                let statusLabel = `${s.key}: not connected — click to connect`;
-                let onStatusClick: (() => void) | undefined = () => connectOauth(s.key);
-                let statusDisabled = saving;
-                if (isConnecting) {
-                  // Keep it clickable during the poll: a re-click clears a stale error and the
-                  // in-flight guard dedups the popup — same affordance the old text button gave.
-                  StatusIcon = Loader2;
-                  iconClass = 'text-yellow-400 animate-spin';
-                  statusLabel = `${s.key}: connecting… — click to retry`;
-                  onStatusClick = () => connectOauth(s.key);
-                } else if (unavailable) {
-                  StatusIcon = Ban;
-                  iconClass = 'text-gray-600';
-                  statusLabel = `${s.key}: unavailable — sandbox required`;
-                  onStatusClick = undefined;
-                  statusDisabled = true;
-                } else if (connected) {
-                  StatusIcon = PlugZap;
-                  iconClass = 'text-green-400';
-                  statusLabel = `${s.key}: connected — click to disconnect`;
-                  onStatusClick = () => void disconnectOauth(s.key);
-                } else if (needsAuth) {
-                  StatusIcon = Plug;
-                  iconClass = 'text-yellow-400';
-                  statusLabel = `${s.key}: needs auth — click to reconnect`;
-                  onStatusClick = () => connectOauth(s.key);
-                }
-                return (
-                  <div
-                    key={s.key}
-                    className="flex items-center justify-between gap-3 px-2 py-2 rounded hover:bg-gray-800"
-                  >
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      {/* Enable this conversation to use the server — only once connected.
-                          Persisted with the static selection on OK; the backend injects the
-                          proxy entry into .claude.json for enabled + connected oauth keys. */}
-                      <input
-                        type="checkbox"
-                        checked={draftEnabled.has(s.key)}
-                        disabled={saving || !connected}
-                        onChange={() => toggleDraft(s.key)}
-                        className="h-4 w-4 accent-green-600 disabled:opacity-40"
-                      />
-                      <span className="text-sm text-gray-200">{s.key}</span>
-                    </label>
-                    <div className="flex shrink-0 items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={onStatusClick}
-                        disabled={statusDisabled}
-                        title={statusLabel}
-                        aria-label={statusLabel}
-                        className="rounded p-1 hover:bg-gray-700 disabled:cursor-default disabled:hover:bg-transparent"
-                      >
-                        <StatusIcon className={`h-4 w-4 ${iconClass}`} />
-                      </button>
-                      {/* Cog rightmost — consistent position across rows (static servers have no
-                          status icon), per the "à droite" placement. */}
-                      {policyCog(s.key)}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-        {enabledKeys.length > 0 && (
-          <div className="mt-4 border-t border-gray-700 pt-3">
-            <div className="mb-2 text-xs font-medium text-gray-400">
-              Tool permissions (this conversation)
-            </div>
-            <div className="space-y-1">
-              {enabledKeys.map((key) => (
-                <div key={key} className="rounded border border-gray-800">
-                  <button
-                    type="button"
-                    onClick={() => setExpandedPolicy((cur) => (cur === key ? null : key))}
-                    className="flex w-full items-center justify-between px-2 py-1.5 text-sm text-gray-200 hover:bg-gray-800"
-                    aria-expanded={expandedPolicy === key}
-                  >
-                    <span className="truncate">{key}</span>
-                    <span className="text-xs text-gray-500">
-                      {expandedPolicy === key ? 'Hide tools' : 'Tools…'}
-                    </span>
-                  </button>
-                  {expandedPolicy === key && sessionId && (
-                    <div className="border-t border-gray-800 p-2">
-                      <McpToolPolicyEditor serverKey={key} scope="session" sessionId={sessionId} />
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
         {error ? (
-          <p className="text-sm text-red-400 mt-3">{error}</p>
+          <p className="mt-3 text-sm text-red-400">{error}</p>
         ) : (
-          <p className="text-xs text-gray-500 mt-3">Changes apply to the next message.</p>
+          <p className="mt-3 text-xs text-gray-500">Changes apply to the next message.</p>
         )}
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-700 pt-3">
           <span className="text-xs text-gray-500">

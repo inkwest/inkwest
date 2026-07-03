@@ -12,6 +12,12 @@ vi.mock('@/services/api', () => ({
   setSessionMcp: vi.fn(),
   startMcpAuth: vi.fn(),
   disconnectMcpAuth: vi.fn(),
+  // The modal's right slide-out renders McpToolPolicyEditor, which calls these.
+  getMcpServerTools: vi.fn().mockResolvedValue({ key: 'k', tools: [], fetched_at: null }),
+  getMyMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
+  getSessionMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
+  setMyMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
+  setSessionMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
 }));
 
 import {
@@ -206,6 +212,15 @@ describe('McpPanel', () => {
     // The status icon flips to the connecting affordance (still clickable to retry).
     expect(await screen.findByRole('button', { name: /connecting/i })).toBeInTheDocument();
     openSpy.mockRestore();
+  });
+
+  it("slides out a server's per-conversation tools when its row is selected", async () => {
+    mockGetCatalog.mockResolvedValue(cat(['coralogix']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+    render(<McpPanel sessionId="s1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    fireEvent.click(screen.getByText('coralogix')); // select the row → tools panel slides out
+    expect(await screen.findByText(/Tools — coralogix/i)).toBeInTheDocument();
   });
 
   it('per-server cog opens global tool settings on the MCP tab, preselecting that server', async () => {

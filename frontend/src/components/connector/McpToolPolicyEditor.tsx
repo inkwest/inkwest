@@ -14,16 +14,8 @@ import {
 // The server-wide default row is stored under tool '*'; tools inherit it unless overridden.
 const SERVER_DEFAULT = '*';
 
-// Session-scope dropdown: the 5 user-facing options mixing scope × verdict.
+// Session-scope: the 5 user-facing options mixing scope × verdict.
 type Choice = 'always_allow' | 'conv_allow' | 'ask' | 'conv_deny' | 'always_deny';
-
-const SESSION_OPTIONS: { value: Choice; label: string }[] = [
-  { value: 'always_allow', label: 'Always allow' },
-  { value: 'conv_allow', label: 'Allow this conversation' },
-  { value: 'ask', label: 'Ask each time' },
-  { value: 'conv_deny', label: 'Deny this conversation' },
-  { value: 'always_deny', label: 'Always deny' },
-];
 
 type Scope = 'global' | 'session';
 
@@ -52,6 +44,51 @@ const VERDICT_SEGMENTS: { v: McpVerdict; label: string; on: string }[] = [
   { v: 'ask', label: 'Ask', on: 'bg-gray-500 text-white' },
   { v: 'deny', label: 'Deny', on: 'bg-red-700 text-white' },
 ];
+
+// Session-scope 5-position slider: same segmented metaphor as the global 3-way, with the two
+// extra "this conversation" stops. Left→right = allow→deny; double mark = persistent (global),
+// single = this conversation only, ? = ask. Full wording lives in title/aria-label.
+const SESSION_SEGMENTS: { v: Choice; mark: string; full: string; on: string }[] = [
+  { v: 'always_allow', mark: '✓✓', full: 'Always allow', on: 'bg-green-700 text-white' },
+  { v: 'conv_allow', mark: '✓', full: 'Allow this conversation', on: 'bg-green-900 text-green-200' },
+  { v: 'ask', mark: '?', full: 'Ask each time', on: 'bg-gray-500 text-white' },
+  { v: 'conv_deny', mark: '✗', full: 'Deny this conversation', on: 'bg-red-900 text-red-200' },
+  { v: 'always_deny', mark: '✗✗', full: 'Always deny', on: 'bg-red-700 text-white' },
+];
+
+function SessionVerdictSlider({
+  value,
+  onChange,
+  name,
+}: {
+  value: Choice;
+  onChange: (v: Choice) => void;
+  name: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={`Permission for ${name}`}
+      className="inline-flex shrink-0 overflow-hidden rounded border border-gray-700"
+    >
+      {SESSION_SEGMENTS.map((s) => (
+        <button
+          key={s.v}
+          type="button"
+          title={s.full}
+          aria-label={`${s.full} — ${name}`}
+          aria-pressed={value === s.v}
+          onClick={() => onChange(s.v)}
+          className={`px-2 py-1 text-xs transition-colors ${
+            value === s.v ? s.on : 'bg-gray-900 text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          {s.mark}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function VerdictSlider({
   value,
@@ -269,27 +306,22 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     );
   }
 
-  const control = (name: string) =>
-    scope === 'session' ? (
-      <select
-        aria-label={`Permission for ${name === SERVER_DEFAULT ? 'server default' : name}`}
+  const control = (name: string) => {
+    const display = name === SERVER_DEFAULT ? 'server default' : name;
+    return scope === 'session' ? (
+      <SessionVerdictSlider
+        name={display}
         value={sessionChoice(name)}
-        onChange={(e) => onSessionChange(name, e.target.value as Choice)}
-        className="shrink-0 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-200"
-      >
-        {SESSION_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
+        onChange={(v) => onSessionChange(name, v)}
+      />
     ) : (
       <VerdictSlider
-        name={name === SERVER_DEFAULT ? 'server default' : name}
+        name={display}
         value={globalMap[name] ?? 'ask'}
         onChange={(v) => onGlobalChange(name, v)}
       />
     );
+  };
 
   const q = query.trim().toLowerCase();
   const filtered = q

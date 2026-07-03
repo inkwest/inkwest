@@ -87,20 +87,20 @@ describe('McpToolPolicyEditor — global scope (segmented slider)', () => {
   });
 });
 
-describe('McpToolPolicyEditor — session scope (5-option dropdown)', () => {
-  it('a conversation override wins over the global default in the derived choice', async () => {
+describe('McpToolPolicyEditor — session scope (5-segment slider)', () => {
+  it('a conversation override wins over the global default (pressed segment)', async () => {
     mGetGlobal.mockResolvedValue({ policies: [{ server_key: 'k', tool: 'query', verdict: 'allow' }] });
     mGetConv.mockResolvedValue({ policies: [{ server_key: 'k', tool: 'query', verdict: 'deny' }] });
     render(<McpToolPolicyEditor serverKey="k" scope="session" sessionId="s1" />);
-    const select = (await screen.findByLabelText('Permission for query')) as HTMLSelectElement;
-    expect(select.value).toBe('conv_deny');
+    // conv deny shadows global allow → "Deny this conversation" is pressed.
+    const seg = await screen.findByRole('button', { name: 'Deny this conversation — query' });
+    expect(seg).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('"always allow" writes the global default AND clears the conversation override', async () => {
     mGetConv.mockResolvedValue({ policies: [{ server_key: 'k', tool: 'query', verdict: 'deny' }] });
     render(<McpToolPolicyEditor serverKey="k" scope="session" sessionId="s1" />);
-    const select = await screen.findByLabelText('Permission for query');
-    fireEvent.change(select, { target: { value: 'always_allow' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Always allow — query' }));
     await waitFor(() => expect(mSetGlobal).toHaveBeenCalled());
     expect(mSetGlobal.mock.calls[0][1]).toContainEqual({ tool: 'query', verdict: 'allow' });
     await waitFor(() => expect(mSetConv).toHaveBeenCalled());
@@ -109,16 +109,15 @@ describe('McpToolPolicyEditor — session scope (5-option dropdown)', () => {
 
   it('"deny this conversation" writes only the conversation row', async () => {
     render(<McpToolPolicyEditor serverKey="k" scope="session" sessionId="s1" />);
-    const select = await screen.findByLabelText('Permission for query');
-    fireEvent.change(select, { target: { value: 'conv_deny' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Deny this conversation — query' }));
     await waitFor(() => expect(mSetConv).toHaveBeenCalled());
     expect(mSetConv.mock.calls[0][2]).toContainEqual({ tool: 'query', verdict: 'deny' });
     expect(mSetGlobal).not.toHaveBeenCalled();
   });
 
-  it('defaults an unset tool to "ask"', async () => {
+  it('defaults an unset tool to "ask" (pressed segment)', async () => {
     render(<McpToolPolicyEditor serverKey="k" scope="session" sessionId="s1" />);
-    const select = (await screen.findByLabelText('Permission for query')) as HTMLSelectElement;
-    expect(select.value).toBe('ask');
+    const seg = await screen.findByRole('button', { name: 'Ask each time — query' });
+    expect(seg).toHaveAttribute('aria-pressed', 'true');
   });
 });
