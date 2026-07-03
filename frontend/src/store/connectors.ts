@@ -3,6 +3,7 @@ import * as api from '@/services/api';
 import { ConnectorName, ConnectorStatus, PriorGrant } from '@/types/connectors';
 import { useSessionsStore } from '@/store/sessions';
 import { openConnectorAuthPopup } from '@/lib/connectorConnect';
+import { centeredPopupFeatures } from '@/lib/popupCenter';
 
 // Grant/revoke/renew persist a 'system' event message server-side; re-fetch the open
 // session so it appears inline in the stream. Fire-and-forget (the access change must
@@ -76,18 +77,11 @@ function indexByConnector(list: ConnectorStatus[]): Record<string, ConnectorStat
 let awsPopup: Window | null = null;
 
 function openAwsPopup(url: string): void {
-  const w = 520;
-  const h = 720;
-  const left = Math.max(0, Math.round((window.screen.width - w) / 2));
-  const top = Math.max(0, Math.round((window.screen.height - h) / 2));
   // The "no" chrome features + explicit size are what make browsers open a small
   // popup window rather than a full tab. It stays best-effort: some browsers/settings
-  // still open a tab regardless.
+  // still open a tab regardless. Centred on the browser window (multi-monitor aware).
   const features = [
-    `width=${w}`,
-    `height=${h}`,
-    `left=${left}`,
-    `top=${top}`,
+    centeredPopupFeatures(520, 720),
     'menubar=no',
     'toolbar=no',
     'location=no',

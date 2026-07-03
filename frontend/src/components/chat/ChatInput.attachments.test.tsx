@@ -59,6 +59,22 @@ describe('ChatInput attachments', () => {
     expect(screen.queryByRole('button', { name: /attach files/i })).not.toBeInTheDocument();
   });
 
+  it('tourAnchor renders the attach button (disabled) even when attachments are disabled', () => {
+    enableAttachments(false);
+    const { container } = render(<ChatInput onSend={onSend} sessionId="s1" tourAnchor />);
+    const btn = screen.getByRole('button', { name: /attach files/i });
+    expect(btn).toBeInTheDocument();
+    expect(btn).toBeDisabled(); // spotlight anchor only, no real affordance
+    // No hidden file input while the feature is off — the anchor can't actually attach.
+    expect(container.querySelector('input[type="file"]')).not.toBeInTheDocument();
+  });
+
+  it('tourAnchor does not force the button when attachments are enabled (stays usable)', () => {
+    const { container } = render(<ChatInput onSend={onSend} sessionId="s1" tourAnchor />);
+    expect(screen.getByRole('button', { name: /attach files/i })).toBeEnabled();
+    expect(container.querySelector('input[type="file"]')).toBeInTheDocument();
+  });
+
   it('uploads a browsed file and shows a chip', async () => {
     vi.mocked(api.uploadAttachments).mockResolvedValue([NOTE]);
     const { container } = render(<ChatInput onSend={onSend} sessionId="s1" />);

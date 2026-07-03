@@ -47,7 +47,7 @@ export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: Setti
       isOpen={isOpen}
       onClose={onClose}
       title="Settings"
-      size="xl"
+      size="2xl"
       align="top"
       // MCP tab manages its own two-pane scroll; pin tabs + let the panes be the
       // buffer so the tab content never pushes past the viewport. Other tabs keep

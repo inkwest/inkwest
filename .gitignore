@@ -12,6 +12,8 @@ dist/
 build/
 *.egg-info/
 .eggs/
+# TypeScript incremental build cache (frontend)
+*.tsbuildinfo
 
 # Environment
 .env

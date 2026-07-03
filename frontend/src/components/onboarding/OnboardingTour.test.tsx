@@ -78,6 +78,34 @@ describe('OnboardingTour', () => {
     expect(screen.queryByText('Model')).not.toBeInTheDocument();
   });
 
+  it('Enter advances through the steps and completes on the last one', () => {
+    render(<><Anchors /><OnboardingTour /></>);
+    expect(screen.getByText('Attachments')).toBeInTheDocument();
+
+    for (const title of ['Skills', 'Connectors', 'MCP servers', 'Model']) {
+      fireEvent.keyDown(window, { key: 'Enter' });
+      expect(screen.getByText(title)).toBeInTheDocument();
+    }
+
+    fireEvent.keyDown(window, { key: 'Enter' }); // last step → Done
+    expect(useOnboardingStore.getState().completed).toBe(true);
+    expect(screen.queryByText('Model')).not.toBeInTheDocument();
+  });
+
+  it('a held Enter (repeat) does not blast through the tour', () => {
+    render(<><Anchors /><OnboardingTour /></>);
+    fireEvent.keyDown(window, { key: 'Enter', repeat: true });
+    expect(screen.getByText('Attachments')).toBeInTheDocument(); // still step 1
+  });
+
+  it('Enter does not hijack a focused bubble button (guard bows out)', () => {
+    render(<><Anchors /><OnboardingTour /></>);
+    fireEvent.click(screen.getByText('Next')); // step 2 → Back is now present
+    screen.getByText('Back').focus();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(screen.getByText('Skills')).toBeInTheDocument(); // did not advance to Connectors
+  });
+
   it('Back steps to the previous tip', () => {
     render(<><Anchors /><OnboardingTour /></>);
     fireEvent.click(screen.getByText('Next'));

@@ -14,6 +14,7 @@ import { StateBadge } from '@/components/connector/StateBadge';
 import { McpPanel } from '@/components/connector/McpPanel';
 import { ModelEnginePicker } from '@/components/chat/ModelEnginePicker';
 import { OnboardingTour } from '@/components/onboarding/OnboardingTour';
+import { useOnboardingStore } from '@/store/onboarding';
 
 const CUSTOM = '__custom__';
 
@@ -36,6 +37,11 @@ export function StartConversation() {
   const { createSession, setPendingPrompt } = useSessionsStore();
   const { user } = useAuthStore();
   const isAdmin = !!user?.is_admin;
+  // Mirrors OnboardingTour's own `active` gate: this component co-mounts the tour, so it
+  // owns the attach-icon spotlight anchor (tour step 1) — scoped here, not read globally
+  // inside ChatInput, so ChatView's composer never renders a phantom disabled icon.
+  const tourCompleted = useOnboardingStore((s) => s.completed);
+  const tourAnchor = !!user && !tourCompleted;
   const { prompts, fetchPrompts } = useSystemPromptStore();
 
   // '' = default prompt, CUSTOM = free-text, otherwise a system prompt id (admin only).
@@ -202,6 +208,7 @@ export function StartConversation() {
           placeholder="Describe what you want to investigate or analyse…"
           sessionId={sessionId ?? undefined}
           onBeforeAttach={() => ensureSession()}
+          tourAnchor={tourAnchor}
           modelControl={
             config && (config.available_models.length > 1 || config.engines.length > 1) ? (
               <ModelEnginePicker

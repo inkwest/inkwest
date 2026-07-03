@@ -49,6 +49,12 @@ interface Props {
   onBeforeAttach?: () => Promise<string | void>;
   // Broadcast typing state to other participants (owner only); no-op when omitted.
   onTyping?: (state: boolean) => void;
+  // Force the attach button to render as an onboarding-tour spotlight anchor even when
+  // attachments are unavailable (see OnboardingTour STEPS[0]). Set only by the composer
+  // that co-mounts the tour (start screen); the button stays disabled (no affordance) so
+  // it can't leak a working control. Scoped this way so other composers (e.g. ChatView,
+  // which never shows the tour) don't render a phantom icon.
+  tourAnchor?: boolean;
 }
 
 // The "/<query>" token immediately left of the cursor (slash at message start or after
@@ -88,7 +94,7 @@ function insertAtCursor(
   };
 }
 
-export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, initialAttachments, autoSubmit, sessionId, large, placeholder, modelControl, connectorControls, onBeforeAttach, onTyping }: Props) {
+export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, initialAttachments, autoSubmit, sessionId, large, placeholder, modelControl, connectorControls, onBeforeAttach, onTyping, tourAnchor }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
   // Debounced typing signal: emit `true` on edit, then `false` after a short idle
   // (also cleared on send/unmount) so other participants see "X is typing…".
@@ -187,6 +193,11 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
   // one (start screen). Both the attach button and paste lazily create the session
   // via onBeforeAttach when none exists yet (see ensureAttachSession).
   const canAttach = attachmentsEnabled && (!!sessionId || !!onBeforeAttach);
+  // The onboarding tour opens on the attach icon (see OnboardingTour STEPS[0]). When the
+  // co-mounted tour asks for it (tourAnchor), keep the button rendered as a spotlight
+  // anchor even when attachments are disabled, so step 1 never points at nothing — it
+  // stays disabled below (no real affordance).
+  const showAttach = canAttach || !!tourAnchor;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -812,17 +823,19 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
         {/* Control row */}
         <div className="mt-1 flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5">
-            {canAttach && (
+            {showAttach && (
               <>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={handleBrowse}
-                  aria-hidden="true"
-                  tabIndex={-1}
-                />
+                {canAttach && (
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={handleBrowse}
+                    aria-hidden="true"
+                    tabIndex={-1}
+                  />
+                )}
                 <ToolHoverCard
                   title="Attach files"
                   body={
@@ -834,7 +847,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
                   <button
                     type="button"
                     onClick={() => void openFilePicker()}
-                    disabled={disabled || uploading}
+                    disabled={disabled || uploading || !canAttach}
                     aria-label="Attach files"
                     title="Attach files"
                     data-tour="attach"

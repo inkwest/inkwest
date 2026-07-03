@@ -1,36 +1,21 @@
 import { startMcpAuth } from '@/services/api';
+import { openAuthPopup } from '@/lib/oauthPopup';
 
 /**
- * Open the OAuth consent popup for an MCP server, popup-blocker safe.
- *
- * The window MUST be opened synchronously inside the click handler (before any await), then
- * navigated to the authorization URL once the backend returns it — opening it after the await
- * trips popup blockers. Returns the opened window so the caller can poll until it closes.
+ * Open the OAuth consent popup for an MCP server, popup-blocker safe (see {@link openAuthPopup}).
+ * Returns the opened window so the caller can poll until it closes.
  */
 export function openMcpAuthPopup(
   key: string,
   onError?: (message: string) => void,
 ): Window | null {
-  // Mid-size, gently landscape (between square and 16:9), centred on the screen.
-  const w = 960;
-  const h = 740;
-  const left = Math.max(0, Math.round((window.screen.width - w) / 2));
-  const top = Math.max(0, Math.round((window.screen.height - h) / 2));
-  const popup = window.open(
-    'about:blank',
+  // Mid-size, gently landscape (between square and 16:9).
+  return openAuthPopup(
     'mcp-oauth',
-    `width=${w},height=${h},left=${left},top=${top}`,
+    { width: 960, height: 740 },
+    async () => (await startMcpAuth(key)).authorize_url,
+    // Surface the backend's reason (ApiError carries the 502 detail, e.g. a discovery failure)
+    // instead of a blank popup — the generic fallback covers non-Error throws.
+    (e) => onError?.(e instanceof Error ? e.message : 'Failed to start MCP authorization'),
   );
-  void (async () => {
-    try {
-      const { authorize_url } = await startMcpAuth(key);
-      if (popup) popup.location.href = authorize_url;
-    } catch (e) {
-      popup?.close();
-      // Surface the backend's reason (ApiError carries the 502 detail, e.g. a discovery
-      // failure) instead of a blank popup — the generic fallback covers non-Error throws.
-      onError?.(e instanceof Error ? e.message : 'Failed to start MCP authorization');
-    }
-  })();
-  return popup;
 }
