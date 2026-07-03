@@ -38,13 +38,33 @@ class McpEnumError(Exception):
     """Enumeration failed: unknown key, dead grant, or upstream/transport error."""
 
 
+def _annotations(tool: Any) -> dict[str, Any] | None:
+    """The tool's MCP behavior hints (read-only / destructive / …), or None if unannotated.
+
+    Drives the UI's capability grouping (Read-only / Write-delete / Interactive) — the same
+    axis Claude's own tool-permission UI groups on. Keys are snake_cased for our wire shape.
+    """
+    a = getattr(tool, "annotations", None)
+    if a is None:
+        return None
+    return {
+        "title": getattr(a, "title", None),
+        "read_only": getattr(a, "readOnlyHint", None),
+        "destructive": getattr(a, "destructiveHint", None),
+        "idempotent": getattr(a, "idempotentHint", None),
+        "open_world": getattr(a, "openWorldHint", None),
+    }
+
+
 def _normalize(tool: Any) -> dict[str, Any]:
-    """One tool → the stable shape we cache and serve ({name, description, input_schema})."""
+    """One tool → the stable shape we cache and serve ({name, description, input_schema,
+    annotations})."""
     raw = getattr(tool, "inputSchema", None)
     return {
         "name": tool.name,
         "description": tool.description or "",
         "input_schema": raw if isinstance(raw, dict) else {},
+        "annotations": _annotations(tool),
     }
 
 

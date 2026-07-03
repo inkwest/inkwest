@@ -13,20 +13,24 @@ type Tab = 'display' | 'skills' | 'mcp' | 'io';
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  // Tab to show when the modal opens (e.g. the MCP panel deep-links to 'mcp').
+  initialTab?: Tab;
 }
 
-export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const [tab, setTab] = useState<Tab>('display');
+export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: SettingsModalProps) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [adminSkills, setAdminSkills] = useState<Skill[]>([]);
   const prefs = usePreferencesStore();
 
-  // Load DB-backed prefs + the admin skill list when the modal first opens.
+  // Load DB-backed prefs + the admin skill list when the modal first opens; also select the
+  // requested tab (a deep-link may open straight onto 'mcp').
   useEffect(() => {
     if (!isOpen) return;
+    setTab(initialTab);
     if (!prefs.loaded) void prefs.load();
     void getSkills().then(setAdminSkills).catch(() => setAdminSkills([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Settings" size="xl" align="top">

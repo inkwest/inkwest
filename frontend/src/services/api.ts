@@ -681,10 +681,20 @@ export async function setSessionMcp(
 // MCP per-tool permission policy (tool enumeration + verdicts). See docs/HANDOFF-mcp-tool-permissions.md.
 export type McpVerdict = 'allow' | 'deny' | 'ask';
 
+export interface McpToolAnnotations {
+  title?: string | null;
+  read_only?: boolean | null;
+  destructive?: boolean | null;
+  idempotent?: boolean | null;
+  open_world?: boolean | null;
+}
+
 export interface McpToolInfo {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  // MCP behavior hints; null/absent for unannotated tools (→ Interactive bucket).
+  annotations?: McpToolAnnotations | null;
 }
 
 export interface McpServerTools {

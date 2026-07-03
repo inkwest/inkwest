@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Ban, Loader2, Plug, PlugZap } from 'lucide-react';
+import { Ban, Loader2, Plug, PlugZap, Settings } from 'lucide-react';
 import { McpIcon } from '@/components/icons/BrandIcons';
 import { ConnectorIconButton } from './ConnectorIconButton';
 import { Badge } from '@/components/ui/Badge';
@@ -15,6 +15,7 @@ import { McpToolPolicyEditor } from './McpToolPolicyEditor';
 import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useSessionsStore } from '@/store/sessions';
 import { useMcpStore } from '@/store/mcp';
+import { useSettingsUi } from '@/store/settingsUi';
 import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCache';
 
 // A `mcp_catalog_changed` broadcast hits every connected client at once; each mounted McpPanel
@@ -71,6 +72,8 @@ export function McpPanel({
   // Mirror the per-session selection into the shared store so ChatInput's "no connector
   // activated" warning reacts to MCP enablement without its own fetch.
   const setSessionEnabled = useMcpStore((s) => s.setSessionEnabled);
+  // Deep-link to the global MCP tool-permission settings (opens Settings on the 'mcp' tab).
+  const openSettings = useSettingsUi((s) => s.open);
   // Bumped by the sync socket on an `mcp_catalog_changed` broadcast (the cache is reset there
   // first). Drives a catalog-*set*-only refresh (see the live-reload effect below), deliberately
   // NOT the mount effect: the session selection must not be refetched on a global catalog change
@@ -327,6 +330,23 @@ export function McpPanel({
     }
   };
 
+  // Per-server cog: jumps to the global tool-permission settings preselecting this server.
+  // Placed right of the status icon so it's present even for servers without a connection.
+  const policyCog = (key: string) => (
+    <button
+      type="button"
+      onClick={() => {
+        setOpen(false);
+        openSettings('mcp', key);
+      }}
+      title="Tool permissions"
+      aria-label={`Tool permissions for ${key}`}
+      className="shrink-0 rounded p-1 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+    >
+      <Settings className="h-3.5 w-3.5" />
+    </button>
+  );
+
   return (
     <>
       {variant === 'icon' ? (
@@ -410,19 +430,22 @@ export function McpPanel({
           {catalog.map((key) => {
             const on = draftEnabled.has(key);
             return (
-              <label
+              <div
                 key={key}
-                className="flex items-center gap-3 px-2 py-2 rounded cursor-pointer hover:bg-gray-800"
+                className="flex items-center justify-between gap-2 rounded px-2 py-2 hover:bg-gray-800"
               >
-                <input
-                  type="checkbox"
-                  checked={on}
-                  disabled={saving}
-                  onChange={() => toggleDraft(key)}
-                  className="h-4 w-4 accent-green-600 disabled:opacity-50"
-                />
-                <span className="text-sm text-gray-200">{key}</span>
-              </label>
+                <label className="flex flex-1 cursor-pointer items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={saving}
+                    onChange={() => toggleDraft(key)}
+                    className="h-4 w-4 accent-green-600 disabled:opacity-50"
+                  />
+                  <span className="text-sm text-gray-200">{key}</span>
+                </label>
+                {policyCog(key)}
+              </div>
             );
           })}
         </div>
@@ -488,16 +511,21 @@ export function McpPanel({
                       />
                       <span className="text-sm text-gray-200">{s.key}</span>
                     </label>
-                    <button
-                      type="button"
-                      onClick={onStatusClick}
-                      disabled={statusDisabled}
-                      title={statusLabel}
-                      aria-label={statusLabel}
-                      className="shrink-0 rounded p-1 hover:bg-gray-700 disabled:cursor-default disabled:hover:bg-transparent"
-                    >
-                      <StatusIcon className={`h-4 w-4 ${iconClass}`} />
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={onStatusClick}
+                        disabled={statusDisabled}
+                        title={statusLabel}
+                        aria-label={statusLabel}
+                        className="rounded p-1 hover:bg-gray-700 disabled:cursor-default disabled:hover:bg-transparent"
+                      >
+                        <StatusIcon className={`h-4 w-4 ${iconClass}`} />
+                      </button>
+                      {/* Cog rightmost — consistent position across rows (static servers have no
+                          status icon), per the "à droite" placement. */}
+                      {policyCog(s.key)}
+                    </div>
                   </div>
                 );
               })}

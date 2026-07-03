@@ -3,6 +3,7 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { McpPanel } from './McpPanel';
 import { resetMcpCatalogCache, primeMcpCatalog } from './mcpCatalogCache';
 import { useMcpStore } from '@/store/mcp';
+import { useSettingsUi } from '@/store/settingsUi';
 import type { McpServerEntry } from '@/services/api';
 
 vi.mock('@/services/api', () => ({
@@ -205,6 +206,15 @@ describe('McpPanel', () => {
     // The status icon flips to the connecting affordance (still clickable to retry).
     expect(await screen.findByRole('button', { name: /connecting/i })).toBeInTheDocument();
     openSpy.mockRestore();
+  });
+
+  it('per-server cog opens global tool settings on the MCP tab, preselecting that server', async () => {
+    useSettingsUi.setState({ isOpen: false, initialTab: 'display', initialServer: null });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Tool permissions for notion' }));
+    expect(useSettingsUi.getState().isOpen).toBe(true);
+    expect(useSettingsUi.getState().initialTab).toBe('mcp');
+    expect(useSettingsUi.getState().initialServer).toBe('notion');
   });
 
   it('drops the key from the session selection BEFORE revoking upstream on Disconnect', async () => {

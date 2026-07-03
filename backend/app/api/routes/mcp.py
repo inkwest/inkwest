@@ -75,6 +75,9 @@ class McpToolInfo(BaseModel):
     name: str
     description: str
     input_schema: dict[str, Any]
+    # MCP behavior hints ({read_only, destructive, idempotent, open_world, title}) or None.
+    # Drives the UI's capability grouping. Absent on older cached rows until a refresh.
+    annotations: dict[str, Any] | None = None
 
 
 class McpServerToolsResponse(BaseModel):

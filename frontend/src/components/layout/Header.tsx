@@ -10,6 +10,7 @@ import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { SettingsModal } from '@/components/settings/SettingsModal';
+import { useSettingsUi } from '@/store/settingsUi';
 import { devSwitchUser } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
 
@@ -30,7 +31,12 @@ export function Header() {
   const { fetchConfig } = useConfigStore();
   const version = useUpdateStore((s) => s.loadedVersion);
   const [showMenu, setShowMenu] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  // Settings modal open-state lives in a store so deep components (e.g. the MCP panel) can open
+  // it on a specific tab without prop-drilling.
+  const settingsOpen = useSettingsUi((s) => s.isOpen);
+  const settingsInitialTab = useSettingsUi((s) => s.initialTab);
+  const openSettings = useSettingsUi((s) => s.open);
+  const closeSettings = useSettingsUi((s) => s.close);
   const [devName, setDevName] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -180,7 +186,7 @@ export function Header() {
                 <button
                   onClick={() => {
                     setShowMenu(false);
-                    setShowSettings(true);
+                    openSettings();
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
                 >
@@ -235,7 +241,11 @@ export function Header() {
         </div>
       </div>
 
-      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
+      <SettingsModal
+        isOpen={settingsOpen}
+        initialTab={settingsInitialTab}
+        onClose={closeSettings}
+      />
     </header>
   );
 }

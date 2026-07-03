@@ -21,13 +21,39 @@ def test_normalize_maps_fields_and_defaults() -> None:
         "name": "query",
         "description": "Run a query",
         "input_schema": {"type": "object"},
+        "annotations": None,  # no annotations on the stub → None
     }
 
 
 def test_normalize_coerces_missing_description_and_schema() -> None:
     # description None -> "", non-dict schema -> {} (never leak a None the UI must special-case).
     out = mcp_tools._normalize(_tool("t", None, None))
-    assert out == {"name": "t", "description": "", "input_schema": {}}
+    assert out == {"name": "t", "description": "", "input_schema": {}, "annotations": None}
+
+
+def test_normalize_captures_annotations() -> None:
+    from types import SimpleNamespace
+
+    tool = SimpleNamespace(
+        name="get_x",
+        description="",
+        inputSchema={},
+        annotations=SimpleNamespace(
+            title="Get X",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=None,
+            openWorldHint=None,
+        ),
+    )
+    out = mcp_tools._normalize(tool)
+    assert out["annotations"] == {
+        "title": "Get X",
+        "read_only": True,
+        "destructive": False,
+        "idempotent": None,
+        "open_world": None,
+    }
 
 
 @pytest.mark.asyncio
