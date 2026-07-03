@@ -38,14 +38,16 @@ export function McpPolicySettingsTab() {
     return <p className="text-sm text-gray-400">No MCP servers configured.</p>;
 
   return (
-    <section className="space-y-3">
-      <p className="text-sm text-gray-400">
+    <section className="flex h-full min-h-0 flex-col gap-3">
+      <p className="shrink-0 text-sm text-gray-400">
         Default permission for each MCP tool. A conversation can override these; unset tools
         fall back to “Ask each time”.
       </p>
-      <div className="flex gap-3">
+      {/* Bounded height so each pane scrolls on its own; min-h-0 lets the panes shrink
+          (they are the scroll buffer) instead of pushing the modal past the viewport. */}
+      <div className="flex h-[520px] min-h-0 gap-3">
         {/* Left: server list — selection drives the right pane. */}
-        <ul className="w-44 shrink-0 space-y-0.5 border-r border-gray-700 pr-2" role="listbox" aria-label="MCP servers">
+        <ul className="w-44 shrink-0 space-y-0.5 overflow-y-auto border-r border-gray-700 pr-2" role="listbox" aria-label="MCP servers">
           {servers.map((s) => (
             <li key={s.key}>
               <button
@@ -65,7 +67,8 @@ export function McpPolicySettingsTab() {
             </li>
           ))}
         </ul>
-        {/* Right: the selected server's per-tool defaults. */}
+        {/* Right: the selected server's per-tool defaults. The editor pins its own
+            header (search + bulk actions) and scrolls only the tool list. */}
         <div className="min-w-0 flex-1">
           {selected && <McpToolPolicyEditor key={selected} serverKey={selected} scope="global" />}
         </div>

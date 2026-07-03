@@ -23,6 +23,13 @@ interface McpState {
   addAsk: (ask: PendingMcpAsk) => void;
   removeAsk: (askId: string) => void;
   setAsks: (asks: PendingMcpAsk[]) => void;
+  // Ask ids currently rendered inline by a transcript tool card. The fallback banner
+  // (McpAskNotice) skips claimed asks so the decision UI shows in exactly one place —
+  // the bubble when the running tool card is on screen, the banner otherwise (e.g.
+  // after a mid-hold reload where the transcript lost the in-flight card).
+  claimedAsks: Record<string, true>;
+  claimAsk: (askId: string) => void;
+  releaseAsk: (askId: string) => void;
   // Enabled MCP server keys for the conversation whose composer is currently mounted,
   // mirrored from McpPanel (its load/apply/disconnect writes) so other surfaces — e.g.
   // ChatInput's "no connector activated" warning — can reactively tell whether the
@@ -48,8 +55,22 @@ export const useMcpStore = create<McpState>((set) => ({
       s.pendingAsks.some((a) => a.askId === ask.askId) ? s : { pendingAsks: [...s.pendingAsks, ask] }
     ),
   removeAsk: (askId) =>
-    set((s) => ({ pendingAsks: s.pendingAsks.filter((a) => a.askId !== askId) })),
+    set((s) => {
+      const claimedAsks = { ...s.claimedAsks };
+      delete claimedAsks[askId];
+      return { pendingAsks: s.pendingAsks.filter((a) => a.askId !== askId), claimedAsks };
+    }),
   setAsks: (asks) => set({ pendingAsks: asks }),
+  claimedAsks: {},
+  claimAsk: (askId) =>
+    set((s) => (s.claimedAsks[askId] ? s : { claimedAsks: { ...s.claimedAsks, [askId]: true } })),
+  releaseAsk: (askId) =>
+    set((s) => {
+      if (!s.claimedAsks[askId]) return s;
+      const claimedAsks = { ...s.claimedAsks };
+      delete claimedAsks[askId];
+      return { claimedAsks };
+    }),
   enabledBySession: {},
   // Replace the whole map (not merge): only one conversation's composer is mounted at a
   // time, so a single entry is all that's ever read — this bounds the map instead of

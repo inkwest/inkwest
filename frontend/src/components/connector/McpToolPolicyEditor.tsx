@@ -152,11 +152,15 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     setConvMap(m);
   };
 
-  // Cross-instance global-policy change signal (bumped by any global-scope write; watched by the
-  // session view to refresh its inherited values).
+  // Cross-instance policy change signals: a global-scope write (this editor, the stacked
+  // Settings modal, or the in-bubble ask bar's "always") bumps `global`; a conversation
+  // write from the ask bar bumps `session`. Watched to re-fetch so every open editor
+  // reflects a decision made elsewhere. Self-caused bumps are skipped via the seen refs.
   const bumpGlobalPolicy = useMcpPolicyVersion((s) => s.bumpGlobal);
   const globalPolicyVersion = useMcpPolicyVersion((s) => s.global);
   const seenPolicyVersion = useRef(globalPolicyVersion);
+  const sessionPolicyVersion = useMcpPolicyVersion((s) => s.session);
+  const seenSessionVersion = useRef(sessionPolicyVersion);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,10 +193,11 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     };
   }, [serverKey, scope, sessionId]);
 
-  // Session view: when the global policy changes elsewhere (bumped), re-fetch it so the inherited
-  // (muted) verdicts reflect the new global defaults. Skips the initial value (mount already loads).
+  // When the global policy changes elsewhere (bumped), re-fetch it: the session view
+  // refreshes its inherited (muted) verdicts, the global view its own sliders (e.g. the
+  // ask bar's "always allow"). Skips the initial value (mount already loads) and bumps
+  // this editor caused itself (seen ref updated at write time).
   useEffect(() => {
-    if (scope !== 'session') return;
     if (seenPolicyVersion.current === globalPolicyVersion) return;
     seenPolicyVersion.current = globalPolicyVersion;
     let cancelled = false;
@@ -206,7 +211,26 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [globalPolicyVersion, scope, serverKey]);
+  }, [globalPolicyVersion, serverKey]);
+
+  // Session view: when the CONVERSATION policy changes elsewhere (the ask bar's "for
+  // this conversation"), re-fetch the local overrides.
+  useEffect(() => {
+    if (scope !== 'session' || !sessionId) return;
+    if (seenSessionVersion.current === sessionPolicyVersion) return;
+    seenSessionVersion.current = sessionPolicyVersion;
+    let cancelled = false;
+    getSessionMcpPolicy(sessionId)
+      .then((r) => {
+        if (!cancelled) setConv(toMap(r.policies, serverKey));
+      })
+      .catch(() => {
+        /* transient; keep the last-known overrides */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionPolicyVersion, scope, serverKey, sessionId]);
 
   const reload = useCallback(async () => {
     setReloading(true);
@@ -259,7 +283,12 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
       for (const n of [SERVER_DEFAULT, ...toolNames]) next[n] = verdict;
       setGlobal(next);
       void runSave(() => setMyMcpPolicy(serverKey, toEntries(next)))
-        .then(() => bumpGlobalPolicy())
+        .then(() => {
+          // Mark this bump as self-caused so the refetch effect skips it (a refetch
+          // racing rapid optimistic edits could clobber the in-flight map).
+          bumpGlobalPolicy();
+          seenPolicyVersion.current = useMcpPolicyVersion.getState().global;
+        })
         .catch(() => {
           setError('Failed to save permission');
           void resyncGlobal();
@@ -282,7 +311,12 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     setGlobal(next); // optimistic — instant, no disable/flicker
     setError(null);
     void runSave(() => setMyMcpPolicy(serverKey, toEntries(next)))
-      .then(() => bumpGlobalPolicy())
+      .then(() => {
+          // Mark this bump as self-caused so the refetch effect skips it (a refetch
+          // racing rapid optimistic edits could clobber the in-flight map).
+          bumpGlobalPolicy();
+          seenPolicyVersion.current = useMcpPolicyVersion.getState().global;
+        })
       .catch(() => {
         setError('Failed to save permission');
         void resyncGlobal();
@@ -370,7 +404,9 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
     : tools;
 
   return (
-    <div className="space-y-2">
+    // Column layout so the header block (search, cache line, bulk actions) stays
+    // pinned while only the tool list below scrolls.
+    <div className="flex h-full min-h-0 flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
         <div className="relative flex-1">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-500" />
@@ -426,19 +462,23 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
             Deny all
           </button>
           {scope === 'session' && (
+            // Icon-only, styled like the per-tool reset (hover box, tooltip carries
+            // the label) so the crowded bulk row stays compact.
             <button
               type="button"
               onClick={bulkResetConv}
               title="Revert every tool to your global default"
-              className="inline-flex items-center gap-1 text-gray-400 hover:underline"
+              aria-label="Reset all tools to your global default"
+              className="rounded p-1 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
             >
-              <RotateCcw className="h-3 w-3" />
-              Reset all
+              <RotateCcw className="h-3.5 w-3.5" />
             </button>
           )}
         </div>
       </div>
 
+      {/* Only the tool list scrolls; everything above stays pinned. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
       {tools.length === 0 ? (
         !error && <p className="text-xs text-gray-500">No tools enumerated for this server.</p>
       ) : filtered.length === 0 ? (
@@ -474,6 +514,7 @@ export function McpToolPolicyEditor({ serverKey, scope, sessionId }: Props) {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

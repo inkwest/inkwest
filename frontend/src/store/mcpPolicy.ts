@@ -6,9 +6,15 @@ import { create } from 'zustand';
 interface McpPolicyVersionState {
   global: number;
   bumpGlobal: () => void;
+  // Same signal for a CONVERSATION's per-tool policy (e.g. the in-bubble ask bar wrote
+  // "deny for this conversation" while the conversation MCP popup is open).
+  session: number;
+  bumpSession: () => void;
 }
 
 export const useMcpPolicyVersion = create<McpPolicyVersionState>((set) => ({
   global: 0,
   bumpGlobal: () => set((s) => ({ global: s.global + 1 })),
+  session: 0,
+  bumpSession: () => set((s) => ({ session: s.session + 1 })),
 }));

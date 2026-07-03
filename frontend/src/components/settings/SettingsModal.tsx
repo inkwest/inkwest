@@ -33,8 +33,18 @@ export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: Setti
   }, [isOpen, initialTab]);
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Settings" size="xl" align="top">
-      <div className="flex gap-2 border-b border-gray-700 -mt-2 mb-4">
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Settings"
+      size="xl"
+      align="top"
+      // MCP tab manages its own two-pane scroll; pin tabs + let the panes be the
+      // buffer so the tab content never pushes past the viewport. Other tabs keep
+      // the default whole-body scroll.
+      bodyClassName={tab === 'mcp' ? 'flex min-h-0 flex-col overflow-hidden' : undefined}
+    >
+      <div className="flex shrink-0 gap-2 border-b border-gray-700 -mt-2 mb-4">
         {([
           ['display', 'Display'],
           ['skills', 'Skills'],

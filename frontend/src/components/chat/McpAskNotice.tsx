@@ -13,6 +13,7 @@ import { useMcpStore } from '@/store/mcp';
  */
 export function McpAskNotice({ sessionId }: { sessionId?: string }) {
   const pendingAsks = useMcpStore((s) => s.pendingAsks);
+  const claimedAsks = useMcpStore((s) => s.claimedAsks);
   const removeAsk = useMcpStore((s) => s.removeAsk);
   const setAsks = useMcpStore((s) => s.setAsks);
   // Ask ids with an in-flight decision POST, so a double-click can't fire twice.
@@ -43,7 +44,10 @@ export function McpAskNotice({ sessionId }: { sessionId?: string }) {
     };
   }, [sessionId, setAsks]);
 
-  if (pendingAsks.length === 0) return null;
+  // Asks claimed by a transcript tool card render Allow/Deny in the bubble itself; the
+  // banner only backstops asks with no visible card (e.g. after a mid-hold reload).
+  const visibleAsks = pendingAsks.filter((a) => !claimedAsks[a.askId]);
+  if (visibleAsks.length === 0) return null;
 
   const decide = async (askId: string, verdict: 'allow' | 'deny') => {
     if (deciding.has(askId)) return;
@@ -65,7 +69,7 @@ export function McpAskNotice({ sessionId }: { sessionId?: string }) {
 
   return (
     <div className="sticky top-0 z-10 mb-3 space-y-2">
-      {pendingAsks.map((ask) => (
+      {visibleAsks.map((ask) => (
         <div
           key={ask.askId}
           className="flex items-center justify-between gap-3 rounded-md border border-blue-700/50 bg-blue-900/30 px-3 py-2 text-sm text-blue-200"

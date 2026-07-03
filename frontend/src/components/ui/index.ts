@@ -29,3 +29,6 @@ export type { ModalProps } from './Modal';
 export { ConfirmDialog } from './ConfirmDialog';
 
 export { Tooltip } from './Tooltip';
+
+export { ToggleSwitch } from './ToggleSwitch';
+export type { ToggleSwitchProps } from './ToggleSwitch';

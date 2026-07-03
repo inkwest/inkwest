@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { useSessionsStore } from '@/store/sessions';
 import { Cluster } from '@/types/api';
 import * as api from '@/services/api';
@@ -72,12 +72,12 @@ export function QuickStartPage() {
         <div className="text-center space-y-4">
           <div className="text-red-400 text-lg">Quick Start Error</div>
           <div className="text-gray-400">{error}</div>
-          <button
-            onClick={() => navigate('/')}
-            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-sm"
+          <Link
+            to="/"
+            className="inline-block px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-sm"
           >
             Go to Home
-          </button>
+          </Link>
         </div>
       </div>
     );

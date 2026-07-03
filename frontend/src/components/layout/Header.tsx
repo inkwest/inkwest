@@ -10,15 +10,21 @@ import { useConfigStore } from '@/store/config';
 import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { SettingsModal } from '@/components/settings/SettingsModal';
-import { useSettingsUi } from '@/store/settingsUi';
+import { useSettingsUi, type SettingsTab } from '@/store/settingsUi';
 import { devSwitchUser } from '@/services/api';
 import { formatTokenCount } from '@/lib/utils';
 
+// Settings has no page of its own (it's a modal), so ?settings=<tab> is its
+// linkable address: the menu entry is a real <Link> carrying it, making
+// middle-click / ⌘-click open Settings in a new tab like any other nav entry.
+const SETTINGS_TABS: readonly SettingsTab[] = ['display', 'skills', 'mcp', 'io'];
+
 export function Header() {
   const navigate = useNavigate();
+  const location = useLocation();
   // Inside the admin panel the entry flips to "Back to Chat" — otherwise it
   // would only navigate to where the user already is, with no way back.
-  const inAdminPanel = useLocation().pathname.startsWith('/admin');
+  const inAdminPanel = location.pathname.startsWith('/admin');
   // Session context belongs to the chat — hide it on admin pages, but keep the
   // store intact so the chat restores as-is when navigating back.
   const storeSession = useSessionsStore((s) => s.currentSession);
@@ -55,6 +61,18 @@ export function Header() {
       void loadPreferences();
     }
   }, [isAuthenticated, fetchConfig, loadPreferences]);
+
+  // Open the modal when the URL carries ?settings=<tab> (a middle-clicked menu
+  // entry landing in a fresh tab), then strip the param so reload/back don't
+  // re-open it. Runs in Header because it renders the modal on every layout.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const tab = params.get('settings');
+    if (tab === null) return;
+    openSettings(SETTINGS_TABS.includes(tab as SettingsTab) ? (tab as SettingsTab) : undefined);
+    params.delete('settings');
+    navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+  }, [location.search, location.pathname, navigate, openSettings]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -183,16 +201,25 @@ export function Header() {
               </div>
 
               <div className="p-2 space-y-1">
-                <button
-                  onClick={() => {
+                {/* Real link so middle-click / ⌘-click opens Settings in a new tab
+                    (via the ?settings= effect above). A plain left-click is
+                    intercepted to open the modal in place without URL churn. */}
+                <Link
+                  to={{ search: '?settings=display' }}
+                  onClick={(e) => {
                     setShowMenu(false);
-                    openSettings();
+                    const plainLeftClick =
+                      e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
+                    if (plainLeftClick) {
+                      e.preventDefault();
+                      openSettings();
+                    }
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
                 >
                   <Settings className="h-4 w-4" />
                   <span>Settings</span>
-                </button>
+                </Link>
                 {/* Replay the first-run tour. Available to every user (admins included);
                     it runs on the start screen, so jump there and clear the seen flag. */}
                 {user && (

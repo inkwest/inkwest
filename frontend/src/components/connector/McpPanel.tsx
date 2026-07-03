@@ -5,6 +5,7 @@ import { ConnectorIconButton } from './ConnectorIconButton';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   disconnectMcpAuth,
   getSessionMcp,
@@ -26,19 +27,22 @@ import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCac
 const CATALOG_RELOAD_JITTER_MS = 1000;
 
 // One server row in the modal's left list: the whole row selects (slides out its tools); the
-// checkbox and the right-side controls (status/cog) act on their own (stopPropagation).
+// toggle and the right-side controls (status/cog) act on their own (stopPropagation).
 function ServerRow({
   label,
   selected,
   onSelect,
   checkbox,
   right,
+  dimmed = false,
 }: {
   label: string;
   selected: boolean;
   onSelect: () => void;
   checkbox: ReactNode;
   right: ReactNode;
+  // Fades the label while the server is not enabled for this conversation.
+  dimmed?: boolean;
 }) {
   return (
     <div
@@ -58,7 +62,9 @@ function ServerRow({
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         {checkbox}
-        <span className="truncate text-sm text-gray-200">{label}</span>
+        <span className={`truncate text-sm ${dimmed ? 'text-gray-500' : 'text-gray-200'}`}>
+          {label}
+        </span>
       </div>
       <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
         {right}
@@ -502,28 +508,36 @@ export function McpPanel({
         </div>
       )}
 
-      <Modal isOpen={open && hasCatalog} onClose={handleClose} title="MCP servers" size="xl">
-        <p className="mb-3 text-sm text-gray-400">
+      <Modal
+        isOpen={open && hasCatalog}
+        onClose={handleClose}
+        title="MCP servers"
+        size="xl"
+        // Height-constrained layout: intro + footer stay pinned, the two-pane
+        // area is the buffer that shrinks/scrolls — OK never goes below the fold.
+        bodyClassName="flex min-h-0 flex-col overflow-hidden"
+      >
+        <p className="mb-3 shrink-0 text-sm text-gray-400">
           Enable MCP servers for this conversation; select one to set its per-tool permissions.
         </p>
-        <div className="flex h-[520px] gap-3">
+        <div className="flex h-[520px] min-h-0 gap-3">
           {/* Left: server list — checkbox enables, the row selects (slides the tools out). */}
-          <div className="w-64 shrink-0 space-y-1 overflow-y-auto pr-1">
+          {/* pl-1 mirrors the tools pane's p-1 (veil padding) so both outer margins match. */}
+          <div className="w-64 shrink-0 space-y-1 overflow-y-auto pl-1 pr-1">
             {catalog.map((key) => (
               <ServerRow
                 key={key}
                 label={key}
                 selected={selectedServer === key}
                 onSelect={() => setSelectedServer(key)}
+                dimmed={!draftEnabled.has(key)}
                 checkbox={
-                  <input
-                    type="checkbox"
+                  <ToggleSwitch
                     aria-label={key}
                     checked={draftEnabled.has(key)}
                     disabled={saving}
                     onClick={(e) => e.stopPropagation()}
                     onChange={() => toggleDraft(key)}
-                    className="h-4 w-4 accent-green-600 disabled:opacity-50"
                   />
                 }
                 right={policyCog(key)}
@@ -573,15 +587,14 @@ export function McpPanel({
                       label={s.key}
                       selected={selectedServer === s.key}
                       onSelect={() => setSelectedServer(s.key)}
+                      dimmed={!draftEnabled.has(s.key)}
                       checkbox={
-                        <input
-                          type="checkbox"
+                        <ToggleSwitch
                           aria-label={s.key}
                           checked={draftEnabled.has(s.key)}
                           disabled={saving || !connected}
                           onClick={(e) => e.stopPropagation()}
                           onChange={() => toggleDraft(s.key)}
-                          className="h-4 w-4 accent-green-600 disabled:opacity-40"
                         />
                       }
                       right={
@@ -614,35 +627,47 @@ export function McpPanel({
             }`}
           >
             {shownServer && (
-              <div className="h-full overflow-y-auto">
-                <div className="mb-2 text-xs font-medium text-gray-400">
-                  Tools — {shownServer} (this conversation)
+              // p-1 keeps the content 4px inside the pane so the veil's rounded corners
+              // (which cover the padding box edge-to-edge) can never reveal text beneath.
+              <div className="relative h-full p-1">
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="mb-2 shrink-0 text-xs font-medium text-gray-400">
+                    Tools — {shownServer} (this conversation)
+                  </div>
+                  {sessionId ? (
+                    <div className="min-h-0 flex-1">
+                      <McpToolPolicyEditor
+                        key={shownServer}
+                        serverKey={shownServer}
+                        scope="session"
+                        sessionId={sessionId}
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-500">
+                      Start the conversation to set per-tool permissions.
+                    </p>
+                  )}
                 </div>
-                {sessionId ? (
-                  <McpToolPolicyEditor
-                    key={shownServer}
-                    serverKey={shownServer}
-                    scope="session"
-                    sessionId={sessionId}
-                  />
-                ) : (
-                  <p className="text-xs text-gray-500">
-                    Start the conversation to set per-tool permissions.
-                  </p>
+                {/* Disabled server: veil the whole pane — permissions only matter once the
+                    server is enabled, and the veil points at the toggle as the next step. */}
+                {!draftEnabled.has(shownServer) && (
+                  <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-gray-900/75">
+                    <p className="max-w-[240px] px-4 text-center text-sm text-gray-300">
+                      This MCP is off for this conversation — turn it on to use its tools.
+                    </p>
+                  </div>
                 )}
               </div>
             )}
           </div>
         </div>
 
-        {error ? (
-          <p className="mt-3 text-sm text-red-400">{error}</p>
-        ) : (
-          <p className="mt-3 text-xs text-gray-500">Changes apply to the next message.</p>
-        )}
-        <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-700 pt-3">
+        {error && <p className="mt-3 shrink-0 text-sm text-red-400">{error}</p>}
+        <div className="mt-4 flex shrink-0 items-center justify-between gap-3 border-t border-gray-700 pt-3">
           <span className="text-xs text-gray-500">
             {allKeys.filter((key) => draftEnabled.has(key)).length}/{allKeys.length} selected
+            {' — '}changes apply to the next message
           </span>
           <Button size="sm" onClick={applySelection} disabled={!sessionId} isLoading={saving}>
             OK

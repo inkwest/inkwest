@@ -140,9 +140,9 @@ describe('McpPanel', () => {
     const btn = await screen.findByRole('button', { name: 'Configure' });
     fireEvent.click(btn);
 
-    // One checkbox per catalog key; the enabled one is checked.
-    const coralogix = screen.getByRole('checkbox', { name: 'coralogix' });
-    const gitlab = screen.getByRole('checkbox', { name: 'gitlab' });
+    // One toggle per catalog key; the enabled one is checked.
+    const coralogix = screen.getByRole('switch', { name: 'coralogix' });
+    const gitlab = screen.getByRole('switch', { name: 'gitlab' });
     expect(coralogix).toBeChecked();
     expect(gitlab).not.toBeChecked();
 
@@ -150,7 +150,7 @@ describe('McpPanel', () => {
     expect(mockSetSession).not.toHaveBeenCalled();
 
     await waitFor(() =>
-      expect(screen.getByText('2/2 selected')).toBeInTheDocument()
+      expect(screen.getByText(/2\/2 selected/)).toBeInTheDocument()
     );
 
     expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
@@ -254,16 +254,16 @@ describe('McpPanel', () => {
   it('enables a connected oauth server into the conversation selection on OK', async () => {
     mockSetSession.mockResolvedValue({ enabled: ['notion'] });
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
-    const checkbox = await screen.findByRole('checkbox'); // only the oauth row has one here
-    expect(checkbox).not.toBeChecked();
-    fireEvent.click(checkbox);
+    const toggle = await screen.findByRole('switch'); // only the oauth row has one here
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
     await waitFor(() => expect(mockSetSession).toHaveBeenCalledWith('s1', ['notion']));
   });
 
-  it('disables the enable checkbox until the oauth server is connected', async () => {
+  it('disables the enable toggle until the oauth server is connected', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    expect(await screen.findByRole('checkbox')).toBeDisabled();
+    expect(await screen.findByRole('switch')).toBeDisabled();
   });
 
   it('shows a needs-auth status icon that reconnects for an expired grant', async () => {
@@ -366,7 +366,7 @@ describe('McpPanel', () => {
 
     render(<McpPanel sessionId="s1" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
-    const gitlab = await screen.findByRole('checkbox', { name: 'gitlab' });
+    const gitlab = await screen.findByRole('switch', { name: 'gitlab' });
     fireEvent.click(gitlab); // unsaved draft toggle
     expect(gitlab).toBeChecked();
 
@@ -379,9 +379,9 @@ describe('McpPanel', () => {
 
     // Jittered live-reload (0..1s) — wait past the max delay for the new server to appear.
     expect(
-      await screen.findByRole('checkbox', { name: 'newsrv' }, { timeout: 3000 })
+      await screen.findByRole('switch', { name: 'newsrv' }, { timeout: 3000 })
     ).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: 'gitlab' })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'gitlab' })).toBeChecked();
     // The selection endpoint is fetched once (mount) — never again on the catalog bump.
     expect(mockGetSession).toHaveBeenCalledTimes(1);
   });
@@ -401,8 +401,8 @@ describe('McpPanel', () => {
     await act(async () => { resolveOpen(); });   // newer (seq 2) lands first
     await act(async () => { resolveMount(); });   // stale (seq 1) lands last — must be dropped
 
-    expect(await screen.findByRole('checkbox', { name: 'fresh' })).toBeInTheDocument();
-    expect(screen.queryByRole('checkbox', { name: 'stale' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('switch', { name: 'fresh' })).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'stale' })).not.toBeInTheDocument();
   });
 
   it('revalidates the catalog when the modal opens (long-mounted, missed the WS bump)', async () => {
