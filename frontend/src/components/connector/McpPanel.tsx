@@ -412,15 +412,13 @@ export function McpPanel({
     }
   };
 
-  // Per-server cog: jumps to the global tool-permission settings preselecting this server.
-  // Placed right of the status icon so it's present even for servers without a connection.
+  // Per-server cog: opens the global tool-permission settings (preselecting this server) STACKED
+  // on top of this popup — closing Settings returns here. Present even for servers without a
+  // connection (placed right of the status icon).
   const policyCog = (key: string) => (
     <button
       type="button"
-      onClick={() => {
-        setOpen(false);
-        openSettings('mcp', key);
-      }}
+      onClick={() => openSettings('mcp', key)}
       title="Tool permissions"
       aria-label={`Tool permissions for ${key}`}
       className="shrink-0 rounded p-1 text-gray-400 hover:bg-gray-700 hover:text-gray-200"

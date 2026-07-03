@@ -1,8 +1,13 @@
-import { HTMLAttributes, forwardRef, useEffect, type CSSProperties } from 'react';
+import { HTMLAttributes, forwardRef, useEffect, useRef, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { clsx } from 'clsx';
 import { X } from 'lucide-react';
 import { useSettingsStore } from '@/store/settings';
+
+// Stack of currently-open modals so stacked modals behave: only the TOPMOST responds to
+// Escape (otherwise every modal's document-level listener fires and they all close), and the
+// body scroll-lock is released only when the LAST modal closes.
+const modalStack: symbol[] = [];
 
 export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
   isOpen: boolean;
@@ -28,24 +33,35 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
     // sidebar width (+4px resize handle) on desktop. The .modal-stage CSS only applies
     // the offset at md+, so mobile (overlay sidebar) stays full-width.
     const sidebarWidth = useSettingsStore((s) => s.sidebarWidth);
-    useEffect(() => {
-      const handleEscape = (e: KeyboardEvent) => {
-        // Consume Escape here so the topmost overlay wins — otherwise it bubbles to the
-        // global Escape-to-stop listener (ChatInput) and would also abort a live stream.
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          onClose();
-        }
-      };
+    // Stable identity for this modal instance in the stack.
+    const idRef = useRef<symbol>();
+    if (!idRef.current) idRef.current = Symbol('modal');
 
-      if (isOpen) {
-        document.addEventListener('keydown', handleEscape);
-        document.body.style.overflow = 'hidden';
-      }
+    useEffect(() => {
+      if (!isOpen) return;
+      const id = idRef.current!;
+      modalStack.push(id);
+      document.body.style.overflow = 'hidden';
+
+      const handleEscape = (e: KeyboardEvent) => {
+        if (e.key !== 'Escape') return;
+        // Only the topmost modal reacts — stacked modals share the document, so without this
+        // every open modal would close at once.
+        if (modalStack[modalStack.length - 1] !== id) return;
+        // stopImmediate so the global Escape-to-stop listener (ChatInput) doesn't also fire
+        // and abort a live stream, and no lower modal listener runs.
+        e.stopImmediatePropagation();
+        onClose();
+      };
+      document.addEventListener('keydown', handleEscape);
 
       return () => {
         document.removeEventListener('keydown', handleEscape);
-        document.body.style.overflow = 'unset';
+        const i = modalStack.lastIndexOf(id);
+        if (i !== -1) modalStack.splice(i, 1);
+        // Release the scroll-lock only once the last modal is gone (a stacked modal above may
+        // have closed while one below is still open).
+        if (modalStack.length === 0) document.body.style.overflow = 'unset';
       };
     }, [isOpen, onClose]);
 
