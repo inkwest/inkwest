@@ -125,16 +125,19 @@ export function OnboardingTour() {
     if (active) setIndex(0);
   }, [active]);
 
-  // Enter advances the tour (last step → done). Capture phase + stop/prevent so the key
-  // never reaches the composer behind the overlay, whose Enter handler would send a
-  // message. When focus is on a bubble button (Back/Skip/Next), we bow out and let its
-  // native Enter→click run instead — so Back/Skip aren't overridden into "advance". A
+  // Enter advances the tour (last step → done). Capture phase + stop/prevent so it doesn't
+  // also reach whatever is behind. But a focused text field OWNS Enter: never hijack it from
+  // the composer (its Enter sends the message / pops the no-connector confirm) or any other
+  // input — otherwise the tour silently eats a user's Enter on the start screen. Likewise bow
+  // out when a bubble button (Back/Skip/Next) is focused so its native Enter→click runs. A
   // held Enter (e.repeat) is ignored so it can't blast through the whole tour at once.
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || e.repeat) return;
-      if (dialogRef.current?.contains(document.activeElement)) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      if (dialogRef.current?.contains(el)) return;
       e.preventDefault();
       e.stopPropagation();
       if (index === STEPS.length - 1) complete();

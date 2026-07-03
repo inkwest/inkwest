@@ -92,6 +92,15 @@ describe('OnboardingTour', () => {
     expect(screen.queryByText('Model')).not.toBeInTheDocument();
   });
 
+  it('does not hijack Enter while a text field is focused (the field owns it)', () => {
+    render(<><Anchors /><input data-testid="field" /><OnboardingTour /></>);
+    (screen.getByTestId('field') as HTMLInputElement).focus();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    // The composer/input keeps its Enter — the tour must not advance past step 1.
+    expect(screen.getByText('Step 1/5')).toBeInTheDocument();
+    expect(screen.getByText('Attachments')).toBeInTheDocument();
+  });
+
   it('a held Enter (repeat) does not blast through the tour', () => {
     render(<><Anchors /><OnboardingTour /></>);
     fireEvent.keyDown(window, { key: 'Enter', repeat: true });
