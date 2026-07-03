@@ -15,12 +15,15 @@ Error semantics the caller/panel must distinguish:
 - broker degraded (DB/vault/transient AS) → 503
 """
 
+import asyncio
 import contextlib
+import json
 import logging
+import uuid
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
@@ -34,7 +37,7 @@ from app.api.routes._proxy_stream import (
 )
 from app.core.constants import MCP_PROXY_MAX_BODY_BYTES
 from app.core.database import async_session_maker
-from app.services import mcp_oauth
+from app.services import mcp_ask_store, mcp_oauth, mcp_policy
 from app.services.mcp_catalog import get_static_http_server
 from app.services.mcp_oauth import GrantDeadError, McpOauthError
 from app.services.mcp_oauth_catalog import get_oauth_server
@@ -81,6 +84,131 @@ def _upstream_url(base: str, path: str) -> str:
     return f"{base}/{path}" if path else base
 
 
+# JSON-RPC application error for a policy-denied tool call (transported in the body, not HTTP).
+_TOOL_DENIED_CODE = -32001
+_TOOL_DENIED_MSG = "Tool call denied by permission policy"
+
+
+def _one_tool_call_name(item: object) -> str | None:
+    """The tool name if ``item`` is a single JSON-RPC ``tools/call`` object, else None."""
+    if not isinstance(item, dict) or item.get("method") != "tools/call":
+        return None
+    params = item.get("params")
+    name = params.get("name") if isinstance(params, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def _tool_call_names(body: bytes) -> list[str]:
+    """All ``tools/call`` tool names in ``body`` — handles a single object AND a JSON-RPC batch
+    (array); empty for any other request. Batches are covered so a batched call can't bypass the
+    gate.
+
+    The proxy sits between the sandbox MCP client and the upstream, so names here are the
+    server's RAW tool names (not the ``mcp__server__tool`` advertised form) — matching how tools
+    are enumerated and how policy rows are keyed.
+    """
+    if not body:
+        return []
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return []
+    items = payload if isinstance(payload, list) else [payload]
+    return [n for item in items if (n := _one_tool_call_name(item)) is not None]
+
+
+async def _resolve_tool_verdict(
+    key: str, tool: str, *, user_id: uuid.UUID, session_id: uuid.UUID | None
+) -> str:
+    """Resolve the tool's verdict in a short-lived DB session.
+
+    Fail-OPEN (allow) on any resolution error: the credential broker is the hard security
+    boundary; a policy-table blip must not break every tool call. Denials come only from
+    explicit policy rows.
+    """
+    db = async_session_maker()
+    try:
+        return await mcp_policy.resolve_verdict(
+            db, user_id=user_id, session_id=session_id, server_key=key, tool=tool
+        )
+    except Exception:
+        # error, not warning: a policy-table outage silently allows every tool here.
+        logger.error("mcp_policy_resolve_failed", extra={"mcp_key": key, "tool": tool})
+        return "allow"
+    finally:
+        await db.close()
+
+
+async def _ask_user(key: str, tool: str, *, user_id: uuid.UUID, session_id: uuid.UUID) -> str:
+    """Hold an ``ask``-verdict tool call on a user decision; returns "allow" or "deny".
+
+    Pushes a targeted WS prompt to the asking user's open tabs on this conversation and
+    parks on the ask's Future until the decision endpoint resolves it. Fail-CLOSED (deny)
+    everywhere — no live tab to ask, timeout, or any unexpected fault: ``ask`` means
+    "nobody approved" defaults to no. The hold happens BEFORE the upstream connection is
+    opened, so it never pins an httpx stream; the sandbox client just sees a slow call.
+
+    The resolution frame is sent in the ``finally`` for every outcome (decision, timeout,
+    fault) so the user's other tabs always clear the banner.
+    """
+    # Lazy import: chat (WS routes) is a leaf the proxy only needs at ask time, and
+    # importing it lazily keeps this module import-light for tests and avoids any future
+    # route-module cycle.
+    from app.api.routes.chat import send_to_user_in_session
+
+    ask = mcp_ask_store.create(
+        user_id=str(user_id), session_id=str(session_id), server_key=key, tool=tool
+    )
+    verdict = "deny"
+    try:
+        sent = await send_to_user_in_session(
+            str(session_id),
+            str(user_id),
+            {
+                "type": "mcp_tool_ask",
+                "ask_id": ask.ask_id,
+                "mcp_key": key,
+                "tool": tool,
+                # Lets the client scope a "for this conversation" policy write to the
+                # ask's own session even if the user switched sessions mid-hold.
+                "session_id": str(session_id),
+            },
+        )
+        if sent == 0:
+            # Locked decision: no WS client connected → deny (waiting would only burn
+            # the sandbox client's own timeout with nobody to answer).
+            logger.info("mcp_tool_ask_no_client", extra={"mcp_key": key, "tool": tool})
+            return verdict
+        try:
+            verdict = await asyncio.wait_for(ask.future, mcp_ask_store.ASK_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.info("mcp_tool_ask_timeout", extra={"mcp_key": key, "tool": tool})
+        return verdict
+    except Exception:
+        logger.exception("mcp_tool_ask_failed", extra={"mcp_key": key, "tool": tool})
+        return "deny"
+    finally:
+        mcp_ask_store.discard(ask.ask_id)
+        with contextlib.suppress(Exception):
+            await send_to_user_in_session(
+                str(session_id),
+                str(user_id),
+                {"type": "mcp_tool_ask_resolved", "ask_id": ask.ask_id, "verdict": verdict},
+            )
+
+
+def _jsonrpc_error_response(body: bytes, code: int, message: str) -> JSONResponse:
+    """A JSON-RPC error echoing the request id, so the model sees a clean tool failure."""
+    req_id = None
+    with contextlib.suppress(ValueError, TypeError):
+        payload = json.loads(body)
+        if isinstance(payload, dict):
+            req_id = payload.get("id")
+    return JSONResponse(
+        content={"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}},
+    )
+
+
 async def _forward(
     client: httpx.AsyncClient, *, method: str, url: str, headers: dict[str, str], body: bytes
 ) -> httpx.Response:
@@ -98,7 +226,7 @@ async def _forward(
 
 
 @router.api_route("/mcp-proxy/{key}/{path:path}", methods=["GET", "POST", "DELETE"])
-async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
+async def mcp_proxy(key: str, path: str, request: Request) -> Response:
     # Resolve the key: an OAuth2 server (per-user vault token, refreshed) OR a static catalog
     # HTTP server (shared server-side headers from MCP_CATALOG). Either way the sandbox holds
     # only the internal JWT; the real credential is injected here. stdio catalog servers carry
@@ -132,6 +260,33 @@ async def mcp_proxy(key: str, path: str, request: Request) -> StreamingResponse:
     url = _upstream_url(upstream_base, path)
     if request.url.query:
         url = f"{url}?{request.url.query}"
+
+    # Per-tool permission gate (engine-agnostic — every engine's MCP traffic funnels here). A
+    # `tools/call` (single or batched) names the tool(s); resolve each verdict and deny the
+    # request before it reaches the upstream if ANY tool is denied. 'ask' holds the request
+    # on a user decision (WS prompt + POST /api/mcp/ask/{id}); undecided → deny. A batch
+    # with several 'ask' tools holds them sequentially — acceptable: real MCP clients don't
+    # batch tools/call, and each hold is bounded by ASK_TIMEOUT_SECONDS.
+    held = False
+    for tool in _tool_call_names(body):
+        verdict = await _resolve_tool_verdict(
+            key, tool, user_id=claims.user_id, session_id=claims.session_id
+        )
+        if verdict == "ask":
+            held = True
+            verdict = await _ask_user(
+                key, tool, user_id=claims.user_id, session_id=claims.session_id
+            )
+        if verdict == "deny":
+            logger.info("mcp_tool_denied", extra={"mcp_key": key, "tool": tool})
+            return _jsonrpc_error_response(body, _TOOL_DENIED_CODE, _TOOL_DENIED_MSG)
+    if held and await request.is_disconnected():
+        # The sandbox client gave up during the hold (its own MCP timeout is often shorter
+        # than the 60s ask window) and already reported the call as failed to the model.
+        # Forwarding now would execute the tool upstream anyway — an invisible side effect
+        # the model may then retry, i.e. double execution. Drop instead of forwarding.
+        logger.info("mcp_tool_ask_client_gone", extra={"mcp_key": key})
+        return _jsonrpc_error_response(body, _TOOL_DENIED_CODE, _TOOL_DENIED_MSG)
 
     # Static catalog HTTP server: inject the def's real headers (the shared credential the
     # sandbox never sees) and stream — no vault, no token refresh, no DB session.

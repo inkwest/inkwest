@@ -17,6 +17,7 @@ import html
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -31,7 +32,7 @@ from app.models.connector_audit import ConnectorAuditLog
 from app.models.mcp_oauth_pending_state import McpOauthPendingState
 from app.models.mcp_user_token import McpUserToken
 from app.models.user import User
-from app.services import mcp_oauth
+from app.services import mcp_ask_store, mcp_oauth, mcp_tools
 from app.services.mcp_catalog import catalog_keys
 from app.services.mcp_oauth import GrantDeadError, McpOauthError
 from app.services.mcp_oauth_catalog import get_oauth_server, oauth_catalog_keys
@@ -68,6 +69,22 @@ class McpCatalogResponse(BaseModel):
 
 class AuthStartResponse(BaseModel):
     authorize_url: str
+
+
+class McpToolInfo(BaseModel):
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    # MCP behavior hints ({read_only, destructive, idempotent, open_world, title}) or None.
+    # Drives the UI's capability grouping. Absent on older cached rows until a refresh.
+    annotations: dict[str, Any] | None = None
+
+
+class McpServerToolsResponse(BaseModel):
+    key: str
+    tools: list[McpToolInfo]
+    # None until the first successful enumeration.
+    fetched_at: datetime | None = None
 
 
 def _redirect_uri() -> str:
@@ -121,6 +138,102 @@ async def get_catalog(
 ) -> McpCatalogResponse:
     """List selectable MCP servers with the current user's per-key auth status."""
     return await _build_catalog(db, current_user)
+
+
+@router.get("/{key}/tools", response_model=McpServerToolsResponse)
+async def get_server_tools(
+    key: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    refresh: bool = Query(False),
+) -> McpServerToolsResponse:
+    """The tools a server exposes, for the per-tool permission UI.
+
+    Served from the ``mcp_server_tools`` cache; enumerated live (MCP initialize + tools/list
+    with proxy-injected creds) on first open or when ``refresh=true``. A dead grant /
+    unreachable server falls back to any stale cache, else 502 — so a transient failure can't
+    block the rest of the config UI.
+    """
+    if key not in (set(catalog_keys()) | set(oauth_catalog_keys())):
+        raise HTTPException(status_code=404, detail="Unknown MCP server")
+
+    cached = await mcp_tools.get_cached_tools(db, key)
+    if cached is not None and not refresh:
+        return McpServerToolsResponse(
+            key=key,
+            tools=[McpToolInfo(**t) for t in cached.tools],
+            fetched_at=cached.updated_at,
+        )
+    try:
+        tools = await mcp_tools.refresh_tools(db, key=key, user_id=current_user.id)
+    except mcp_tools.McpEnumError as e:
+        if cached is not None:  # serve stale rather than fail the whole panel
+            return McpServerToolsResponse(
+                key=key,
+                tools=[McpToolInfo(**t) for t in cached.tools],
+                fetched_at=cached.updated_at,
+            )
+        # No cache and enumeration failed (server unreachable / not connected / cold). Raise 500
+        # — a genuine application error the UI surfaces as such. Deliberately NOT 502/503/504:
+        # those are the gateway/backend-unavailable class the client retries (~12x) and shows as
+        # "backend reconnecting", which would both flood an unreachable server and mislead.
+        raise HTTPException(
+            status_code=500,
+            detail="Couldn't list this server's tools (it may be unreachable or not connected).",
+        ) from e
+    row = await mcp_tools.get_cached_tools(db, key)
+    return McpServerToolsResponse(
+        key=key,
+        tools=[McpToolInfo(**t) for t in tools],
+        fetched_at=row.updated_at if row else None,
+    )
+
+
+class McpAskDecision(BaseModel):
+    verdict: Literal["allow", "deny"]
+
+
+class McpPendingAsk(BaseModel):
+    ask_id: str
+    mcp_key: str
+    tool: str
+    # The conversation the held call belongs to: the client must scope a "for this
+    # conversation" policy write to the ASK's session, not whichever session happens
+    # to be selected when the user clicks (a switch mid-hold would misroute it).
+    session_id: str
+
+
+@router.get("/ask/pending", response_model=list[McpPendingAsk])
+async def pending_asks(
+    current_user: CurrentUser,
+    session_id: uuid.UUID = Query(...),
+) -> list[McpPendingAsk]:
+    """Live tool-permission asks held for this user on one conversation.
+
+    Rehydrates the inline ask banners after a page reload — the WS ``mcp_tool_ask`` frame
+    is fire-and-forget, so a tab that (re)connects mid-hold would otherwise never see it.
+    """
+    return [
+        McpPendingAsk(ask_id=a.ask_id, mcp_key=a.server_key, tool=a.tool, session_id=a.session_id)
+        for a in mcp_ask_store.pending_for(user_id=str(current_user.id), session_id=str(session_id))
+    ]
+
+
+@router.post("/ask/{ask_id}")
+async def decide_ask(
+    ask_id: str,
+    decision: McpAskDecision,
+    current_user: CurrentUser,
+) -> dict[str, str]:
+    """Resolve a held tool-permission ask (the proxy is parked on its Future).
+
+    404 covers unknown, expired (the proxy's timeout already denied it), already-decided,
+    AND another user's ask — indistinguishable on purpose, so ask_ids can't be probed.
+    """
+    ok = mcp_ask_store.resolve(ask_id, decision.verdict, user_id=str(current_user.id))
+    if not ok:
+        raise HTTPException(status_code=404, detail="Ask not found or already resolved")
+    return {"status": "ok"}
 
 
 @router.post("/{key}/auth/start", response_model=AuthStartResponse)

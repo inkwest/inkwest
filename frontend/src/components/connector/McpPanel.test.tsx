@@ -3,6 +3,7 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { McpPanel } from './McpPanel';
 import { resetMcpCatalogCache, primeMcpCatalog } from './mcpCatalogCache';
 import { useMcpStore } from '@/store/mcp';
+import { useSettingsUi } from '@/store/settingsUi';
 import type { McpServerEntry } from '@/services/api';
 
 vi.mock('@/services/api', () => ({
@@ -11,6 +12,12 @@ vi.mock('@/services/api', () => ({
   setSessionMcp: vi.fn(),
   startMcpAuth: vi.fn(),
   disconnectMcpAuth: vi.fn(),
+  // The modal's right slide-out renders McpToolPolicyEditor, which calls these.
+  getMcpServerTools: vi.fn().mockResolvedValue({ key: 'k', tools: [], fetched_at: null }),
+  getMyMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
+  getSessionMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
+  setMyMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
+  setSessionMcpPolicy: vi.fn().mockResolvedValue({ policies: [] }),
 }));
 
 import {
@@ -133,9 +140,9 @@ describe('McpPanel', () => {
     const btn = await screen.findByRole('button', { name: 'Configure' });
     fireEvent.click(btn);
 
-    // One checkbox per catalog key; the enabled one is checked.
-    const coralogix = screen.getByRole('checkbox', { name: 'coralogix' });
-    const gitlab = screen.getByRole('checkbox', { name: 'gitlab' });
+    // One toggle per catalog key; the enabled one is checked.
+    const coralogix = screen.getByRole('switch', { name: 'coralogix' });
+    const gitlab = screen.getByRole('switch', { name: 'gitlab' });
     expect(coralogix).toBeChecked();
     expect(gitlab).not.toBeChecked();
 
@@ -143,7 +150,7 @@ describe('McpPanel', () => {
     expect(mockSetSession).not.toHaveBeenCalled();
 
     await waitFor(() =>
-      expect(screen.getByText('2/2 selected')).toBeInTheDocument()
+      expect(screen.getByText(/2\/2 selected/)).toBeInTheDocument()
     );
 
     expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
@@ -173,7 +180,7 @@ describe('McpPanel', () => {
 
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
 
-    const connect = await screen.findByRole('button', { name: 'Connect' });
+    const connect = await screen.findByRole('button', { name: /click to connect/i });
     fireEvent.click(connect);
     // Popup must open synchronously in the click handler (before the await) — else blocked.
     expect(openSpy).toHaveBeenCalledTimes(1);
@@ -188,11 +195,52 @@ describe('McpPanel', () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
     mockStartAuth.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize' });
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    const connect = await screen.findByRole('button', { name: 'Connect' });
+    const connect = await screen.findByRole('button', { name: /click to connect/i });
     fireEvent.click(connect);
     fireEvent.click(connect); // double-click: guard must drop this one
     expect(openSpy).toHaveBeenCalledTimes(1);
     openSpy.mockRestore();
+  });
+
+  it('shows a spinning "connecting…" status while the connect poll is in flight', async () => {
+    // closed:false keeps the poll alive so the transient connecting state persists for the assert.
+    const popup = { closed: false, location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    mockStartAuth.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize' });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
+    fireEvent.click(await screen.findByRole('button', { name: /click to connect/i }));
+    // The status icon flips to the connecting affordance (still clickable to retry).
+    expect(await screen.findByRole('button', { name: /connecting/i })).toBeInTheDocument();
+    openSpy.mockRestore();
+  });
+
+  it("slides out a server's per-conversation tools when its row is selected", async () => {
+    mockGetCatalog.mockResolvedValue(cat(['coralogix']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+    render(<McpPanel sessionId="s1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    fireEvent.click(screen.getByText('coralogix')); // select the row → tools panel slides out
+    expect(await screen.findByText(/Tools — coralogix/i)).toBeInTheDocument();
+  });
+
+  it('veils the tools pane for a disabled server and lifts the veil once toggled on', async () => {
+    mockGetCatalog.mockResolvedValue(cat(['coralogix']));
+    mockGetSession.mockResolvedValue({ enabled: [] });
+    render(<McpPanel sessionId="s1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
+    fireEvent.click(screen.getByText('coralogix'));
+    expect(await screen.findByText(/This MCP is off for this conversation/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('switch', { name: /coralogix/i })); // enable in the draft
+    expect(screen.queryByText(/This MCP is off for this conversation/i)).not.toBeInTheDocument();
+  });
+
+  it('per-server cog opens global tool settings on the MCP tab, preselecting that server', async () => {
+    useSettingsUi.setState({ isOpen: false, initialTab: 'display', initialServer: null });
+    await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Tool permissions for notion' }));
+    expect(useSettingsUi.getState().isOpen).toBe(true);
+    expect(useSettingsUi.getState().initialTab).toBe('mcp');
+    expect(useSettingsUi.getState().initialServer).toBe('notion');
   });
 
   it('drops the key from the session selection BEFORE revoking upstream on Disconnect', async () => {
@@ -206,7 +254,7 @@ describe('McpPanel', () => {
     );
     render(<McpPanel sessionId="s1" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    fireEvent.click(await screen.findByRole('button', { name: /click to disconnect/i }));
     await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
     // setSessionMcp must have run first, so a failed revoke can't leave it enabled-but-revoked.
     expect(mockSetSession.mock.invocationCallOrder[0]).toBeLessThan(
@@ -217,29 +265,28 @@ describe('McpPanel', () => {
   it('enables a connected oauth server into the conversation selection on OK', async () => {
     mockSetSession.mockResolvedValue({ enabled: ['notion'] });
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
-    const checkbox = await screen.findByRole('checkbox'); // only the oauth row has one here
-    expect(checkbox).not.toBeChecked();
-    fireEvent.click(checkbox);
+    const toggle = await screen.findByRole('switch'); // only the oauth row has one here
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
     await waitFor(() => expect(mockSetSession).toHaveBeenCalledWith('s1', ['notion']));
   });
 
-  it('disables the enable checkbox until the oauth server is connected', async () => {
+  it('disables the enable toggle until the oauth server is connected', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    expect(await screen.findByRole('checkbox')).toBeDisabled();
+    expect(await screen.findByRole('switch')).toBeDisabled();
   });
 
-  it('shows a needs-auth badge and a Reconnect button for an expired grant', async () => {
+  it('shows a needs-auth status icon that reconnects for an expired grant', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'needs_auth' });
-    expect(await screen.findByText('needs auth')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+    // Status + action fused into one icon: its accessible name carries state + affordance.
+    expect(await screen.findByRole('button', { name: /needs auth — click to reconnect/i })).toBeInTheDocument();
   });
 
-  it('shows a connected badge and Disconnect, and disconnects on click', async () => {
+  it('shows a connected status icon and disconnects on click', async () => {
     mockDisconnect.mockResolvedValue(cat([], []));
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'connected' });
-    expect(await screen.findByText('connected')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    fireEvent.click(await screen.findByRole('button', { name: /connected — click to disconnect/i }));
     await waitFor(() => expect(mockDisconnect).toHaveBeenCalledWith('notion'));
   });
 
@@ -250,7 +297,7 @@ describe('McpPanel', () => {
     mockStartAuth.mockRejectedValue(new Error('no usable authorization-server metadata'));
 
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect' }));
+    fireEvent.click(await screen.findByRole('button', { name: /click to connect/i }));
 
     expect(
       await screen.findByText(
@@ -267,7 +314,7 @@ describe('McpPanel', () => {
     mockStartAuth.mockRejectedValueOnce(new Error('boom'));
 
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'not_connected' });
-    const connect = await screen.findByRole('button', { name: 'Connect' });
+    const connect = await screen.findByRole('button', { name: /click to connect/i });
     fireEvent.click(connect);
     expect(await screen.findByText('Failed to start MCP authorization: boom')).toBeInTheDocument();
 
@@ -282,10 +329,12 @@ describe('McpPanel', () => {
     openSpy.mockRestore();
   });
 
-  it('greys out an unavailable oauth server (sandbox disabled) with no Connect', async () => {
+  it('greys out an unavailable oauth server (sandbox disabled) with no connect action', async () => {
     await openModalWithOauth({ key: 'notion', kind: 'oauth2', auth_status: 'unavailable' });
-    expect(await screen.findByText('sandbox required')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument();
+    // The status icon states "sandbox required" and is disabled — no connect affordance.
+    const status = await screen.findByRole('button', { name: /unavailable — sandbox required/i });
+    expect(status).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /click to connect/i })).not.toBeInTheDocument();
   });
 
   // ---- stale-while-revalidate + live reload ------------------------------ //
@@ -328,7 +377,7 @@ describe('McpPanel', () => {
 
     render(<McpPanel sessionId="s1" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Configure' }));
-    const gitlab = await screen.findByRole('checkbox', { name: 'gitlab' });
+    const gitlab = await screen.findByRole('switch', { name: 'gitlab' });
     fireEvent.click(gitlab); // unsaved draft toggle
     expect(gitlab).toBeChecked();
 
@@ -341,9 +390,9 @@ describe('McpPanel', () => {
 
     // Jittered live-reload (0..1s) — wait past the max delay for the new server to appear.
     expect(
-      await screen.findByRole('checkbox', { name: 'newsrv' }, { timeout: 3000 })
+      await screen.findByRole('switch', { name: 'newsrv' }, { timeout: 3000 })
     ).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: 'gitlab' })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'gitlab' })).toBeChecked();
     // The selection endpoint is fetched once (mount) — never again on the catalog bump.
     expect(mockGetSession).toHaveBeenCalledTimes(1);
   });
@@ -363,8 +412,8 @@ describe('McpPanel', () => {
     await act(async () => { resolveOpen(); });   // newer (seq 2) lands first
     await act(async () => { resolveMount(); });   // stale (seq 1) lands last — must be dropped
 
-    expect(await screen.findByRole('checkbox', { name: 'fresh' })).toBeInTheDocument();
-    expect(screen.queryByRole('checkbox', { name: 'stale' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('switch', { name: 'fresh' })).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'stale' })).not.toBeInTheDocument();
   });
 
   it('revalidates the catalog when the modal opens (long-mounted, missed the WS bump)', async () => {

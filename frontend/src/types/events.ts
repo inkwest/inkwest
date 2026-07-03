@@ -12,6 +12,10 @@ export interface ChatEvent {
     | 'stream_resumed'
     | 'connector_required'
     | 'mcp_auth_required'
+    // Runtime tool-permission gate: the proxy holds a tool call on the user's decision.
+    // Targeted frames (only the asking user's sockets), not session broadcasts.
+    | 'mcp_tool_ask'
+    | 'mcp_tool_ask_resolved'
     // Local lifecycle frames the service synthesizes for the store:
     | 'connected'
     | 'disconnected'
@@ -36,6 +40,13 @@ export interface ChatEvent {
   attachments?: Attachment[] | null;
   author_user_id?: string;
   author_display_name?: string;
+  // mcp_tool_ask / mcp_tool_ask_resolved
+  ask_id?: string;
+  mcp_key?: string;
+  tool?: string;
+  verdict?: string;
+  // mcp_tool_ask: the conversation the held call belongs to
+  session_id?: string;
 }
 
 export interface SendMessage {

@@ -132,6 +132,27 @@ async def broadcast_to_session(
             pass
 
 
+async def send_to_user_in_session(session_id: str, user_id: str, payload: dict) -> int:
+    """Send a frame to ONE user's sockets on a session; returns how many were reached.
+
+    Targeted (unlike ``broadcast_to_session``) so a per-user prompt — the MCP tool-ask
+    banner — never lands on other participants' or guests' tabs (guests carry synthetic
+    ``guest:*`` presence ids, which can never equal a real user id). Best-effort per
+    socket; 0 means the user has no live tab on this conversation.
+    """
+    async with _connections_lock:
+        present = session_presence.get(session_id, {})
+        targets = [ws for ws, pres in present.items() if pres.user_id == str(user_id)]
+    sent = 0
+    for ws in targets:
+        try:
+            await ws.send_json(payload)
+            sent += 1
+        except Exception:
+            pass
+    return sent
+
+
 async def _broadcast_presence(session_id: str) -> None:
     """Fan the current (deduped) presence roster to all of a session's sockets."""
     async with _connections_lock:

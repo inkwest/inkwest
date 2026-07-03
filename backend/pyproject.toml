@@ -38,13 +38,18 @@ dependencies = [
     # Prometheus metrics exporter on a dedicated port (app.core.metrics_server). >=0.20:
     # start_http_server returns (server, thread) so the lifespan can stop it cleanly.
     "prometheus-client>=0.20.0",
+    # MCP client SDK — the backend enumerates a server's tools server-side (initialize +
+    # tools/list over streamable-HTTP with proxy-injected creds) to drive per-tool
+    # permissions. Core (not the optional extra) since enumeration is a first-class feature,
+    # not a sandbox-only concern.
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
-# In-sandbox MCP for the inkwest-agent loop (P1.7). Optional on purpose: the toolbox
-# image bakes this in, but the in-agent client imports it LAZILY and degrades to "no MCP
-# tools" when absent, so a backend/dev env without it still runs the loop. Not in the
-# core deps to keep the portal install lean (the broker only writes the config file).
+# Retained as an alias: `mcp` is now a CORE dependency (backend-side tool enumeration), so
+# installing `.[mcp]` is a no-op superset. Kept so existing image builds / references that
+# target this extra keep working. The in-agent client still imports it lazily and degrades
+# to "no MCP tools" when absent.
 mcp = [
     "mcp>=1.0.0",
 ]

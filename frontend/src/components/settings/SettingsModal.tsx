@@ -2,39 +2,60 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Download, Upload, GitFork } from 'lucide-react';
 import { Button, Modal } from '@/components/ui';
 import { SkillsManager } from '@/components/skills/SkillsManager';
+import { McpPolicySettingsTab } from '@/components/settings/McpPolicySettingsTab';
 import { usePreferencesStore } from '@/store/preferences';
+import { SETTINGS_TABS, type SettingsTab } from '@/store/settingsUi';
 import { useSettingsStore } from '@/store/settings';
 import { getSkills } from '@/services/api';
 import type { ConfigExport, Skill } from '@/types/api';
 
-type Tab = 'display' | 'skills' | 'io';
+// Tab keys come from the canonical SETTINGS_TABS in settingsUi.ts; only the
+// human labels live here — Record<SettingsTab, …> turns a missed label into a
+// type error when a tab is added to the canonical list.
+type Tab = SettingsTab;
+const TAB_LABELS: Record<SettingsTab, string> = {
+  display: 'Display',
+  skills: 'Skills',
+  mcp: 'MCP tools',
+  io: 'Import / Export',
+};
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  // Tab to show when the modal opens (e.g. the MCP panel deep-links to 'mcp').
+  initialTab?: Tab;
 }
 
-export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const [tab, setTab] = useState<Tab>('display');
+export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: SettingsModalProps) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [adminSkills, setAdminSkills] = useState<Skill[]>([]);
   const prefs = usePreferencesStore();
 
-  // Load DB-backed prefs + the admin skill list when the modal first opens.
+  // Load DB-backed prefs + the admin skill list when the modal first opens; also select the
+  // requested tab (a deep-link may open straight onto 'mcp').
   useEffect(() => {
     if (!isOpen) return;
+    setTab(initialTab);
     if (!prefs.loaded) void prefs.load();
     void getSkills().then(setAdminSkills).catch(() => setAdminSkills([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Settings" size="xl" align="top">
-      <div className="flex gap-2 border-b border-gray-700 -mt-2 mb-4">
-        {([
-          ['display', 'Display'],
-          ['skills', 'Skills'],
-          ['io', 'Import / Export'],
-        ] as [Tab, string][]).map(([key, label]) => (
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Settings"
+      size="xl"
+      align="top"
+      // MCP tab manages its own two-pane scroll; pin tabs + let the panes be the
+      // buffer so the tab content never pushes past the viewport. Other tabs keep
+      // the default whole-body scroll.
+      bodyClassName={tab === 'mcp' ? 'flex min-h-0 flex-col overflow-hidden' : undefined}
+    >
+      <div className="flex shrink-0 gap-2 border-b border-gray-700 -mt-2 mb-4">
+        {SETTINGS_TABS.map((key) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -44,7 +65,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 : 'border-transparent text-gray-400 hover:text-gray-200'
             }`}
           >
-            {label}
+            {TAB_LABELS[key]}
           </button>
         ))}
       </div>
@@ -59,6 +80,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         <>
           {tab === 'display' && <DisplayTab />}
           {tab === 'skills' && <SkillsTab adminSkills={adminSkills} />}
+          {tab === 'mcp' && <McpPolicySettingsTab />}
           {tab === 'io' && <ImportExportTab />}
         </>
       )}

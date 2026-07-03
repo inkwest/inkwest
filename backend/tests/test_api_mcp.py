@@ -282,3 +282,298 @@ async def test_set_session_mcp_rejects_unknown_key(
     assert resp.status_code == 400
     assert "evil" in resp.json()["detail"]
     apply.assert_not_called()
+
+
+# ---- per-server tool enumeration (GET /api/mcp/{key}/tools) ------------------ //
+def _tools_row(tools: list[dict], updated_at: object = None) -> MagicMock:
+    """Stand-in for a McpServerTools row (.tools / .updated_at)."""
+    from datetime import UTC, datetime
+
+    row = MagicMock()
+    row.tools = tools
+    row.updated_at = updated_at or datetime(2026, 7, 3, tzinfo=UTC)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_get_tools_cache_hit_returns_cached_without_enumerating(
+    authenticated_client: AsyncClient,
+) -> None:
+    cached = _tools_row([{"name": "query", "description": "q", "input_schema": {}}])
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=["coralogix"]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=[]),
+        patch("app.services.mcp_tools.get_cached_tools", AsyncMock(return_value=cached)),
+        patch("app.services.mcp_tools.refresh_tools", AsyncMock()) as refresh,
+    ):
+        resp = await authenticated_client.get("/api/mcp/coralogix/tools")
+    assert resp.status_code == 200
+    assert [t["name"] for t in resp.json()["tools"]] == ["query"]
+    refresh.assert_not_awaited()  # cache hit must not hit the network
+
+
+@pytest.mark.asyncio
+async def test_get_tools_cache_miss_enumerates(authenticated_client: AsyncClient) -> None:
+    fresh = [{"name": "search", "description": "", "input_schema": {}}]
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=[]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=["notion"]),
+        patch(
+            "app.services.mcp_tools.get_cached_tools",
+            AsyncMock(side_effect=[None, _tools_row(fresh)]),
+        ),
+        patch("app.services.mcp_tools.refresh_tools", AsyncMock(return_value=fresh)) as refresh,
+    ):
+        resp = await authenticated_client.get("/api/mcp/notion/tools")
+    assert resp.status_code == 200
+    assert [t["name"] for t in resp.json()["tools"]] == ["search"]
+    refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_tools_unknown_key_404(authenticated_client: AsyncClient) -> None:
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=["coralogix"]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=[]),
+    ):
+        resp = await authenticated_client.get("/api/mcp/ghost/tools")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_tools_enum_failure_no_cache_returns_500_not_retryable(
+    authenticated_client: AsyncClient,
+) -> None:
+    # An enumeration failure with no cache must be a 500 (application error the UI shows as
+    # such), NOT a 502/503/504 — those are the gateway class the client retries ~12x and
+    # renders as "backend unavailable", flooding an unreachable server and misleading the user.
+    from app.services.mcp_tools import McpEnumError
+
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=[]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_tools.get_cached_tools", AsyncMock(return_value=None)),
+        patch(
+            "app.services.mcp_tools.refresh_tools",
+            AsyncMock(side_effect=McpEnumError("dead")),
+        ),
+    ):
+        resp = await authenticated_client.get("/api/mcp/notion/tools")
+    assert resp.status_code == 500
+    assert resp.status_code not in (502, 503, 504)  # not the retried backend-unavailable class
+
+
+@pytest.mark.asyncio
+async def test_get_tools_enum_failure_serves_stale_cache(
+    authenticated_client: AsyncClient,
+) -> None:
+    from app.services.mcp_tools import McpEnumError
+
+    stale = _tools_row([{"name": "old", "description": "", "input_schema": {}}])
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=[]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_tools.get_cached_tools", AsyncMock(return_value=stale)),
+        patch(
+            "app.services.mcp_tools.refresh_tools",
+            AsyncMock(side_effect=McpEnumError("transient")),
+        ),
+    ):
+        # refresh=true forces a re-enum; it fails, but the stale cache must still serve.
+        resp = await authenticated_client.get("/api/mcp/notion/tools?refresh=true")
+    assert resp.status_code == 200
+    assert [t["name"] for t in resp.json()["tools"]] == ["old"]
+
+
+# ---- per-tool policy: conversation scope (/api/sessions/{id}/mcp/policy) ----- //
+@pytest.mark.asyncio
+async def test_get_session_policy_returns_rows(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with patch(
+        "app.services.mcp_policy.get_session_policies",
+        AsyncMock(return_value=[{"server_key": "coralogix", "tool": "*", "verdict": "deny"}]),
+    ):
+        resp = await authenticated_client.get(f"/api/sessions/{mock_session_obj.id}/mcp/policy")
+    assert resp.status_code == 200
+    assert resp.json()["policies"] == [{"server_key": "coralogix", "tool": "*", "verdict": "deny"}]
+
+
+@pytest.mark.asyncio
+async def test_set_session_policy_replaces_server(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix"]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=[]),
+        patch("app.services.mcp_policy.set_session_server_policy", AsyncMock()) as setter,
+        patch("app.services.mcp_policy.get_session_policies", AsyncMock(return_value=[])),
+    ):
+        resp = await authenticated_client.put(
+            f"/api/sessions/{mock_session_obj.id}/mcp/policy",
+            json={"server_key": "coralogix", "entries": [{"tool": "query", "verdict": "deny"}]},
+        )
+    assert resp.status_code == 200
+    setter.assert_awaited_once()
+    _, kwargs = setter.await_args
+    assert kwargs["entries"] == [("query", "deny")]
+
+
+@pytest.mark.asyncio
+async def test_set_session_policy_unknown_server_400(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix"]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=[]),
+        patch("app.services.mcp_policy.set_session_server_policy", AsyncMock()) as setter,
+    ):
+        resp = await authenticated_client.put(
+            f"/api/sessions/{mock_session_obj.id}/mcp/policy",
+            json={"server_key": "ghost", "entries": []},
+        )
+    assert resp.status_code == 400
+    setter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_session_policy_bad_verdict_400(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    from app.services.mcp_policy import InvalidVerdictError
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix"]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=[]),
+        patch(
+            "app.services.mcp_policy.set_session_server_policy",
+            AsyncMock(side_effect=InvalidVerdictError("bad")),
+        ),
+    ):
+        resp = await authenticated_client.put(
+            f"/api/sessions/{mock_session_obj.id}/mcp/policy",
+            json={"server_key": "coralogix", "entries": [{"tool": "q", "verdict": "maybe"}]},
+        )
+    assert resp.status_code == 400
+
+
+# ---- per-tool policy: global user scope (/api/me/mcp-policy) ----------------- //
+@pytest.mark.asyncio
+async def test_get_my_mcp_policy_returns_rows(authenticated_client: AsyncClient) -> None:
+    with patch(
+        "app.services.mcp_policy.get_user_policies",
+        AsyncMock(return_value=[{"server_key": "notion", "tool": "search", "verdict": "allow"}]),
+    ):
+        resp = await authenticated_client.get("/api/me/mcp-policy")
+    assert resp.status_code == 200
+    assert resp.json()["policies"][0]["tool"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_set_my_mcp_policy_replaces_server(authenticated_client: AsyncClient) -> None:
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=[]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_policy.set_user_server_policy", AsyncMock()) as setter,
+        patch("app.services.mcp_policy.get_user_policies", AsyncMock(return_value=[])),
+    ):
+        resp = await authenticated_client.put(
+            "/api/me/mcp-policy",
+            json={"server_key": "notion", "entries": [{"tool": "*", "verdict": "ask"}]},
+        )
+    assert resp.status_code == 200
+    setter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_my_mcp_policy_unknown_server_400(authenticated_client: AsyncClient) -> None:
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=[]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_policy.set_user_server_policy", AsyncMock()) as setter,
+    ):
+        resp = await authenticated_client.put(
+            "/api/me/mcp-policy", json={"server_key": "ghost", "entries": []}
+        )
+    assert resp.status_code == 400
+    setter.assert_not_awaited()
+
+
+# ---- runtime ask decision + rehydrate (P6) ----------------------------------- //
+import uuid as _uuid  # noqa: E402
+
+from app.services import mcp_ask_store  # noqa: E402
+
+_ASK_UID = "00000000-0000-4000-8000-000000000001"  # conftest mock_user id
+_ASK_SID = "00000000-0000-4000-8000-000000000002"
+
+
+@pytest.fixture(autouse=True)
+def _clean_ask_store():
+    mcp_ask_store._asks.clear()
+    yield
+    mcp_ask_store._asks.clear()
+
+
+@pytest.mark.asyncio
+async def test_decide_ask_allow_resolves_future(authenticated_client) -> None:
+    ask = mcp_ask_store.create(
+        user_id=_ASK_UID, session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    resp = await authenticated_client.post(f"/api/mcp/ask/{ask.ask_id}", json={"verdict": "allow"})
+    assert resp.status_code == 200
+    assert await ask.future == "allow"
+
+
+@pytest.mark.asyncio
+async def test_decide_ask_unknown_or_foreign_is_404(authenticated_client) -> None:
+    foreign = mcp_ask_store.create(
+        user_id=str(_uuid.uuid4()), session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    unknown = await authenticated_client.post("/api/mcp/ask/nope", json={"verdict": "deny"})
+    other = await authenticated_client.post(
+        f"/api/mcp/ask/{foreign.ask_id}", json={"verdict": "deny"}
+    )
+    assert unknown.status_code == 404
+    assert other.status_code == 404  # indistinguishable from unknown: no ask_id probing
+    assert not foreign.future.done()
+
+
+@pytest.mark.asyncio
+async def test_decide_ask_bad_verdict_is_422(authenticated_client) -> None:
+    ask = mcp_ask_store.create(
+        user_id=_ASK_UID, session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    resp = await authenticated_client.post(f"/api/mcp/ask/{ask.ask_id}", json={"verdict": "maybe"})
+    assert resp.status_code == 422
+    assert not ask.future.done()
+
+
+@pytest.mark.asyncio
+async def test_pending_asks_scoped_to_user_and_session(authenticated_client) -> None:
+    mine = mcp_ask_store.create(
+        user_id=_ASK_UID, session_id=_ASK_SID, server_key="notion", tool="search"
+    )
+    mcp_ask_store.create(  # other user, same session — must not leak
+        user_id=str(_uuid.uuid4()), session_id=_ASK_SID, server_key="notion", tool="x"
+    )
+    mcp_ask_store.create(  # same user, other session
+        user_id=_ASK_UID, session_id=str(_uuid.uuid4()), server_key="notion", tool="y"
+    )
+    resp = await authenticated_client.get(f"/api/mcp/ask/pending?session_id={_ASK_SID}")
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {"ask_id": mine.ask_id, "mcp_key": "notion", "tool": "search", "session_id": _ASK_SID}
+    ]

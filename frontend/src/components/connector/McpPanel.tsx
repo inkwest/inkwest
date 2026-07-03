@@ -1,18 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Ban, Loader2, Plug, PlugZap, Settings } from 'lucide-react';
 import { McpIcon } from '@/components/icons/BrandIcons';
 import { ConnectorIconButton } from './ConnectorIconButton';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
+import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
   disconnectMcpAuth,
   getSessionMcp,
   setSessionMcp,
   type McpServerEntry,
 } from '@/services/api';
+import { McpToolPolicyEditor } from './McpToolPolicyEditor';
 import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useSessionsStore } from '@/store/sessions';
 import { useMcpStore } from '@/store/mcp';
+import { useSettingsUi } from '@/store/settingsUi';
 import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCache';
 
 // A `mcp_catalog_changed` broadcast hits every connected client at once; each mounted McpPanel
@@ -21,6 +25,54 @@ import { loadMcpCatalog, peekMcpCatalog, primeMcpCatalog } from './mcpCatalogCac
 // to still feel live; only the WS-triggered reload is jittered (mount/open fetches are already
 // spread by user action).
 const CATALOG_RELOAD_JITTER_MS = 1000;
+
+// One server row in the modal's left list: the whole row selects (slides out its tools); the
+// toggle and the right-side controls (status/cog) act on their own (stopPropagation).
+function ServerRow({
+  label,
+  selected,
+  onSelect,
+  control,
+  right,
+  dimmed = false,
+}: {
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+  // The enable/disable ToggleSwitch (acts on its own; stopPropagation inside).
+  control: ReactNode;
+  right: ReactNode;
+  // Fades the label while the server is not enabled for this conversation.
+  dimmed?: boolean;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className={`flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-2 ${
+        selected ? 'bg-blue-600/30' : 'hover:bg-gray-800'
+      }`}
+    >
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        {control}
+        <span className={`truncate text-sm ${dimmed ? 'text-gray-500' : 'text-gray-200'}`}>
+          {label}
+        </span>
+      </div>
+      <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+        {right}
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   sessionId: string;
@@ -44,7 +96,7 @@ interface Props {
 
 /**
  * Per-conversation MCP selector. Opens a modal listing the catalog of available
- * MCP servers, one per line with a checkbox. Toggling persists the selection and
+ * MCP servers, one per line with an enable toggle. Toggling persists the selection and
  * re-merges the conversation's .claude.json server-side; it takes effect on the
  * NEXT message (the CLI reads its config at launch). Renders as a connector-style
  * item in both the chat bar ('inline') and the start screen ('row').
@@ -69,6 +121,8 @@ export function McpPanel({
   // Mirror the per-session selection into the shared store so ChatInput's "no connector
   // activated" warning reacts to MCP enablement without its own fetch.
   const setSessionEnabled = useMcpStore((s) => s.setSessionEnabled);
+  // Deep-link to the global MCP tool-permission settings (opens Settings on the 'mcp' tab).
+  const openSettings = useSettingsUi((s) => s.open);
   // Bumped by the sync socket on an `mcp_catalog_changed` broadcast (the cache is reset there
   // first). Drives a catalog-*set*-only refresh (see the live-reload effect below), deliberately
   // NOT the mount effect: the session selection must not be refetched on a global catalog change
@@ -79,6 +133,17 @@ export function McpPanel({
   const pollTimers = useRef<Set<number>>(new Set());
   // Keys with an in-flight connect poll, so a double-click doesn't spawn a second popup+poll.
   const connecting = useRef<Set<string>>(new Set());
+  // Reactive mirror of `connecting` for rendering the transient "connecting…" status icon
+  // (the ref alone can't drive a re-render).
+  const [connectingKeys, setConnectingKeys] = useState<Set<string>>(new Set());
+  // Server selected in the modal's left list → its tools slide out on the right (one at a time).
+  const [selectedServer, setSelectedServer] = useState<string | null>(null);
+  // The server the right panel is rendering. Lags `selectedServer` on a SWITCH: the content stays
+  // mounted while the panel retracts (so the shrink is visible with content), then swaps + reopens.
+  const [shownServer, setShownServer] = useState<string | null>(null);
+  // Panel width state (open = expanded). Separate from shownServer so the retract animates with
+  // the OLD content still shown, then we swap content and expand.
+  const [panelOpen, setPanelOpen] = useState(false);
   // Monotonic guard shared by every catalog fetch (mount load, live-reload, popup-open): all
   // force the same live endpoint, so an earlier-issued request resolving last must not clobber a
   // fresher one's result. Only the latest-sequenced fetch writes catalog/oauthServers state.
@@ -177,6 +242,37 @@ export function McpPanel({
     };
   }, [open, fetchCatalogSet]);
 
+  // Drive the retract-then-reopen on a server switch. Depends ONLY on selectedServer so it fires
+  // just once per selection change: collapse the panel (shownServer=null), then reopen with the
+  // new server after the slide. First open (panel already collapsed) reopens immediately; a real
+  // switch waits the transition so the retract is visible. (shownServer is read but intentionally
+  // not a dep — adding it would re-fire on the collapse and skip the retract.)
+  useEffect(() => {
+    if (selectedServer === null) {
+      setPanelOpen(false); // deselect/close → retract
+      return;
+    }
+    if (shownServer === null) {
+      // first open: mount content + expand.
+      setShownServer(selectedServer);
+      setPanelOpen(true);
+      return;
+    }
+    if (selectedServer === shownServer) {
+      setPanelOpen(true); // re-select the shown server → ensure open
+      return;
+    }
+    // Real switch: retract with the OLD content still shown, then swap content + reopen after
+    // the transition (> duration-200) so the shrink is fully visible.
+    setPanelOpen(false);
+    const t = window.setTimeout(() => {
+      setShownServer(selectedServer);
+      setPanelOpen(true);
+    }, 260);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedServer]);
+
   const toggleDraft = (key: string) => {
     if (saving) return;
     const next = new Set(draftEnabled);
@@ -187,6 +283,9 @@ export function McpPanel({
   const handleClose = () => {
     setDraftEnabled(new Set(enabled));
     setError(null);
+    setSelectedServer(null);
+    setShownServer(null);
+    setPanelOpen(false);
     setOpen(false);
   };
 
@@ -239,6 +338,7 @@ export function McpPanel({
       setError(`Failed to start MCP authorization: ${message}`),
     );
     connecting.current.add(key);
+    setConnectingKeys((prev) => new Set(prev).add(key));
     // Poll the catalog while connecting; stop as soon as the grant lands ("connected"), the
     // popup closes, or a hard deadline elapses — so an abandoned popup can't poll forever.
     // The timer is tracked in pollTimers so unmount cleanup always clears it.
@@ -251,6 +351,11 @@ export function McpPanel({
         window.clearInterval(timer);
         pollTimers.current.delete(timer);
         connecting.current.delete(key);
+        setConnectingKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
         // Close the popup from the opener once connected — reliable, unlike the
         // callback's own window.close() (blocked after the cross-origin round-trip,
         // and blocked outright by the prod CSP script-src 'self').
@@ -313,6 +418,21 @@ export function McpPanel({
       setOpen(true);
     }
   };
+
+  // Per-server cog: opens the global tool-permission settings (preselecting this server) STACKED
+  // on top of this popup — closing Settings returns here. Present even for servers without a
+  // connection (placed right of the status icon).
+  const policyCog = (key: string) => (
+    <button
+      type="button"
+      onClick={() => openSettings('mcp', key)}
+      title="Tool permissions"
+      aria-label={`Tool permissions for ${key}`}
+      className="shrink-0 rounded p-1 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+    >
+      <Settings className="h-3.5 w-3.5" />
+    </button>
+  );
 
   return (
     <>
@@ -389,93 +509,166 @@ export function McpPanel({
         </div>
       )}
 
-      <Modal isOpen={open && hasCatalog} onClose={handleClose} title="MCP servers" size="sm">
-        <p className="text-sm text-gray-400 mb-3">
-          Choose which MCP servers this conversation can use.
+      <Modal
+        isOpen={open && hasCatalog}
+        onClose={handleClose}
+        title="MCP servers"
+        size="xl"
+        // Height-constrained layout: intro + footer stay pinned, the two-pane
+        // area is the buffer that shrinks/scrolls — OK never goes below the fold.
+        bodyClassName="flex min-h-0 flex-col overflow-hidden"
+      >
+        <p className="mb-3 shrink-0 text-sm text-gray-400">
+          Enable MCP servers for this conversation; select one to set its per-tool permissions.
         </p>
-        <div className="space-y-1">
-          {catalog.map((key) => {
-            const on = draftEnabled.has(key);
-            return (
-              <label
+        <div className="flex h-[520px] min-h-0 gap-3">
+          {/* Left: server list — the toggle enables, the row selects (slides the tools out). */}
+          {/* pl-1 mirrors the tools pane's p-1 (veil padding) so both outer margins match. */}
+          <div className="w-64 shrink-0 space-y-1 overflow-y-auto pl-1 pr-1">
+            {catalog.map((key) => (
+              <ServerRow
                 key={key}
-                className="flex items-center gap-3 px-2 py-2 rounded cursor-pointer hover:bg-gray-800"
-              >
-                <input
-                  type="checkbox"
-                  checked={on}
-                  disabled={saving}
-                  onChange={() => toggleDraft(key)}
-                  className="h-4 w-4 accent-green-600 disabled:opacity-50"
-                />
-                <span className="text-sm text-gray-200">{key}</span>
-              </label>
-            );
-          })}
+                label={key}
+                selected={selectedServer === key}
+                onSelect={() => setSelectedServer(key)}
+                dimmed={!draftEnabled.has(key)}
+                control={
+                  <ToggleSwitch
+                    aria-label={key}
+                    checked={draftEnabled.has(key)}
+                    disabled={saving}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => toggleDraft(key)}
+                  />
+                }
+                right={policyCog(key)}
+              />
+            ))}
+
+            {oauthServers.length > 0 && (
+              <div className="mt-3 border-t border-gray-700 pt-2">
+                <div className="mb-1 px-2 text-xs font-medium text-gray-400">OAuth servers</div>
+                {oauthServers.map((s) => {
+                  const connected = s.auth_status === 'connected';
+                  const needsAuth = s.auth_status === 'needs_auth';
+                  const unavailable = s.auth_status === 'unavailable';
+                  const isConnecting = connectingKeys.has(s.key);
+                  // Fuse connection state + action into one icon: color signals the state, the
+                  // click runs the matching action, full text lives in title/aria-label.
+                  let StatusIcon = Plug;
+                  let iconClass = 'text-gray-500';
+                  let statusLabel = `${s.key}: not connected — click to connect`;
+                  let onStatusClick: (() => void) | undefined = () => connectOauth(s.key);
+                  let statusDisabled = saving;
+                  if (isConnecting) {
+                    StatusIcon = Loader2;
+                    iconClass = 'text-yellow-400 animate-spin';
+                    statusLabel = `${s.key}: connecting… — click to retry`;
+                    onStatusClick = () => connectOauth(s.key);
+                  } else if (unavailable) {
+                    StatusIcon = Ban;
+                    iconClass = 'text-gray-600';
+                    statusLabel = `${s.key}: unavailable — sandbox required`;
+                    onStatusClick = undefined;
+                    statusDisabled = true;
+                  } else if (connected) {
+                    StatusIcon = PlugZap;
+                    iconClass = 'text-green-400';
+                    statusLabel = `${s.key}: connected — click to disconnect`;
+                    onStatusClick = () => void disconnectOauth(s.key);
+                  } else if (needsAuth) {
+                    StatusIcon = Plug;
+                    iconClass = 'text-yellow-400';
+                    statusLabel = `${s.key}: needs auth — click to reconnect`;
+                    onStatusClick = () => connectOauth(s.key);
+                  }
+                  return (
+                    <ServerRow
+                      key={s.key}
+                      label={s.key}
+                      selected={selectedServer === s.key}
+                      onSelect={() => setSelectedServer(s.key)}
+                      dimmed={!draftEnabled.has(s.key)}
+                      control={
+                        <ToggleSwitch
+                          aria-label={s.key}
+                          checked={draftEnabled.has(s.key)}
+                          disabled={saving || !connected}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => toggleDraft(s.key)}
+                        />
+                      }
+                      right={
+                        <>
+                          <button
+                            type="button"
+                            onClick={onStatusClick}
+                            disabled={statusDisabled}
+                            title={statusLabel}
+                            aria-label={statusLabel}
+                            className="rounded p-1 hover:bg-gray-700 disabled:cursor-default disabled:hover:bg-transparent"
+                          >
+                            <StatusIcon className={`h-4 w-4 ${iconClass}`} />
+                          </button>
+                          {/* Cog rightmost — consistent even for servers without a status icon. */}
+                          {policyCog(s.key)}
+                        </>
+                      }
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Right: slides out when a server is selected — its per-conversation tool permissions. */}
+          <div
+            className={`overflow-hidden transition-all duration-200 ${
+              panelOpen ? 'w-[560px] border-l border-gray-700 pl-3 opacity-100' : 'w-0 opacity-0'
+            }`}
+          >
+            {shownServer && (
+              // p-1 keeps the content 4px inside the pane so the veil's rounded corners
+              // (which cover the padding box edge-to-edge) can never reveal text beneath.
+              <div className="relative h-full p-1">
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="mb-2 shrink-0 text-xs font-medium text-gray-400">
+                    Tools — {shownServer} (this conversation)
+                  </div>
+                  {sessionId ? (
+                    <div className="min-h-0 flex-1">
+                      <McpToolPolicyEditor
+                        key={shownServer}
+                        serverKey={shownServer}
+                        scope="session"
+                        sessionId={sessionId}
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-500">
+                      Start the conversation to set per-tool permissions.
+                    </p>
+                  )}
+                </div>
+                {/* Disabled server: veil the whole pane — permissions only matter once the
+                    server is enabled, and the veil points at the toggle as the next step. */}
+                {!draftEnabled.has(shownServer) && (
+                  <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-gray-900/75">
+                    <p className="max-w-[240px] px-4 text-center text-sm text-gray-300">
+                      This MCP is off for this conversation — turn it on to use its tools.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
-        {oauthServers.length > 0 && (
-          <div className="mt-4 border-t border-gray-700 pt-3">
-            <div className="mb-2 text-xs font-medium text-gray-400">
-              OAuth servers (connect once per account)
-            </div>
-            <div className="space-y-1">
-              {oauthServers.map((s) => {
-                const connected = s.auth_status === 'connected';
-                const needsAuth = s.auth_status === 'needs_auth';
-                const unavailable = s.auth_status === 'unavailable';
-                return (
-                  <div
-                    key={s.key}
-                    className="flex items-center justify-between gap-3 px-2 py-2 rounded hover:bg-gray-800"
-                  >
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      {/* Enable this conversation to use the server — only once connected.
-                          Persisted with the static selection on OK; the backend injects the
-                          proxy entry into .claude.json for enabled + connected oauth keys. */}
-                      <input
-                        type="checkbox"
-                        checked={draftEnabled.has(s.key)}
-                        disabled={saving || !connected}
-                        onChange={() => toggleDraft(s.key)}
-                        className="h-4 w-4 accent-green-600 disabled:opacity-40"
-                      />
-                      <span className="text-sm text-gray-200">{s.key}</span>
-                      {connected && <Badge variant="success">connected</Badge>}
-                      {needsAuth && <Badge variant="default">needs auth</Badge>}
-                      {unavailable && <Badge variant="default">unavailable</Badge>}
-                    </label>
-                    {unavailable ? (
-                      <span className="text-xs text-gray-500">sandbox required</span>
-                    ) : connected ? (
-                      <button
-                        onClick={() => void disconnectOauth(s.key)}
-                        className="text-xs text-red-400 hover:text-red-300"
-                      >
-                        Disconnect
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => connectOauth(s.key)}
-                        className="text-xs text-blue-400 hover:text-blue-300"
-                      >
-                        {needsAuth ? 'Reconnect' : 'Connect'}
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-        {error ? (
-          <p className="text-sm text-red-400 mt-3">{error}</p>
-        ) : (
-          <p className="text-xs text-gray-500 mt-3">Changes apply to the next message.</p>
-        )}
-        <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-700 pt-3">
+        {error && <p className="mt-3 shrink-0 text-sm text-red-400">{error}</p>}
+        <div className="mt-4 flex shrink-0 items-center justify-between gap-3 border-t border-gray-700 pt-3">
           <span className="text-xs text-gray-500">
             {allKeys.filter((key) => draftEnabled.has(key)).length}/{allKeys.length} selected
+            {' — '}changes apply to the next message
           </span>
           <Button size="sm" onClick={applySelection} disabled={!sessionId} isLoading={saving}>
             OK
