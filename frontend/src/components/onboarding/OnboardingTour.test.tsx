@@ -37,10 +37,10 @@ describe('OnboardingTour', () => {
     useOnboardingStore.getState().restart();
   });
 
-  it('does not show for an admin', () => {
+  it('shows for an admin too', () => {
     setUser(true);
     render(<><Anchors /><OnboardingTour /></>);
-    expect(screen.queryByText('Attachments')).not.toBeInTheDocument();
+    expect(screen.getByText('Attachments')).toBeInTheDocument();
   });
 
   it('does not show once the tour was completed', () => {

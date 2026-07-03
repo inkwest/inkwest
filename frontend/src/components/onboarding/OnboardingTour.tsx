@@ -3,11 +3,11 @@ import { createPortal } from 'react-dom';
 import { useAuthStore } from '@/store/admin';
 import { useOnboardingStore } from '@/store/onboarding';
 
-// First-run guided tour for NON-ADMIN users: spotlights the real composer affordances
+// First-run guided tour for all users: spotlights the real composer affordances
 // one step at a time (attachments → skills → connectors → MCP → model). Built without a
 // tour lib — each step targets live elements by their data-tour anchor (by identity,
 // never by position) and dims everything else around their bounding box. Shown once per
-// browser (see useOnboardingStore); admins never see it.
+// browser (see useOnboardingStore); replayable from the header menu.
 
 interface Step {
   // Matches one or more live elements; the spotlight covers their union bounding box.
@@ -84,9 +84,8 @@ export function OnboardingTour() {
   const user = useAuthStore((s) => s.user);
   const completed = useOnboardingStore((s) => s.completed);
   const complete = useOnboardingStore((s) => s.complete);
-  // Gate on a known, non-admin user so the tour never flashes before auth resolves
-  // (user === null) nor for admins.
-  const active = !!user && !user.is_admin && !completed;
+  // Gate on a known user so the tour never flashes before auth resolves (user === null).
+  const active = !!user && !completed;
 
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<Box | null>(null);
