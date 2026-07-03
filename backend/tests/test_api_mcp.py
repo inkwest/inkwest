@@ -377,3 +377,129 @@ async def test_get_tools_enum_failure_serves_stale_cache(
         resp = await authenticated_client.get("/api/mcp/notion/tools?refresh=true")
     assert resp.status_code == 200
     assert [t["name"] for t in resp.json()["tools"]] == ["old"]
+
+
+# ---- per-tool policy: conversation scope (/api/sessions/{id}/mcp/policy) ----- //
+@pytest.mark.asyncio
+async def test_get_session_policy_returns_rows(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with patch(
+        "app.services.mcp_policy.get_session_policies",
+        AsyncMock(return_value=[{"server_key": "coralogix", "tool": "*", "verdict": "deny"}]),
+    ):
+        resp = await authenticated_client.get(f"/api/sessions/{mock_session_obj.id}/mcp/policy")
+    assert resp.status_code == 200
+    assert resp.json()["policies"] == [{"server_key": "coralogix", "tool": "*", "verdict": "deny"}]
+
+
+@pytest.mark.asyncio
+async def test_set_session_policy_replaces_server(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix"]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=[]),
+        patch("app.services.mcp_policy.set_session_server_policy", AsyncMock()) as setter,
+        patch("app.services.mcp_policy.get_session_policies", AsyncMock(return_value=[])),
+    ):
+        resp = await authenticated_client.put(
+            f"/api/sessions/{mock_session_obj.id}/mcp/policy",
+            json={"server_key": "coralogix", "entries": [{"tool": "query", "verdict": "deny"}]},
+        )
+    assert resp.status_code == 200
+    setter.assert_awaited_once()
+    _, kwargs = setter.await_args
+    assert kwargs["entries"] == [("query", "deny")]
+
+
+@pytest.mark.asyncio
+async def test_set_session_policy_unknown_server_400(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix"]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=[]),
+        patch("app.services.mcp_policy.set_session_server_policy", AsyncMock()) as setter,
+    ):
+        resp = await authenticated_client.put(
+            f"/api/sessions/{mock_session_obj.id}/mcp/policy",
+            json={"server_key": "ghost", "entries": []},
+        )
+    assert resp.status_code == 400
+    setter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_session_policy_bad_verdict_400(
+    authenticated_client: AsyncClient, mock_db: AsyncMock, mock_session_obj: MagicMock
+) -> None:
+    from app.services.mcp_policy import InvalidVerdictError
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=result)
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=["coralogix"]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=[]),
+        patch(
+            "app.services.mcp_policy.set_session_server_policy",
+            AsyncMock(side_effect=InvalidVerdictError("bad")),
+        ),
+    ):
+        resp = await authenticated_client.put(
+            f"/api/sessions/{mock_session_obj.id}/mcp/policy",
+            json={"server_key": "coralogix", "entries": [{"tool": "q", "verdict": "maybe"}]},
+        )
+    assert resp.status_code == 400
+
+
+# ---- per-tool policy: global user scope (/api/me/mcp-policy) ----------------- //
+@pytest.mark.asyncio
+async def test_get_my_mcp_policy_returns_rows(authenticated_client: AsyncClient) -> None:
+    with patch(
+        "app.services.mcp_policy.get_user_policies",
+        AsyncMock(return_value=[{"server_key": "notion", "tool": "search", "verdict": "allow"}]),
+    ):
+        resp = await authenticated_client.get("/api/me/mcp-policy")
+    assert resp.status_code == 200
+    assert resp.json()["policies"][0]["tool"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_set_my_mcp_policy_replaces_server(authenticated_client: AsyncClient) -> None:
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=[]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_policy.set_user_server_policy", AsyncMock()) as setter,
+        patch("app.services.mcp_policy.get_user_policies", AsyncMock(return_value=[])),
+    ):
+        resp = await authenticated_client.put(
+            "/api/me/mcp-policy",
+            json={"server_key": "notion", "entries": [{"tool": "*", "verdict": "ask"}]},
+        )
+    assert resp.status_code == 200
+    setter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_my_mcp_policy_unknown_server_400(authenticated_client: AsyncClient) -> None:
+    with (
+        patch("app.services.mcp_catalog.catalog_keys", return_value=[]),
+        patch("app.services.mcp_oauth_catalog.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_policy.set_user_server_policy", AsyncMock()) as setter,
+    ):
+        resp = await authenticated_client.put(
+            "/api/me/mcp-policy", json={"server_key": "ghost", "entries": []}
+        )
+    assert resp.status_code == 400
+    setter.assert_not_awaited()

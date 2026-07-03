@@ -23,6 +23,9 @@ from app.models.schemas import (
     ConfigExport,
     ConfigImport,
     ExportSkill,
+    McpPolicyEntry,
+    McpPolicyResponse,
+    McpPolicyServerUpdate,
     PreferencesResponse,
     PreferencesUpdate,
     UserSkillCreate,
@@ -159,6 +162,51 @@ async def update_my_preferences(
         document=prefs.document,
         skills=[UserSkillResponse.model_validate(s) for s in skills],
     )
+
+
+# --------------------------------------------------------------------------- #
+# Global MCP per-tool permission policy (the user's defaults across conversations) #
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/mcp-policy", response_model=McpPolicyResponse)
+async def get_my_mcp_policy(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> McpPolicyResponse:
+    """The user's global per-tool MCP verdicts (defaults inherited by every conversation)."""
+    from app.services import mcp_policy
+
+    rows = await mcp_policy.get_user_policies(db, current_user.id)
+    return McpPolicyResponse(policies=[McpPolicyEntry(**r) for r in rows])
+
+
+@router.put("/mcp-policy", response_model=McpPolicyResponse)
+async def set_my_mcp_policy(
+    body: McpPolicyServerUpdate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> McpPolicyResponse:
+    """Replace the user's global per-tool verdicts for one server (full-state per server)."""
+    from app.services import mcp_policy
+    from app.services.mcp_catalog import catalog_keys
+    from app.services.mcp_oauth_catalog import oauth_catalog_keys
+
+    if body.server_key not in (set(catalog_keys()) | set(oauth_catalog_keys())):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown MCP server key"
+        )
+    try:
+        await mcp_policy.set_user_server_policy(
+            db,
+            user_id=current_user.id,
+            server_key=body.server_key,
+            entries=[(e.tool, e.verdict) for e in body.entries],
+        )
+    except mcp_policy.InvalidVerdictError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    rows = await mcp_policy.get_user_policies(db, current_user.id)
+    return McpPolicyResponse(policies=[McpPolicyEntry(**r) for r in rows])
 
 
 # --------------------------------------------------------------------------- #

@@ -603,3 +603,30 @@ class ValidationErrorResponse(BaseModel):
     """Schema for validation error response."""
 
     detail: list[dict[str, Any]]
+
+
+# ---- MCP per-tool permission policy (shared by /api/me + /api/sessions) ------ //
+class McpPolicyEntry(BaseModel):
+    """One resolved policy row: a tool's verdict for a server (tool='*' = server default)."""
+
+    server_key: str
+    tool: str
+    verdict: str  # allow | deny | ask
+
+
+class McpPolicyResponse(BaseModel):
+    """All policy rows in a scope (a user's globals, or a conversation's overrides)."""
+
+    policies: list[McpPolicyEntry]
+
+
+class McpToolVerdict(BaseModel):
+    tool: str  # a tool name, or '*' for the server-wide default
+    verdict: str  # allow | deny | ask
+
+
+class McpPolicyServerUpdate(BaseModel):
+    """Replace all of one server's tool verdicts in a scope (per-server full-state PUT)."""
+
+    server_key: str
+    entries: list[McpToolVerdict]

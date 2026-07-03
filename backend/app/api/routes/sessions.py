@@ -34,6 +34,9 @@ from app.models.cluster import Cluster
 from app.models.message import Message
 from app.models.schemas import (
     ClusterSummary,
+    McpPolicyEntry,
+    McpPolicyResponse,
+    McpPolicyServerUpdate,
     MessageResponse,
     SearchMessageHit,
     SearchResponse,
@@ -634,6 +637,50 @@ async def set_session_mcp(
         await save_session_event(db, session_id, "mcp", "disconnected", targets=removed)
 
     return SessionMcpResponse(enabled=enabled)
+
+
+@router.get("/{session_id}/mcp/policy", response_model=McpPolicyResponse)
+async def get_session_mcp_policy(
+    session_id: UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> McpPolicyResponse:
+    """Per-tool permission overrides scoped to this conversation."""
+    from app.services import mcp_policy
+
+    await _load_owned_session(session_id, current_user, db)
+    rows = await mcp_policy.get_session_policies(db, session_id)
+    return McpPolicyResponse(policies=[McpPolicyEntry(**r) for r in rows])
+
+
+@router.put("/{session_id}/mcp/policy", response_model=McpPolicyResponse)
+async def set_session_mcp_policy(
+    session_id: UUID,
+    body: McpPolicyServerUpdate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> McpPolicyResponse:
+    """Replace this conversation's per-tool verdicts for one server (full-state per server)."""
+    from app.services import mcp_policy
+    from app.services.mcp_catalog import catalog_keys
+    from app.services.mcp_oauth_catalog import oauth_catalog_keys
+
+    await _load_owned_session(session_id, current_user, db)
+    if body.server_key not in (set(catalog_keys()) | set(oauth_catalog_keys())):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown MCP server key"
+        )
+    try:
+        await mcp_policy.set_session_server_policy(
+            db,
+            session_id=session_id,
+            server_key=body.server_key,
+            entries=[(e.tool, e.verdict) for e in body.entries],
+        )
+    except mcp_policy.InvalidVerdictError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    rows = await mcp_policy.get_session_policies(db, session_id)
+    return McpPolicyResponse(policies=[McpPolicyEntry(**r) for r in rows])
 
 
 # ---------------------------------------------------------------------------

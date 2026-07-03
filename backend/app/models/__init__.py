@@ -9,6 +9,7 @@ from app.models.mcp_oauth_catalog import McpOauthCatalog
 from app.models.mcp_oauth_client import McpOauthClient
 from app.models.mcp_oauth_pending_state import McpOauthPendingState
 from app.models.mcp_server_tools import McpServerTools
+from app.models.mcp_tool_policy import SessionMcpToolPolicy, UserMcpToolPolicy
 from app.models.mcp_user_key import McpUserKey
 from app.models.mcp_user_token import McpUserToken
 from app.models.message import Message
@@ -55,4 +56,6 @@ __all__ = [
     "McpServerTools",
     "McpUserKey",
     "McpUserToken",
+    "SessionMcpToolPolicy",
+    "UserMcpToolPolicy",
 ]
