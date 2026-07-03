@@ -17,6 +17,7 @@ import html
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -31,7 +32,7 @@ from app.models.connector_audit import ConnectorAuditLog
 from app.models.mcp_oauth_pending_state import McpOauthPendingState
 from app.models.mcp_user_token import McpUserToken
 from app.models.user import User
-from app.services import mcp_oauth
+from app.services import mcp_oauth, mcp_tools
 from app.services.mcp_catalog import catalog_keys
 from app.services.mcp_oauth import GrantDeadError, McpOauthError
 from app.services.mcp_oauth_catalog import get_oauth_server, oauth_catalog_keys
@@ -68,6 +69,19 @@ class McpCatalogResponse(BaseModel):
 
 class AuthStartResponse(BaseModel):
     authorize_url: str
+
+
+class McpToolInfo(BaseModel):
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+class McpServerToolsResponse(BaseModel):
+    key: str
+    tools: list[McpToolInfo]
+    # None until the first successful enumeration.
+    fetched_at: datetime | None = None
 
 
 def _redirect_uri() -> str:
@@ -121,6 +135,48 @@ async def get_catalog(
 ) -> McpCatalogResponse:
     """List selectable MCP servers with the current user's per-key auth status."""
     return await _build_catalog(db, current_user)
+
+
+@router.get("/{key}/tools", response_model=McpServerToolsResponse)
+async def get_server_tools(
+    key: str,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    refresh: bool = Query(False),
+) -> McpServerToolsResponse:
+    """The tools a server exposes, for the per-tool permission UI.
+
+    Served from the ``mcp_server_tools`` cache; enumerated live (MCP initialize + tools/list
+    with proxy-injected creds) on first open or when ``refresh=true``. A dead grant /
+    unreachable server falls back to any stale cache, else 502 — so a transient failure can't
+    block the rest of the config UI.
+    """
+    if key not in (set(catalog_keys()) | set(oauth_catalog_keys())):
+        raise HTTPException(status_code=404, detail="Unknown MCP server")
+
+    cached = await mcp_tools.get_cached_tools(db, key)
+    if cached is not None and not refresh:
+        return McpServerToolsResponse(
+            key=key,
+            tools=[McpToolInfo(**t) for t in cached.tools],
+            fetched_at=cached.updated_at,
+        )
+    try:
+        tools = await mcp_tools.refresh_tools(db, key=key, user_id=current_user.id)
+    except mcp_tools.McpEnumError as e:
+        if cached is not None:  # serve stale rather than fail the whole panel
+            return McpServerToolsResponse(
+                key=key,
+                tools=[McpToolInfo(**t) for t in cached.tools],
+                fetched_at=cached.updated_at,
+            )
+        raise HTTPException(status_code=502, detail="Failed to enumerate MCP tools") from e
+    row = await mcp_tools.get_cached_tools(db, key)
+    return McpServerToolsResponse(
+        key=key,
+        tools=[McpToolInfo(**t) for t in tools],
+        fetched_at=row.updated_at if row else None,
+    )
 
 
 @router.post("/{key}/auth/start", response_model=AuthStartResponse)

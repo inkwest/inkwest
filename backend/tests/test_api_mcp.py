@@ -282,3 +282,98 @@ async def test_set_session_mcp_rejects_unknown_key(
     assert resp.status_code == 400
     assert "evil" in resp.json()["detail"]
     apply.assert_not_called()
+
+
+# ---- per-server tool enumeration (GET /api/mcp/{key}/tools) ------------------ //
+def _tools_row(tools: list[dict], updated_at: object = None) -> MagicMock:
+    """Stand-in for a McpServerTools row (.tools / .updated_at)."""
+    from datetime import UTC, datetime
+
+    row = MagicMock()
+    row.tools = tools
+    row.updated_at = updated_at or datetime(2026, 7, 3, tzinfo=UTC)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_get_tools_cache_hit_returns_cached_without_enumerating(
+    authenticated_client: AsyncClient,
+) -> None:
+    cached = _tools_row([{"name": "query", "description": "q", "input_schema": {}}])
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=["coralogix"]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=[]),
+        patch("app.services.mcp_tools.get_cached_tools", AsyncMock(return_value=cached)),
+        patch("app.services.mcp_tools.refresh_tools", AsyncMock()) as refresh,
+    ):
+        resp = await authenticated_client.get("/api/mcp/coralogix/tools")
+    assert resp.status_code == 200
+    assert [t["name"] for t in resp.json()["tools"]] == ["query"]
+    refresh.assert_not_awaited()  # cache hit must not hit the network
+
+
+@pytest.mark.asyncio
+async def test_get_tools_cache_miss_enumerates(authenticated_client: AsyncClient) -> None:
+    fresh = [{"name": "search", "description": "", "input_schema": {}}]
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=[]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=["notion"]),
+        patch(
+            "app.services.mcp_tools.get_cached_tools",
+            AsyncMock(side_effect=[None, _tools_row(fresh)]),
+        ),
+        patch("app.services.mcp_tools.refresh_tools", AsyncMock(return_value=fresh)) as refresh,
+    ):
+        resp = await authenticated_client.get("/api/mcp/notion/tools")
+    assert resp.status_code == 200
+    assert [t["name"] for t in resp.json()["tools"]] == ["search"]
+    refresh.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_tools_unknown_key_404(authenticated_client: AsyncClient) -> None:
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=["coralogix"]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=[]),
+    ):
+        resp = await authenticated_client.get("/api/mcp/ghost/tools")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_tools_enum_failure_no_cache_502(authenticated_client: AsyncClient) -> None:
+    from app.services.mcp_tools import McpEnumError
+
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=[]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_tools.get_cached_tools", AsyncMock(return_value=None)),
+        patch(
+            "app.services.mcp_tools.refresh_tools",
+            AsyncMock(side_effect=McpEnumError("dead")),
+        ),
+    ):
+        resp = await authenticated_client.get("/api/mcp/notion/tools")
+    assert resp.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_get_tools_enum_failure_serves_stale_cache(
+    authenticated_client: AsyncClient,
+) -> None:
+    from app.services.mcp_tools import McpEnumError
+
+    stale = _tools_row([{"name": "old", "description": "", "input_schema": {}}])
+    with (
+        patch("app.api.routes.mcp.catalog_keys", return_value=[]),
+        patch("app.api.routes.mcp.oauth_catalog_keys", return_value=["notion"]),
+        patch("app.services.mcp_tools.get_cached_tools", AsyncMock(return_value=stale)),
+        patch(
+            "app.services.mcp_tools.refresh_tools",
+            AsyncMock(side_effect=McpEnumError("transient")),
+        ),
+    ):
+        # refresh=true forces a re-enum; it fails, but the stale cache must still serve.
+        resp = await authenticated_client.get("/api/mcp/notion/tools?refresh=true")
+    assert resp.status_code == 200
+    assert [t["name"] for t in resp.json()["tools"]] == ["old"]
