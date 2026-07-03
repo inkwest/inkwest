@@ -678,6 +678,70 @@ export async function setSessionMcp(
   });
 }
 
+// MCP per-tool permission policy (tool enumeration + verdicts). See docs/HANDOFF-mcp-tool-permissions.md.
+export type McpVerdict = 'allow' | 'deny' | 'ask';
+
+export interface McpToolInfo {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+export interface McpServerTools {
+  key: string;
+  tools: McpToolInfo[];
+  fetched_at: string | null;
+}
+
+export interface McpPolicyEntry {
+  server_key: string;
+  tool: string; // a tool name, or '*' for the server-wide default
+  verdict: McpVerdict;
+}
+
+export interface McpPolicySet {
+  policies: McpPolicyEntry[];
+}
+
+/** A server's tools (from the cache; enumerated live on first open or when refresh=true). */
+export async function getMcpServerTools(key: string, refresh = false): Promise<McpServerTools> {
+  const q = refresh ? '?refresh=true' : '';
+  return fetchAPI(`/api/mcp/${encodeURIComponent(key)}/tools${q}`);
+}
+
+/** The current user's global per-tool verdicts (defaults inherited by every conversation). */
+export async function getMyMcpPolicy(): Promise<McpPolicySet> {
+  return fetchAPI('/api/me/mcp-policy');
+}
+
+/** Replace the user's global verdicts for one server (full-state per server). */
+export async function setMyMcpPolicy(
+  serverKey: string,
+  entries: { tool: string; verdict: McpVerdict }[]
+): Promise<McpPolicySet> {
+  return fetchAPI('/api/me/mcp-policy', {
+    method: 'PUT',
+    body: JSON.stringify({ server_key: serverKey, entries }),
+  });
+}
+
+/** A conversation's per-tool override verdicts. */
+export async function getSessionMcpPolicy(sessionId: string): Promise<McpPolicySet> {
+  return fetchAPI(`/api/sessions/${sessionId}/mcp/policy`);
+}
+
+/** Replace a conversation's verdicts for one server (full-state per server). */
+export async function setSessionMcpPolicy(
+  sessionId: string,
+  serverKey: string,
+  entries: { tool: string; verdict: McpVerdict }[]
+): Promise<McpPolicySet> {
+  return fetchAPI(`/api/sessions/${sessionId}/mcp/policy`, {
+    method: 'PUT',
+    body: JSON.stringify({ server_key: serverKey, entries }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Current-user self-service: preferences + personal skills.
 // All scoped to the authenticated user — no admin role.

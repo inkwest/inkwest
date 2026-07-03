@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Download, Upload, GitFork } from 'lucide-react';
 import { Button, Modal } from '@/components/ui';
 import { SkillsManager } from '@/components/skills/SkillsManager';
+import { McpPolicySettingsTab } from '@/components/settings/McpPolicySettingsTab';
 import { usePreferencesStore } from '@/store/preferences';
 import { useSettingsStore } from '@/store/settings';
 import { getSkills } from '@/services/api';
 import type { ConfigExport, Skill } from '@/types/api';
 
-type Tab = 'display' | 'skills' | 'io';
+type Tab = 'display' | 'skills' | 'mcp' | 'io';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -33,6 +34,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         {([
           ['display', 'Display'],
           ['skills', 'Skills'],
+          ['mcp', 'MCP tools'],
           ['io', 'Import / Export'],
         ] as [Tab, string][]).map(([key, label]) => (
           <button
@@ -59,6 +61,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         <>
           {tab === 'display' && <DisplayTab />}
           {tab === 'skills' && <SkillsTab adminSkills={adminSkills} />}
+          {tab === 'mcp' && <McpPolicySettingsTab />}
           {tab === 'io' && <ImportExportTab />}
         </>
       )}

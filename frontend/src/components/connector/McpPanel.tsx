@@ -11,6 +11,7 @@ import {
   setSessionMcp,
   type McpServerEntry,
 } from '@/services/api';
+import { McpToolPolicyEditor } from './McpToolPolicyEditor';
 import { openMcpAuthPopup } from '@/lib/mcpConnect';
 import { useSessionsStore } from '@/store/sessions';
 import { useMcpStore } from '@/store/mcp';
@@ -83,6 +84,8 @@ export function McpPanel({
   // Reactive mirror of `connecting` for rendering the transient "connecting…" status icon
   // (the ref alone can't drive a re-render).
   const [connectingKeys, setConnectingKeys] = useState<Set<string>>(new Set());
+  // Which enabled server's per-tool permissions are expanded in the modal (one at a time).
+  const [expandedPolicy, setExpandedPolicy] = useState<string | null>(null);
   // Monotonic guard shared by every catalog fetch (mount load, live-reload, popup-open): all
   // force the same live endpoint, so an earlier-issued request resolving last must not clobber a
   // fresher one's result. Only the latest-sequenced fetch writes catalog/oauthServers state.
@@ -498,6 +501,35 @@ export function McpPanel({
                   </div>
                 );
               })}
+            </div>
+          </div>
+        )}
+        {enabledKeys.length > 0 && (
+          <div className="mt-4 border-t border-gray-700 pt-3">
+            <div className="mb-2 text-xs font-medium text-gray-400">
+              Tool permissions (this conversation)
+            </div>
+            <div className="space-y-1">
+              {enabledKeys.map((key) => (
+                <div key={key} className="rounded border border-gray-800">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedPolicy((cur) => (cur === key ? null : key))}
+                    className="flex w-full items-center justify-between px-2 py-1.5 text-sm text-gray-200 hover:bg-gray-800"
+                    aria-expanded={expandedPolicy === key}
+                  >
+                    <span className="truncate">{key}</span>
+                    <span className="text-xs text-gray-500">
+                      {expandedPolicy === key ? 'Hide tools' : 'Tools…'}
+                    </span>
+                  </button>
+                  {expandedPolicy === key && sessionId && (
+                    <div className="border-t border-gray-800 p-2">
+                      <McpToolPolicyEditor serverKey={key} scope="session" sessionId={sessionId} />
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         )}
