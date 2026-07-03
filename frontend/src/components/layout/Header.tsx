@@ -187,9 +187,9 @@ export function Header() {
                   <Settings className="h-4 w-4" />
                   <span>Settings</span>
                 </button>
-                {/* Replay the first-run tour. Non-admins only (admins never see it); it
-                    runs on the start screen, so jump there and clear the seen flag. */}
-                {user && !user.is_admin && (
+                {/* Replay the first-run tour. Available to every user (admins included);
+                    it runs on the start screen, so jump there and clear the seen flag. */}
+                {user && (
                   <button
                     onClick={() => {
                       setShowMenu(false);
