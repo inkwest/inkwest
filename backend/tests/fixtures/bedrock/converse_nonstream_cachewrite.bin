@@ -1,0 +1,1 @@
+{"output":{"message":{"role":"assistant","content":[{"text":"REDACTED"}]}},"stopReason":"max_tokens","usage":{"inputTokens":7,"outputTokens":16,"totalTokens":12631,"cacheReadInputTokens":0,"cacheWriteInputTokens":12608,"cacheDetails":[{"ttl":"5m","inputTokens":12608}]},"metrics":{"latencyMs":8952}}

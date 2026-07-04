@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.budget import BudgetPeriod, UsageRecord
 from app.models.session import Session
+from app.models.user import User
 from app.services.budget_service import get_period_start
 
 
@@ -53,22 +54,30 @@ async def summary(
     end: datetime | None,
 ) -> dict[str, Any]:
     """Total tokens/cost/requests over the window."""
+    # Labeled columns (not positional indexes): inserting a column can never silently
+    # renumber its neighbours.
     query = select(
-        func.coalesce(func.sum(UsageRecord.input_tokens), 0),
-        func.coalesce(func.sum(UsageRecord.output_tokens), 0),
-        func.coalesce(func.sum(UsageRecord.cost_usd), 0),
-        func.count(UsageRecord.id),
+        func.coalesce(func.sum(UsageRecord.input_tokens), 0).label("input_tokens"),
+        func.coalesce(func.sum(UsageRecord.output_tokens), 0).label("output_tokens"),
+        func.coalesce(func.sum(UsageRecord.cache_read_tokens), 0).label("cache_read_tokens"),
+        func.coalesce(func.sum(UsageRecord.cache_write_tokens), 0).label("cache_write_tokens"),
+        func.coalesce(func.sum(UsageRecord.cost_usd), 0).label("cost_usd"),
+        func.count(UsageRecord.id).label("request_count"),
     ).where(*_conditions(user_id, start, end))
 
     row = (await db.execute(query)).one()
-    input_tokens = int(row[0])
-    output_tokens = int(row[1])
+    input_tokens = int(row.input_tokens)
+    output_tokens = int(row.output_tokens)
+    # total_tokens stays fresh-input + output (pre-cache semantics); the cache splits are
+    # additive fields so no consumer's math silently changes.
     return {
         "total_input_tokens": input_tokens,
         "total_output_tokens": output_tokens,
+        "total_cache_read_tokens": int(row.cache_read_tokens),
+        "total_cache_write_tokens": int(row.cache_write_tokens),
         "total_tokens": input_tokens + output_tokens,
-        "total_cost_usd": float(row[2]),
-        "request_count": int(row[3]),
+        "total_cost_usd": float(row.cost_usd),
+        "request_count": int(row.request_count),
     }
 
 
@@ -88,6 +97,8 @@ async def by_model(
             UsageRecord.provider.label("engine"),
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
             func.count(UsageRecord.id).label("request_count"),
         )
@@ -103,9 +114,67 @@ async def by_model(
             "engine": row.engine,
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
             "total_tokens": row.input_tokens + row.output_tokens,
             "cost_usd": float(row.cost_usd),
             "request_count": row.request_count,
+        }
+        for row in rows
+    ]
+
+
+async def by_user(
+    db: AsyncSession,
+    start: datetime,
+    end: datetime | None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Per-user usage breakdown (identities resolved), costliest first. Admin-only by
+    nature (it spans users), so there is no ``user_id`` scope parameter."""
+    query = (
+        select(
+            UsageRecord.user_id,
+            func.sum(UsageRecord.input_tokens).label("input_tokens"),
+            func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
+            func.sum(UsageRecord.cost_usd).label("cost_usd"),
+            func.count(UsageRecord.id).label("request_count"),
+            func.count(func.distinct(UsageRecord.session_id)).label("conversation_count"),
+        )
+        .where(*_conditions(None, start, end))
+        .group_by(UsageRecord.user_id)
+        .order_by(func.sum(UsageRecord.cost_usd).desc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+
+    rows = (await db.execute(query)).all()
+
+    user_ids = [row.user_id for row in rows if row.user_id]
+    users_map: dict[str, User] = {}
+    if user_ids:
+        result = await db.execute(select(User).where(User.id.in_(user_ids)))
+        users_map = {str(u.id): u for u in result.scalars().all()}
+
+    return [
+        {
+            "user_id": str(row.user_id) if row.user_id else None,
+            "email": users_map[str(row.user_id)].email
+            if row.user_id and str(row.user_id) in users_map
+            else "",
+            "display_name": users_map[str(row.user_id)].display_name
+            if row.user_id and str(row.user_id) in users_map
+            else "Unknown",
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
+            "total_tokens": row.input_tokens + row.output_tokens,
+            "cost_usd": float(row.cost_usd),
+            "request_count": row.request_count,
+            "conversation_count": row.conversation_count,
         }
         for row in rows
     ]
@@ -128,6 +197,8 @@ async def by_session(
             UsageRecord.session_id,
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
             func.count(UsageRecord.id).label("request_count"),
             func.min(UsageRecord.recorded_at).label("first_request"),
@@ -156,6 +227,8 @@ async def by_session(
             "title": titles.get(str(row.session_id), "Untitled"),
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
             "total_tokens": row.input_tokens + row.output_tokens,
             "cost_usd": float(row.cost_usd),
             "request_count": row.request_count,
@@ -183,6 +256,8 @@ async def timeseries(
             bucket,
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
             func.count(UsageRecord.id).label("request_count"),
         )
@@ -196,8 +271,76 @@ async def timeseries(
             "timestamp": row.bucket.isoformat(),
             "input_tokens": int(row.input_tokens),
             "output_tokens": int(row.output_tokens),
+            "cache_read_tokens": int(row.cache_read_tokens),
+            "cache_write_tokens": int(row.cache_write_tokens),
             "cost_usd": float(row.cost_usd),
             "request_count": int(row.request_count),
+        }
+        for row in (await db.execute(query)).all()
+    ]
+
+
+async def by_turn(
+    db: AsyncSession,
+    user_id: UUID | None,
+    start: datetime,
+    end: datetime | None,
+    session_id: UUID | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Per-turn usage rollup: one turn's usage rows grouped by ``turn_id`` (a broker
+    turn contributes N per-call rows; an engine turn contributes its single row).
+
+    Pre-cutover rows (``turn_id IS NULL``) fall back to per-row granularity by grouping
+    on the row's own id — they simply don't aggregate (see
+    ``migrations/20260704000000_usage_cache_tokens.sql``). The returned ``turn_id`` is the
+    grouping key, so for those legacy rows it carries the UsageRecord id. Newest turns
+    first. No frontend consumer yet — groundwork for a per-turn cost drill-down
+    (documented in docs/BUDGET.md).
+    """
+    turn_key = func.coalesce(UsageRecord.turn_id, UsageRecord.id).label("turn_key")
+    conditions = _conditions(user_id, start, end)
+    if session_id is not None:
+        conditions.append(UsageRecord.session_id == session_id)
+
+    # session_id joins the GROUP BY instead of being aggregated: a turn never spans
+    # sessions (so the grouping is unchanged), and PostgreSQL has no max(uuid).
+    query = (
+        select(
+            turn_key,
+            UsageRecord.session_id,
+            func.max(UsageRecord.model).label("model"),
+            func.max(UsageRecord.provider).label("engine"),
+            func.max(UsageRecord.source).label("source"),
+            func.sum(UsageRecord.input_tokens).label("input_tokens"),
+            func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
+            func.sum(UsageRecord.cost_usd).label("cost_usd"),
+            func.count(UsageRecord.id).label("call_count"),
+            func.max(UsageRecord.recorded_at).label("last_call"),
+        )
+        .where(*conditions)
+        .group_by(turn_key, UsageRecord.session_id)
+        .order_by(func.max(UsageRecord.recorded_at).desc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+
+    return [
+        {
+            "turn_id": str(row.turn_key),
+            "session_id": str(row.session_id),
+            "model": row.model,
+            "engine": row.engine,
+            "source": row.source,
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
+            "cost_usd": float(row.cost_usd),
+            "call_count": row.call_count,
+            "last_call": row.last_call.isoformat() if row.last_call else None,
         }
         for row in (await db.execute(query)).all()
     ]

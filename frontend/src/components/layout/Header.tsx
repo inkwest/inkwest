@@ -12,7 +12,7 @@ import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { SettingsModal } from '@/components/settings/SettingsModal';
 import { useSettingsUi, isSettingsTab } from '@/store/settingsUi';
 import { devSwitchUser } from '@/services/api';
-import { formatTokenCount } from '@/lib/utils';
+import { TokenGlyphs } from '@/components/ui/TokenGlyphs';
 
 export function Header() {
   const navigate = useNavigate();
@@ -121,10 +121,14 @@ export function Header() {
             (ConnectorPanel). No global default badge here: outside a session it
             named only a model with no engine, which is ambiguous now that a model
             can run on more than one engine. */}
-        {currentSession && (currentSession.total_input_tokens || currentSession.total_output_tokens) ? (
-          <span className="text-xs text-gray-500 hidden sm:inline" title="Input / Output tokens">
-            {formatTokenCount(currentSession.total_input_tokens || 0)}&darr; {formatTokenCount(currentSession.total_output_tokens || 0)}&uarr;
-          </span>
+        {currentSession && (currentSession.total_input_tokens || currentSession.total_output_tokens || currentSession.total_cache_read_tokens || currentSession.total_cache_write_tokens) ? (
+          <TokenGlyphs
+            className="text-xs text-gray-500 hidden sm:inline"
+            input={currentSession.total_input_tokens || 0}
+            output={currentSession.total_output_tokens || 0}
+            cacheRead={currentSession.total_cache_read_tokens || 0}
+            cacheWrite={currentSession.total_cache_write_tokens || 0}
+          />
         ) : null}
         {currentSession && <ConnectionStatus />}
 

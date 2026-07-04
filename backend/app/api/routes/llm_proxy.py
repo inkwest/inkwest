@@ -34,10 +34,12 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from urllib.parse import quote
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.background import BackgroundTask
 
 from app.api.routes._proxy_stream import (
@@ -48,9 +50,13 @@ from app.api.routes._proxy_stream import (
     read_capped_body,
     split_bearer,
 )
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.constants import LLM_PROXY_MAX_BODY_BYTES, LLM_PROXY_STREAM_MAX_SECONDS
+from app.core.database import async_session_maker
 from app.services import model_catalog, model_registry
+from app.services.budget_service import record_usage
+from app.services.llm_metering import STREAMING_OPS, CallUsage, MeteringTee
 from app.services.llm_proxy_token import LlmProxyClaims, ProxyAuthError, verify
 
 logger = logging.getLogger(__name__)
@@ -63,7 +69,9 @@ _transport: httpx.AsyncBaseTransport | None = None
 # Bedrock runtime operations the broker permits (the trailing path segment). converse /
 # converse-stream (Converse API, used by the inkwest-agent) and
 # invoke / invoke-with-response-stream (InvokeModel, used by the Claude CLI on Bedrock).
-_ALLOWED_OPS = frozenset({"converse", "converse-stream", "invoke", "invoke-with-response-stream"})
+# Composed from the metering module's STREAMING_OPS so the tee's stream/JSON detection
+# can never silently desync from the ops the route accepts.
+_ALLOWED_OPS = frozenset({"converse", "invoke"}) | STREAMING_OPS
 
 # Bedrock CONTROL-plane resources the broker proxies (read-only GET allowlist, first path
 # segment). Claude Code on Bedrock lists these to resolve a model to its regional inference
@@ -174,7 +182,15 @@ async def llm_proxy(model_path: str, request: Request) -> StreamingResponse:
     body = await read_capped_body(request, LLM_PROXY_MAX_BODY_BYTES)
     url, auth = _UPSTREAMS[_PROVIDER](target, op, request.url.query, region, bearer)
     return await _send(
-        request, method="POST", url=url, auth=auth, body=body, session_id=claims.session_id
+        request,
+        method="POST",
+        url=url,
+        auth=auth,
+        body=body,
+        session_id=claims.session_id,
+        meter=MeteringTee(op),
+        claims=claims,
+        target=target,
     )
 
 
@@ -240,13 +256,164 @@ async def _bounded_aiter(upstream: httpx.Response) -> AsyncIterator[bytes]:
     upstream that dribbles one byte just under that ceiling could pin a worker slot for an
     unbounded wall-clock time (slowloris). This caps the whole response to a generous ceiling
     (longer than any real turn) so a single replica can't be held hostage. On expiry the
-    BackgroundTask still runs, closing the client + stream."""
+    BackgroundTask still runs, closing the client + stream. Accounting note: a call cut
+    here before its terminal usage frame is billed from the Anthropic self-report on
+    invoke-stream (the tee's abort fallback); converse-stream carries no usage until its
+    terminal metadata event, so a cut converse-stream call yields NO row — that miss shows
+    up on ``inkwest_llm_metering_failures_total{reason="no_usage"}``."""
     try:
         async with asyncio.timeout(LLM_PROXY_STREAM_MAX_SECONDS):
             async for chunk in upstream.aiter_raw():
                 yield chunk
     except TimeoutError:
         logger.warning("llm_proxy_stream_deadline_exceeded")
+
+
+async def _metered_aiter(
+    upstream: httpx.Response, meter: MeteringTee | None
+) -> AsyncIterator[bytes]:
+    """Passive tee over :func:`_bounded_aiter`: every chunk is observed, then yielded
+    unchanged. ``MeteringTee.feed`` never raises (it fails itself), so metering can neither
+    corrupt nor stall the forwarded stream."""
+    async for chunk in _bounded_aiter(upstream):
+        if meter is not None:
+            meter.feed(chunk)
+        yield chunk
+
+
+# The metering persist runs in fire-and-forget tasks, NOT inline in the response
+# BackgroundTask: Starlette awaits that task in the proxied call's teardown, so a
+# slow/blocked billing DB would add its latency to every Bedrock call and throttle
+# proxy throughput. The semaphore bounds DB-write concurrency; the pending-set cap
+# bounds task pileup during a DB outage (dropping the row is the lesser harm, and
+# it's alarmed like any persist failure).
+_PERSIST_DB_CONCURRENCY = asyncio.Semaphore(4)
+_MAX_PENDING_PERSISTS = 256
+_persist_tasks: set[asyncio.Task[None]] = set()
+# One immediate-ish retry covers the transient-blip class (same rationale/delay as
+# turn_usage._RETRY_DELAY_SECONDS). Patched to 0 in tests.
+_PERSIST_RETRY_DELAY_SECONDS = 0.5
+
+
+async def drain_metering_persists() -> None:
+    """Await every in-flight metering persist. TESTS ONLY — production never blocks on
+    metering; tests need the offloaded write to have landed before asserting on it."""
+    while _persist_tasks:
+        await asyncio.gather(*tuple(_persist_tasks), return_exceptions=True)
+        # Awaiting already-done tasks returns WITHOUT yielding, which would starve the
+        # call_soon queue holding the set-discard callbacks — and spin this loop forever.
+        await asyncio.sleep(0)
+
+
+async def _persist_metered_usage(
+    usage: CallUsage, claims: LlmProxyClaims, target: str, session_uuid: UUID
+) -> None:
+    """Persist one broker usage row, retrying once — this row is the turn's ONLY budget
+    record (broker-on turns skip the engine row), so a transient DB blip must not drop
+    it permanently. Idempotent across attempts: the row PK is fixed up front, so an
+    ambiguous first commit (landed server-side, ack lost) makes the retry's re-INSERT
+    collide instead of double-billing the call."""
+    # Label the sink's Prometheus counters with the real engine: this task runs outside
+    # the orchestrator's turn context, so turn_engine() would be "unknown".
+    metrics.set_turn_engine(claims.engine or "unknown")
+    model = model_registry.resolve_invoke_target(target)
+    record_id = uuid4()
+    async with _PERSIST_DB_CONCURRENCY:
+        for attempt in (1, 2):
+            try:
+                # The route has no request-scoped DB session — a fresh one per attempt
+                # (its close discards any aborted transaction, no explicit rollback).
+                async with async_session_maker() as db:
+                    await record_usage(
+                        db,
+                        user_id=UUID(claims.user_id) if claims.user_id else None,
+                        session_id=session_uuid,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        model=model,
+                        provider=claims.engine or "unknown",
+                        cache_read_tokens=usage.cache_read_tokens,
+                        cache_write_tokens=usage.cache_write_tokens,
+                        cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                        source="broker",
+                        turn_id=UUID(claims.turn_id) if claims.turn_id else None,
+                        record_id=record_id,
+                    )
+                    await db.commit()
+                return
+            except IntegrityError:
+                if attempt == 2:
+                    # The fixed record_id collided: attempt 1's commit landed server-side
+                    # with the ack lost. The row exists — success, not a failure.
+                    logger.info(
+                        "llm_proxy_metering_already_persisted",
+                        extra={"target": target, "session_id": claims.session_id},
+                    )
+                    return
+                await asyncio.sleep(_PERSIST_RETRY_DELAY_SECONDS)
+            except Exception:
+                if attempt == 2:
+                    logger.warning(
+                        "llm_proxy_metering_persist_failed",
+                        extra={"target": target, "session_id": claims.session_id},
+                        exc_info=True,
+                    )
+                    metrics.llm_metering_failures_total.labels(reason="persist_failed").inc()
+                    return
+                await asyncio.sleep(_PERSIST_RETRY_DELAY_SECONDS)
+
+
+async def _finish_stream(
+    upstream: httpx.Response,
+    client: httpx.AsyncClient,
+    meter: MeteringTee | None,
+    claims: LlmProxyClaims | None,
+    target: str | None,
+) -> None:
+    """Post-stream BackgroundTask: tear down the upstream, then hand the metered usage
+    off to a bounded persist task.
+
+    Runs after the response body was fully sent (or the client vanished) — decoupled from
+    the orchestrator's control flow, so a call completed before an engine crash is still
+    billed (AWS bills it too). Starlette awaits this inline in the response teardown, so
+    it stays fast (teardown + tee readout); the DB write happens in
+    :func:`_persist_metered_usage`. Best-effort throughout: nothing here may propagate
+    into the response lifecycle."""
+    try:
+        await close_stream(upstream, client)
+    except Exception:
+        # An already-reset connection can make aclose() raise; swallowing it here keeps
+        # the teardown failure from silently costing the call its usage row below.
+        logger.warning("llm_proxy_stream_teardown_failed", extra={"target": target}, exc_info=True)
+    if meter is None or claims is None or target is None:
+        return
+    usage = meter.result()
+    if usage is None:
+        # Parse failure or no usage frame at all (invoke-stream aborts fall back to the
+        # self-report inside the tee; converse-stream aborts land here). The bytes were
+        # forwarded fine; we just can't account this call.
+        logger.warning(
+            "llm_proxy_metering_no_usage",
+            extra={"target": target, "session_id": claims.session_id},
+        )
+        metrics.llm_metering_failures_total.labels(reason="no_usage").inc()
+        return
+    if not claims.session_id:
+        logger.warning("llm_proxy_metering_no_session", extra={"target": target})
+        metrics.llm_metering_failures_total.labels(reason="no_session").inc()
+        return
+    if len(_persist_tasks) >= _MAX_PENDING_PERSISTS:
+        logger.warning(
+            "llm_proxy_metering_persist_overflow",
+            extra={"target": target, "session_id": claims.session_id},
+        )
+        metrics.llm_metering_failures_total.labels(reason="persist_failed").inc()
+        return
+    task = asyncio.create_task(
+        _persist_metered_usage(usage, claims, target, UUID(claims.session_id))
+    )
+    _persist_tasks.add(task)
+    task.add_done_callback(_persist_tasks.discard)
 
 
 async def _send(
@@ -257,13 +424,18 @@ async def _send(
     auth: dict[str, str],
     body: bytes | None,
     session_id: str | None,
+    meter: MeteringTee | None = None,
+    claims: LlmProxyClaims | None = None,
+    target: str | None = None,
 ) -> StreamingResponse:
     """Forward one request to Bedrock and stream the response back untouched.
 
     Single teardown contract (mirrors mcp_proxy): on success the client + stream outlive this
     handler and are closed by ``close_stream`` once the body is consumed (or the client
     disconnects); on any failure OR cancellation before the StreamingResponse is handed off,
-    close the client here."""
+    close the client here. Data-plane calls additionally carry a :class:`MeteringTee` that
+    observes the forwarded bytes and persists a usage row post-stream (HTTP 200 only — an errored
+    Bedrock call has no billable tokens)."""
     client = httpx.AsyncClient(transport=_transport, timeout=TIMEOUT)
     upstream: httpx.Response | None = None
     try:
@@ -284,9 +456,11 @@ async def _send(
 
     # Unreachable with upstream None: send() failure raised above. Asserted for the type checker.
     assert upstream is not None
+    if upstream.status_code != 200:
+        meter = None  # non-2xx carries no invocationMetrics/usage — nothing billable
     return StreamingResponse(
-        _bounded_aiter(upstream),
+        _metered_aiter(upstream, meter),
         status_code=upstream.status_code,
         headers=filter_headers(upstream.headers, _RESP_STRIP),
-        background=BackgroundTask(close_stream, upstream, client),
+        background=BackgroundTask(_finish_stream, upstream, client, meter, claims, target),
     )

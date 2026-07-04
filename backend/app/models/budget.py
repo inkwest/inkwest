@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import Enum
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Integer, Numeric, String, func
+from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, func, text
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -162,6 +162,21 @@ class UsageRecord(Base):
 
     __tablename__ = "usage_records"
 
+    # Mirror of the migration's DB backstop (20260704000000_usage_cache_tokens.sql):
+    # one engine-side budget row per turn — turn_usage's ambiguous-commit retry relies
+    # on the re-INSERT failing. Declared on the model (with a sqlite_where twin) so the
+    # real-SQL test suites built from Base.metadata enforce it too; dropping it from
+    # the migration alone can no longer pass silently.
+    __table_args__ = (
+        Index(
+            "uq_usage_records_engine_turn",
+            "turn_id",
+            unique=True,
+            postgresql_where=text("source = 'engine' AND turn_id IS NOT NULL"),
+            sqlite_where=text("source = 'engine' AND turn_id IS NOT NULL"),
+        ),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
@@ -191,6 +206,35 @@ class UsageRecord(Base):
         Integer,
         nullable=False,
         default=0,
+    )
+    # Prompt-cache tokens (input-side only; Bedrock/Anthropic never cache output).
+    # input_tokens above is FRESH input — cache tokens are additive, not a subset.
+    cache_read_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Tokens served from the prompt cache (billed ~0.1x input rate)",
+    )
+    cache_write_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Tokens written to the prompt cache (billed ~1.25x input rate)",
+    )
+
+    # Accounting authority that wrote the row: 'engine' (orchestrator fallback) or
+    # 'broker' (LLM proxy metering — one row per Bedrock call).
+    source: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="engine",
+    )
+    # Per-turn aggregation key: the N broker rows of one turn (and the single engine
+    # row) share it. Nullable — pre-cutover rows have none and don't group.
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        index=True,
     )
 
     # Model info

@@ -3,6 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -379,7 +380,16 @@ async def test_update_user_status_not_found(admin_client: AsyncClient, mock_db: 
 
 @pytest.mark.asyncio
 async def test_usage_summary(admin_client: AsyncClient, mock_db: AsyncMock) -> None:
-    row = (5000, 3000, 0.12, 10)
+    # Distinct sentinels: cache_read must NOT equal total_tokens (5000+3000) or a
+    # column mix-up would pass unnoticed.
+    row = SimpleNamespace(
+        input_tokens=5000,
+        output_tokens=3000,
+        cache_read_tokens=7777,
+        cache_write_tokens=2000,
+        cost_usd=0.12,
+        request_count=10,
+    )
     mock_result = MagicMock()
     mock_result.one.return_value = row
     mock_db.execute = AsyncMock(return_value=mock_result)
@@ -389,6 +399,8 @@ async def test_usage_summary(admin_client: AsyncClient, mock_db: AsyncMock) -> N
     assert resp.status_code == 200
     data = resp.json()
     assert data["total_tokens"] == 8000
+    assert data["total_cache_read_tokens"] == 7777
+    assert data["total_cache_write_tokens"] == 2000
     assert data["request_count"] == 10
 
 

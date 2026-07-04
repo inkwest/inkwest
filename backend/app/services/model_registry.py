@@ -38,16 +38,21 @@ from app.services.model_catalog import (
     is_anthropic_model,
     model_modalities,
     profile_arn,
+    profile_ids_for_arn,
 )
 from app.services.pricing import (
     DEFAULT_PRICING,
     ModelPricing,
+    cost_for_pricing,
     get_model_pricing,
     is_legacy_model,
     model_label,
 )
 from app.services.pricing import (
     calculate_cost as _table_cost,
+)
+from app.services.pricing import (
+    pricing_candidates as _id_candidates,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,14 +136,60 @@ def _row_pricing(row: dict[str, Any] | None) -> tuple[ModelPricing | None, bool]
     return None, False
 
 
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> Decimal:
-    """Cost in USD honoring any per-model pricing override."""
+def calculate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
+) -> Decimal:
+    """Cost in USD honoring any per-model pricing override (prompt-cache aware).
+
+    Overrides carry input/output prices only; cache prices derive from the
+    override's input_price via the default multipliers (cost_for_pricing).
+    """
     override, _ = _row_pricing(_rows.get(model))
     if override is None:
-        return _table_cost(model, input_tokens, output_tokens)
-    return (Decimal(input_tokens) / Decimal(1_000_000)) * override.input_price + (
-        Decimal(output_tokens) / Decimal(1_000_000)
-    ) * override.output_price
+        return _table_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cache_write_1h_tokens=cache_write_1h_tokens,
+        )
+    return cost_for_pricing(
+        override,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        cache_write_1h_tokens=cache_write_1h_tokens,
+    )
+
+
+def resolve_invoke_target(target: str) -> str:
+    """Registry model_id behind a proxied invoke target (bare id, inference-profile id, ARN).
+
+    The LLM broker meters per call, but the URL carries whatever the engine invoked — Claude
+    Code auto-upgrades a bare foundation id to its regional profile id (``eu.anthropic.…``),
+    and profile-only models invoke via their ARN. Usage rows must aggregate under the
+    registry's friendly model_id regardless. Unresolvable targets return verbatim — the
+    pricing lookup applies its own normalization, so cost still resolves for known families.
+    """
+    entries = merged_entries()
+    ids = {e.model_id for e in entries}
+    if target in ids:
+        return target
+    for e in entries:
+        if e.arn and (target == e.arn or target in profile_ids_for_arn(e.arn)):
+            return e.model_id
+    # Progressive normalization (route prefix / version / date stripped) → known id.
+    for candidate in _id_candidates(target):
+        if candidate in ids:
+            return candidate
+    return target
 
 
 def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:

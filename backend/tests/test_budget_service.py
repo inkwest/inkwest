@@ -380,6 +380,55 @@ class TestBudgetServiceIntegration:
         assert record.cost_usd == Decimal("0.0123")
 
     @pytest.mark.asyncio
+    async def test_record_usage_persists_cache_tokens_source_and_turn_id(self):
+        from app.services.budget_service import record_usage
+
+        turn_id = uuid4()
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=7,
+                output_tokens=16,
+                model="claude-sonnet-4-20250514",
+                cache_read_tokens=27_082,
+                cache_write_tokens=3_242,
+                source="broker",
+                turn_id=turn_id,
+            )
+        assert record.cache_read_tokens == 27_082
+        assert record.cache_write_tokens == 3_242
+        assert record.source == "broker"
+        assert record.turn_id == turn_id
+        # Cost includes the cache terms (read at 0.1x, write at 1.25x of $3/M input).
+        expected = (
+            Decimal(7) * Decimal("3")
+            + Decimal(16) * Decimal("15")
+            + Decimal(27_082) * Decimal("0.30")
+            + Decimal(3_242) * Decimal("3.75")
+        ) / Decimal(1_000_000)
+        assert record.cost_usd == expected
+
+    @pytest.mark.asyncio
+    async def test_record_usage_defaults_source_engine_turn_none(self):
+        from app.services.budget_service import record_usage
+
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=1,
+                output_tokens=1,
+                model="claude-sonnet-4-20250514",
+            )
+        assert record.source == "engine"
+        assert record.turn_id is None
+        assert record.cache_read_tokens == 0
+        assert record.cache_write_tokens == 0
+
+    @pytest.mark.asyncio
     async def test_record_usage_falls_back_to_estimate_when_cost_is_none(self):
         from app.services.budget_service import record_usage
 
@@ -400,3 +449,66 @@ class TestBudgetServiceIntegration:
             )
         calc.assert_called_once()
         assert record.cost_usd == Decimal("0.5")
+
+
+class TestRecordUsageHardening:
+    @pytest.mark.asyncio
+    async def test_negative_counts_are_clamped(self):
+        """A forged negative count must not create a negative-cost row (budget evasion)."""
+        from app.services.budget_service import record_usage
+
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=-100_000,
+                output_tokens=-5,
+                model="claude-sonnet-4-20250514",
+                cache_read_tokens=-1,
+                cache_write_tokens=-2,
+            )
+        assert record.input_tokens == 0
+        assert record.output_tokens == 0
+        assert record.cache_read_tokens == 0
+        assert record.cache_write_tokens == 0
+        assert record.cost_usd == 0
+
+    @pytest.mark.asyncio
+    async def test_negative_engine_cost_is_clamped(self):
+        """An ENGINE-REPORTED negative cost bypasses the token clamps — the sink must
+        clamp it too, or a forged row REDUCES summed spend (budget-cap evasion)."""
+        from app.services.budget_service import record_usage
+
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="opencode"):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=10,
+                output_tokens=5,
+                model="claude-sonnet-4-20250514",
+                cost_usd=Decimal("-12.34"),
+            )
+        assert record.cost_usd == 0
+
+    @pytest.mark.asyncio
+    async def test_metrics_failure_never_blocks_persistence(self):
+        from app.services.budget_service import record_usage
+
+        with (
+            patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"),
+            patch(
+                "app.services.budget_service.metrics.tokens_total.labels",
+                side_effect=RuntimeError("prometheus down"),
+            ),
+        ):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=10,
+                output_tokens=5,
+                model="claude-sonnet-4-20250514",
+            )
+        assert record.input_tokens == 10  # row still created

@@ -26,6 +26,7 @@ EventType = Literal[
     "done",  # Response complete
     "error",  # Error occurred
     "session_info",  # Session metadata (e.g., new session created)
+    "usage_stats",  # Internal accounting on a cut stream (consumed by the orchestrator)
     # Web search events
     "search_proposal",  # Proposed web search awaiting approval
     "search_results",  # Web search results for user review

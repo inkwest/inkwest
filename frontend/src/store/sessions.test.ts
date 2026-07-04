@@ -310,3 +310,48 @@ describe('sessionsStore sort/filter + pagination', () => {
     expect(params?.activity_before).toBeUndefined();
   });
 });
+
+describe('sessionsStore updateSessionTokens', () => {
+  const base: Session = {
+    id: 's1',
+    total_input_tokens: 1000,
+    total_output_tokens: 500,
+    total_cache_read_tokens: 111,
+    total_cache_write_tokens: 22,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  } as Session;
+
+  beforeEach(() => {
+    useSessionsStore.setState({ sessions: [base], currentSession: null });
+  });
+
+  it('accumulates the turn usage onto the fetched cumulative totals', () => {
+    useSessionsStore.getState().updateSessionTokens('s1', 10, 5, 27082, 3242);
+    const s = useSessionsStore.getState().sessions[0];
+    // badges show the CONVERSATION total, not the last turn
+    expect(s.total_input_tokens).toBe(1010);
+    expect(s.total_output_tokens).toBe(505);
+    expect(s.total_cache_read_tokens).toBe(111 + 27082);
+    expect(s.total_cache_write_tokens).toBe(22 + 3242);
+  });
+
+  it('a fully-cached turn (0 fresh in/out) keeps the cumulative and adds the cache', () => {
+    useSessionsStore.getState().updateSessionTokens('s1', 0, 0, 5000, undefined);
+    const s = useSessionsStore.getState().sessions[0];
+    expect(s.total_input_tokens).toBe(1000);
+    expect(s.total_output_tokens).toBe(500);
+    expect(s.total_cache_read_tokens).toBe(111 + 5000);
+    expect(s.total_cache_write_tokens).toBe(22);
+  });
+
+  it('accumulates across consecutive turns', () => {
+    useSessionsStore.getState().updateSessionTokens('s1', 10, 5, 100, 0);
+    useSessionsStore.getState().updateSessionTokens('s1', 20, 8, 0, 50);
+    const s = useSessionsStore.getState().sessions[0];
+    expect(s.total_input_tokens).toBe(1030);
+    expect(s.total_output_tokens).toBe(513);
+    expect(s.total_cache_read_tokens).toBe(211);
+    expect(s.total_cache_write_tokens).toBe(72);
+  });
+});

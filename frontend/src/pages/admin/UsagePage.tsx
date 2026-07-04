@@ -18,19 +18,10 @@ import { TrendingUp, Users, Cpu, DollarSign, ChevronRight, ChevronDown, Wallet }
 import { UserSessionsUsage } from '@/types/admin';
 import * as adminApi from '@/services/adminApi';
 import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost } from '@/lib/usageFormat';
+import { formatTokens, formatCost, formatCostTotal } from '@/lib/usageFormat';
 import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
-import {
-  ComposedChart,
-  Bar,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from 'recharts';
+import { TokenBreakdownCard } from '@/components/usage/TokenBreakdownCard';
+import { UsageOverTimeChart } from '@/components/usage/UsageOverTimeChart';
 
 const periodOptions = [
   { value: 'hourly', label: 'Last Hour' },
@@ -55,6 +46,8 @@ type UserSortKey =
   | 'display_name'
   | 'conversation_count'
   | 'mean_req'
+  | 'cache_read_tokens'
+  | 'cache_write_tokens'
   | 'total_tokens'
   | 'cost_usd';
 
@@ -64,12 +57,6 @@ function meanRequestsPerConv(u: { request_count: number; conversation_count: num
 }
 
 const USERS_PAGE_SIZE = 10;
-
-function formatTimeseriesLabel(iso: string, period: string) {
-  const d = new Date(iso);
-  if (period === 'hourly' || period === 'daily') return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return d.toISOString().slice(0, 10);
-}
 
 export function UsagePage() {
   const {
@@ -107,7 +94,7 @@ export function UsagePage() {
             return dir * (a.display_name || a.email).localeCompare(b.display_name || b.email);
           }
           const val = (u: typeof a) =>
-            userKey === 'mean_req' ? meanRequestsPerConv(u) : (u[userKey] as number);
+            userKey === 'mean_req' ? meanRequestsPerConv(u) : (u[userKey] as number) || 0;
           return dir * (val(a) - val(b));
         });
   const toggleUserSort = (key: UserSortKey) => {
@@ -283,7 +270,7 @@ export function UsagePage() {
                   </div>
                   <div>
                     <p className="text-sm text-gray-400">Total Cost</p>
-                    <p className="text-2xl font-bold">{formatCost(summary.total_cost_usd)}</p>
+                    <p className="text-2xl font-bold">{formatCostTotal(summary.total_cost_usd)}</p>
                   </div>
                 </CardContent>
               </Card>
@@ -302,44 +289,11 @@ export function UsagePage() {
             </div>
           )}
 
-          {timeseries.length > 0 && (
-            <Card variant="bordered">
-              <CardHeader>
-                <CardTitle>Usage Over Time</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ResponsiveContainer width="100%" height={300}>
-                  <ComposedChart data={timeseries.map((p) => ({
-                    ...p,
-                    label: formatTimeseriesLabel(p.timestamp, period),
-                    total_tokens: p.input_tokens + p.output_tokens,
-                  }))}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                    <XAxis dataKey="label" tick={{ fill: '#9CA3AF', fontSize: 12 }} />
-                    {/* Left axis: token bars. Right axis: cost line — separate scales so a
-                        small dollar figure stays readable next to millions of tokens. */}
-                    <YAxis yAxisId="tokens" tick={{ fill: '#9CA3AF', fontSize: 12 }} tickFormatter={(v) => formatTokens(v)} />
-                    <YAxis yAxisId="cost" orientation="right" tick={{ fill: '#F59E0B', fontSize: 12 }} tickFormatter={(v) => formatCost(v)} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: 8 }}
-                      labelStyle={{ color: '#E5E7EB' }}
-                      formatter={(value, name) =>
-                        name === 'cost_usd'
-                          ? [formatCost(Number(value) || 0), 'Cost']
-                          : [formatTokens(Number(value) || 0), name === 'input_tokens' ? 'Input' : 'Output']
-                      }
-                    />
-                    <Legend formatter={(value) => value === 'input_tokens' ? 'Input tokens' : value === 'output_tokens' ? 'Output tokens' : 'Cost'} />
-                    <Bar yAxisId="tokens" dataKey="input_tokens" stackId="tokens" fill="#3B82F6" radius={[0, 0, 0, 0]} />
-                    <Bar yAxisId="tokens" dataKey="output_tokens" stackId="tokens" fill="#10B981" radius={[4, 4, 0, 0]} />
-                    <Line yAxisId="cost" type="monotone" dataKey="cost_usd" stroke="#F59E0B" strokeWidth={2} dot={false} />
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
-          )}
+          <UsageOverTimeChart timeseries={timeseries} period={period} />
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {summary && <TokenBreakdownCard summary={summary} />}
+
+          <div className="space-y-6">
             {/* Usage by User — clickable drill-down */}
             <Card variant="bordered">
               <CardHeader>
@@ -398,6 +352,12 @@ export function UsagePage() {
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'total_tokens')} onClick={() => toggleUserSort('total_tokens')}>
                         Tokens{sortArrow(userSort, 'total_tokens')}
                       </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cache_read_tokens')} onClick={() => toggleUserSort('cache_read_tokens')} title="Prompt-cache reads (billed ~0.1x input rate)">
+                        Cache R{sortArrow(userSort, 'cache_read_tokens')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cache_write_tokens')} onClick={() => toggleUserSort('cache_write_tokens')} title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)">
+                        Cache W{sortArrow(userSort, 'cache_write_tokens')}
+                      </TableHead>
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cost_usd')} onClick={() => toggleUserSort('cost_usd')}>
                         Cost{sortArrow(userSort, 'cost_usd')}
                       </TableHead>
@@ -441,6 +401,12 @@ export function UsagePage() {
                           <TableCell className="text-right">
                             {formatTokens(usage.total_tokens)}
                           </TableCell>
+                          <TableCell className="text-right text-gray-400">
+                            {formatTokens(usage.cache_read_tokens || 0)}
+                          </TableCell>
+                          <TableCell className="text-right text-gray-400">
+                            {formatTokens(usage.cache_write_tokens || 0)}
+                          </TableCell>
                           <TableCell className="text-right">
                             {formatCost(usage.cost_usd)}
                           </TableCell>
@@ -460,7 +426,7 @@ export function UsagePage() {
                         </TableRow>
                         {expandedUser === usage.user_id && (
                           <TableRow key={`${usage.user_id}-sessions`}>
-                            <TableCell colSpan={7} className="bg-gray-900/50 p-0">
+                            <TableCell colSpan={9} className="bg-gray-900/50 p-0">
                               {sessionsLoading ? (
                                 <div className="flex items-center justify-center py-4">
                                   <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500" />
@@ -504,7 +470,7 @@ export function UsagePage() {
                     ))}
                     {userUsage.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-8 text-gray-400">
+                        <TableCell colSpan={9} className="text-center py-8 text-gray-400">
                           No usage data for this period
                         </TableCell>
                       </TableRow>
@@ -518,62 +484,6 @@ export function UsagePage() {
             <ModelUsageTable data={modelUsage} />
           </div>
 
-          {summary && (
-            <Card variant="bordered">
-              <CardHeader>
-                <CardTitle>Token Breakdown</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div>
-                    <p className="text-sm text-gray-400">Input Tokens</p>
-                    <p className="text-xl font-bold">
-                      {formatTokens(summary.total_input_tokens)}
-                    </p>
-                    <div className="mt-2 h-2 bg-gray-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-blue-500"
-                        style={{
-                          width: `${
-                            summary.total_tokens > 0
-                              ? (summary.total_input_tokens / summary.total_tokens) * 100
-                              : 0
-                          }%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-400">Output Tokens</p>
-                    <p className="text-xl font-bold">
-                      {formatTokens(summary.total_output_tokens)}
-                    </p>
-                    <div className="mt-2 h-2 bg-gray-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-green-500"
-                        style={{
-                          width: `${
-                            summary.total_tokens > 0
-                              ? (summary.total_output_tokens / summary.total_tokens) * 100
-                              : 0
-                          }%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-400">Requests</p>
-                    <p className="text-xl font-bold">{summary.request_count}</p>
-                    <p className="text-sm text-gray-500 mt-2">
-                      ~{summary.request_count > 0
-                        ? Math.round(summary.total_tokens / summary.request_count)
-                        : 0} tokens/request
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
         </>
       )}
 

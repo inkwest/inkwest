@@ -9,7 +9,7 @@ import datetime as dt
 import ipaddress
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -25,9 +25,8 @@ from app.api.dependencies import AdminUser, get_db
 from app.core.config import get_settings
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
 from app.models.role_mapping import RoleKubeconfigMapping
-from app.models.session import Session
 from app.models.user import User
-from app.services import mcp_oauth_catalog, model_registry
+from app.services import mcp_oauth_catalog, model_registry, usage_reports
 from app.services.app_settings import (
     BEDROCK_INCLUDE_OPEN_KEY,
     BUDGET_ENABLED_KEY,
@@ -191,6 +190,8 @@ class UsageSummaryResponse(BaseModel):
     period_start: datetime
     total_input_tokens: int
     total_output_tokens: int
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
     total_tokens: int
     total_cost_usd: float
     request_count: int
@@ -853,12 +854,8 @@ def _usage_date_filters(
     start_date: dt.date | None,
     end_date: dt.date | None,
 ) -> tuple[datetime, datetime | None]:
-    """Resolve date range from explicit dates or budget period."""
-    if start_date:
-        start = datetime.combine(start_date, dt.time.min, tzinfo=UTC)
-        end = datetime.combine(end_date, dt.time.max, tzinfo=UTC) if end_date else None
-        return start, end
-    return get_period_start(period), None
+    """Resolve date range from explicit dates or budget period (shared resolver)."""
+    return usage_reports.resolve_window(period, start_date, end_date)
 
 
 @router.get("/usage/summary", response_model=UsageSummaryResponse)
@@ -872,33 +869,11 @@ async def get_usage_summary(
 ) -> UsageSummaryResponse:
     """Get usage summary for a period or custom date range."""
     filter_start, filter_end = _usage_date_filters(period, start_date, end_date)
-
-    conditions = [UsageRecord.recorded_at >= filter_start]
-    if filter_end:
-        conditions.append(UsageRecord.recorded_at <= filter_end)
-    if user_id is not None:
-        conditions.append(UsageRecord.user_id == user_id)
-
-    query = select(
-        func.coalesce(func.sum(UsageRecord.input_tokens), 0),
-        func.coalesce(func.sum(UsageRecord.output_tokens), 0),
-        func.coalesce(func.sum(UsageRecord.cost_usd), 0),
-        func.count(UsageRecord.id),
-    ).where(*conditions)
-
-    result = await db.execute(query)
-    row = result.one()
-    input_tokens = int(row[0])
-    output_tokens = int(row[1])
-
+    totals = await usage_reports.summary(db, user_id, filter_start, filter_end)
     return UsageSummaryResponse(
         period="custom" if start_date else period.value,
         period_start=filter_start,
-        total_input_tokens=input_tokens,
-        total_output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        total_cost_usd=float(row[2]),
-        request_count=int(row[3]),
+        **totals,
     )
 
 
@@ -913,53 +888,7 @@ async def get_usage_by_user(
 ) -> list[dict[str, Any]]:
     """Get usage breakdown by user."""
     filter_start, filter_end = _usage_date_filters(period, start_date, end_date)
-
-    conditions = [UsageRecord.recorded_at >= filter_start]
-    if filter_end:
-        conditions.append(UsageRecord.recorded_at <= filter_end)
-
-    query = (
-        select(
-            UsageRecord.user_id,
-            func.sum(UsageRecord.input_tokens).label("input_tokens"),
-            func.sum(UsageRecord.output_tokens).label("output_tokens"),
-            func.sum(UsageRecord.cost_usd).label("cost_usd"),
-            func.count(UsageRecord.id).label("request_count"),
-            func.count(func.distinct(UsageRecord.session_id)).label("conversation_count"),
-        )
-        .where(*conditions)
-        .group_by(UsageRecord.user_id)
-        .order_by(func.sum(UsageRecord.cost_usd).desc())
-        .limit(limit)
-    )
-
-    result = await db.execute(query)
-    rows = result.all()
-
-    user_ids = [row.user_id for row in rows if row.user_id]
-    users_map: dict[str, User] = {}
-    if user_ids:
-        users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
-        users_map = {str(u.id): u for u in users_result.scalars().all()}
-
-    return [
-        {
-            "user_id": str(row.user_id) if row.user_id else None,
-            "email": users_map[str(row.user_id)].email
-            if row.user_id and str(row.user_id) in users_map
-            else "",
-            "display_name": users_map[str(row.user_id)].display_name
-            if row.user_id and str(row.user_id) in users_map
-            else "Unknown",
-            "input_tokens": row.input_tokens,
-            "output_tokens": row.output_tokens,
-            "total_tokens": row.input_tokens + row.output_tokens,
-            "cost_usd": float(row.cost_usd),
-            "request_count": row.request_count,
-            "conversation_count": row.conversation_count,
-        }
-        for row in rows
-    ]
+    return await usage_reports.by_user(db, filter_start, filter_end, limit=limit)
 
 
 @router.get("/usage/by-model")
@@ -972,43 +901,7 @@ async def get_usage_by_model(
 ) -> list[dict[str, Any]]:
     """Get usage breakdown by model."""
     filter_start, filter_end = _usage_date_filters(period, start_date, end_date)
-
-    conditions = [UsageRecord.recorded_at >= filter_start]
-    if filter_end:
-        conditions.append(UsageRecord.recorded_at <= filter_end)
-
-    # `UsageRecord.provider` stores the engine that ran the turn (record_usage defaults it to
-    # metrics.turn_engine()), so grouping by (model, provider) IS the model×engine breakdown —
-    # the same model can legitimately appear once per engine it ran on.
-    query = (
-        select(
-            UsageRecord.model,
-            UsageRecord.provider.label("engine"),
-            func.sum(UsageRecord.input_tokens).label("input_tokens"),
-            func.sum(UsageRecord.output_tokens).label("output_tokens"),
-            func.sum(UsageRecord.cost_usd).label("cost_usd"),
-            func.count(UsageRecord.id).label("request_count"),
-        )
-        .where(*conditions)
-        .group_by(UsageRecord.model, UsageRecord.provider)
-        .order_by(func.sum(UsageRecord.cost_usd).desc())
-    )
-
-    result = await db.execute(query)
-    rows = result.all()
-
-    return [
-        {
-            "model": row.model,
-            "engine": row.engine,
-            "input_tokens": row.input_tokens,
-            "output_tokens": row.output_tokens,
-            "total_tokens": row.input_tokens + row.output_tokens,
-            "cost_usd": float(row.cost_usd),
-            "request_count": row.request_count,
-        }
-        for row in rows
-    ]
+    return await usage_reports.by_model(db, None, filter_start, filter_end)
 
 
 @router.get("/usage/by-user/{user_id}/sessions")
@@ -1022,57 +915,13 @@ async def get_usage_by_user_sessions(
 ) -> dict[str, Any]:
     """Get per-session usage breakdown for a specific user."""
     filter_start, filter_end = _usage_date_filters(period, start_date, end_date)
-
-    conditions = [UsageRecord.user_id == user_id, UsageRecord.recorded_at >= filter_start]
-    if filter_end:
-        conditions.append(UsageRecord.recorded_at <= filter_end)
-
-    query = (
-        select(
-            UsageRecord.session_id,
-            func.sum(UsageRecord.input_tokens).label("input_tokens"),
-            func.sum(UsageRecord.output_tokens).label("output_tokens"),
-            func.sum(UsageRecord.cost_usd).label("cost_usd"),
-            func.count(UsageRecord.id).label("request_count"),
-            func.min(UsageRecord.recorded_at).label("first_request"),
-            func.max(UsageRecord.recorded_at).label("last_request"),
-        )
-        .where(*conditions)
-        .group_by(UsageRecord.session_id)
-        .order_by(func.sum(UsageRecord.cost_usd).desc())
-    )
-
-    result = await db.execute(query)
-    rows = result.all()
-
-    session_ids = [row.session_id for row in rows]
-    sessions_map: dict[str, str] = {}
-    if session_ids:
-        sessions_result = await db.execute(
-            select(Session.id, Session.title).where(Session.id.in_(session_ids))
-        )
-        sessions_map = {str(s.id): s.title or "Untitled" for s in sessions_result.all()}
-
+    sessions = await usage_reports.by_session(db, user_id, filter_start, filter_end)
     user = await db.get(User, user_id)
-
     return {
         "user_id": str(user_id),
         "display_name": user.display_name if user else "Unknown",
         "email": user.email if user else "",
-        "sessions": [
-            {
-                "session_id": str(row.session_id),
-                "title": sessions_map.get(str(row.session_id), "Untitled"),
-                "input_tokens": row.input_tokens,
-                "output_tokens": row.output_tokens,
-                "total_tokens": row.input_tokens + row.output_tokens,
-                "cost_usd": float(row.cost_usd),
-                "request_count": row.request_count,
-                "first_request": row.first_request.isoformat() if row.first_request else None,
-                "last_request": row.last_request.isoformat() if row.last_request else None,
-            }
-            for row in rows
-        ],
+        "sessions": sessions,
     }
 
 
@@ -1087,40 +936,8 @@ async def get_usage_timeseries(
 ) -> list[dict[str, Any]]:
     """Get usage timeseries grouped by hour or day."""
     filter_start, filter_end = _usage_date_filters(period, start_date, end_date)
-
-    valid_granularities = {"hour", "day"}
-    if granularity not in valid_granularities:
-        raise HTTPException(status_code=400, detail="Invalid granularity")
-    bucket = func.date_trunc(granularity, UsageRecord.recorded_at).label("bucket")
-
-    conditions = [UsageRecord.recorded_at >= filter_start]
-    if filter_end:
-        conditions.append(UsageRecord.recorded_at <= filter_end)
-
-    query = (
-        select(
-            bucket,
-            func.sum(UsageRecord.input_tokens).label("input_tokens"),
-            func.sum(UsageRecord.output_tokens).label("output_tokens"),
-            func.sum(UsageRecord.cost_usd).label("cost_usd"),
-            func.count(UsageRecord.id).label("request_count"),
-        )
-        .where(*conditions)
-        .group_by(bucket)
-        .order_by(bucket)
-    )
-
-    result = await db.execute(query)
-    return [
-        {
-            "timestamp": row.bucket.isoformat(),
-            "input_tokens": int(row.input_tokens),
-            "output_tokens": int(row.output_tokens),
-            "cost_usd": float(row.cost_usd),
-            "request_count": int(row.request_count),
-        }
-        for row in result.all()
-    ]
+    # granularity is constrained to hour|day by the Query pattern; the service re-guards.
+    return await usage_reports.timeseries(db, None, granularity, filter_start, filter_end)
 
 
 # =============================================================================

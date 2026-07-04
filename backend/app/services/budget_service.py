@@ -356,6 +356,12 @@ async def record_usage(
     model: str | None = None,
     provider: str | None = None,
     cost_usd: Decimal | None = None,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
+    source: str = "engine",
+    turn_id: UUID | None = None,
+    record_id: UUID | None = None,
 ) -> UsageRecord:
     """
     Record token usage for budget tracking.
@@ -364,14 +370,34 @@ async def record_usage(
         db: Database session
         user_id: User ID
         session_id: Chat session ID
-        input_tokens: Input token count
+        input_tokens: Fresh (uncached) input token count
         output_tokens: Output token count
         model: Model name (uses current config if not specified)
         provider: Engine that ran the turn (defaults to the current turn's engine)
+        cost_usd: Engine-reported authoritative cost (wins over the estimate)
+        cache_read_tokens: Tokens served from the prompt cache
+        cache_write_tokens: Tokens written to the prompt cache (total, all TTLs)
+        cache_write_1h_tokens: Portion of cache_write_tokens at 1h TTL (2x rate);
+            feeds cost only — persisted inside cache_write_tokens
+        source: Accounting authority — 'engine' (orchestrator) or 'broker' (LLM proxy)
+        turn_id: Per-turn aggregation key (broker rows of one turn share it)
+        record_id: Caller-fixed row PK. The broker persist retry reuses one id across
+            attempts so an ambiguous first commit (landed server-side, ack lost) makes
+            the re-INSERT collide on the PK instead of double-billing the call
 
     Returns:
         Created UsageRecord
     """
+    # SECURITY: engine-reported counts arrive from the sandboxed process's stdout — a
+    # compromised/prompt-injected agent could emit negative numbers, and a negative
+    # cost_usd row would REDUCE the user's summed spend (budget-cap evasion broker-off).
+    # Clamp at the sink; the broker path parses real wire bytes but shares the sink.
+    input_tokens = max(0, int(input_tokens))
+    output_tokens = max(0, int(output_tokens))
+    cache_read_tokens = max(0, int(cache_read_tokens))
+    cache_write_tokens = max(0, int(cache_write_tokens))
+    cache_write_1h_tokens = max(0, int(cache_write_1h_tokens))
+
     if model is None:
         model = default_model()
     if provider is None:
@@ -382,7 +408,23 @@ async def record_usage(
     # Prefer an engine-reported authoritative cost (e.g. opencode's per-turn USD, which
     # accounts for cache-token pricing) over the token×rate estimate; fall back to the
     # estimate when the engine doesn't report one (Anthropic/Converse paths).
-    cost = cost_usd if cost_usd is not None else calculate_cost(model, input_tokens, output_tokens)
+    # The token clamps above make the estimate non-negative, but an ENGINE-REPORTED cost
+    # bypasses them — clamp it too, or the sink's stated budget-cap-evasion defense holds
+    # only for callers that pre-validate (today just opencode's orchestrator).
+    if cost_usd is not None and cost_usd < 0:
+        cost_usd = Decimal(0)
+    cost = (
+        cost_usd
+        if cost_usd is not None
+        else calculate_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cache_write_1h_tokens=cache_write_1h_tokens,
+        )
+    )
 
     # Per-model token/cost rates for Prometheus: the resolved model is known here, and this
     # is the single sink every orchestrator funnels usage through. Best-effort — a metrics
@@ -393,15 +435,30 @@ async def record_usage(
         metrics.tokens_total.labels(model=model, direction="output", engine=engine).inc(
             output_tokens
         )
+        # Cache directions only when non-zero: most models/turns have no cache activity
+        # and unconditional .inc(0) would mint empty series for every model.
+        if cache_read_tokens:
+            metrics.tokens_total.labels(model=model, direction="cache_read", engine=engine).inc(
+                cache_read_tokens
+            )
+        if cache_write_tokens:
+            metrics.tokens_total.labels(model=model, direction="cache_write", engine=engine).inc(
+                cache_write_tokens
+            )
         metrics.model_cost_usd_total.labels(model=model, engine=engine).inc(float(cost))
     except Exception:  # noqa: BLE001 — metrics are non-critical
         logger.warning("usage_metrics_emit_failed", exc_info=True)
 
     record = UsageRecord(
+        **({"id": record_id} if record_id is not None else {}),
         user_id=user_id,
         session_id=session_id,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        source=source,
+        turn_id=turn_id,
         model=model,
         provider=provider,
         cost_usd=cost,

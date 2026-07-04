@@ -160,6 +160,12 @@ export function useWebSocket(sessionId: string) {
             role: 'assistant',
             content,
             created_at: new Date().toISOString(),
+            // Token counts from the done metadata so the per-bubble line renders on the
+            // live turn too (the persisted row carries the same values after reload).
+            input_tokens: (event.metadata?.input_tokens as number | undefined) ?? null,
+            output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
+            cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
+            cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
           });
         } else if (wasStopped) {
           addMessage({
@@ -168,14 +174,23 @@ export function useWebSocket(sessionId: string) {
             role: 'assistant',
             content: [{ type: 'text', text: '*Response interrupted by user.*' }],
             created_at: new Date().toISOString(),
+            input_tokens: (event.metadata?.input_tokens as number | undefined) ?? null,
+            output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
+            cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
+            cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
           });
         }
 
         if (event.metadata) {
           const inp = event.metadata.input_tokens as number | undefined;
           const out = event.metadata.output_tokens as number | undefined;
-          if (inp || out) {
-            useSessionsStore.getState().updateSessionTokens(sessionId, inp || 0, out || 0);
+          const cacheRead = event.metadata.cache_read_tokens as number | undefined;
+          const cacheWrite = event.metadata.cache_write_tokens as number | undefined;
+          // Include cache in the gate: a fully-cached turn can report 0 fresh in/out.
+          if (inp || out || cacheRead || cacheWrite) {
+            useSessionsStore
+              .getState()
+              .updateSessionTokens(sessionId, inp || 0, out || 0, cacheRead, cacheWrite);
           }
         }
 
@@ -188,13 +203,23 @@ export function useWebSocket(sessionId: string) {
         break;
       }
 
-      case 'error':
+      case 'error': {
+        // Agent error events carry the usage burned before the failure — the backend
+        // persists it, so the badges should reflect it live too.
+        const eInp = event.metadata?.input_tokens as number | undefined;
+        const eOut = event.metadata?.output_tokens as number | undefined;
+        const eCr = event.metadata?.cache_read_tokens as number | undefined;
+        const eCw = event.metadata?.cache_write_tokens as number | undefined;
+        if (eInp || eOut || eCr || eCw) {
+          useSessionsStore.getState().updateSessionTokens(sessionId, eInp || 0, eOut || 0, eCr, eCw);
+        }
         setError(event.content || 'An error occurred');
         setIsStreaming(false);
         setResumingTurn(false);
         setActiveToolCall(null);
         flushQueue();
         break;
+      }
 
       case 'connector_required': {
         // A tool needs a connector that isn't granted/expired — surface a

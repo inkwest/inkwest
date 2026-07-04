@@ -461,8 +461,43 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
     has_sent_text = False
     total_input_tokens = 0
     total_output_tokens = 0
+    # Prompt-cache tokens (Anthropic usage shape). Claude Code caches aggressively, so on
+    # Bedrock these dominate a turn's real cost — dropping them caused a ~10x undercount.
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
+    # 1h-TTL portion of the writes (billed 2x, not 1.25x) — the Anthropic usage block
+    # carries the split under cache_creation.ephemeral_1h_input_tokens.
+    total_cache_write_1h_tokens = 0
+    done_emitted = False
 
-    async for line in output_stream:
+    def _usage_meta() -> dict[str, int]:
+        return {
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "cache_read_tokens": total_cache_read_tokens,
+            "cache_write_tokens": total_cache_write_tokens,
+            "cache_write_1h_tokens": total_cache_write_1h_tokens,
+        }
+
+    # Manual aiter/anext (not `async for`) ON PURPOSE: the except below must cover ONLY
+    # the read — wrapping the whole loop would also catch exceptions thrown into the
+    # body's yields and misreport them as a cut stream.
+    lines = aiter(output_stream)
+    while True:
+        try:
+            line = await anext(lines)
+        except StopAsyncIteration:
+            break
+        except (RuntimeError, TimeoutError):
+            # Stream cut by a CLI crash/timeout (non-zero exit raises here, before any
+            # terminal `done` could arrive). Surface the usage accumulated so far on an
+            # internal usage_stats event — a failed turn still burned Bedrock spend — then
+            # re-raise so the orchestrator handles the failure. The orchestrator consumes
+            # usage_stats (never forwarded to the client). Same GOAL as
+            # parse_opencode_response's cut-stream handling, different mechanism (opencode
+            # attaches the usage to its client-visible error event instead).
+            yield ChatEvent(type="usage_stats", metadata=_usage_meta())
+            raise
         parsed = parse_cli_stream_line(line)
         if not parsed:
             continue
@@ -490,6 +525,12 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
             if usage:
                 total_input_tokens += usage.get("input_tokens", 0)
                 total_output_tokens += usage.get("output_tokens", 0)
+                total_cache_read_tokens += usage.get("cache_read_input_tokens", 0) or 0
+                total_cache_write_tokens += usage.get("cache_creation_input_tokens", 0) or 0
+                cache_creation = usage.get("cache_creation") or {}
+                total_cache_write_1h_tokens += (
+                    cache_creation.get("ephemeral_1h_input_tokens", 0) or 0
+                )
 
             content = message.get("content", [])
             for block in content:
@@ -545,31 +586,34 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
             if result_text and not has_sent_text:
                 yield ChatEvent(type="text_delta", content=result_text)
                 has_sent_text = True
-            # Result event carries final usage from CLI
-            usage = parsed.get("usage", {})
-            if usage.get("input_tokens"):
-                total_input_tokens = usage["input_tokens"]
-            if usage.get("output_tokens"):
-                total_output_tokens = usage["output_tokens"]
+            # Result event carries final usage from CLI. Override per-field on key
+            # PRESENCE, not truthiness: the result block is a cumulative authority, so a
+            # present-but-0 value (e.g. a fully-cached turn's input) must replace the
+            # accumulated per-assistant sum — mixing the two counting bases skews the turn.
+            # A key entirely absent keeps the accumulated value (older CLIs omit cache keys).
+            # `or {}`: a present-but-null "usage" must not crash the membership tests below.
+            usage = parsed.get("usage") or {}
+            if "input_tokens" in usage:
+                total_input_tokens = usage["input_tokens"] or 0
+            if "output_tokens" in usage:
+                total_output_tokens = usage["output_tokens"] or 0
+            if "cache_read_input_tokens" in usage:
+                total_cache_read_tokens = usage["cache_read_input_tokens"] or 0
+            if "cache_creation_input_tokens" in usage:
+                total_cache_write_tokens = usage["cache_creation_input_tokens"] or 0
+            if "ephemeral_1h_input_tokens" in (usage.get("cache_creation") or {}):
+                total_cache_write_1h_tokens = (
+                    usage["cache_creation"]["ephemeral_1h_input_tokens"] or 0
+                )
 
             subtype = parsed.get("subtype")
             if subtype == "success":
-                yield ChatEvent(
-                    type="done",
-                    metadata={
-                        "input_tokens": total_input_tokens,
-                        "output_tokens": total_output_tokens,
-                    },
-                )
+                done_emitted = True
+                yield ChatEvent(type="done", metadata=_usage_meta())
 
         elif event_type in ("message_stop", "done", "end"):
-            yield ChatEvent(
-                type="done",
-                metadata={
-                    "input_tokens": total_input_tokens,
-                    "output_tokens": total_output_tokens,
-                },
-            )
+            done_emitted = True
+            yield ChatEvent(type="done", metadata=_usage_meta())
 
         elif event_type == "error":
             error_msg = parsed.get("message", parsed.get("error", "Unknown error"))
@@ -586,6 +630,19 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 tool_input=parsed.get("input", {}),
                 tool_use_id=parsed.get("id"),
             )
+
+    # Clean stream end without a terminal done (user Stop kills the CLI mid-turn and the
+    # stream just ends): surface whatever accumulated so the orchestrator's stop path can
+    # persist the burned tokens. Cache counts join the gate — a fully-cached turn reports
+    # 0 fresh in/out yet burned billable tokens (same rule as turn_usage's persist gate).
+    # Internal event — the orchestrator consumes it.
+    if not done_emitted and (
+        total_input_tokens
+        or total_output_tokens
+        or total_cache_read_tokens
+        or total_cache_write_tokens
+    ):
+        yield ChatEvent(type="usage_stats", metadata=_usage_meta())
 
 
 async def execute_agent(
@@ -817,6 +874,8 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
             "cost_usd": cost_usd,
         }
 
+    # Manual aiter/anext for the same reason as parse_cli_response: the except must
+    # cover ONLY the read, never exceptions thrown into the body's yields.
     lines = aiter(output_stream)
     while True:
         try:
@@ -864,15 +923,12 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
             iterations += 1
             tokens = _as_dict(part.get("tokens"))
             cache = _as_dict(tokens.get("cache"))
-            # Bedrock prompt caching moves most of the prompt into cache.write/read (the
-            # live fixture shows input=3, cache.write=7949 on a step) — fold them into the
-            # input count so session token stats aren't off by orders of magnitude. USD cost
-            # is opencode's own cache-aware figure (cost_usd), unaffected by this sum.
-            in_tokens += (
-                int(tokens.get("input") or 0)
-                + int(cache.get("write") or 0)
-                + int(cache.get("read") or 0)
-            )
+            # FRESH input only — cache tokens ride their own counters (parity with the
+            # claude-cli and inkwest-agent paths, and with the broker's wire metering).
+            # They used to be folded into in_tokens "so stats reflect real prompt size";
+            # now that every surface shows the cache splits explicitly, folding would
+            # double-count them (once in the input figure, again in the cache columns).
+            in_tokens += int(tokens.get("input") or 0)
             cache_read += int(cache.get("read") or 0)
             cache_write += int(cache.get("write") or 0)
             out_tokens += int(tokens.get("output") or 0)

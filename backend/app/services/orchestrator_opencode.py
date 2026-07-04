@@ -31,10 +31,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
-from app.services import llm_broker
+from app.services import engines, llm_broker
 from app.services.ai_cli_client import execute_opencode, parse_opencode_response
 from app.services.ai_client import resolve_session_model
-from app.services.budget_service import record_usage
 from app.services.events import (
     ChatEvent,
     connector_required_event,
@@ -47,10 +46,10 @@ from app.services.messages import (
     get_enabled_mcp_servers,
     get_session_messages,
     save_message,
-    update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills, skills_container_root
+from app.services.turn_usage import persist_turn_usage
 from app.services.user_preferences import get_effective_skills
 
 logger = logging.getLogger(__name__)
@@ -355,6 +354,61 @@ async def orchestrate_chat_opencode(
     # whole tree; durable state (workdir, opencode.db, .claude) lives on bind-mounts and
     # survives, so the next turn simply re-provisions. A normal turn keeps the container warm.
     abnormal = False
+    # Accounting state, bound BEFORE the try so the outer error handler can persist
+    # whatever accumulated (an errored turn's completed Bedrock calls are still billed).
+    received_terminal = False
+    done_meta: dict[str, Any] = {}
+    turn_id = uuid.uuid4()
+    usage_persisted = False
+    usage_message_id: uuid.UUID | None = None
+
+    async def _persist_accumulated_usage() -> None:
+        """Idempotent per-turn handoff to the shared persist_turn_usage (see its module
+        contracts); called from success, every error handler AND the user-stop path."""
+        nonlocal usage_persisted
+        if usage_persisted:
+            return
+        usage_persisted = True
+        in_tokens = done_meta.get("input_tokens", 0)
+        out_tokens = done_meta.get("output_tokens", 0)
+        # opencode reports an authoritative per-turn USD cost (cache-aware) — pass it
+        # through so we don't recompute a wrong figure from token×rate. Guard the parse:
+        # a malformed value degrades to the shared helper's cache-aware token×rate
+        # estimate. Truthy check on purpose: opencode reports 0.0 when models.dev has no
+        # pricing for the model (a genuinely free turn doesn't exist — output tokens
+        # always bill), so zero means "unknown" → estimate. Negative/malformed fall back.
+        oc_cost = done_meta.get("cost_usd")
+        cost_override: Decimal | None = None
+        if oc_cost:
+            try:
+                cost_override = Decimal(str(oc_cost))
+            except (InvalidOperation, ValueError):
+                cost_override = None
+            if cost_override is not None and cost_override < 0:
+                cost_override = None
+        await persist_turn_usage(
+            db,
+            session_id=session_id,
+            session_uuid=session_uuid,
+            user_id=user_id,
+            model=model,
+            turn_id=turn_id,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+            cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+            # No cache_write_1h_tokens: opencode's tokens.cache carries no TTL split, so
+            # the 1h portion is unknowable here — the fallback estimate prices all cache
+            # writes at the 5m rate. Moot whenever opencode reports its authoritative
+            # cache-aware cost_usd (the normal case, passed through below).
+            tool_calls=done_meta.get("tool_calls", 0),
+            iterations=done_meta.get("iterations", 1),
+            skip_budget_row=bool(broker_env),
+            cost_usd=cost_override,
+            # Turn's FIRST assistant row — see stamp_message_usage for the fusion rationale.
+            stamp_message_id=usage_message_id,
+        )
+
     try:
         from app.services import sandbox
 
@@ -389,7 +443,10 @@ async def orchestrate_chat_opencode(
         # With the broker on, sandbox.env drops the real key (see sandbox.env.example / docs), so
         # the only Bedrock token in the sandbox is this ephemeral grant — burned at turn end
         # (finally). Off ⇒ empty/None ⇒ opencode uses the sandbox.env key direct (today's behavior).
-        broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
+        # One turn_id for every usage row this turn produces (broker grant + engine fallback).
+        broker_env = llm_broker.agent_broker_env(
+            user_id, session_uuid, engine=engines.OPENCODE, turn_id=turn_id
+        )
         broker_base = llm_broker.agent_bedrock_endpoint_url()
 
         # The broker is fail-closed: with NO enabled registry models nothing is invocable,
@@ -493,17 +550,19 @@ async def orchestrate_chat_opencode(
         # pending tool_result batch is flushed when the next assistant content arrives.
         assistant_blocks: list[dict[str, Any]] = []
         pending_results: list[dict[str, Any]] = []
-        received_terminal = False
-        done_meta: dict[str, Any] = {}
         aws_reauth_sent = False
 
         async def _flush() -> None:
-            nonlocal assistant_blocks, pending_results
+            nonlocal assistant_blocks, pending_results, usage_message_id
             if assistant_blocks:
                 try:
-                    await save_message(
+                    saved = await save_message(
                         db, session_id, "assistant", assistant_blocks, model=model, engine=engine
                     )
+                    # Track the turn's FIRST assistant row: the persist helper stamps the
+                    # token totals onto it (see stamp_message_usage for the fusion WHY).
+                    if usage_message_id is None:
+                        usage_message_id = saved.id
                 except Exception as e:
                     logger.error(f"Failed to save assistant message: {e}")
             if pending_results:
@@ -617,6 +676,9 @@ async def orchestrate_chat_opencode(
                 # completed turn (its done already reached the client) nor double-terminate.
                 logger.info("opencode chat cancelled by user")
                 abnormal = True  # tear down → reap any opencode-spawned children
+                # Persist whatever usage reached us before the kill (no-op when nothing
+                # terminal arrived) — AWS bills the completed calls.
+                await _persist_accumulated_usage()
                 yield done_event(stopped=True)
                 return
 
@@ -636,64 +698,7 @@ async def orchestrate_chat_opencode(
             logger.warning(f"opencode exited abnormally after a terminal event: {e}")
             await _flush()  # persist what streamed before the failure (pairs can't dangle)
 
-        in_tokens = done_meta.get("input_tokens", 0)
-        out_tokens = done_meta.get("output_tokens", 0)
-        if in_tokens or out_tokens:
-            try:
-                await update_session_stats(
-                    db,
-                    session_id,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    tool_calls=done_meta.get("tool_calls", 0),
-                    iterations=done_meta.get("iterations", 1),
-                )
-                # opencode reports an authoritative per-turn USD cost (cache-aware) — pass it
-                # through so we don't recompute a wrong figure from token×rate. Guard the parse:
-                # a malformed value degrades to the token estimate rather than failing the turn.
-                oc_cost = done_meta.get("cost_usd")
-                cost_override: Decimal | None = None
-                # Truthy check on purpose: opencode reports 0.0 when models.dev has no
-                # pricing for the model (a genuinely free turn doesn't exist — output
-                # tokens always bill), so zero means "unknown" → estimate. Negative/malformed
-                # values likewise fall back.
-                if oc_cost:
-                    try:
-                        cost_override = Decimal(str(oc_cost))
-                    except (InvalidOperation, ValueError):
-                        cost_override = None
-                    if cost_override is not None and cost_override < 0:
-                        cost_override = None
-                if cost_override is None:
-                    # Fallback estimate from NON-cache input only. in_tokens folds Bedrock
-                    # cache write/read (so session stats reflect real prompt size), but
-                    # calculate_cost bills every "input" token at the full prompt rate — passing
-                    # the cache-inflated count (record_usage's own fallback does) overcharges the
-                    # cached prefix ~10x. Cache read is near-free and cache write is model-priced;
-                    # absent cache-aware rates in the estimator, cost only the fresh prompt input.
-                    from app.services.budget_service import calculate_cost
-
-                    fresh_input = in_tokens - done_meta.get("cache_read_tokens", 0)
-                    fresh_input -= done_meta.get("cache_write_tokens", 0)
-                    cost_override = calculate_cost(model, max(fresh_input, 0), out_tokens)
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=session_uuid,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    model=model,
-                    cost_usd=cost_override,
-                )
-                await db.commit()
-            except Exception as e:
-                logger.error(f"Failed to persist session stats/usage: {e}")
-                # A failed commit leaves the session in an aborted transaction; roll back so
-                # the next DB op on this session doesn't error (parity with finalize_turn).
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
+        await _persist_accumulated_usage()
 
         if not received_terminal:
             yield done_event()
@@ -701,6 +706,7 @@ async def orchestrate_chat_opencode(
     except Exception as e:
         logger.exception("Unexpected error in opencode orchestration")
         abnormal = True
+        await _persist_accumulated_usage()
         yield error_event(f"Unexpected error: {str(e)}")
 
     finally:

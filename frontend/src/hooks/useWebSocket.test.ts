@@ -330,3 +330,59 @@ describe('useWebSocket', () => {
     expect(useChatStore.getState().resumingTurn).toBe(false);
   });
 });
+
+describe('done-event token accounting', () => {
+  it('stamps the live-appended assistant message with the turn token counts', () => {
+    useChatStore.setState({
+      messages: [],
+      streamingBlocks: [{ type: 'text', content: 'answer' }],
+      isStreaming: true,
+      queuedMessages: [],
+    });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[MockWS.instances.length - 1];
+
+    act(() =>
+      ws.emit({
+        type: 'done',
+        metadata: {
+          input_tokens: 10,
+          output_tokens: 349,
+          cache_read_tokens: 27082,
+          cache_write_tokens: 3242,
+        },
+      }),
+    );
+
+    const messages = useChatStore.getState().messages;
+    const last = messages[messages.length - 1];
+    expect(last.role).toBe('assistant');
+    // The per-bubble token line reads these on the LIVE turn, not only after reload.
+    expect(last.input_tokens).toBe(10);
+    expect(last.output_tokens).toBe(349);
+    expect(last.cache_read_tokens).toBe(27082);
+    expect(last.cache_write_tokens).toBe(3242);
+  });
+
+  it('refreshes the session badge on a fully-cached turn (fresh in/out zero)', () => {
+    const spy = vi.fn();
+    useSessionsStore.setState({ updateSessionTokens: spy });
+    useChatStore.setState({
+      messages: [],
+      streamingBlocks: [],
+      isStreaming: true,
+      queuedMessages: [],
+    });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[MockWS.instances.length - 1];
+
+    act(() =>
+      ws.emit({
+        type: 'done',
+        metadata: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 5000 },
+      }),
+    );
+
+    expect(spy).toHaveBeenCalledWith('session-1', 0, 0, 5000, undefined);
+  });
+});

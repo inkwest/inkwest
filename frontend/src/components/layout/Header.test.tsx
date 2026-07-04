@@ -113,8 +113,30 @@ describe('Header', () => {
       },
     });
     renderHeader();
-    const tokenEl = screen.getByTitle(/input.*output/i);
-    expect(tokenEl).toBeInTheDocument();
+    // Per-symbol titles: each glyph carries its own hover (fresh input / output).
+    expect(screen.getByTitle(/fresh input tokens/i)).toHaveTextContent('1.5k');
+    expect(screen.getByTitle(/output tokens/i)).toHaveTextContent('800');
+  });
+
+  it('shows cache glyphs only when the session has cache tokens', () => {
+    useSessionsStore.setState({
+      currentSession: {
+        id: 's1',
+        cluster_id: 'c1',
+        title: 'Test',
+        total_input_tokens: 1500,
+        total_output_tokens: 800,
+        total_cache_read_tokens: 27082,
+        total_cache_write_tokens: 3242,
+        cluster: { id: 'c1', name: 'prod', display_name: 'Production', is_active: true, created_at: new Date().toISOString() },
+        messages: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    });
+    renderHeader();
+    expect(screen.getByTitle(/cache read: 27,082/i)).toHaveTextContent('27.1k');
+    expect(screen.getByTitle(/cache write: 3,242/i)).toHaveTextContent('3.2k');
   });
 
   it('shows connection status when session is active', () => {

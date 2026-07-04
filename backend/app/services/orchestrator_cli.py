@@ -17,10 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.core.config import get_settings
 from app.services import attachments as attachments_svc
-from app.services import llm_broker, model_registry
+from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
 from app.services.ai_client import resolve_session_model_choice
-from app.services.budget_service import record_usage
 from app.services.events import (
     ChatEvent,
     done_event,
@@ -34,10 +33,10 @@ from app.services.messages import (
     get_enabled_mcp_servers,
     save_message,
     set_cli_session_id,
-    update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills
+from app.services.turn_usage import persist_turn_usage
 from app.services.user_preferences import get_effective_skills
 from app.tools.connector_exec import build_connector_env, connector_prompt_hint
 
@@ -238,6 +237,58 @@ required.
     # so it dies with the turn. Initialized here so the finally can revoke it even on an early
     # failure (it carries the token in AWS_BEARER_TOKEN_BEDROCK; empty ⇒ burn is a no-op).
     broker_env: dict[str, str] = {}
+    # Accounting state, bound BEFORE the try so the error handlers can always persist
+    # whatever accumulated (an errored turn's completed Bedrock calls are still billed).
+    content: list[dict] = []
+    actual_model: str | None = None
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
+    total_cache_write_1h_tokens = 0
+    turn_id = uuid.uuid4()
+    usage_persisted = False
+
+    def _apply_usage_meta(meta: dict) -> None:
+        """One unpacker for the terminal `done` and the crash-path `usage_stats` events
+        (same keys) — two inline copies could drift on a future cache field."""
+        nonlocal total_input_tokens, total_output_tokens, total_cache_read_tokens
+        nonlocal total_cache_write_tokens, total_cache_write_1h_tokens
+        total_input_tokens = meta.get("input_tokens", 0)
+        total_output_tokens = meta.get("output_tokens", 0)
+        total_cache_read_tokens = meta.get("cache_read_tokens", 0)
+        total_cache_write_tokens = meta.get("cache_write_tokens", 0)
+        total_cache_write_1h_tokens = meta.get("cache_write_1h_tokens", 0)
+
+    async def _persist_accumulated_usage() -> None:
+        """Idempotent per-turn handoff to the shared persist_turn_usage (see its module
+        contracts); called from success, every error handler AND the user-stop path."""
+        nonlocal usage_persisted
+        if usage_persisted:
+            return
+        usage_persisted = True
+        await persist_turn_usage(
+            db,
+            session_id=session_id,
+            session_uuid=uuid.UUID(str(session_id)),
+            user_id=user_id,
+            # Attribute to what actually ran: CLI-reported model, else the explicit
+            # choice; None falls back to the catalog default (approximate — the CLI
+            # used its own default then).
+            model=actual_model or model_choice,
+            turn_id=turn_id,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            cache_read_tokens=total_cache_read_tokens,
+            cache_write_tokens=total_cache_write_tokens,
+            cache_write_1h_tokens=total_cache_write_1h_tokens,
+            tool_calls=len([b for b in content if b.get("type") == "tool_use"]),
+            iterations=1,
+            # Broker-on (grant minted ⇒ broker_env non-empty): the proxy already wrote
+            # the authoritative per-call rows.
+            skip_budget_row=bool(broker_env),
+        )
+
     try:
         # Where the agent works. In sandbox mode `claude` runs inside this
         # conversation's own container: ensure() provisions the toolbox+proxy pair on
@@ -289,13 +340,8 @@ required.
         # fresh session so the conversation self-heals instead of erroring on every turn.
         # The assistant message is a single ordered `content` list built in stream arrival
         # order, so the persisted block order matches what was shown live.
-        content: list[dict] = []
         received_done = False
         new_cli_session_id: str | None = None
-        # Model reported by the CLI's init event — what actually ran this turn.
-        actual_model: str | None = None
-        total_input_tokens = 0
-        total_output_tokens = 0
         resume_id = cli_session_id
 
         # Route the CLI's Bedrock calls through the LLM auth broker when enabled (sandbox only
@@ -303,8 +349,15 @@ required.
         # the sandbox). The grant + CLAUDE_CODE_USE_BEDROCK + ANTHROPIC_BEDROCK_BASE_URL ride the
         # connector-env channel (docker exec -e), overriding sandbox_env_file so the real
         # bearer no longer needs to live in the sandbox. Off/local ⇒ empty ⇒ today's behavior.
+        # One turn_id for every usage row this turn produces: threaded into the broker grant
+        # (each proxied Bedrock call's row carries it) and into the engine-side record_usage
+        # fallback, so per-turn aggregation works identically regardless of the source.
         broker_env = (
-            llm_broker.cli_broker_env(user_id, session_id) if settings.sandbox_enabled else {}
+            llm_broker.cli_broker_env(
+                user_id, session_id, engine=engines.CLAUDE_CLI, turn_id=turn_id
+            )
+            if settings.sandbox_enabled
+            else {}
         )
         engine_env = {**connector_env, **broker_env}
 
@@ -329,6 +382,9 @@ required.
             new_cli_session_id = None
             total_input_tokens = 0
             total_output_tokens = 0
+            total_cache_read_tokens = 0
+            total_cache_write_tokens = 0
+            total_cache_write_1h_tokens = 0
             emitted = False
             try:
                 output_stream = execute_claude_cli(
@@ -354,6 +410,16 @@ required.
                     # CLI generator before its kill ran (async-gen cleanup is GC-timed), so
                     # the in-container agent could outlive the stop. We let the stream end and
                     # emit the stopped marker once, below.
+
+                    if event.type == "usage_stats":
+                        # Internal accounting event from the parser: the stream was cut by a
+                        # crash/timeout and this carries the usage accumulated before the
+                        # failure. Consume it (never client-visible, must not set `emitted`
+                        # — the stale-resume retry keys off "no client-visible output") so
+                        # the error-path persist below still accounts the burned tokens.
+                        if event.metadata:
+                            _apply_usage_meta(event.metadata)
+                        continue
 
                     if event.type == "session_info" and event.metadata.get("cli_session_id"):
                         # init/metadata only — NOT client-visible output, so it must not
@@ -405,8 +471,7 @@ required.
                     elif event.type == "done":
                         received_done = True
                         if event.metadata:
-                            total_input_tokens = event.metadata.get("input_tokens", 0)
-                            total_output_tokens = event.metadata.get("output_tokens", 0)
+                            _apply_usage_meta(event.metadata)
                         yield event
                     else:
                         yield event
@@ -415,6 +480,9 @@ required.
                 # on an explicit cancel; surface that to the client as a stopped turn.
                 if cancel_event and cancel_event.is_set():
                     logger.info("CLI chat cancelled by user")
+                    # A Stop kills the CLI mid-turn but AWS bills the completed calls —
+                    # persist whatever the parser surfaced (usage_stats on stream end).
+                    await _persist_accumulated_usage()
                     yield done_event(stopped=True)
                     return
                 break  # turn completed
@@ -456,36 +524,17 @@ required.
                     content,
                     model=actual_model or model_choice,
                     engine=engine,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_write_tokens=total_cache_write_tokens,
                 )
             except Exception as e:
                 logger.error(f"Failed to save assistant message: {e}")
                 # Continue anyway - response was already streamed
 
         # Persist session stats and usage
-        if total_input_tokens or total_output_tokens:
-            try:
-                await update_session_stats(
-                    db,
-                    session_id,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    tool_calls=len([b for b in content if b.get("type") == "tool_use"]),
-                    iterations=1,
-                )
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=uuid.UUID(str(session_id)),
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    # Attribute to what actually ran: CLI-reported model, else the
-                    # explicit choice; None falls back to the catalog default
-                    # (approximate — the CLI used its own default then).
-                    model=actual_model or model_choice,
-                )
-                await db.commit()
-            except Exception as e:
-                logger.error(f"Failed to persist session stats/usage: {e}")
+        await _persist_accumulated_usage()
 
         if not received_done:
             yield done_event()
@@ -495,14 +544,17 @@ required.
         # the post-stream process.wait() cap and the per-line idle-stall guard. A hardcoded
         # "after {claude_cli_timeout}s" would misreport the idle case.
         logger.error(f"Claude CLI timed out: {e}")
+        await _persist_accumulated_usage()
         yield error_event(f"Request timed out: {e}")
 
     except RuntimeError as e:
         logger.error(f"Claude CLI error: {e}")
+        await _persist_accumulated_usage()
         yield error_event(str(e))
 
     except Exception as e:
         logger.exception("Unexpected error in CLI orchestration")
+        await _persist_accumulated_usage()
         yield error_event(f"Unexpected error: {str(e)}")
 
     finally:

@@ -133,11 +133,22 @@ tool_duration_seconds = Histogram(
 )
 
 # --- Tokens & cost (per resolved model + engine) ---------------------------------------
+# direction: input (fresh) | output | cache_read | cache_write — prompt-cache tokens are
+# reported separately on the wire and never included in "input".
 tokens_total = Counter(
     "inkwest_tokens_total", "Model tokens processed", ["model", "direction", "engine"]
 )
 model_cost_usd_total = Counter(
     "inkwest_model_cost_usd_total", "Estimated model cost in USD", ["model", "engine"]
+)
+# Broker metering failures = billed Bedrock calls that produced NO usage row (broker-on
+# also skips the engine row, so each increment is real unaccounted spend). Alert on a
+# sustained rate: a wire-format drift would flip EVERY call to "no_usage" silently.
+# reason: no_usage (parse failure / no terminal frame) | no_session | persist_failed
+llm_metering_failures_total = Counter(
+    "inkwest_llm_metering_failures_total",
+    "Broker metering failures (no usage row persisted)",
+    ["reason"],
 )
 
 # --- Sandbox (only moves when sandbox_enabled) -----------------------------------------

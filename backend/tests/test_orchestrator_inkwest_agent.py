@@ -287,8 +287,8 @@ def _patch_broker(
         patch.object(oia, "get_session_messages", AsyncMock(return_value=history or [])),
         patch.object(oia, "save_message", spies.save_message),
         patch.object(oia, "ensure_session_title", spies.ensure_title),
-        patch.object(oia, "update_session_stats", spies.update_stats),
-        patch.object(oia, "record_usage", spies.record_usage),
+        patch("app.services.turn_usage.update_session_stats", spies.update_stats),
+        patch("app.services.turn_usage.record_usage", spies.record_usage),
         patch.object(oia, "resolve_session_system_prompt", AsyncMock(return_value="base")),
         patch.object(oia, "get_system_prompt", MagicMock(return_value="SYSTEM")),
         patch.object(oia, "resolve_session_model", AsyncMock(return_value=model)),
@@ -1409,3 +1409,190 @@ async def test_grant_burned_when_agent_execute_raises() -> None:
     assert captured["token"]
     with pytest.raises(token.ProxyAuthError):  # burned in the finally despite the crash
         token.verify(captured["token"])
+
+
+# --- P2 authority switch: broker-on skips the engine-side budget row ----------------------
+
+
+@pytest.mark.asyncio
+async def test_broker_on_skips_engine_usage_row_keeps_stats():
+    patches, spies = _patch_broker(
+        broker_settings=SimpleNamespace(
+            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000"
+        )
+    )
+    lines = [json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}})]
+    for p in patches:
+        p.start()
+    try:
+        await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    spies.update_stats.assert_awaited_once()
+    spies.record_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broker_off_engine_usage_row_carries_turn_id():
+    patches, spies = _patch_broker()
+    lines = [json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}})]
+    for p in patches:
+        p.start()
+    try:
+        await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    spies.update_stats.assert_awaited_once()
+    spies.record_usage.assert_awaited_once()
+    assert isinstance(spies.record_usage.await_args.kwargs["turn_id"], uuid.UUID)
+
+
+@pytest.mark.asyncio
+async def test_errored_turn_persists_accumulated_usage():
+    """P3: an agent error event carries the usage burned before the failure — persist it."""
+    patches, spies = _patch_broker()
+    lines = [
+        json.dumps(
+            {
+                "type": "error",
+                "content": "AI service error: throttled",
+                "is_error": True,
+                "metadata": {
+                    "input_tokens": 8,
+                    "output_tokens": 4,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 12608,
+                    "tool_calls": 1,
+                    "iterations": 1,
+                },
+            }
+        )
+    ]
+    for p in patches:
+        p.start()
+    try:
+        events = await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert any(e.type == "error" for e in events)
+    spies.update_stats.assert_awaited_once()
+    spies.record_usage.assert_awaited_once()
+    kwargs = spies.record_usage.await_args.kwargs
+    assert kwargs["input_tokens"] == 8
+    assert kwargs["cache_write_tokens"] == 12608
+
+
+@pytest.mark.asyncio
+async def test_turn_totals_stamped_on_first_assistant_row():
+    """Bubble fusion (groupServerMessages) keeps the FIRST assistant row's fields, so the
+    turn totals must be stamped there — not on the last flush's row."""
+    patches, spies = _patch_broker()
+    # save_message order: user turn, FIRST assistant flush, tool_result, trailing flush.
+    user_row = SimpleNamespace(id=uuid.uuid4())
+    first_row = SimpleNamespace(id=uuid.uuid4())
+    spies.save_message.side_effect = [
+        user_row,
+        first_row,
+        SimpleNamespace(id=uuid.uuid4()),
+        SimpleNamespace(id=uuid.uuid4()),
+    ]
+    stamp = AsyncMock()
+    # Two assistant flushes (text -> tool exchange -> trailing text) + terminal done.
+    lines = [
+        json.dumps({"type": "text_delta", "content": "looking..."}),
+        json.dumps(
+            {
+                "type": "tool_start",
+                "tool_name": "kubectl_get",
+                "tool_input": {"resource": "pods"},
+                "tool_use_id": "t1",
+            }
+        ),
+        json.dumps({"type": "tool_result", "content": "pod/x", "tool_use_id": "t1"}),
+        json.dumps({"type": "text_delta", "content": "done."}),
+        json.dumps(
+            {
+                "type": "done",
+                "metadata": {
+                    "input_tokens": 7,
+                    "output_tokens": 16,
+                    "cache_read_tokens": 12608,
+                    "cache_write_tokens": 0,
+                },
+            }
+        ),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with patch("app.services.turn_usage.stamp_message_usage", stamp):
+            await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    stamp.assert_awaited_once()
+    args, kwargs = stamp.await_args
+    assert args[1] == first_row.id  # FIRST assistant row, not the trailing flush's
+    assert kwargs["input_tokens"] == 7
+    assert kwargs["cache_read_tokens"] == 12608
+    # session stats carry the cache splits too
+    assert spies.update_stats.await_args.kwargs["cache_read_tokens"] == 12608
+    assert spies.update_stats.await_args.kwargs["cache_write_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stamp_failure_never_loses_the_usage_row():
+    """The stamp is display-only: its failure must not cost the turn its budget row."""
+    patches, spies = _patch_broker()
+    spies.save_message.side_effect = [
+        SimpleNamespace(id=uuid.uuid4()),  # user turn
+        SimpleNamespace(id=uuid.uuid4()),  # assistant flush
+    ]
+    stamp = AsyncMock(side_effect=RuntimeError("db blip"))
+    lines = [
+        json.dumps({"type": "text_delta", "content": "hi"}),
+        json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}}),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with patch("app.services.turn_usage.stamp_message_usage", stamp):
+            events = await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert events[-1].type == "done"  # turn outcome unaffected
+    spies.record_usage.assert_awaited_once()  # budget row persisted BEFORE the stamp
+    stamp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_only_turn_is_persisted():
+    """A fully-cached turn (0 fresh in/out, cache > 0) still burned billable tokens."""
+    patches, spies = _patch_broker()
+    lines = [
+        json.dumps(
+            {
+                "type": "done",
+                "metadata": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 9000,
+                    "cache_write_tokens": 0,
+                },
+            }
+        )
+    ]
+    for p in patches:
+        p.start()
+    try:
+        await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    spies.record_usage.assert_awaited_once()
+    assert spies.record_usage.await_args.kwargs["cache_read_tokens"] == 9000
+    assert spies.update_stats.await_args.kwargs["cache_read_tokens"] == 9000

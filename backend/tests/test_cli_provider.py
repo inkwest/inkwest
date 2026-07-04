@@ -740,8 +740,8 @@ class TestOrchestrateChatCliResume:
             patch.object(orchestrator_cli, "clear_cli_session_id", clear_mock),
             patch.object(orchestrator_cli, "save_message", AsyncMock()),
             patch.object(orchestrator_cli, "ensure_session_title", AsyncMock(return_value=None)),
-            patch.object(orchestrator_cli, "update_session_stats", AsyncMock()),
-            patch.object(orchestrator_cli, "record_usage", AsyncMock()),
+            patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+            patch("app.services.turn_usage.record_usage", AsyncMock()),
             patch.object(orchestrator_cli, "build_connector_env", AsyncMock(return_value=({}, []))),
             patch.object(
                 orchestrator_cli, "resolve_session_system_prompt", AsyncMock(return_value="")
@@ -802,8 +802,8 @@ class TestOrchestrateChatCliResume:
             patch.object(orchestrator_cli, "set_cli_session_id", AsyncMock()),
             patch.object(orchestrator_cli, "save_message", save_mock),
             patch.object(orchestrator_cli, "ensure_session_title", AsyncMock(return_value=None)),
-            patch.object(orchestrator_cli, "update_session_stats", AsyncMock()),
-            patch.object(orchestrator_cli, "record_usage", AsyncMock()),
+            patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+            patch("app.services.turn_usage.record_usage", AsyncMock()),
             patch.object(orchestrator_cli, "build_connector_env", AsyncMock(return_value=({}, []))),
             patch.object(
                 orchestrator_cli, "resolve_session_system_prompt", AsyncMock(return_value="")
@@ -897,8 +897,8 @@ class TestOrchestratorContentOrder:
             patch.object(
                 orchestrator_cli, "build_connector_env", new=AsyncMock(return_value=({}, set()))
             ),
-            patch.object(orchestrator_cli, "update_session_stats", new=AsyncMock()),
-            patch.object(orchestrator_cli, "record_usage", new=AsyncMock()),
+            patch("app.services.turn_usage.update_session_stats", new=AsyncMock()),
+            patch("app.services.turn_usage.record_usage", new=AsyncMock()),
             patch.object(orchestrator_cli.os, "makedirs"),
         ):
             db = AsyncMock()
@@ -927,3 +927,163 @@ class TestOrchestratorContentOrder:
         # not pushed to the end after a single merged text block.
         assert assistant_content[0]["text"] == "Let me check. "
         assert assistant_content[3]["text"] == "All good."  # consecutive deltas coalesced
+
+
+# --- P3: prompt-cache accumulation + usage-on-error in parse_cli_response ---------------
+#
+# NDJSON lines follow the Claude CLI stream-json contract; the usage field names are the
+# Anthropic usage shape as captured live in tests/fixtures/bedrock/invoke_stream_*.bin
+# (cache_read_input_tokens / cache_creation_input_tokens).
+
+
+class TestParseCliCacheTokens:
+    @pytest.mark.asyncio
+    async def test_assistant_usage_accumulates_cache_tokens(self):
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],'
+                '"usage":{"input_tokens":10,"output_tokens":3,'
+                '"cache_read_input_tokens":27082,"cache_creation_input_tokens":3242}}}'
+            )
+            yield '{"type":"result","subtype":"success","result":"hi"}'
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.type == "done"
+        assert done.metadata["cache_read_tokens"] == 27082
+        assert done.metadata["cache_write_tokens"] == 3242
+
+    @pytest.mark.asyncio
+    async def test_result_usage_overrides_cache_totals(self):
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":1,"output_tokens":1,'
+                '"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}'
+            )
+            yield (
+                '{"type":"result","subtype":"success","result":"x","usage":'
+                '{"input_tokens":10,"output_tokens":349,'
+                '"cache_read_input_tokens":27082,"cache_creation_input_tokens":26797}}'
+            )
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.metadata["input_tokens"] == 10
+        assert done.metadata["output_tokens"] == 349
+        assert done.metadata["cache_read_tokens"] == 27082
+        assert done.metadata["cache_write_tokens"] == 26797
+
+    @pytest.mark.asyncio
+    async def test_missing_cache_keys_default_zero(self):
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":365,"output_tokens":17}}}'
+            )
+            yield '{"type":"result","subtype":"success","result":"x"}'
+
+        events = [e async for e in parse_cli_response(stream())]
+        assert events[-1].metadata["cache_read_tokens"] == 0
+        assert events[-1].metadata["cache_write_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_result_usage_present_zero_overrides_accumulated(self):
+        """The result block is a cumulative authority: a present-but-0 field (fully-cached
+        turn's fresh input) must replace the accumulated sum — presence, not truthiness."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":42,"output_tokens":1,'
+                '"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}'
+            )
+            yield (
+                '{"type":"result","subtype":"success","result":"x","usage":'
+                '{"input_tokens":0,"output_tokens":7,'
+                '"cache_read_input_tokens":9000,"cache_creation_input_tokens":0}}'
+            )
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.metadata["input_tokens"] == 0
+        assert done.metadata["output_tokens"] == 7
+        assert done.metadata["cache_read_tokens"] == 9000
+        assert done.metadata["cache_write_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_result_usage_absent_cache_keys_keep_accumulated(self):
+        """An older CLI's result block without cache keys must not wipe the accumulated
+        cache counts (absent ≠ zero for the override)."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":1,"output_tokens":1,'
+                '"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}'
+            )
+            yield (
+                '{"type":"result","subtype":"success","result":"x","usage":'
+                '{"input_tokens":10,"output_tokens":3}}'
+            )
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.metadata["input_tokens"] == 10
+        assert done.metadata["cache_read_tokens"] == 100
+        assert done.metadata["cache_write_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_result_usage_null_is_tolerated(self):
+        """A present-but-null usage field must not crash the parser (latent TypeError
+        the presence-based rewrite hardened against)."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":3,"output_tokens":2}}}'
+            )
+            yield '{"type":"result","subtype":"success","result":"x","usage":null}'
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.type == "done"
+        assert done.metadata["input_tokens"] == 3  # accumulated values survive
+
+    @pytest.mark.asyncio
+    async def test_clean_stream_end_cache_only_surfaces_usage_stats(self):
+        """User Stop after a fully-cached round: 0 fresh in/out but real cache burn — the
+        clean-end gate must include cache counts (same rule as the persist gate)."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":0,"output_tokens":0,'
+                '"cache_read_input_tokens":8000,"cache_creation_input_tokens":0}}}'
+            )
+            # stream just ends — no terminal done (the Stop killed the CLI)
+
+        events = [e async for e in parse_cli_response(stream())]
+        assert events[-1].type == "usage_stats"
+        assert events[-1].metadata["cache_read_tokens"] == 8000
+
+    @pytest.mark.asyncio
+    async def test_stream_cut_surfaces_usage_stats_then_reraises(self):
+        """CLI exit 1 mid-turn: the accumulated usage must not vanish with the exception."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":10,"output_tokens":3,'
+                '"cache_read_input_tokens":5000,"cache_creation_input_tokens":100}}}'
+            )
+            raise RuntimeError("Claude CLI failed with exit code 1")
+
+        events = []
+        with pytest.raises(RuntimeError):
+            async for e in parse_cli_response(stream()):
+                events.append(e)
+        assert events[-1].type == "usage_stats"
+        assert events[-1].metadata["input_tokens"] == 10
+        assert events[-1].metadata["cache_read_tokens"] == 5000
+        assert events[-1].metadata["cache_write_tokens"] == 100

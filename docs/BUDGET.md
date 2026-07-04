@@ -21,9 +21,38 @@
 - **Per-turn usage**: input/output tokens and computed cost are written to
   `usage_records` after each model response, across every provider orchestrator
   via `record_usage`.
+- **Prompt-cache tokens** (`cache_read_tokens` / `cache_write_tokens` columns):
+  on the Anthropic/Bedrock wire, `input_tokens` is the FRESH (uncached) input
+  only — cache tokens are reported separately and billed at their own rates
+  (reads ~0.1×, 5m-TTL writes ~1.25×, 1h-TTL writes 2× the input rate; see
+  `pricing.cost_for_pricing`). Cache is **input-side only** — output is never
+  cached.
+- **Source of truth** (`source` column): with the LLM auth broker enabled
+  (`llm_broker_enabled`), the broker meters **each Bedrock call** from the exact
+  wire data AWS bills (`invocationMetrics` / Converse `usage`) and writes one
+  `source='broker'` row per call; the orchestrators then skip their own budget
+  row (no double count) but keep session stats + the per-message token counts.
+  Broker off ⇒ one `source='engine'` row per turn, from the engine-reported
+  usage (cache-aware since the cutover).
+- **Per-turn rollup** (`turn_id` column): every post-cutover row carries a
+  `turn_id` — a broker turn's N per-call rows share one, an engine turn's single
+  row has its own — exposed via `GET /api/me/usage/turns` ("this turn cost $X
+  across N calls"). Pre-cutover rows have `turn_id IS NULL` and degrade to
+  per-call granularity. Response: a list of `TurnUsageEntry`
+  (`app/models/schemas.py`) — `{turn_id, session_id, model, engine, source,
+  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+  call_count, last_call}`, newest first; filters `session_id`, `days`, `limit`.
 - **Budgets** (`budgets` table): optional Global / Role / User limits. A budget
   may cap cost (`max_cost_usd`), tokens (`max_total_tokens`), or both — and both
   are evaluated (whichever is reached first blocks).
+
+> **Cutover 2026-07-04**: usage rows recorded before this date predate
+> cache-aware accounting — they under-count cache-heavy turns (observed ~10×
+> on a real production bill). No backfill;
+> comparisons across the cutover are apples-to-oranges. The cutover ships two
+> schema migrations (`20260704000000_usage_cache_tokens.sql`,
+> `20260704010000_message_session_cache_tokens.sql`) — apply them before
+> deploying; column semantics in `docs/DATABASE_SCHEMA.md`.
 
 ## Enforcement
 
@@ -61,7 +90,8 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
 |---|---|
 | Compute budget status (`is_allowed`, action, warnings) | `backend/app/services/budget_service.py::check_budget` |
 | Enforcement gate (request path) | `backend/app/api/routes/chat.py::_budget_block_reason` |
-| Record real usage per turn | `budget_service.py::record_usage`, called by every orchestrator |
+| Shared end-of-turn persistence (stats + budget row + Message stamp, gate/retry/rollback contracts) | `backend/app/services/turn_usage.py::persist_turn_usage` — called by all three orchestrators on success/error/stop |
+| Record real usage per turn | `budget_service.py::record_usage` (the single sink) — broker OFF: via `turn_usage.persist_turn_usage` (one row/turn); broker ON: via `llm_proxy.py::_finish_stream` + `llm_metering.MeteringTee` (one row per Bedrock call, `source='broker'`, persisted by a bounded background task with one idempotent retry) |
 | Enforcement settings | `is_budget_enabled` / `default_monthly_cost_limit` in `budget_service.py`; keys in `app_settings.py` |
 | Admin settings endpoint | `admin.py::get_budget_settings` / `update_budget_settings` |
 | Budget CRUD | `admin.py` `/budgets` endpoints |
@@ -85,3 +115,18 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
   user. A user driving two sessions concurrently can have both pass the check and
   both spend — consistent with the single-replica caveats elsewhere; overshoot
   stays bounded.
+- **Token caps ignore cache tokens.** `max_total_tokens` sums fresh input +
+  output only — cache reads/writes don't count toward token budgets (their
+  *cost* does, via `cost_usd`). Deliberate for now: pricing already weights
+  cache correctly, and counting a 0.1×-priced cache read as a full token would
+  distort token caps the other way.
+- **Stopped/aborted turns (broker on).** A user Stop cuts the in-flight Bedrock
+  stream, but AWS bills it. On `invoke-with-response-stream` (Claude CLI) the
+  metering tee falls back to the Anthropic self-report seen so far (input+cache
+  exact, output as of the last usage frame — never over-billed) and a row is
+  still written. On `converse-stream` (inkwest-agent / opencode) usage rides
+  only the terminal metadata event, so a cut call yields **no row** — the miss
+  increments `inkwest_llm_metering_failures_total{reason="no_usage"}` (alert on
+  a sustained rate: wire-format drift makes EVERY call a miss). Session stats
+  stay engine-fed either way, so a stopped converse turn can show tokens in the
+  UI that never reached the budget — bounded to that turn.

@@ -112,9 +112,29 @@ async def _run_loop(
 
     total_input_tokens = 0
     total_output_tokens = 0
+    # Converse cache tokens: always 0 today (the agent sets no cachePoint) but accumulated
+    # unconditionally so metering is already correct when opportunistic caching lands.
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
+    # 1h-TTL portion of the writes (billed 2x): Converse reports it in
+    # usage.cacheDetails[{ttl, inputTokens}]. Always 0 today (no cachePoint yet).
+    total_cache_write_1h_tokens = 0
     total_tool_calls = 0
     iteration = 0
     iter_latency_ms = 0
+
+    def _usage_meta() -> dict[str, Any]:
+        # Additive keys — an older backend ignores the cache fields (protocol-compatible).
+        return {
+            "iterations": iteration,
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "cache_read_tokens": total_cache_read_tokens,
+            "cache_write_tokens": total_cache_write_tokens,
+            "cache_write_1h_tokens": total_cache_write_1h_tokens,
+            "tool_calls": total_tool_calls,
+            "latency_ms": iter_latency_ms,
+        }
 
     while iteration < spec.limits.max_iterations:
         iteration += 1
@@ -148,18 +168,36 @@ async def _run_loop(
             )
             iter_latency_ms = int((time.monotonic() - iter_start) * 1000)
         except ClientError as e:
+            # Carry the usage accumulated over prior iterations: those calls completed and
+            # AWS bills them even though this turn is now failing.
             yield error_event(
-                f"AI service error: {e.response.get('Error', {}).get('Message', str(e))}"
+                f"AI service error: {e.response.get('Error', {}).get('Message', str(e))}",
+                metadata=_usage_meta(),
             )
             return
         except Exception as e:
             # converse() runs in a worker thread; nothing else can cancel it.
-            yield error_event(f"AI error: {str(e)}")
+            yield error_event(f"AI error: {str(e)}", metadata=_usage_meta())
             return
 
         usage = response.get("usage", {})
         total_input_tokens += usage.get("inputTokens", 0)
         total_output_tokens += usage.get("outputTokens", 0)
+        # Both spellings observed live on the agent path (documented name + Count alias).
+        total_cache_read_tokens += (
+            usage.get("cacheReadInputTokens", usage.get("cacheReadInputTokenCount", 0)) or 0
+        )
+        total_cache_write_tokens += (
+            usage.get("cacheWriteInputTokens", usage.get("cacheWriteInputTokenCount", 0)) or 0
+        )
+        # ASSUMPTION (1h TTL unobserved live, same as llm_metering._from_converse_usage):
+        # every cacheDetails entry is treated as write-side; a read-side 1h entry would be
+        # over-priced into the 2x-write portion. Pricing clamps the 1h part to total writes.
+        total_cache_write_1h_tokens += sum(
+            int(d.get("inputTokens") or 0)
+            for d in usage.get("cacheDetails") or []
+            if isinstance(d, dict) and d.get("ttl") == "1h"
+        )
 
         out_content = response.get("output", {}).get("message", {}).get("content", [])
         stop_reason = response.get("stopReason", "end_turn")
@@ -243,18 +281,11 @@ async def _run_loop(
             continue
 
         # Terminal stop reason (end_turn, max_tokens, stop_sequence, guardrail…).
-        yield done_event(
-            metadata={
-                "iterations": iteration,
-                "input_tokens": total_input_tokens,
-                "output_tokens": total_output_tokens,
-                "tool_calls": total_tool_calls,
-                "latency_ms": iter_latency_ms,
-            }
-        )
+        yield done_event(metadata=_usage_meta())
         return
 
     yield error_event(
         f"Reached maximum iterations ({spec.limits.max_iterations}). "
-        "The conversation has become too complex. Please start a new session."
+        "The conversation has become too complex. Please start a new session.",
+        metadata=_usage_meta(),
     )

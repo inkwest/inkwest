@@ -92,6 +92,8 @@ async def save_message(
     token_count: int | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_write_tokens: int | None = None,
     thinking_content: str | None = None,
     latency_ms: int | None = None,
     model: str | None = None,
@@ -112,8 +114,10 @@ async def save_message(
         attachments: Files attached to a user turn (descriptor dicts)
         author_user_id: Who sent this user turn (shared conversations); None = the AI
         token_count: Number of tokens in the message (deprecated, use output_tokens)
-        input_tokens: Number of input tokens for this API call
+        input_tokens: Number of fresh (uncached) input tokens for this API call
         output_tokens: Number of output tokens for this API call
+        cache_read_tokens: Prompt-cache tokens read for this turn (input-side)
+        cache_write_tokens: Prompt-cache tokens written for this turn (input-side)
         thinking_content: AI reasoning/thinking content if extended thinking enabled
         latency_ms: API call latency in milliseconds
         model: Model that produced this turn (assistant messages) for cost attribution
@@ -146,6 +150,8 @@ async def save_message(
         token_count=token_count if token_count is not None else output_tokens,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
         thinking_content=thinking_content,
         latency_ms=latency_ms,
         model=model,
@@ -500,6 +506,45 @@ async def update_session_summary(
     logger.debug(f"Updated summary for session {session_id}")
 
 
+async def stamp_message_usage(
+    db: AsyncSession,
+    message_id: uuid.UUID,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> None:
+    """Stamp a turn's token totals onto an already-saved assistant message.
+
+    CANONICAL bubble-fusion rationale (the orchestrators/tests reference this): the
+    agent/opencode orchestrators persist assistant rows incrementally while streaming
+    (before the terminal usage metadata exists), so the counts are written back onto
+    the turn's FIRST assistant row once known — bubble fusion (frontend
+    ``groupServerMessages``) keeps the first row's fields, so that row is what the
+    per-bubble token line reads. Commits immediately (same granularity as
+    save_message).
+    """
+    # Same clamp rationale as update_session_stats (engine-reported values).
+    input_tokens = max(0, int(input_tokens))
+    output_tokens = max(0, int(output_tokens))
+    cache_read_tokens = max(0, int(cache_read_tokens))
+    cache_write_tokens = max(0, int(cache_write_tokens))
+
+    await db.execute(
+        update(Message)
+        .where(Message.id == message_id)
+        .values(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            # Keep token_count coherent with save_message's fallback semantics.
+            token_count=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
+    )
+    await db.commit()
+
+
 async def update_session_stats(
     db: AsyncSession,
     session_id: str | uuid.UUID,
@@ -507,6 +552,9 @@ async def update_session_stats(
     output_tokens: int = 0,
     tool_calls: int = 0,
     iterations: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    commit: bool = True,
 ) -> None:
     """
     Update session usage statistics.
@@ -520,9 +568,22 @@ async def update_session_stats(
         output_tokens: Number of output tokens to add
         tool_calls: Number of tool calls to add
         iterations: Number of iterations to add
+        cache_read_tokens: Prompt-cache read tokens to add (input-side)
+        cache_write_tokens: Prompt-cache write tokens to add (input-side)
+        commit: ``False`` joins the caller's transaction instead of self-committing —
+            turn_usage folds the increment into the budget-row txn so its retry guard
+            (the uq_usage_records_engine_turn backstop) covers the stats too; a
+            self-committed increment could double-apply on an ambiguous-commit retry
     """
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
+
+    # SECURITY: counts come from the sandboxed engine's stdout — clamp so a forged
+    # negative can't walk the session totals backwards (same rationale as record_usage).
+    input_tokens = max(0, int(input_tokens))
+    output_tokens = max(0, int(output_tokens))
+    cache_read_tokens = max(0, int(cache_read_tokens))
+    cache_write_tokens = max(0, int(cache_write_tokens))
 
     # Use atomic increment to prevent race conditions
     await db.execute(
@@ -531,11 +592,14 @@ async def update_session_stats(
         .values(
             total_input_tokens=Session.total_input_tokens + input_tokens,
             total_output_tokens=Session.total_output_tokens + output_tokens,
+            total_cache_read_tokens=Session.total_cache_read_tokens + cache_read_tokens,
+            total_cache_write_tokens=Session.total_cache_write_tokens + cache_write_tokens,
             total_tool_calls=Session.total_tool_calls + tool_calls,
             total_iterations=Session.total_iterations + iterations,
         )
     )
-    await db.commit()
+    if commit:
+        await db.commit()
     logger.debug(
         f"Updated stats for session {session_id}: "
         f"+{input_tokens} in, +{output_tokens} out, +{tool_calls} tools, +{iterations} iters"
@@ -563,6 +627,8 @@ async def get_session_stats(db: AsyncSession, session_id: str | uuid.UUID) -> di
         return {
             "total_input_tokens": 0,
             "total_output_tokens": 0,
+            "total_cache_read_tokens": 0,
+            "total_cache_write_tokens": 0,
             "total_tool_calls": 0,
             "total_iterations": 0,
         }
@@ -570,6 +636,8 @@ async def get_session_stats(db: AsyncSession, session_id: str | uuid.UUID) -> di
     return {
         "total_input_tokens": session.total_input_tokens,
         "total_output_tokens": session.total_output_tokens,
+        "total_cache_read_tokens": session.total_cache_read_tokens,
+        "total_cache_write_tokens": session.total_cache_write_tokens,
         "total_tool_calls": session.total_tool_calls,
         "total_iterations": session.total_iterations,
     }

@@ -7,7 +7,9 @@ from decimal import Decimal
 import pytest
 
 from app.services.pricing import (
+    ModelPricing,
     calculate_cost,
+    cost_for_pricing,
     estimate_cost,
     get_model_pricing,
 )
@@ -110,6 +112,102 @@ class TestCalculateCost:
         # 1M input at $15/M = $15
         cost = calculate_cost("claude-opus-4-20250514", 1_000_000, 0)
         assert cost == Decimal("15.00")
+
+
+class TestCacheAwareCost:
+    """Prompt-cache-aware cost: reads 0.1x, 5m writes 1.25x, 1h writes 2x input rate."""
+
+    # claude-sonnet-4-20250514: input $3/M, output $15/M.
+
+    def test_cache_read_billed_at_tenth_of_input(self):
+        # 1M cache-read at 0.1 x $3/M = $0.30
+        cost = calculate_cost("claude-sonnet-4-20250514", 0, 0, cache_read_tokens=1_000_000)
+        assert cost == Decimal("0.30")
+
+    def test_cache_write_billed_at_1_25x_input(self):
+        # 1M cache-write (5m TTL) at 1.25 x $3/M = $3.75
+        cost = calculate_cost("claude-sonnet-4-20250514", 0, 0, cache_write_tokens=1_000_000)
+        assert cost == Decimal("3.75")
+
+    def test_cache_write_1h_billed_at_2x_input(self):
+        # All writes at 1h TTL: 1M at 2 x $3/M = $6
+        cost = calculate_cost(
+            "claude-sonnet-4-20250514",
+            0,
+            0,
+            cache_write_tokens=1_000_000,
+            cache_write_1h_tokens=1_000_000,
+        )
+        assert cost == Decimal("6.00")
+
+    def test_cache_write_ttl_split(self):
+        # 600k at 5m (1.25 x 3 = 3.75/M -> 2.25) + 400k at 1h (2 x 3 = 6/M -> 2.40)
+        cost = calculate_cost(
+            "claude-sonnet-4-20250514",
+            0,
+            0,
+            cache_write_tokens=1_000_000,
+            cache_write_1h_tokens=400_000,
+        )
+        assert cost == Decimal("4.65")
+
+    def test_full_four_way_split(self):
+        # Real-shaped turn: fresh 7, out 16, write 12608 — the captured converse turn.
+        cost = calculate_cost(
+            "claude-sonnet-4-20250514",
+            7,
+            16,
+            cache_write_tokens=12_608,
+        )
+        expected = (
+            Decimal(7) * Decimal("3") / Decimal(1_000_000)
+            + Decimal(16) * Decimal("15") / Decimal(1_000_000)
+            + Decimal(12_608) * Decimal("3.75") / Decimal(1_000_000)
+        )
+        assert cost == expected
+
+    def test_1h_portion_clamped_to_total_writes(self):
+        # A reported 1h portion larger than the total never over-bills.
+        cost = calculate_cost(
+            "claude-sonnet-4-20250514",
+            0,
+            0,
+            cache_write_tokens=100_000,
+            cache_write_1h_tokens=500_000,
+        )
+        assert cost == Decimal("0.60")  # all 100k at 2x rate ($6/M)
+
+    def test_defaults_keep_legacy_behavior(self):
+        # No cache args = the pre-cache cost, byte-identical.
+        assert calculate_cost("claude-sonnet-4-20250514", 500_000, 100_000) == Decimal("3.00")
+
+    def test_explicit_cache_prices_win_over_multipliers(self):
+        pricing = ModelPricing(
+            input_price=Decimal("3.00"),
+            output_price=Decimal("15.00"),
+            cache_read_price=Decimal("0.50"),
+            cache_write_price=Decimal("4.00"),
+        )
+        cost = cost_for_pricing(
+            pricing, 0, 0, cache_read_tokens=1_000_000, cache_write_tokens=1_000_000
+        )
+        assert cost == Decimal("4.50")
+
+    def test_explicit_write_price_scales_1h_by_premium_ratio(self):
+        # Explicit 5m write $4/M -> 1h at 4 x (2/1.25) = $6.40/M.
+        pricing = ModelPricing(
+            input_price=Decimal("3.00"),
+            output_price=Decimal("15.00"),
+            cache_write_price=Decimal("4.00"),
+        )
+        cost = cost_for_pricing(
+            pricing,
+            0,
+            0,
+            cache_write_tokens=1_000_000,
+            cache_write_1h_tokens=1_000_000,
+        )
+        assert cost == Decimal("6.40")
 
 
 class TestEstimateCost:

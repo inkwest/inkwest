@@ -129,7 +129,13 @@ interface SessionsState {
   setPendingPrompt: (prompt: string | null, attachments?: Attachment[] | null) => void;
   consumePendingPrompt: () => string | null;
   consumePendingAttachments: () => Attachment[] | null;
-  updateSessionTokens: (id: string, inputTokens: number, outputTokens: number) => void;
+  updateSessionTokens: (
+    id: string,
+    inputTokens: number,
+    outputTokens: number,
+    cacheReadTokens?: number,
+    cacheWriteTokens?: number,
+  ) => void;
   searchGlobal: (query: string) => Promise<void>;
   clearSearch: () => void;
 }
@@ -449,15 +455,22 @@ export const useSessionsStore = create<SessionsState>()(
         }
       },
 
-      updateSessionTokens: (id, inputTokens, outputTokens) => {
+      updateSessionTokens: (id, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens) => {
+        // The done event reports the TURN's usage; the header/list badges show the
+        // conversation total — so ACCUMULATE onto the fetched cumulative. The next
+        // session fetch replaces everything with server truth (update_session_stats
+        // does the same atomic increment DB-side, so the figures converge).
+        const patch = <T extends Session>(s: T): T => ({
+          ...s,
+          total_input_tokens: (s.total_input_tokens || 0) + inputTokens,
+          total_output_tokens: (s.total_output_tokens || 0) + outputTokens,
+          total_cache_read_tokens: (s.total_cache_read_tokens || 0) + (cacheReadTokens || 0),
+          total_cache_write_tokens: (s.total_cache_write_tokens || 0) + (cacheWriteTokens || 0),
+        });
         set((state) => ({
-          sessions: state.sessions.map((s) =>
-            s.id === id ? { ...s, total_input_tokens: inputTokens, total_output_tokens: outputTokens } : s,
-          ),
+          sessions: state.sessions.map((s) => (s.id === id ? patch(s) : s)),
           currentSession:
-            state.currentSession?.id === id
-              ? { ...state.currentSession, total_input_tokens: inputTokens, total_output_tokens: outputTokens }
-              : state.currentSession,
+            state.currentSession?.id === id ? patch(state.currentSession) : state.currentSession,
         }));
       },
 

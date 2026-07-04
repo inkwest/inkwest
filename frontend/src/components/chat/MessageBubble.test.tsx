@@ -27,7 +27,7 @@ const baseMessage: Message = {
 
 describe('MessageBubble', () => {
   beforeEach(() => {
-    useSettingsStore.setState({ showTimestamps: false });
+    useSettingsStore.setState({ showTimestamps: false, showTokenCounts: false });
   });
 
   it('renders user message with text content', () => {
@@ -499,5 +499,57 @@ describe('MessageBubble', () => {
     render(<MessageBubble message={msg} />);
     expect(screen.getByText(/GitLab access granted/)).toBeInTheDocument();
     expect(screen.queryByText(formatTimestamp(msg.created_at))).not.toBeInTheDocument();
+  });
+});
+
+describe('per-bubble token line', () => {
+  const assistantWithTokens: Message = {
+    id: 'msg-t1',
+    session_id: 'sess-1',
+    role: 'assistant',
+    content: 'done.',
+    created_at: '2026-07-04T10:00:00Z',
+    input_tokens: 10,
+    output_tokens: 349,
+    cache_read_tokens: 27082,
+    cache_write_tokens: 3242,
+  };
+
+  beforeEach(() => {
+    useSettingsStore.setState({ showTimestamps: false, showTokenCounts: true });
+  });
+
+  it('renders the 4-way split with a title per symbol', () => {
+    render(<MessageBubble message={assistantWithTokens} />);
+    expect(screen.getByTitle(/fresh input tokens/i)).toHaveTextContent('10');
+    expect(screen.getByTitle(/^output tokens$/i)).toHaveTextContent('349');
+    expect(screen.getByTitle(/cache read: 27,082/i)).toHaveTextContent('27.1k');
+    expect(screen.getByTitle(/cache write: 3,242/i)).toHaveTextContent('3.2k');
+  });
+
+  it('omits the cache glyphs on a no-cache turn', () => {
+    const msg: Message = { ...assistantWithTokens, cache_read_tokens: 0, cache_write_tokens: 0 };
+    render(<MessageBubble message={msg} />);
+    expect(screen.getByTitle(/fresh input tokens/i)).toBeInTheDocument();
+    expect(screen.queryByTitle(/cache read/i)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(/cache write/i)).not.toBeInTheDocument();
+  });
+
+  it('renders nothing for rows predating the token columns', () => {
+    const msg: Message = { ...assistantWithTokens, input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
+    render(<MessageBubble message={msg} />);
+    expect(screen.queryByTitle(/fresh input tokens/i)).not.toBeInTheDocument();
+  });
+
+  it('never renders on user bubbles', () => {
+    const msg: Message = { ...assistantWithTokens, role: 'user', content: 'hi' };
+    render(<MessageBubble message={msg} />);
+    expect(screen.queryByTitle(/fresh input tokens/i)).not.toBeInTheDocument();
+  });
+
+  it('is gated behind the showTokenCounts setting', () => {
+    useSettingsStore.setState({ showTokenCounts: false });
+    render(<MessageBubble message={assistantWithTokens} />);
+    expect(screen.queryByTitle(/fresh input tokens/i)).not.toBeInTheDocument();
   });
 });

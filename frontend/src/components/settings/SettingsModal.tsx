@@ -109,7 +109,7 @@ function ToggleRow({
 }
 
 function DisplayTab() {
-  const { compactToolCards, showTimestamps, wideComposer } = useSettingsStore();
+  const { compactToolCards, showTimestamps, showTokenCounts, wideComposer } = useSettingsStore();
   const saveUi = usePreferencesStore((s) => s.saveUi);
   const error = usePreferencesStore((s) => s.error);
   return (
@@ -123,6 +123,11 @@ function DisplayTab() {
         label="Show timestamps"
         checked={showTimestamps}
         onChange={(v) => void saveUi({ showTimestamps: v })}
+      />
+      <ToggleRow
+        label="Show token counts"
+        checked={showTokenCounts}
+        onChange={(v) => void saveUi({ showTokenCounts: v })}
       />
       <ToggleRow
         label="Wide composer"

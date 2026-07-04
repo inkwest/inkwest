@@ -155,6 +155,34 @@ def test_calculate_cost_falls_back_to_static_table():
     assert calculate_cost("claude-opus-4-8", 1_000_000, 1_000_000) == Decimal("30.00")
 
 
+def test_calculate_cost_override_derives_cache_prices_from_override_input():
+    """Cache multipliers apply to the OVERRIDE's input price, not the table's."""
+    model_registry._rows = {
+        "custom-x": _row("custom-x", input_price=Decimal("2.00"), output_price=Decimal("8.00"))
+    }
+    # 1M cache-read at 0.1 x $2/M + 1M cache-write at 1.25 x $2/M = 0.20 + 2.50
+    cost = calculate_cost(
+        "custom-x", 0, 0, cache_read_tokens=1_000_000, cache_write_tokens=1_000_000
+    )
+    assert cost == Decimal("2.70")
+
+
+def test_calculate_cost_override_cache_write_1h_ttl():
+    model_registry._rows = {
+        "custom-x": _row("custom-x", input_price=Decimal("2.00"), output_price=Decimal("8.00"))
+    }
+    # 1h TTL writes bill 2x the override input price.
+    cost = calculate_cost(
+        "custom-x", 0, 0, cache_write_tokens=1_000_000, cache_write_1h_tokens=1_000_000
+    )
+    assert cost == Decimal("4.00")
+
+
+def test_calculate_cost_no_override_passes_cache_to_table():
+    # claude-opus-4-8: input $5/M -> 1M cache-read = $0.50.
+    assert calculate_cost("claude-opus-4-8", 0, 0, cache_read_tokens=1_000_000) == Decimal("0.50")
+
+
 def test_unpriced_model_flagged_in_merged_entry():
     model_catalog._live_models = ["totally-unknown-model"]
     entry = next(e for e in merged_entries() if e.model_id == "totally-unknown-model")
@@ -363,3 +391,69 @@ async def test_delete_rejects_discovered_model():
     with pytest.raises(ValueError, match="cannot be deleted"):
         await model_registry.delete_model(db, "claude-opus-4-8")
     db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Invoke-target normalization (broker metering)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_invoke_target_exact_id():
+    model_catalog._live_models = ["claude-opus-4-8"]
+    assert model_registry.resolve_invoke_target("claude-opus-4-8") == "claude-opus-4-8"
+
+
+def test_resolve_invoke_target_profile_id_and_arn():
+    arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.anthropic.claude-opus-4-8"
+    model_catalog._live_models = ["anthropic.claude-opus-4-8"]
+    model_catalog._profile_arns = {
+        "eu.anthropic.claude-opus-4-8": arn,
+        "anthropic.claude-opus-4-8": arn,
+    }
+    model_registry._rows = {
+        "anthropic.claude-opus-4-8": _row("anthropic.claude-opus-4-8", enabled=True, arn=arn)
+    }
+    # The engine may invoke via the profile id or the ARN — both map back to the entry.
+    assert (
+        model_registry.resolve_invoke_target("eu.anthropic.claude-opus-4-8")
+        == "anthropic.claude-opus-4-8"
+    )
+    assert model_registry.resolve_invoke_target(arn) == "anthropic.claude-opus-4-8"
+
+
+def test_resolve_invoke_target_route_prefix_normalization():
+    """No arn/profile row, but the route-prefixed id normalizes to a known entry."""
+    model_catalog._live_models = ["anthropic.claude-opus-4-8"]
+    assert (
+        model_registry.resolve_invoke_target("eu.anthropic.claude-opus-4-8")
+        == "anthropic.claude-opus-4-8"
+    )
+
+
+def test_resolve_invoke_target_unknown_verbatim():
+    model_catalog._live_models = ["claude-opus-4-8"]
+    assert model_registry.resolve_invoke_target("weird-target") == "weird-target"
+
+
+def test_resolve_invoke_target_covers_every_enabled_entry():
+    """Handoff open-point 2: normalization must hit for every enabled registry entry —
+    its id, its ARN, and every profile id of that ARN all resolve to the entry."""
+    arn_a = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.anthropic.claude-opus-4-8"
+    arn_b = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.meta.llama4-x"
+    model_catalog._live_models = ["anthropic.claude-opus-4-8", "meta.llama4-x"]
+    model_catalog._profile_arns = {
+        "eu.anthropic.claude-opus-4-8": arn_a,
+        "eu.meta.llama4-x": arn_b,
+    }
+    model_registry._rows = {
+        "anthropic.claude-opus-4-8": _row("anthropic.claude-opus-4-8", enabled=True, arn=arn_a),
+        "meta.llama4-x": _row("meta.llama4-x", enabled=True, arn=arn_b),
+    }
+    for entry in model_registry.merged_entries():
+        if not entry.enabled:
+            continue
+        assert model_registry.resolve_invoke_target(entry.model_id) == entry.model_id
+        if entry.arn:
+            assert model_registry.resolve_invoke_target(entry.arn) == entry.model_id
+            for pid in model_catalog.profile_ids_for_arn(entry.arn):
+                assert model_registry.resolve_invoke_target(pid) == entry.model_id

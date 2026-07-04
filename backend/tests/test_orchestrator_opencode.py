@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services import orchestrator_opencode as oo
+from app.services import turn_usage as tu
 from app.services.ai_cli_client import execute_opencode
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
@@ -222,13 +223,23 @@ class TestOrchestrateOpencode:
         es.enter_context(patch.object(oo, "apply_session_skills", MagicMock()))
         es.enter_context(patch.object(oo, "save_message", AsyncMock()))
         es.enter_context(patch.object(oo, "ensure_session_title", AsyncMock()))
-        es.enter_context(patch.object(oo, "update_session_stats", AsyncMock()))
-        es.enter_context(patch.object(oo, "record_usage", AsyncMock()))
+        es.enter_context(patch("app.services.turn_usage.update_session_stats", AsyncMock()))
+        es.enter_context(patch("app.services.turn_usage.record_usage", AsyncMock()))
         es.enter_context(
             patch.object(oo, "resolve_session_system_prompt", AsyncMock(return_value="BASE"))
         )
         es.enter_context(patch.object(oo, "get_system_prompt", MagicMock(return_value="SYS")))
         es.enter_context(patch.object(oo, "resolve_session_model", AsyncMock(return_value="m")))
+        # Pin the LLM broker OFF by default so these tests are hermetic against the ambient
+        # LLM_BROKER_ENABLED (on in some dev .envs). With P2's authority switch, a live
+        # broker env would silently skip record_usage and invert the accounting asserts.
+        # Broker-specific tests re-patch these inside their own `with` (inner patch wins).
+        es.enter_context(
+            patch.object(oo.llm_broker, "agent_broker_env", MagicMock(return_value={}))
+        )
+        es.enter_context(
+            patch.object(oo.llm_broker, "agent_bedrock_endpoint_url", MagicMock(return_value=None))
+        )
         es.enter_context(patch.object(oo, "execute_opencode", exec_factory or fake_exec))
         # model_registry.get_entry + sandbox.* are imported lazily inside the broker, so patch
         # the real module functions (not sys.modules — `from app.services import sandbox` binds
@@ -394,8 +405,8 @@ class TestOrchestrateOpencode:
                 )
             )
             # Assert inside the patch context — the AsyncMock is reverted on exit.
-            oo.record_usage.assert_awaited_once()
-            assert oo.record_usage.await_args.kwargs["cost_usd"] == Decimal("0.0123")
+            tu.record_usage.assert_awaited_once()
+            assert tu.record_usage.await_args.kwargs["cost_usd"] == Decimal("0.0123")
 
     @pytest.mark.asyncio
     async def test_llm_broker_wiring_when_enabled(self):
@@ -658,12 +669,12 @@ class TestOrchestrateOpencode:
 
             sandbox.release.assert_awaited_once()
             sandbox.teardown.assert_awaited_once()
-            oo.update_session_stats.assert_awaited_once()
-            assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 10
-            assert oo.update_session_stats.await_args.kwargs["output_tokens"] == 5
-            oo.record_usage.assert_awaited_once()
+            tu.update_session_stats.assert_awaited_once()
+            assert tu.update_session_stats.await_args.kwargs["input_tokens"] == 10
+            assert tu.update_session_stats.await_args.kwargs["output_tokens"] == 5
+            tu.record_usage.assert_awaited_once()
             # cost accumulated before the error rides its metadata → authoritative override
-            assert oo.record_usage.await_args.kwargs["cost_usd"] == Decimal("0.01")
+            assert tu.record_usage.await_args.kwargs["cost_usd"] == Decimal("0.01")
         assert any(e.type == "error" and "Forbidden" in (e.content or "") for e in events)
         # The parser suppresses its trailing truncated done after an error — one terminal.
         assert not any(e.type == "done" for e in events)
@@ -698,7 +709,7 @@ class TestOrchestrateOpencode:
 
             sandbox.release.assert_awaited_once()
             sandbox.teardown.assert_awaited_once()
-            oo.update_session_stats.assert_awaited_once()
+            tu.update_session_stats.assert_awaited_once()
             # The assistant text that streamed before the crash is persisted.
             saved_roles = [c.args[2] for c in oo.save_message.await_args_list]
             assert "assistant" in saved_roles
@@ -929,11 +940,9 @@ class TestOrchestrateOpencode:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("raw_cost", ["0", "-0.5", '"broken"'])
     async def test_untrustworthy_cost_falls_back_to_estimate(self, raw_cost):
-        # Zero (= models.dev has no pricing), negative, or malformed cost must NOT be recorded
-        # verbatim — the orchestrator computes a non-cache-input token×rate estimate and passes
-        # THAT as cost_usd (so record_usage's own cache-inflated fallback never runs; H1).
-        from app.services.budget_service import calculate_cost
-
+        # Zero (= models.dev has no pricing), negative, or malformed cost must NOT be
+        # recorded verbatim — cost_usd passes as None so record_usage's own CACHE-AWARE
+        # token×rate estimate applies (pinned in test_budget_service/test_pricing).
         line = (
             b'{"type":"step_finish","part":{"reason":"stop",'
             b'"tokens":{"input":10,"output":5},"cost":' + raw_cost.encode() + b"}}\n"
@@ -951,18 +960,15 @@ class TestOrchestrateOpencode:
                     user_id=USER_ID,
                 )
             )
-            oo.record_usage.assert_awaited_once()
-            passed = oo.record_usage.await_args.kwargs["cost_usd"]
-            # No cache tokens in this turn → fresh input == 10; estimate, never the bogus value.
-            assert passed == calculate_cost("m", 10, 5)
-            assert passed is not None and passed >= 0
+            tu.record_usage.assert_awaited_once()
+            # The bogus value never reaches the row; None delegates to the estimator.
+            assert tu.record_usage.await_args.kwargs["cost_usd"] is None
 
     @pytest.mark.asyncio
-    async def test_cost_fallback_excludes_cache_tokens(self):
-        # H1: on the estimate fallback, cache write/read tokens (folded into input for stats)
-        # must NOT be billed at the full input rate — the estimate uses fresh input only.
-        from app.services.budget_service import calculate_cost
-
+    async def test_cost_fallback_prices_cache_tokens_at_cache_rates(self):
+        # Cache write/read tokens must NOT be billed at the full input rate — stats see
+        # fresh input, the splits ride their own kwargs, and cost_usd=None delegates to
+        # record_usage's cache-aware estimator (rates pinned in test_pricing).
         line = (
             b'{"type":"step_finish","part":{"reason":"stop",'
             b'"tokens":{"input":10,"output":5,"cache":{"write":8000,"read":4000}}}}\n'
@@ -980,9 +986,15 @@ class TestOrchestrateOpencode:
                     user_id=USER_ID,
                 )
             )
-            # stats see the full cache-inflated input; cost sees only the 10 fresh tokens.
-            assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 10 + 8000 + 4000
-            assert oo.record_usage.await_args.kwargs["cost_usd"] == calculate_cost("m", 10, 5)
+            # stats see FRESH input (cache rides its own counters — no double count);
+            # cost prices fresh + cache splits at their real rates.
+            assert tu.update_session_stats.await_args.kwargs["input_tokens"] == 10
+            assert tu.update_session_stats.await_args.kwargs["cache_read_tokens"] == 4000
+            assert tu.update_session_stats.await_args.kwargs["cache_write_tokens"] == 8000
+            assert tu.record_usage.await_args.kwargs["cost_usd"] is None
+            # ...and the raw splits land in the usage row's cache columns.
+            assert tu.record_usage.await_args.kwargs["cache_read_tokens"] == 4000
+            assert tu.record_usage.await_args.kwargs["cache_write_tokens"] == 8000
 
     @pytest.mark.asyncio
     async def test_broker_on_with_no_enabled_models_errors_cleanly(self):
@@ -1379,3 +1391,123 @@ class TestOpencodeHardening:
         dones = [e for e in events if e.type == "done"]
         assert len(dones) == 1 and not dones[0].metadata.get("stopped")  # genuine done, not stopped
         assert "assistant" in saved_roles  # the completed answer was persisted
+
+
+class TestBrokerAuthoritySwitch:
+    """P2: broker-on skips ONLY the engine-side budget row; session stats stay engine-fed."""
+
+    _patch = TestOrchestrateOpencode._patch
+
+    @pytest.mark.asyncio
+    async def test_broker_on_skips_engine_usage_row_keeps_stats(self):
+        line = (
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":10,"output":5},"cost":0.0123}}\n'
+        )
+        es, _cap = self._patch(history=[], exec_lines=[line])
+        with (
+            es,
+            patch.object(
+                oo.llm_broker,
+                "agent_broker_env",
+                MagicMock(return_value={"AWS_BEARER_TOKEN_BEDROCK": "grant-x"}),
+            ),
+            patch.object(
+                oo.llm_broker,
+                "agent_bedrock_endpoint_url",
+                MagicMock(return_value="http://broker/api/llm-proxy"),
+            ),
+            patch.object(oo.llm_broker, "burn_env", MagicMock()),
+            patch.object(oo, "_publish_workdir_file", lambda wd, name, content: None),
+        ):
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            tu.update_session_stats.assert_awaited_once()
+            tu.record_usage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_broker_off_engine_usage_row_carries_turn_id(self):
+        line = (
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":10,"output":5},"cost":0.0123}}\n'
+        )
+        es, _cap = self._patch(history=[], exec_lines=[line])
+        with (
+            es,
+            patch.object(oo.llm_broker, "agent_broker_env", MagicMock(return_value={})),
+            patch.object(oo.llm_broker, "agent_bedrock_endpoint_url", MagicMock(return_value=None)),
+        ):
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            tu.update_session_stats.assert_awaited_once()
+            tu.record_usage.assert_awaited_once()
+            assert isinstance(tu.record_usage.await_args.kwargs["turn_id"], uuid.UUID)
+
+
+class TestStampFirstAssistantRow:
+    _patch = TestOrchestrateOpencode._patch
+
+    @pytest.mark.asyncio
+    async def test_turn_totals_stamped_on_first_assistant_row(self):
+        """Bubble fusion keeps the FIRST assistant row's fields — stamp must target it."""
+        lines = [
+            b'{"type":"text","part":{"type":"text","text":"looking..."}}\n',
+            (
+                b'{"type":"tool_use","part":{"tool":"bash","callID":"c1",'
+                b'"state":{"status":"completed","input":{},"output":"ok","metadata":{"exit":0}}}}\n'
+            ),
+            b'{"type":"text","part":{"type":"text","text":"done."}}\n',
+            (
+                b'{"type":"step_finish","part":{"reason":"stop",'
+                b'"tokens":{"input":7,"output":16,"cache":{"read":12608,"write":0}},"cost":0.0}}\n'
+            ),
+        ]
+        es, _cap = self._patch(history=[], exec_lines=lines)
+        stamp = AsyncMock()
+        # save order: user turn, FIRST assistant flush (text+tool), tool_result, trailing text.
+        user_row = SimpleNamespace(id=uuid.uuid4())
+        first_row = SimpleNamespace(id=uuid.uuid4())
+        with es, patch("app.services.turn_usage.stamp_message_usage", stamp):
+            oo.save_message.side_effect = [
+                user_row,
+                first_row,
+                SimpleNamespace(id=uuid.uuid4()),
+                SimpleNamespace(id=uuid.uuid4()),
+            ]
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            stamp.assert_awaited_once()
+            args, kwargs = stamp.await_args
+            assert args[1] == first_row.id
+            assert kwargs["input_tokens"] == 7  # FRESH input — cache not folded in
+            assert kwargs["cache_read_tokens"] == 12608
+            # session stats carry the splits too
+            assert tu.update_session_stats.await_args.kwargs["input_tokens"] == 7
+            assert tu.update_session_stats.await_args.kwargs["cache_read_tokens"] == 12608

@@ -403,6 +403,8 @@ def mock_session_obj(mock_cluster: MagicMock) -> MagicMock:
     session.is_archived = False
     session.total_input_tokens = 100
     session.total_output_tokens = 50
+    session.total_cache_read_tokens = 0
+    session.total_cache_write_tokens = 0
     session.total_tool_calls = 2
     session.total_iterations = 1
     session.created_at = datetime.now(UTC)

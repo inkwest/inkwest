@@ -35,6 +35,7 @@ from app.services.messages import (
     save_message,
     save_session_event,
     set_cli_session_id,
+    stamp_message_usage,
     update_session_stats,
     update_session_summary,
     update_session_title,
@@ -499,11 +500,24 @@ async def test_update_stats_increments_atomically(db: AsyncSession) -> None:
     await update_session_stats(
         db, sid, input_tokens=10, output_tokens=5, tool_calls=1, iterations=1
     )
-    await update_session_stats(db, sid, input_tokens=3, output_tokens=2, tool_calls=2, iterations=1)
+    await update_session_stats(
+        db,
+        sid,
+        input_tokens=3,
+        output_tokens=2,
+        tool_calls=2,
+        iterations=1,
+        cache_read_tokens=60,
+        cache_write_tokens=20,
+    )
+    # Cache counters accumulate across calls (nonzero + nonzero), like the other totals.
+    await update_session_stats(db, sid, cache_read_tokens=40, cache_write_tokens=5)
     stats = await get_session_stats(db, sid)
     assert stats == {
         "total_input_tokens": 13,
         "total_output_tokens": 7,
+        "total_cache_read_tokens": 100,
+        "total_cache_write_tokens": 25,
         "total_tool_calls": 3,
         "total_iterations": 2,
     }
@@ -514,6 +528,8 @@ async def test_get_stats_missing_session_returns_zeros(db: AsyncSession) -> None
     assert stats == {
         "total_input_tokens": 0,
         "total_output_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "total_cache_write_tokens": 0,
         "total_tool_calls": 0,
         "total_iterations": 0,
     }
@@ -541,3 +557,73 @@ async def test_get_stats_returns_persisted_totals(db: AsyncSession) -> None:
     stats = await get_session_stats(db, sid)
     assert stats["total_input_tokens"] == 100
     assert stats["total_tool_calls"] == 5
+
+
+# --- P4: per-message cache tokens + post-hoc usage stamping ------------------------------
+
+
+async def test_save_message_persists_cache_tokens(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    msg = await save_message(
+        db,
+        sid,
+        "assistant",
+        "hello",
+        input_tokens=10,
+        output_tokens=349,
+        cache_read_tokens=0,
+        cache_write_tokens=26797,
+    )
+    assert msg.cache_read_tokens == 0
+    assert msg.cache_write_tokens == 26797
+    assert msg.input_tokens == 10
+
+
+async def test_stamp_message_usage_backfills_saved_row(db: AsyncSession) -> None:
+    """Agent/opencode save assistant rows before the terminal usage exists; the stamp
+    writes the turn totals back onto the turn's FIRST assistant row — bubble fusion
+    keeps the first row's fields, so that row is what the per-bubble line reads."""
+    sid = await _make_session(db)
+    msg = await save_message(db, sid, "assistant", "streamed early")
+    assert msg.input_tokens is None
+
+    await stamp_message_usage(
+        db,
+        msg.id,
+        input_tokens=7,
+        output_tokens=16,
+        cache_read_tokens=12608,
+        cache_write_tokens=0,
+    )
+    await db.refresh(msg)
+    assert msg.input_tokens == 7
+    assert msg.output_tokens == 16
+    assert msg.token_count == 16  # coherent with save_message's fallback semantics
+    assert msg.cache_read_tokens == 12608
+    assert msg.cache_write_tokens == 0
+
+
+async def test_update_session_stats_no_commit_joins_caller_txn(db: AsyncSession) -> None:
+    """commit=False leaves the increment uncommitted — turn_usage folds it into the
+    budget-row transaction so the two land (or roll back) together."""
+    sid = await _make_session(db)
+    await update_session_stats(db, sid, input_tokens=10, output_tokens=5, commit=False)
+    await db.rollback()
+    stats = await get_session_stats(db, sid)
+    assert stats["total_input_tokens"] == 0  # rolled back with the caller's txn
+
+    await update_session_stats(db, sid, input_tokens=10, output_tokens=5, commit=False)
+    await db.commit()
+    stats = await get_session_stats(db, sid)
+    assert stats["total_input_tokens"] == 10
+
+
+async def test_update_session_stats_clamps_negative_inputs(db: AsyncSession) -> None:
+    """Engine-reported counts are sandbox-influenced: negatives must never walk totals back."""
+    sid = await _make_session(db)
+    await update_session_stats(db, sid, input_tokens=10, output_tokens=5)
+    await update_session_stats(db, sid, input_tokens=-9999, output_tokens=-1, cache_read_tokens=-5)
+    stats = await get_session_stats(db, sid)
+    assert stats["total_input_tokens"] == 10
+    assert stats["total_output_tokens"] == 5
+    assert stats["total_cache_read_tokens"] == 0

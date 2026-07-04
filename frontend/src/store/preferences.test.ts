@@ -83,6 +83,13 @@ describe('preferencesStore', () => {
     expect(put.mock.calls[0][0].ui?.showTimestamps).toBe(false);
   });
 
+  it('round-trips showTokenCounts through saveUi', async () => {
+    const put = vi.spyOn(api, 'updateMyPreferences').mockResolvedValue(resp());
+    await usePreferencesStore.getState().saveUi({ showTokenCounts: false });
+    expect(useSettingsStore.getState().showTokenCounts).toBe(false);
+    expect(put.mock.calls[0][0].ui?.showTokenCounts).toBe(false);
+  });
+
   it('setAdminSkillEnabled toggles the disabled set', async () => {
     const put = vi.spyOn(api, 'updateMyPreferences').mockResolvedValue(resp());
     await usePreferencesStore.getState().setAdminSkillEnabled('foo', false);

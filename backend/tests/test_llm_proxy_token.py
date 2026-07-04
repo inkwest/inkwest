@@ -97,3 +97,66 @@ def test_store_is_hard_capped(monkeypatch) -> None:
     assert t.verify(tokens[-1]).session_id == str(_S)
     with pytest.raises(ProxyAuthError):
         t.verify(tokens[0])  # oldest evicted under the cap
+
+
+def test_mint_carries_engine_and_turn_id() -> None:
+    turn = uuid.uuid4()
+    claims = t.verify(t.mint(_U, _S, engine="opencode", turn_id=turn))
+    assert claims.engine == "opencode"
+    assert claims.turn_id == str(turn)
+
+
+def test_mint_engine_turn_default_none() -> None:
+    claims = t.verify(t.mint(_U, _S))
+    assert claims.engine is None
+    assert claims.turn_id is None
+
+
+def test_grant_call_cap_kills_grant(monkeypatch) -> None:
+    """Past the per-grant invocation ceiling the grant dies (cost-amplification bound):
+    subsequent verifies fail even though the TTL hasn't run out."""
+    monkeypatch.setattr(t, "_MAX_CALLS_PER_GRANT", 3)
+    tok = t.mint(_U, _S)
+    for _ in range(3):
+        assert t.verify(tok).session_id == str(_S)
+    with pytest.raises(ProxyAuthError):
+        t.verify(tok)
+    # Dead for good, not a one-off rejection.
+    with pytest.raises(ProxyAuthError):
+        t.verify(tok)
+
+
+def test_burn_clears_call_counter() -> None:
+    """The call counter lives and dies with its grant — no leak across burn."""
+    tok = t.mint(_U, _S)
+    t.verify(tok)
+    t.burn(tok)
+    assert tok not in t._grant_calls
+
+
+def test_store_cap_eviction_clears_call_counter(monkeypatch) -> None:
+    """Mint's cap eviction must route through _drop — a `del _grants[tok]` regression
+    would leak _grant_calls entries unbounded across mint storms."""
+    monkeypatch.setattr(t, "_MAX_GRANTS", 2)
+    # Leftover grants from earlier tests would win the oldest-expiring eviction race.
+    t._grants.clear()
+    t._grant_calls.clear()
+    old = t.mint(_U, _S)
+    t.verify(old)  # give the soon-evicted grant a call counter
+    t.mint(_U, _S)
+    t.mint(_U, _S)  # cap hit → evicts `old`
+    assert old not in t._grants
+    assert old not in t._grant_calls
+    # Invariant: the counter dict never holds keys the grant store doesn't.
+    assert set(t._grant_calls) <= set(t._grants)
+
+
+def test_sweep_clears_call_counter(monkeypatch) -> None:
+    """The opportunistic expired-grant sweep must clear the call counter too."""
+    monkeypatch.setattr(t, "_TTL_SECONDS", -1)  # everything minted is already expired
+    tok = t.mint(_U, _S)
+    t._grant_calls[tok] = 3  # simulate served calls before expiry
+    monkeypatch.setattr(t, "_TTL_SECONDS", 3600)
+    t.mint(_U, _S)  # mint sweeps the expired grant
+    assert tok not in t._grants
+    assert tok not in t._grant_calls

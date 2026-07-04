@@ -48,6 +48,8 @@ export interface UserSkill {
 export interface UiPreferences {
   compactToolCards?: boolean;
   showTimestamps?: boolean;
+  /** Per-bubble token line (in/out/cache) next to the timestamp. */
+  showTokenCounts?: boolean;
   wideComposer?: boolean;
   sidebarWidth?: number;
 }
@@ -92,6 +94,9 @@ export interface Session {
   engine?: string | null;
   total_input_tokens?: number;
   total_output_tokens?: number;
+  /** Cumulative prompt-cache tokens (input-side; total_input_tokens is FRESH input only). */
+  total_cache_read_tokens?: number;
+  total_cache_write_tokens?: number;
   created_at: string;
   updated_at: string;
   /** Collaboration markers (see backend SessionResponse). */
@@ -181,6 +186,12 @@ export interface Message {
   model?: string | null;
   /** Agentic engine that produced this assistant turn; null/undefined for older or non-assistant rows. */
   engine?: string | null;
+  /** Per-turn token counts (assistant rows; the turn's first assistant row carries them).
+   *  input_tokens is FRESH input — cache tokens are reported separately, input-side only. */
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
   status?: MessageStatus;
   error_message?: string;
   is_retryable?: boolean;

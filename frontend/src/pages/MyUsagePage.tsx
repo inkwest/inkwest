@@ -17,19 +17,10 @@ import { useMyUsageStore, MY_USAGE_SESSIONS_LIMIT } from '@/store/usage';
 import { TrendingUp, MessageSquare, Cpu, DollarSign } from 'lucide-react';
 import type { UsageDateRange } from '@/services/usageApi';
 import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost } from '@/lib/usageFormat';
+import { formatTokens, formatCost, formatCostTotal } from '@/lib/usageFormat';
 import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
-import {
-  ComposedChart,
-  Bar,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from 'recharts';
+import { TokenBreakdownCard } from '@/components/usage/TokenBreakdownCard';
+import { UsageOverTimeChart } from '@/components/usage/UsageOverTimeChart';
 
 const periodOptions = [
   { value: 'hourly', label: 'Last Hour' },
@@ -50,13 +41,13 @@ function lastMonthRange(): UsageDateRange {
   };
 }
 
-function formatTimeseriesLabel(iso: string, period: string) {
-  const d = new Date(iso);
-  if (period === 'hourly' || period === 'daily') return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return d.toISOString().slice(0, 10);
-}
-
-type SessionSortKey = 'title' | 'request_count' | 'total_tokens' | 'cost_usd';
+type SessionSortKey =
+  | 'title'
+  | 'request_count'
+  | 'total_tokens'
+  | 'cache_read_tokens'
+  | 'cache_write_tokens'
+  | 'cost_usd';
 
 const SESSIONS_PAGE_SIZE = 10;
 
@@ -89,7 +80,7 @@ export function MyUsagePage() {
           if (sessionKey === 'title') {
             return dir * (a.title || '').localeCompare(b.title || '');
           }
-          return dir * ((a[sessionKey] as number) - (b[sessionKey] as number));
+          return dir * (((a[sessionKey] as number) || 0) - ((b[sessionKey] as number) || 0));
         });
 
   // Front-only pager over the conversation rows.
@@ -223,7 +214,7 @@ export function MyUsagePage() {
                   </div>
                   <div>
                     <p className="text-sm text-gray-400">Total Cost</p>
-                    <p className="text-2xl font-bold">{formatCost(summary.total_cost_usd)}</p>
+                    <p className="text-2xl font-bold">{formatCostTotal(summary.total_cost_usd)}</p>
                   </div>
                 </CardContent>
               </Card>
@@ -242,44 +233,11 @@ export function MyUsagePage() {
             </div>
           )}
 
-          {timeseries.length > 0 && (
-            <Card variant="bordered">
-              <CardHeader>
-                <CardTitle>Usage Over Time</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ResponsiveContainer width="100%" height={300}>
-                  <ComposedChart data={timeseries.map((p) => ({
-                    ...p,
-                    label: formatTimeseriesLabel(p.timestamp, period),
-                    total_tokens: p.input_tokens + p.output_tokens,
-                  }))}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                    <XAxis dataKey="label" tick={{ fill: '#9CA3AF', fontSize: 12 }} />
-                    {/* Left axis: token bars. Right axis: cost line — separate scales so a
-                        small dollar figure stays readable next to millions of tokens. */}
-                    <YAxis yAxisId="tokens" tick={{ fill: '#9CA3AF', fontSize: 12 }} tickFormatter={(v) => formatTokens(v)} />
-                    <YAxis yAxisId="cost" orientation="right" tick={{ fill: '#F59E0B', fontSize: 12 }} tickFormatter={(v) => formatCost(v)} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: 8 }}
-                      labelStyle={{ color: '#E5E7EB' }}
-                      formatter={(value, name) =>
-                        name === 'cost_usd'
-                          ? [formatCost(Number(value) || 0), 'Cost']
-                          : [formatTokens(Number(value) || 0), name === 'input_tokens' ? 'Input' : 'Output']
-                      }
-                    />
-                    <Legend formatter={(value) => value === 'input_tokens' ? 'Input tokens' : value === 'output_tokens' ? 'Output tokens' : 'Cost'} />
-                    <Bar yAxisId="tokens" dataKey="input_tokens" stackId="tokens" fill="#3B82F6" radius={[0, 0, 0, 0]} />
-                    <Bar yAxisId="tokens" dataKey="output_tokens" stackId="tokens" fill="#10B981" radius={[4, 4, 0, 0]} />
-                    <Line yAxisId="cost" type="monotone" dataKey="cost_usd" stroke="#F59E0B" strokeWidth={2} dot={false} />
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
-          )}
+          <UsageOverTimeChart timeseries={timeseries} period={period} />
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {summary && <TokenBreakdownCard summary={summary} />}
+
+          <div className="space-y-6">
             {/* My Conversations */}
             <Card variant="bordered">
               <CardHeader>
@@ -338,6 +296,12 @@ export function MyUsagePage() {
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'total_tokens')} onClick={() => toggleSessionSort('total_tokens')}>
                         Tokens{sortArrow(sessionSort, 'total_tokens')}
                       </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cache_read_tokens')} onClick={() => toggleSessionSort('cache_read_tokens')} title="Prompt-cache reads (billed ~0.1x input rate)">
+                        Cache R{sortArrow(sessionSort, 'cache_read_tokens')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cache_write_tokens')} onClick={() => toggleSessionSort('cache_write_tokens')} title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)">
+                        Cache W{sortArrow(sessionSort, 'cache_write_tokens')}
+                      </TableHead>
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cost_usd')} onClick={() => toggleSessionSort('cost_usd')}>
                         Cost{sortArrow(sessionSort, 'cost_usd')}
                       </TableHead>
@@ -356,12 +320,14 @@ export function MyUsagePage() {
                         </TableCell>
                         <TableCell className="text-right text-gray-400">{s.request_count}</TableCell>
                         <TableCell className="text-right">{formatTokens(s.total_tokens)}</TableCell>
+                        <TableCell className="text-right text-gray-400">{formatTokens(s.cache_read_tokens || 0)}</TableCell>
+                        <TableCell className="text-right text-gray-400">{formatTokens(s.cache_write_tokens || 0)}</TableCell>
                         <TableCell className="text-right">{formatCost(s.cost_usd)}</TableCell>
                       </TableRow>
                     ))}
                     {sessions.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={4} className="text-center py-8 text-gray-400">
+                        <TableCell colSpan={6} className="text-center py-8 text-gray-400">
                           No usage data for this period
                         </TableCell>
                       </TableRow>
@@ -375,48 +341,6 @@ export function MyUsagePage() {
             <ModelUsageTable data={modelUsage} />
           </div>
 
-          {summary && (
-            <Card variant="bordered">
-              <CardHeader>
-                <CardTitle>Token Breakdown</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div>
-                    <p className="text-sm text-gray-400">Input Tokens</p>
-                    <p className="text-xl font-bold">{formatTokens(summary.total_input_tokens)}</p>
-                    <div className="mt-2 h-2 bg-gray-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-blue-500"
-                        style={{
-                          width: `${summary.total_tokens > 0 ? (summary.total_input_tokens / summary.total_tokens) * 100 : 0}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-400">Output Tokens</p>
-                    <p className="text-xl font-bold">{formatTokens(summary.total_output_tokens)}</p>
-                    <div className="mt-2 h-2 bg-gray-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-green-500"
-                        style={{
-                          width: `${summary.total_tokens > 0 ? (summary.total_output_tokens / summary.total_tokens) * 100 : 0}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-400">Requests</p>
-                    <p className="text-xl font-bold">{summary.request_count}</p>
-                    <p className="text-sm text-gray-500 mt-2">
-                      ~{summary.request_count > 0 ? Math.round(summary.total_tokens / summary.request_count) : 0} tokens/request
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
         </>
       )}
       </div>

@@ -6,9 +6,11 @@ passthrough, ARN round-trip, body cap, and the error-code split.
 """
 
 import asyncio
+import contextlib
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import quote
 
 import httpx
@@ -62,9 +64,11 @@ def _reset_proxy_state():
 
     llm_proxy._transport = None
     llm_proxy_token._grants.clear()
+    llm_proxy._persist_tasks.clear()
     yield
     llm_proxy._transport = None
     llm_proxy_token._grants.clear()
+    llm_proxy._persist_tasks.clear()
 
 
 def _patches(handler, *, settings=None, allowed=None):
@@ -734,3 +738,470 @@ async def test_close_stream_closes_client_even_if_aclose_raises() -> None:
     with pytest.raises(RuntimeError):
         await close_stream(_Boom(), _Client())
     assert closed["client"] is True  # closed despite the stream aclose raising
+
+
+# --- Broker metering (P1): passive tee + post-stream usage persistence -------------------
+#
+# Upstream bytes are the REAL captured fixtures from tests/fixtures/bedrock/ (see README
+# there) — the tests assert byte-identical forwarding AND one UsageRecord per call with the
+# correct 4-way token split. record_usage / the DB session factory are patched at the route's
+# namespace; the tee itself is exercised for real.
+
+_FIXTURES = Path(__file__).parent / "fixtures" / "bedrock"
+
+_ENGINE = "claude-cli"
+_TURN = uuid.UUID("00000000-0000-4000-8000-00000000aaaa")
+
+
+def _fixture_streaming(name: str, chunk_size: int = 1024) -> httpx.Response:
+    """A streaming MockTransport response replaying a real fixture in several chunks."""
+    data = (_FIXTURES / name).read_bytes()
+
+    async def gen():
+        for i in range(0, len(data), chunk_size):
+            yield data[i : i + chunk_size]
+
+    return httpx.Response(
+        200, headers={"content-type": "application/vnd.amazon.eventstream"}, content=gen()
+    )
+
+
+def _metering_patches(handler, record_usage_mock):
+    """The standard patch set + a stubbed DB layer for the post-stream persist."""
+    db = AsyncMock()
+
+    @contextlib.asynccontextmanager
+    async def session_maker():
+        yield db
+
+    return db, _patches(handler) + [
+        patch("app.api.routes.llm_proxy.record_usage", record_usage_mock),
+        patch("app.api.routes.llm_proxy.async_session_maker", session_maker),
+        patch("app.api.routes.llm_proxy._PERSIST_RETRY_DELAY_SECONDS", 0),
+    ]
+
+
+async def _drain():
+    """The persist runs in a detached task — settle it before asserting."""
+    from app.api.routes import llm_proxy
+
+    await llm_proxy.drain_metering_persists()
+
+
+def _metered_bearer() -> dict[str, str]:
+    tok = llm_proxy_token.mint(_U, _S, engine=_ENGINE, turn_id=_TURN)
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def _failures(reason: str) -> float:
+    """Current value of the metering-failure counter for one reason label, via the
+    public collect() API (never-incremented label ⇒ 0.0)."""
+    from app.core import metrics
+
+    for metric in metrics.llm_metering_failures_total.collect():
+        for sample in metric.samples:
+            if sample.name.endswith("_total") and sample.labels.get("reason") == reason:
+                return sample.value
+    return 0.0
+
+
+def _all_failures() -> float:
+    return sum(_failures(r) for r in ("no_usage", "no_session", "persist_failed"))
+
+
+_METER_CASES = [
+    # (fixture, op, in, out, cache_read, cache_write)
+    ("invoke_stream_nocache.bin", "invoke-with-response-stream", 365, 17, 0, 0),
+    ("invoke_stream_cachewrite.bin", "invoke-with-response-stream", 10, 349, 0, 26797),
+    ("invoke_stream_cacheread.bin", "invoke-with-response-stream", 10, 885, 27082, 3242),
+    ("converse_stream_nocache.bin", "converse-stream", 6472, 4, 0, 0),
+    ("converse_nonstream_cachekeys.bin", "converse", 11183, 461, 0, 0),
+    ("converse_nonstream_cachewrite.bin", "converse", 7, 16, 0, 12608),
+    ("converse_nonstream_cacheread.bin", "converse", 7, 16, 12608, 0),
+    ("invoke_nonstream.bin", "invoke", 8, 1, 0, 0),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fixture", "op", "in_tok", "out_tok", "read_tok", "write_tok"),
+    _METER_CASES,
+    ids=[c[0] for c in _METER_CASES],
+)
+async def test_metering_forwards_bytes_and_persists_one_row(
+    fixture, op, in_tok, out_tok, read_tok, write_tok
+) -> None:
+    data = (_FIXTURES / fixture).read_bytes()
+    record = AsyncMock()
+    db, ps = _metering_patches(lambda request: _fixture_streaming(fixture), record)
+    failures_before = _all_failures()
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/{op}",
+                headers=_metered_bearer(),
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        assert resp.content == data  # forwarded byte-identical
+        await _drain()
+        # No false alarms: a fully-metered call must leave the failure counter flat.
+        assert _all_failures() == failures_before
+        record.assert_awaited_once()
+        kwargs = record.await_args.kwargs
+        assert kwargs["input_tokens"] == in_tok
+        assert kwargs["output_tokens"] == out_tok
+        assert kwargs["cache_read_tokens"] == read_tok
+        assert kwargs["cache_write_tokens"] == write_tok
+        assert kwargs["cache_write_1h_tokens"] == 0  # only 5m TTL observed live
+        assert kwargs["source"] == "broker"
+        assert kwargs["provider"] == _ENGINE
+        assert kwargs["turn_id"] == _TURN
+        assert kwargs["session_id"] == _S
+        assert kwargs["user_id"] == _U
+        # target → model normalization ran: the row aggregates under the registry's
+        # friendly id (route prefix stripped), not the raw invoke target.
+        from app.services import model_registry
+
+        assert kwargs["model"] == model_registry.resolve_invoke_target(MODEL)
+        assert kwargs["model"] == "claude-opus-4-8"
+        assert kwargs["record_id"] is not None  # fixed PK = the retry idempotency key
+        db.commit.assert_awaited_once()
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_truncated_invoke_stream_bills_self_report(caplog) -> None:
+    """Truncated REAL invoke-stream fixture (no terminal metrics frame — the abort shape):
+    bytes still forwarded byte-identical, and the tee's self-report fallback persists a
+    row (AWS bills the cut call; see llm_metering) instead of dropping it."""
+    data = (_FIXTURES / "invoke_stream_cachewrite.bin").read_bytes()[:-500]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        async def gen():
+            yield data
+
+        return httpx.Response(200, content=gen())
+
+    record = AsyncMock()
+    db, ps = _metering_patches(handler, record)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/invoke-with-response-stream",
+                headers=_metered_bearer(),
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        assert resp.content == data
+        await _drain()
+        record.assert_awaited_once()
+        kwargs = record.await_args.kwargs
+        # Self-report values (message_start), not the billed metrics the cut swallowed.
+        assert kwargs["input_tokens"] == 10
+        assert kwargs["cache_write_tokens"] == 26797
+        assert kwargs["source"] == "broker"
+        db.commit.assert_awaited_once()
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_truncated_converse_stream_no_row_bumps_counter(caplog) -> None:
+    """Truncated REAL converse-stream fixture: usage only rides the terminal metadata
+    event, so a cut stream yields no row — the documented alert counter must move
+    (reason=no_usage), the bytes still forward byte-identical."""
+    data = (_FIXTURES / "converse_stream_nocache.bin").read_bytes()[:-200]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        async def gen():
+            yield data
+
+        return httpx.Response(200, content=gen())
+
+    record = AsyncMock()
+    db, ps = _metering_patches(handler, record)
+    before = _failures("no_usage")
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse-stream",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+        assert resp.status_code == 200
+        assert resp.content == data
+        record.assert_not_awaited()
+        db.commit.assert_not_awaited()
+        assert "llm_proxy_metering_no_usage" in caplog.text
+        assert _failures("no_usage") == before + 1
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_skips_non_2xx() -> None:
+    """An errored Bedrock call (4xx/5xx) has no billable tokens — no row."""
+    record = AsyncMock()
+    db, ps = _metering_patches(
+        lambda request: _streaming(429, b'{"message":"Too many requests"}'), record
+    )
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse",
+                headers=_metered_bearer(),
+                content=b"{}",
+            )
+        assert resp.status_code == 429
+        record.assert_not_awaited()
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_persist_failure_never_breaks_the_stream(caplog) -> None:
+    record = AsyncMock(side_effect=RuntimeError("db down"))
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    before = _failures("persist_failed")
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+            await _drain()
+        assert resp.status_code == 200
+        assert resp.content == (_FIXTURES / "converse_nonstream_cacheread.bin").read_bytes()
+        assert record.await_count == 2  # one retry before giving up
+        assert "llm_proxy_metering_persist_failed" in caplog.text
+        assert _failures("persist_failed") == before + 1
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_persist_retries_transient_failure() -> None:
+    """A one-off DB blip (broker rows are the turn's ONLY budget record) must not drop
+    the row: attempt 2 lands it, no failure counted."""
+    record = AsyncMock(side_effect=[RuntimeError("blip"), AsyncMock()])
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    failures_before = _all_failures()
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse",
+                headers=_metered_bearer(),
+                content=b"{}",
+            )
+        await _drain()
+        assert resp.status_code == 200
+        assert record.await_count == 2
+        # Same PK on both attempts: an ambiguous first commit can only collide, not double.
+        first, second = record.await_args_list
+        assert first.kwargs["record_id"] == second.kwargs["record_id"]
+        db.commit.assert_awaited_once()
+        assert _all_failures() == failures_before
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_persist_retry_pk_collision_is_success(caplog) -> None:
+    """Ambiguous first commit (landed server-side, ack lost): the retry's re-INSERT hits
+    the fixed record_id PK — logged as already-persisted, NOT a failure."""
+    from sqlalchemy.exc import IntegrityError
+
+    record = AsyncMock(
+        side_effect=[
+            RuntimeError("commit ack lost"),
+            IntegrityError("dup pk", params=None, orig=Exception("duplicate key")),
+        ]
+    )
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    before = _failures("persist_failed")
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("INFO"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+            await _drain()
+        assert resp.status_code == 200
+        assert record.await_count == 2
+        assert "llm_proxy_metering_already_persisted" in caplog.text
+        assert _failures("persist_failed") == before  # not a failure
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_finish_stream_teardown_failure_still_persists(caplog) -> None:
+    """An already-reset connection makes close_stream raise inside the BackgroundTask —
+    the call's usage row must still land (billing can't hinge on teardown hygiene)."""
+    record = AsyncMock()
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    ps.append(
+        patch(
+            "app.api.routes.llm_proxy.close_stream",
+            AsyncMock(side_effect=RuntimeError("already reset")),
+        )
+    )
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+            await _drain()
+        assert resp.status_code == 200
+        assert "llm_proxy_stream_teardown_failed" in caplog.text
+        record.assert_awaited_once()
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_persist_overflow_drops_and_counts(caplog) -> None:
+    """The pending-task cap (DB-outage backstop): past it the row is dropped and alarmed,
+    never queued unboundedly."""
+    record = AsyncMock()
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    ps.append(patch("app.api.routes.llm_proxy._MAX_PENDING_PERSISTS", 0))
+    before = _failures("persist_failed")
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+            await _drain()
+        assert resp.status_code == 200
+        assert "llm_proxy_metering_persist_overflow" in caplog.text
+        record.assert_not_awaited()
+        assert _failures("persist_failed") == before + 1
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_legacy_grant_defaults(caplog) -> None:
+    """A grant minted without engine/turn_id (pre-P1 callers) still meters: provider falls
+    back to 'unknown', turn_id stays None."""
+    record = AsyncMock()
+    db, ps = _metering_patches(lambda request: _fixture_streaming("invoke_nonstream.bin"), record)
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/invoke",
+                headers=_bearer(),  # legacy mint(_U, _S)
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        await _drain()
+        record.assert_awaited_once()
+        kwargs = record.await_args.kwargs
+        assert kwargs["provider"] == "unknown"
+        assert kwargs["turn_id"] is None
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_skips_grant_without_session(caplog) -> None:
+    """A grant minted with no session can't be attributed — warning + failure counter,
+    never an exception into the response lifecycle."""
+    record = AsyncMock()
+    db, ps = _metering_patches(lambda request: _fixture_streaming("invoke_nonstream.bin"), record)
+    for p in ps:
+        p.start()
+    try:
+        tok = llm_proxy_token.mint(None, None, engine=_ENGINE, turn_id=_TURN)
+        before = _failures("no_session")
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/invoke",
+                    headers={"Authorization": f"Bearer {tok}"},
+                    content=b"{}",
+                )
+        assert resp.status_code == 200
+        record.assert_not_awaited()
+        assert "llm_proxy_metering_no_session" in caplog.text
+        assert _failures("no_session") == before + 1
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_gets_are_never_metered() -> None:
+    """Only data-plane calls carry a tee: a control-plane GET (non-Bedrock-usage JSON)
+    must produce no usage row and no parse warning."""
+    record = AsyncMock()
+    db, ps = _metering_patches(
+        lambda request: _streaming(200, b'{"inferenceProfileSummaries": []}'), record
+    )
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.get(
+                "/api/llm-proxy/inference-profiles",
+                headers=_metered_bearer(),
+            )
+        assert resp.status_code == 200
+        record.assert_not_awaited()
+    finally:
+        for p in ps:
+            p.stop()
