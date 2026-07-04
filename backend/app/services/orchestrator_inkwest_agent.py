@@ -31,7 +31,7 @@ from app.core import metrics
 from app.core.config import get_settings
 from app.core.constants import MAX_RESPONSE_TOKENS
 from app.services import attachments as attachments_svc
-from app.services import llm_broker, model_registry
+from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
 from app.services.budget_service import record_usage
@@ -311,7 +311,11 @@ async def orchestrate_chat_inkwest_agent(
         # env ⇄ None endpoint). The grant rides connector_env (docker exec -e), OVERRIDING the
         # AWS_BEARER_TOKEN_BEDROCK in sandbox.env so the real key need not live in the sandbox; the
         # endpoint rides the TurnSpec below. Off ⇒ empty ⇒ today's behavior (real bearer direct).
-        broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
+        # One turn_id for every usage row this turn produces (broker grant + engine fallback).
+        turn_id = uuid.uuid4()
+        broker_env = llm_broker.agent_broker_env(
+            user_id, session_uuid, engine=engines.INKWEST_AGENT, turn_id=turn_id
+        )
         broker_endpoint_url = llm_broker.agent_bedrock_endpoint_url() if broker_env else None
         if broker_env:
             connector_env = {**connector_env, **broker_env}

@@ -391,3 +391,69 @@ async def test_delete_rejects_discovered_model():
     with pytest.raises(ValueError, match="cannot be deleted"):
         await model_registry.delete_model(db, "claude-opus-4-8")
     db.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Invoke-target normalization (broker metering)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_invoke_target_exact_id():
+    model_catalog._live_models = ["claude-opus-4-8"]
+    assert model_registry.resolve_invoke_target("claude-opus-4-8") == "claude-opus-4-8"
+
+
+def test_resolve_invoke_target_profile_id_and_arn():
+    arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.anthropic.claude-opus-4-8"
+    model_catalog._live_models = ["anthropic.claude-opus-4-8"]
+    model_catalog._profile_arns = {
+        "eu.anthropic.claude-opus-4-8": arn,
+        "anthropic.claude-opus-4-8": arn,
+    }
+    model_registry._rows = {
+        "anthropic.claude-opus-4-8": _row("anthropic.claude-opus-4-8", enabled=True, arn=arn)
+    }
+    # The engine may invoke via the profile id or the ARN — both map back to the entry.
+    assert (
+        model_registry.resolve_invoke_target("eu.anthropic.claude-opus-4-8")
+        == "anthropic.claude-opus-4-8"
+    )
+    assert model_registry.resolve_invoke_target(arn) == "anthropic.claude-opus-4-8"
+
+
+def test_resolve_invoke_target_route_prefix_normalization():
+    """No arn/profile row, but the route-prefixed id normalizes to a known entry."""
+    model_catalog._live_models = ["anthropic.claude-opus-4-8"]
+    assert (
+        model_registry.resolve_invoke_target("eu.anthropic.claude-opus-4-8")
+        == "anthropic.claude-opus-4-8"
+    )
+
+
+def test_resolve_invoke_target_unknown_verbatim():
+    model_catalog._live_models = ["claude-opus-4-8"]
+    assert model_registry.resolve_invoke_target("weird-target") == "weird-target"
+
+
+def test_resolve_invoke_target_covers_every_enabled_entry():
+    """Handoff open-point 2: normalization must hit for every enabled registry entry —
+    its id, its ARN, and every profile id of that ARN all resolve to the entry."""
+    arn_a = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.anthropic.claude-opus-4-8"
+    arn_b = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.meta.llama4-x"
+    model_catalog._live_models = ["anthropic.claude-opus-4-8", "meta.llama4-x"]
+    model_catalog._profile_arns = {
+        "eu.anthropic.claude-opus-4-8": arn_a,
+        "eu.meta.llama4-x": arn_b,
+    }
+    model_registry._rows = {
+        "anthropic.claude-opus-4-8": _row("anthropic.claude-opus-4-8", enabled=True, arn=arn_a),
+        "meta.llama4-x": _row("meta.llama4-x", enabled=True, arn=arn_b),
+    }
+    for entry in model_registry.merged_entries():
+        if not entry.enabled:
+            continue
+        assert model_registry.resolve_invoke_target(entry.model_id) == entry.model_id
+        if entry.arn:
+            assert model_registry.resolve_invoke_target(entry.arn) == entry.model_id
+            for pid in model_catalog.profile_ids_for_arn(entry.arn):
+                assert model_registry.resolve_invoke_target(pid) == entry.model_id

@@ -34,6 +34,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from urllib.parse import quote
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -48,9 +49,13 @@ from app.api.routes._proxy_stream import (
     read_capped_body,
     split_bearer,
 )
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.constants import LLM_PROXY_MAX_BODY_BYTES, LLM_PROXY_STREAM_MAX_SECONDS
+from app.core.database import async_session_maker
 from app.services import model_catalog, model_registry
+from app.services.budget_service import record_usage
+from app.services.llm_metering import MeteringTee
 from app.services.llm_proxy_token import LlmProxyClaims, ProxyAuthError, verify
 
 logger = logging.getLogger(__name__)
@@ -174,7 +179,15 @@ async def llm_proxy(model_path: str, request: Request) -> StreamingResponse:
     body = await read_capped_body(request, LLM_PROXY_MAX_BODY_BYTES)
     url, auth = _UPSTREAMS[_PROVIDER](target, op, request.url.query, region, bearer)
     return await _send(
-        request, method="POST", url=url, auth=auth, body=body, session_id=claims.session_id
+        request,
+        method="POST",
+        url=url,
+        auth=auth,
+        body=body,
+        session_id=claims.session_id,
+        meter=MeteringTee(op),
+        claims=claims,
+        target=target,
     )
 
 
@@ -249,6 +262,76 @@ async def _bounded_aiter(upstream: httpx.Response) -> AsyncIterator[bytes]:
         logger.warning("llm_proxy_stream_deadline_exceeded")
 
 
+async def _metered_aiter(
+    upstream: httpx.Response, meter: MeteringTee | None
+) -> AsyncIterator[bytes]:
+    """Passive tee over :func:`_bounded_aiter`: every chunk is observed, then yielded
+    unchanged. ``MeteringTee.feed`` never raises (it fails itself), so metering can neither
+    corrupt nor stall the forwarded stream."""
+    async for chunk in _bounded_aiter(upstream):
+        if meter is not None:
+            meter.feed(chunk)
+        yield chunk
+
+
+async def _finish_stream(
+    upstream: httpx.Response,
+    client: httpx.AsyncClient,
+    meter: MeteringTee | None,
+    claims: LlmProxyClaims | None,
+    target: str | None,
+) -> None:
+    """Post-stream BackgroundTask: tear down the upstream, then persist the metered usage.
+
+    Runs after the response body was fully sent (or the client vanished) — decoupled from the
+    orchestrator's control flow, so a call completed before an engine crash is still billed
+    (AWS bills it too). Persistence is best-effort: any failure logs a warning and never
+    propagates into the response lifecycle."""
+    await close_stream(upstream, client)
+    if meter is None or claims is None or target is None:
+        return
+    usage = meter.result()
+    if usage is None:
+        # Parse failure or no terminal usage frame (e.g. disconnect mid-stream). The bytes
+        # were forwarded fine; we just can't account this call.
+        logger.warning(
+            "llm_proxy_metering_no_usage",
+            extra={"target": target, "session_id": claims.session_id},
+        )
+        return
+    if not claims.session_id:
+        logger.warning("llm_proxy_metering_no_session", extra={"target": target})
+        return
+    try:
+        # Label the sink's Prometheus counters with the real engine: this background task
+        # runs outside the orchestrator's turn context, so turn_engine() would be "unknown".
+        metrics.set_turn_engine(claims.engine or "unknown")
+        model = model_registry.resolve_invoke_target(target)
+        # The route has no request-scoped DB session — open a fresh one for the write.
+        async with async_session_maker() as db:
+            await record_usage(
+                db,
+                user_id=UUID(claims.user_id) if claims.user_id else None,
+                session_id=UUID(claims.session_id),
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                model=model,
+                provider=claims.engine or "unknown",
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                source="broker",
+                turn_id=UUID(claims.turn_id) if claims.turn_id else None,
+            )
+            await db.commit()
+    except Exception:
+        logger.warning(
+            "llm_proxy_metering_persist_failed",
+            extra={"target": target, "session_id": claims.session_id},
+            exc_info=True,
+        )
+
+
 async def _send(
     request: Request,
     *,
@@ -257,13 +340,18 @@ async def _send(
     auth: dict[str, str],
     body: bytes | None,
     session_id: str | None,
+    meter: MeteringTee | None = None,
+    claims: LlmProxyClaims | None = None,
+    target: str | None = None,
 ) -> StreamingResponse:
     """Forward one request to Bedrock and stream the response back untouched.
 
     Single teardown contract (mirrors mcp_proxy): on success the client + stream outlive this
     handler and are closed by ``close_stream`` once the body is consumed (or the client
     disconnects); on any failure OR cancellation before the StreamingResponse is handed off,
-    close the client here."""
+    close the client here. Data-plane calls additionally carry a :class:`MeteringTee` that
+    observes the forwarded bytes and persists a usage row post-stream (2xx only — an errored
+    Bedrock call has no billable tokens)."""
     client = httpx.AsyncClient(transport=_transport, timeout=TIMEOUT)
     upstream: httpx.Response | None = None
     try:
@@ -284,9 +372,11 @@ async def _send(
 
     # Unreachable with upstream None: send() failure raised above. Asserted for the type checker.
     assert upstream is not None
+    if upstream.status_code != 200:
+        meter = None  # non-2xx carries no invocationMetrics/usage — nothing billable
     return StreamingResponse(
-        _bounded_aiter(upstream),
+        _metered_aiter(upstream, meter),
         status_code=upstream.status_code,
         headers=filter_headers(upstream.headers, _RESP_STRIP),
-        background=BackgroundTask(close_stream, upstream, client),
+        background=BackgroundTask(_finish_stream, upstream, client, meter, claims, target),
     )

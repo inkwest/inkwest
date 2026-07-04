@@ -53,10 +53,17 @@ class ProxyAuthError(Exception):
 
 @dataclass(frozen=True)
 class LlmProxyClaims:
-    """Identity behind a live grant. Audit/budget correlation only — NOT a request gate."""
+    """Identity behind a live grant. Audit/budget correlation only — NOT a request gate.
+
+    ``engine`` and ``turn_id`` are supplied by the orchestrator at mint time (it knows the
+    resolved engine and owns the per-turn id) so broker usage rows carry the real engine and
+    aggregate per turn.
+    """
 
     user_id: str | None
     session_id: str | None
+    engine: str | None = None
+    turn_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,8 @@ class _Grant:
     user_id: str | None
     session_id: str | None
     expires_at: float  # time.monotonic() deadline (backstop)
+    engine: str | None = None
+    turn_id: str | None = None
 
 
 # token -> grant. Event-loop-confined; see module docstring for the single-replica assumption.
@@ -78,12 +87,19 @@ def _sweep(now: float) -> None:
         del _grants[tok]
 
 
-def mint(user_id: object | None, session_id: object | None) -> str:
+def mint(
+    user_id: object | None,
+    session_id: object | None,
+    engine: str | None = None,
+    turn_id: object | None = None,
+) -> str:
     """Mint a fresh opaque grant for this turn and register it. Returns the token to inject.
 
     ``user_id``/``session_id`` are stored for audit only (stringified); they never gate a
-    request. A new turn always gets a new token — there is no reuse to keep an injected env
-    stable, because the env is re-applied per turn via ``docker exec -e`` (nothing to churn).
+    request. ``engine``/``turn_id`` attribute the broker's usage rows (engine + per-turn
+    aggregation) — supplied by the orchestrator, also never a gate. A new turn always gets a
+    new token — there is no reuse to keep an injected env stable, because the env is
+    re-applied per turn via ``docker exec -e`` (nothing to churn).
     """
     now = time.monotonic()
     _sweep(now)
@@ -104,6 +120,8 @@ def mint(user_id: object | None, session_id: object | None) -> str:
         user_id=str(user_id) if user_id is not None else None,
         session_id=str(session_id) if session_id is not None else None,
         expires_at=now + _TTL_SECONDS,
+        engine=engine,
+        turn_id=str(turn_id) if turn_id is not None else None,
     )
     return token
 
@@ -120,7 +138,12 @@ def verify(token: str) -> LlmProxyClaims:
     if grant.expires_at <= time.monotonic():
         _grants.pop(token, None)  # lazily expire the orphan we just found
         raise ProxyAuthError("expired grant")
-    return LlmProxyClaims(user_id=grant.user_id, session_id=grant.session_id)
+    return LlmProxyClaims(
+        user_id=grant.user_id,
+        session_id=grant.session_id,
+        engine=grant.engine,
+        turn_id=grant.turn_id,
+    )
 
 
 def burn(token: str | None) -> None:

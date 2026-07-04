@@ -60,12 +60,19 @@ def broker_base_url() -> str | None:
     return f"{base.rstrip('/')}/api/llm-proxy"
 
 
-def cli_broker_env(user_id: UUID | str | None, session_id: UUID | str | None) -> dict[str, str]:
+def cli_broker_env(
+    user_id: UUID | str | None,
+    session_id: UUID | str | None,
+    engine: str | None = None,
+    turn_id: UUID | str | None = None,
+) -> dict[str, str]:
     """Env that routes the Claude CLI's Bedrock calls through the broker (claude-cli engine).
 
-    Empty when the broker is off/misconfigured ⇒ the CLI uses whatever ``sandbox_env_file``
-    provides (today's behavior). Injected via ``docker exec -e``, so these override the
-    env-file values for this turn's process without rebuilding the container.
+    ``engine``/``turn_id`` come from the orchestrator (it knows the resolved engine and owns
+    the per-turn id) and attribute the broker's usage rows. Empty when the broker is
+    off/misconfigured ⇒ the CLI uses whatever ``sandbox_env_file`` provides (today's
+    behavior). Injected via ``docker exec -e``, so these override the env-file values for
+    this turn's process without rebuilding the container.
     """
     base = broker_base_url()
     if base is None:
@@ -73,7 +80,7 @@ def cli_broker_env(user_id: UUID | str | None, session_id: UUID | str | None) ->
     return {
         "CLAUDE_CODE_USE_BEDROCK": "1",
         "ANTHROPIC_BEDROCK_BASE_URL": base,
-        _TOKEN_ENV: mint(user_id, session_id),
+        _TOKEN_ENV: mint(user_id, session_id, engine=engine, turn_id=turn_id),
     }
 
 
@@ -82,15 +89,21 @@ def agent_bedrock_endpoint_url() -> str | None:
     return broker_base_url()
 
 
-def agent_broker_env(user_id: UUID | str | None, session_id: UUID | str | None) -> dict[str, str]:
-    """Grant env injected into the inkwest-agent at spawn (``docker exec -e``).
+def agent_broker_env(
+    user_id: UUID | str | None,
+    session_id: UUID | str | None,
+    engine: str | None = None,
+    turn_id: UUID | str | None = None,
+) -> dict[str, str]:
+    """Grant env injected into a sandboxed agent at spawn (``docker exec -e``).
 
-    Only the grant rides the env here — the endpoint_url rides the TurnSpec
+    Serves BOTH inkwest-agent and opencode, so ``engine`` is passed by the orchestrator, not
+    hardcoded. Only the grant rides the env here — the endpoint_url rides the TurnSpec
     (:func:`agent_bedrock_endpoint_url`). Empty when the broker is off/misconfigured.
     """
     if broker_base_url() is None:
         return {}
-    return {_TOKEN_ENV: mint(user_id, session_id)}
+    return {_TOKEN_ENV: mint(user_id, session_id, engine=engine, turn_id=turn_id)}
 
 
 def burn_env(env: dict[str, str] | None) -> None:

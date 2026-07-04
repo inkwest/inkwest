@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
-from app.services import llm_broker
+from app.services import engines, llm_broker
 from app.services.ai_cli_client import execute_opencode, parse_opencode_response
 from app.services.ai_client import resolve_session_model
 from app.services.budget_service import record_usage
@@ -389,7 +389,11 @@ async def orchestrate_chat_opencode(
         # With the broker on, sandbox.env drops the real key (see sandbox.env.example / docs), so
         # the only Bedrock token in the sandbox is this ephemeral grant — burned at turn end
         # (finally). Off ⇒ empty/None ⇒ opencode uses the sandbox.env key direct (today's behavior).
-        broker_env = llm_broker.agent_broker_env(user_id, session_uuid)
+        # One turn_id for every usage row this turn produces (broker grant + engine fallback).
+        turn_id = uuid.uuid4()
+        broker_env = llm_broker.agent_broker_env(
+            user_id, session_uuid, engine=engines.OPENCODE, turn_id=turn_id
+        )
         broker_base = llm_broker.agent_bedrock_endpoint_url()
 
         # The broker is fail-closed: with NO enabled registry models nothing is invocable,

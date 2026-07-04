@@ -97,3 +97,16 @@ def test_store_is_hard_capped(monkeypatch) -> None:
     assert t.verify(tokens[-1]).session_id == str(_S)
     with pytest.raises(ProxyAuthError):
         t.verify(tokens[0])  # oldest evicted under the cap
+
+
+def test_mint_carries_engine_and_turn_id() -> None:
+    turn = uuid.uuid4()
+    claims = t.verify(t.mint(_U, _S, engine="opencode", turn_id=turn))
+    assert claims.engine == "opencode"
+    assert claims.turn_id == str(turn)
+
+
+def test_mint_engine_turn_default_none() -> None:
+    claims = t.verify(t.mint(_U, _S))
+    assert claims.engine is None
+    assert claims.turn_id is None

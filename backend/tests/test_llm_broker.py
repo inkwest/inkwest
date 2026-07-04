@@ -90,3 +90,17 @@ def test_burn_env_revokes_grant() -> None:
 def test_burn_env_none_and_empty_safe() -> None:
     llm_broker.burn_env(None)
     llm_broker.burn_env({})  # no token key ⇒ no-op
+
+
+def test_env_helpers_thread_engine_and_turn_id_into_claims() -> None:
+    turn = uuid.uuid4()
+    with _patch(_settings(enabled=True, base="http://gw:8000")):
+        cli_env = llm_broker.cli_broker_env(_U, _S, engine="claude-cli", turn_id=turn)
+        agent_env = llm_broker.agent_broker_env(_U, _S, engine="opencode", turn_id=turn)
+    cli_claims = token.verify(cli_env["AWS_BEARER_TOKEN_BEDROCK"])
+    agent_claims = token.verify(agent_env["AWS_BEARER_TOKEN_BEDROCK"])
+    assert cli_claims.engine == "claude-cli"
+    assert agent_claims.engine == "opencode"
+    assert cli_claims.turn_id == str(turn) == agent_claims.turn_id
+    llm_broker.burn_env(cli_env)
+    llm_broker.burn_env(agent_env)

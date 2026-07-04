@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.core.config import get_settings
 from app.services import attachments as attachments_svc
-from app.services import llm_broker, model_registry
+from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
 from app.services.ai_client import resolve_session_model_choice
 from app.services.budget_service import record_usage
@@ -303,8 +303,16 @@ required.
         # the sandbox). The grant + CLAUDE_CODE_USE_BEDROCK + ANTHROPIC_BEDROCK_BASE_URL ride the
         # connector-env channel (docker exec -e), overriding sandbox_env_file so the real
         # bearer no longer needs to live in the sandbox. Off/local ⇒ empty ⇒ today's behavior.
+        # One turn_id for every usage row this turn produces: threaded into the broker grant
+        # (each proxied Bedrock call's row carries it) and into the engine-side record_usage
+        # fallback, so per-turn aggregation works identically regardless of the source.
+        turn_id = uuid.uuid4()
         broker_env = (
-            llm_broker.cli_broker_env(user_id, session_id) if settings.sandbox_enabled else {}
+            llm_broker.cli_broker_env(
+                user_id, session_id, engine=engines.CLAUDE_CLI, turn_id=turn_id
+            )
+            if settings.sandbox_enabled
+            else {}
         )
         engine_env = {**connector_env, **broker_env}
 

@@ -24,9 +24,11 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # Captured wire fixtures must stay byte-exact — whitespace hooks may not touch them.
       - id: trailing-whitespace
+        exclude: '^backend/tests/fixtures/bedrock/.*\.bin$'
       - id: end-of-file-fixer
-        exclude: '\.sql$'
+        exclude: '(\.sql$|^backend/tests/fixtures/bedrock/.*\.bin$)'
       - id: check-yaml
         args: [--unsafe]
       - id: check-toml
