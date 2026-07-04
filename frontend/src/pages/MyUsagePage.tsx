@@ -17,7 +17,7 @@ import { useMyUsageStore, MY_USAGE_SESSIONS_LIMIT } from '@/store/usage';
 import { TrendingUp, MessageSquare, Cpu, DollarSign } from 'lucide-react';
 import type { UsageDateRange } from '@/services/usageApi';
 import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost, TOKEN_SERIES_LABELS } from '@/lib/usageFormat';
+import { formatTokens, formatCost, formatCostTotal, TOKEN_SERIES_LABELS } from '@/lib/usageFormat';
 import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
 import {
   ComposedChart,
@@ -229,7 +229,7 @@ export function MyUsagePage() {
                   </div>
                   <div>
                     <p className="text-sm text-gray-400">Total Cost</p>
-                    <p className="text-2xl font-bold">{formatCost(summary.total_cost_usd)}</p>
+                    <p className="text-2xl font-bold">{formatCostTotal(summary.total_cost_usd)}</p>
                   </div>
                 </CardContent>
               </Card>
