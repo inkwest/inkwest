@@ -14,12 +14,20 @@ import { useEffect, useRef, type RefObject } from 'react';
 //   confirm from inside one.
 // - Focus on another interactive control (Cancel, the X close, a link): its own
 //   Enter→click activation wins — otherwise Enter on Cancel would CONFIRM.
+// Stack of open confirm dialogs so only the TOPMOST reacts to Enter — mirrors Modal's
+// modalStack. Without it, stacked confirms would all fire on a single keystroke.
+const confirmStack: symbol[] = [];
+
 export function useConfirmKey(
   open: boolean,
   confirmRef: RefObject<HTMLElement | null>,
   onConfirm: () => void,
   { space = false }: { space?: boolean } = {},
 ) {
+  // Stable identity for this dialog instance in the stack.
+  const idRef = useRef<symbol>();
+  if (!idRef.current) idRef.current = Symbol('confirm');
+
   // Latest callback without re-binding the listener (it reads live state upstream).
   const cbRef = useRef(onConfirm);
   cbRef.current = onConfirm;
@@ -33,7 +41,10 @@ export function useConfirmKey(
 
   useEffect(() => {
     if (!open) return;
+    const id = idRef.current!;
+    confirmStack.push(id);
     const onKey = (e: KeyboardEvent) => {
+      if (confirmStack[confirmStack.length - 1] !== id) return;
       if (e.key !== 'Enter' && !(space && e.key === ' ')) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -44,6 +55,10 @@ export function useConfirmKey(
       cbRef.current();
     };
     document.addEventListener('keydown', onKey, true);
-    return () => document.removeEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      const i = confirmStack.lastIndexOf(id);
+      if (i !== -1) confirmStack.splice(i, 1);
+    };
   }, [open, space, confirmRef]);
 }

@@ -43,6 +43,23 @@ describe('ConfirmDialog', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
+  it('only the topmost of two stacked confirms reacts to Enter', () => {
+    const onConfirmA = vi.fn();
+    const onConfirmB = vi.fn();
+    render(
+      <>
+        <ConfirmDialog isOpen onClose={vi.fn()} onConfirm={onConfirmA} title="A" message="a" />
+        <ConfirmDialog isOpen onClose={vi.fn()} onConfirm={onConfirmB} title="B" message="b" />
+      </>,
+    );
+    // With no control focused, both document-level listeners would fire on one
+    // keystroke without the confirm stack guard.
+    (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.keyDown(document.body, { key: 'Enter' });
+    expect(onConfirmB).toHaveBeenCalledTimes(1);
+    expect(onConfirmA).not.toHaveBeenCalled();
+  });
+
   it('a held Enter (key repeat) neither confirms nor natively clicks the button', () => {
     const { onConfirm } = setup();
     // fireEvent returns false when preventDefault was called — the repeat must be

@@ -57,6 +57,17 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
       else if (ref) ref.current = node;
     };
 
+    // Restore focus to the element that had it when the modal opened (WCAG 2.4.3) —
+    // its own effect keyed on isOpen only, so a mid-open onClose identity change can't
+    // re-capture an element inside the dialog as the "opener".
+    useEffect(() => {
+      if (!isOpen) return;
+      const opener = document.activeElement as HTMLElement | null;
+      return () => {
+        if (opener && document.contains(opener)) opener.focus();
+      };
+    }, [isOpen]);
+
     useEffect(() => {
       if (!isOpen) return;
       const id = idRef.current!;
@@ -93,6 +104,11 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
         const last = focusables[focusables.length - 1];
         const active = document.activeElement;
         if (!dialog.contains(active)) {
+          // A foreign overlay dialog (e.g. the onboarding tour bubble — role="dialog"
+          // but not a Modal) owns the focus: leave its Tab alone instead of yanking
+          // focus in. Modal-managed dialogs carry data-modal, so focus left in a lower
+          // stacked modal IS still pulled into the topmost one.
+          if (active?.closest('[role="dialog"]:not([data-modal])')) return;
           e.preventDefault();
           (e.shiftKey ? last : first).focus();
         } else if (e.shiftKey && active === first) {
@@ -159,6 +175,7 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
             ref={setDialogRef}
             role="dialog"
             aria-modal="true"
+            data-modal=""
             className={clsx(
               'relative w-full bg-gray-800 text-white rounded-lg shadow-xl',
               // flex column + capped height so tall content scrolls inside the
