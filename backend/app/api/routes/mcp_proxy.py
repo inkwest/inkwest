@@ -175,10 +175,11 @@ async def _ask_user(key: str, tool: str, *, user_id: uuid.UUID, session_id: uuid
             },
         )
         if sent == 0:
-            # Locked decision: no WS client connected → deny (waiting would only burn
-            # the sandbox client's own timeout with nobody to answer).
-            logger.info("mcp_tool_ask_no_client", extra={"mcp_key": key, "tool": tool})
-            return verdict
+            # No live tab right now — typically a reload's brief WS gap. Do NOT deny outright:
+            # park on the Future for the normal timeout so a reconnect within the window
+            # rehydrates the ask (GET /api/mcp/ask/pending) and the user still decides. Still
+            # fail-closed — no decision before ASK_TIMEOUT_SECONDS → deny below.
+            logger.info("mcp_tool_ask_no_client_waiting", extra={"mcp_key": key, "tool": tool})
         try:
             verdict = await asyncio.wait_for(ask.future, mcp_ask_store.ASK_TIMEOUT_SECONDS)
         except TimeoutError:

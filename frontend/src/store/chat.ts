@@ -34,6 +34,26 @@ export function groupServerMessages(messages: Message[]): Message[] {
   return grouped;
 }
 
+/**
+ * The persisted transcript to render BENEATH StreamingMessage. While a turn is streaming or being
+ * replayed (`stream_resumed` after a reload into a still-running turn), StreamingMessage owns the
+ * current assistant turn. But a reload also loads that turn's persisted in-progress copy into
+ * `messages`, so rendering the transcript as-is would show the whole turn twice (the
+ * reload-during-ask double). Drop only a TRAILING assistant turn — normal streaming leaves the
+ * user message trailing, so its transcript is untouched — and only once the replay buffer has
+ * content, so the turn is never blanked while the buffer is still in flight.
+ */
+export function transcriptForRender(
+  messages: Message[],
+  isStreaming: boolean,
+  hasStreamingBuffer: boolean,
+): Message[] {
+  const last = messages[messages.length - 1];
+  return isStreaming && hasStreamingBuffer && last?.role === 'assistant'
+    ? messages.slice(0, -1)
+    : messages;
+}
+
 // Normalize a message's content to a block list so consecutive turn rows can be
 // concatenated. Assistant/tool_result rows are block arrays (or a bare string for
 // a text-only round); session-event objects never reach here (they are 'system').
@@ -74,6 +94,11 @@ interface ChatState {
   // New: ordered streaming blocks for inline display
   streamingBlocks: StreamingBlock[];
   isStreaming: boolean;
+  // True between `stream_resumed` (reload into a still-running turn) and that turn's `done`.
+  // The turn's persisted in-progress copy is in `messages` from the session load AND being
+  // replayed into streamingBlocks; transcriptForRender hides it live, and on `done` we drop it
+  // so the freshly-appended completed turn isn't a duplicate. See dropInProgressAssistant.
+  resumingTurn: boolean;
   // Messages typed while a turn is streaming, sent combined once it ends.
   queuedMessages: QueuedMessage[];
   isConnected: boolean;
@@ -95,6 +120,11 @@ interface ChatState {
   addToolResult: (result: { name: string; content: string; is_error: boolean }) => void;
   clearToolResults: () => void;
   setIsStreaming: (streaming: boolean) => void;
+  setResumingTurn: (v: boolean) => void;
+  // Drop a trailing in-progress assistant turn (the persisted copy of a resumed turn) so the
+  // completed turn appended on `done` doesn't duplicate it. No-op if the last message isn't an
+  // assistant turn (e.g. a fresh, non-resumed turn — nothing to dedup).
+  dropInProgressAssistant: () => void;
   setIsConnected: (connected: boolean) => void;
   setIsReconnecting: (reconnecting: boolean) => void;
   setError: (error: string | null) => void;
@@ -130,6 +160,7 @@ export const useChatStore = create<ChatState>((set) => ({
   toolResults: [],
   streamingBlocks: [],
   isStreaming: false,
+  resumingTurn: false,
   queuedMessages: [],
   isConnected: false,
   isReconnecting: false,
@@ -218,6 +249,12 @@ export const useChatStore = create<ChatState>((set) => ({
     }),
   clearToolResults: () => set({ toolResults: [] }),
   setIsStreaming: (streaming) => set({ isStreaming: streaming }),
+  setResumingTurn: (v) => set({ resumingTurn: v }),
+  dropInProgressAssistant: () =>
+    set((state) => {
+      const last = state.messages[state.messages.length - 1];
+      return last?.role === 'assistant' ? { messages: state.messages.slice(0, -1) } : {};
+    }),
   setIsConnected: (connected) => set({ isConnected: connected }),
   setIsReconnecting: (reconnecting) => set({ isReconnecting: reconnecting }),
   setError: (error) => set({ error }),
@@ -267,6 +304,7 @@ export const useChatStore = create<ChatState>((set) => ({
       toolResults: [],
       streamingBlocks: [],
       isStreaming: false,
+      resumingTurn: false,
       queuedMessages: [],
       error: null,
       presence: [],

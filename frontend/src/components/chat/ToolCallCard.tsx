@@ -1,92 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { ChevronDown, ChevronRight, Terminal, Copy, Check, ListTodo, Circle, CheckCircle2, Loader2, ShieldQuestion } from 'lucide-react';
+import { ChevronDown, ChevronRight, Terminal, Copy, Check, ListTodo, Circle, CheckCircle2, Loader2 } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn, TEXT_SIZE } from '@/lib/utils';
 import { useSettingsStore } from '@/store/settings';
 import { useMcpStore } from '@/store/mcp';
-import { persistToolVerdict } from '@/store/mcpPolicy';
 import { matchesMcpToolName } from '@/lib/mcpToolName';
-
-type AskScope = 'once' | 'conversation' | 'global';
-
-// Split-button for the ask bar: the label click decides "once"; the caret opens the
-// scope menu (this conversation / always). One component so Allow/Deny stay symmetric.
-function DecisionButton({
-  label,
-  solidClass,
-  menuClass,
-  disabled,
-  showConversationScope,
-  onDecide,
-}: {
-  label: string;
-  solidClass: string;
-  menuClass: string;
-  disabled: boolean;
-  // Hide "for this conversation" when the ask carries no session id (a stale
-  // backend frame) — a silent no-write downgrade to "once" would mislead.
-  showConversationScope: boolean;
-  onDecide: (scope: AskScope) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
-  }, [open]);
-
-  const pick = (scope: AskScope) => {
-    setOpen(false);
-    onDecide(scope);
-  };
-
-  return (
-    <span ref={rootRef} className="relative inline-flex">
-      <button
-        onClick={(e) => { e.stopPropagation(); pick('once'); }}
-        disabled={disabled}
-        title={`${label} this call only`}
-        className={cn('rounded-l px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50', solidClass)}
-      >
-        {label}
-      </button>
-      <button
-        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
-        disabled={disabled}
-        aria-label={`${label} options`}
-        aria-expanded={open}
-        className={cn('rounded-r border-l border-black/20 px-1 py-1 text-white disabled:opacity-50', solidClass)}
-      >
-        <ChevronDown className="h-3.5 w-3.5" />
-      </button>
-      {open && (
-        <div className={cn('absolute right-0 top-full z-20 mt-1 w-48 overflow-hidden rounded-md border shadow-lg', menuClass)}>
-          {(
-            [
-              ['once', 'once'],
-              ...(showConversationScope ? [['conversation', 'for this conversation']] : []),
-              ['global', 'always (all conversations)'],
-            ] as [AskScope, string][]
-          ).map(([scope, text]) => (
-            <button
-              key={scope}
-              onClick={(e) => { e.stopPropagation(); pick(scope); }}
-              className="block w-full px-3 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-700"
-            >
-              {label} {text}
-            </button>
-          ))}
-        </div>
-      )}
-    </span>
-  );
-}
+import { AskDecisionBar } from './AskDecisionBar';
 
 interface TodoItem {
   content: string;
@@ -122,7 +42,6 @@ export function ToolCallCard({ name, input, result, isError, isLoading, autoColl
   // would make the find() drop the ask, the cleanup release it, and the loop restart
   // (claim → release ping-pong ⇒ "Maximum update depth exceeded").
   const myClaim = useRef<string | null>(null);
-  const [deciding, setDeciding] = useState(false);
   // Only an ACTIVELY-LOADING card may take a NEW claim: results render as separate
   // tool_result cards, so `result` never arrives on a tool_use card and a result-less
   // guard alone would let a stale/completed card of the same tool steal the ask (bar
@@ -155,39 +74,6 @@ export function ToolCallCard({ name, input, result, isError, isLoading, autoColl
       useMcpStore.getState().releaseAsk(askId);
     };
   }, [askId]);
-
-  const decide = async (verdict: 'allow' | 'deny', scope: AskScope) => {
-    if (!askId || !ask || deciding) return;
-    setDeciding(true);
-    try {
-      // Kick the broader-scope policy write off FIRST (so it lands even if the
-      // decision below races the 60s hold timeout) but do NOT await it before the
-      // decision POST: the shared save chain can be busy behind a slow editor PUT,
-      // and blocking on it would let the hold expire into a deny the user didn't
-      // choose. persistToolVerdict serializes with editor saves and bumps the
-      // policy version; it's best-effort here — a failed write must not block the
-      // decision (a 5xx surfaces via the banner strip, a network failure via the
-      // amber banner). The conversation scope targets the ASK's session, not the
-      // selected one — the user may have switched sessions while the call was held.
-      const persist =
-        scope === 'conversation' && ask.sessionId
-          ? persistToolVerdict(
-              { scope: 'session', sessionId: ask.sessionId },
-              ask.mcpKey,
-              ask.tool,
-              verdict,
-            ).catch(() => undefined)
-          : scope === 'global'
-            ? persistToolVerdict({ scope: 'global' }, ask.mcpKey, ask.tool, verdict).catch(
-                () => undefined,
-              )
-            : Promise.resolve();
-      await useMcpStore.getState().decideAsk(askId, verdict);
-      await persist;
-    } finally {
-      setDeciding(false);
-    }
-  };
 
   // Auto-expand when loading starts, auto-collapse when loading finishes or result arrives
   useEffect(() => {
@@ -321,35 +207,10 @@ export function ToolCallCard({ name, input, result, isError, isLoading, autoColl
           "Always" persists the user's GLOBAL tool policy, "for this conversation" the
           session-scoped one; both then resolve the hold. */}
       {ask && (
-        <div className={cn(
-          'flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-blue-600/50 bg-blue-900/40 px-3 py-2',
-          !expanded && 'rounded-b-[5px]'
-        )}>
-          <span className="flex min-w-0 items-center gap-2 text-sm text-blue-100">
-            <ShieldQuestion className="h-4 w-4 shrink-0 text-blue-300" />
-            <span className="truncate">
-              Allow <strong>{ask.mcpKey}</strong> to run <strong>{ask.tool}</strong>?
-            </span>
-          </span>
-          <span className="flex shrink-0 gap-2">
-            <DecisionButton
-              label="Allow"
-              solidClass="bg-green-600 hover:bg-green-500"
-              menuClass="border-gray-600 bg-gray-800"
-              disabled={deciding}
-              showConversationScope={Boolean(ask.sessionId)}
-              onDecide={(scope) => void decide('allow', scope)}
-            />
-            <DecisionButton
-              label="Deny"
-              solidClass="bg-red-600/80 hover:bg-red-600"
-              menuClass="border-gray-600 bg-gray-800"
-              disabled={deciding}
-              showConversationScope={Boolean(ask.sessionId)}
-              onDecide={(scope) => void decide('deny', scope)}
-            />
-          </span>
-        </div>
+        <AskDecisionBar
+          ask={ask}
+          className={cn('border-t border-blue-600/50 bg-blue-900/40', !expanded && 'rounded-b-[5px]')}
+        />
       )}
 
       {expanded && (

@@ -84,9 +84,9 @@ describe('ToolCallCard runtime ask gate', () => {
       </>,
     );
     await waitFor(() => expect(useMcpStore.getState().claimedAsks['ask-1']).toBe(true));
-    // In-bubble bar shows; the banner (which mentions the server via "wants to call") hides.
+    // In-bubble bar shows; the composer-anchored fallback (McpAskNotice) hides.
     expect(screen.getByRole('button', { name: 'Allow' })).toBeInTheDocument();
-    expect(screen.queryByText(/wants to call/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('mcp-ask-fallback')).not.toBeInTheDocument();
     unmount();
     expect(useMcpStore.getState().claimedAsks['ask-1']).toBeUndefined();
   });
@@ -191,8 +191,10 @@ describe('ToolCallCard runtime ask gate', () => {
         <McpAskNotice sessionId="s1" />
       </>,
     );
-    expect(screen.queryByRole('button', { name: 'Allow options' })).not.toBeInTheDocument();
-    expect(screen.getByText(/wants to call/)).toBeInTheDocument();
+    // The card renders no bar (it didn't claim); the fallback backstops with the SAME full
+    // decision affordances (scope split-buttons), not a stripped-down prompt.
+    expect(screen.getByTestId('mcp-ask-fallback')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Allow options' })).toBeInTheDocument();
     expect(useMcpStore.getState().claimedAsks['ask-1']).toBeUndefined();
   });
 
