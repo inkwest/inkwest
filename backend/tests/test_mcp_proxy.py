@@ -674,8 +674,10 @@ async def test_ask_timeout_denies(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ask_with_no_ws_client_denies_immediately() -> None:
-    """Locked decision: no live tab to ask -> deny without burning the 60s hold."""
+async def test_ask_no_client_parks_then_denies_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No live tab when the ask is minted (a reload's WS gap): park on the Future instead of
+    denying outright, so a reconnect could still rehydrate + decide. No decision before the
+    timeout → fail-closed deny."""
     called = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -686,8 +688,9 @@ async def test_ask_with_no_ws_client_denies_immediately() -> None:
 
     async def send_nobody(session_id: str, user_id: str, payload: dict) -> int:
         frames.append(payload)
-        return 0
+        return 0  # no live tab at ask time
 
+    monkeypatch.setattr(mcp_ask_store, "ASK_TIMEOUT_SECONDS", 0.01)
     ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
     ps.append(
         patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="ask"))
@@ -702,9 +705,51 @@ async def test_ask_with_no_ws_client_denies_immediately() -> None:
                 headers=_bearer(),
                 content=b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"q"}}',
             )
-        assert resp.json()["error"]["code"] == _mp._TOOL_DENIED_CODE
-        assert called["n"] == 0
+        assert resp.json()["error"]["code"] == _mp._TOOL_DENIED_CODE  # timed out → deny
+        assert called["n"] == 0  # upstream never reached
         assert frames[-1]["type"] == "mcp_tool_ask_resolved"  # banner still cleared
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_ask_no_client_then_reconnect_decides_forwards() -> None:
+    """No tab when the ask is minted, but the user reconnects and Allows within the window
+    (rehydrate → decide → resolve). The parked call must forward — not have been denied at
+    mint time (the reload-gap regression)."""
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return _streaming(200, b'{"ok":true}')
+
+    frames: list[dict] = []
+
+    async def send_reconnect(session_id: str, user_id: str, payload: dict) -> int:
+        frames.append(payload)
+        # No live tab at send time (return 0), but the user reconnects a moment later and the
+        # rehydrated ask is Allowed — model the decision endpoint resolving the parked Future.
+        if payload["type"] == "mcp_tool_ask":
+            assert mcp_ask_store.resolve(payload["ask_id"], "allow", user_id=str(_U))
+        return 0
+
+    ps = _patches(handler, fresh_token=AsyncMock(return_value="t"))
+    ps.append(
+        patch("app.api.routes.mcp_proxy.mcp_policy.resolve_verdict", AsyncMock(return_value="ask"))
+    )
+    ps.append(patch("app.api.routes.chat.send_to_user_in_session", send_reconnect))
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                "/api/mcp-proxy/notion/",
+                headers=_bearer(),
+                content=b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"q"}}',
+            )
+        assert resp.status_code == 200  # allowed → forwarded despite no tab at mint time
+        assert called["n"] == 1
     finally:
         for p in ps:
             p.stop()

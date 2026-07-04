@@ -79,6 +79,7 @@ describe('useWebSocket', () => {
       isConnected: false,
       isReconnecting: false,
       isStreaming: false,
+      resumingTurn: false,
       error: null,
     });
   });
@@ -291,5 +292,41 @@ describe('useWebSocket', () => {
     const ws = MockWS.instances[0];
     act(() => ws.emit({ type: 'mcp_tool_ask', ask_id: 'a1' })); // no key/tool
     expect(useMcpStore.getState().pendingAsks).toEqual([]);
+  });
+
+  it('stream_resumed marks the turn resuming; done drops the persisted in-progress copy', () => {
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[0];
+    // Reload state: the user turn + its persisted in-progress assistant already in the transcript.
+    useChatStore.setState({
+      messages: [
+        { id: 'u1', session_id: 'session-1', role: 'user', content: 'go', created_at: '2026-01-01T00:00:00Z' },
+        {
+          id: 'a-partial',
+          session_id: 'session-1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'partial' }],
+          created_at: '2026-01-01T00:00:01Z',
+        },
+      ],
+    });
+    act(() => ws.emit({ type: 'stream_resumed' }));
+    expect(useChatStore.getState().resumingTurn).toBe(true);
+    // Replay fills the buffer, then the turn completes.
+    act(() => ws.emit({ type: 'text_delta', content: 'partial and more' }));
+    act(() => ws.emit({ type: 'done', metadata: {} }));
+
+    const assistants = useChatStore.getState().messages.filter((m) => m.role === 'assistant');
+    expect(assistants).toHaveLength(1); // stale partial dropped, completed turn appended once
+    expect(useChatStore.getState().resumingTurn).toBe(false);
+  });
+
+  it('clears resumingTurn on disconnect (re-set on reconnect if the turn is still running)', () => {
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[0];
+    act(() => ws.emit({ type: 'stream_resumed' }));
+    expect(useChatStore.getState().resumingTurn).toBe(true);
+    act(() => ws.emit({ type: 'disconnected' }));
+    expect(useChatStore.getState().resumingTurn).toBe(false);
   });
 });

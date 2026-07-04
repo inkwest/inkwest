@@ -19,6 +19,8 @@ export function useWebSocket(sessionId: string) {
     clearToolResults,
     clearStreamingBlocks,
     setIsStreaming,
+    setResumingTurn,
+    dropInProgressAssistant,
     setIsConnected,
     setIsReconnecting,
     setError,
@@ -68,6 +70,9 @@ export function useWebSocket(sessionId: string) {
         // Drop the stale roster/typing so a departed peer doesn't linger as
         // "viewing"/"typing…" until (if ever) a fresh frame arrives.
         clearPresence();
+        // Clear the resume flag: a reconnect re-sets it via stream_resumed if the turn is still
+        // running, so it never leaks past a turn that ends while we're disconnected.
+        setResumingTurn(false);
         break;
 
       case 'reconnecting':
@@ -79,9 +84,13 @@ export function useWebSocket(sessionId: string) {
 
       case 'stream_resumed':
         // Reconnected to a turn still running on the server (we navigated back).
-        // Clear any stale streaming state, then the replayed buffer rebuilds it.
+        // Clear any stale streaming state, then the replayed buffer rebuilds it. Mark the turn
+        // as resuming: its persisted in-progress copy is in `messages` (session load) and will
+        // be replayed — transcriptForRender hides it live, and `done` drops it so the completed
+        // turn isn't a duplicate.
         clearStreamingBlocks();
         setIsStreaming(true);
+        setResumingTurn(true);
         break;
 
       case 'text_delta':
@@ -108,6 +117,13 @@ export function useWebSocket(sessionId: string) {
       case 'done': {
         const store = useChatStore.getState();
         const wasStopped = !!event.metadata?.stopped;
+
+        // Resumed turn: drop its stale persisted in-progress copy before appending the
+        // completed turn below, else the reload would leave two identical assistant bubbles.
+        if (store.resumingTurn) {
+          dropInProgressAssistant();
+          setResumingTurn(false);
+        }
 
         if (store.streamingBlocks.length > 0) {
           const content: Array<
@@ -175,6 +191,7 @@ export function useWebSocket(sessionId: string) {
       case 'error':
         setError(event.content || 'An error occurred');
         setIsStreaming(false);
+        setResumingTurn(false);
         setActiveToolCall(null);
         flushQueue();
         break;
@@ -250,6 +267,8 @@ export function useWebSocket(sessionId: string) {
     clearToolResults,
     clearStreamingBlocks,
     setIsStreaming,
+    setResumingTurn,
+    dropInProgressAssistant,
     setIsConnected,
     setIsReconnecting,
     setError,

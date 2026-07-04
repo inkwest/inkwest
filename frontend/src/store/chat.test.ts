@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useChatStore, groupServerMessages } from './chat';
+import { useChatStore, groupServerMessages, transcriptForRender } from './chat';
 import { ContentBlock, Message } from '@/types/api';
 
 function msg(id: string, role: 'user' | 'assistant' = 'user'): Message {
@@ -112,6 +112,56 @@ function assistantWithTools(id: string, blocks: ContentBlock[]): Message {
 function toolResultRow(id: string, blocks: ContentBlock[]): Message {
   return { id, session_id: 's1', role: 'tool_result', content: blocks, created_at: '2026-06-10T00:00:00Z' };
 }
+
+describe('transcriptForRender', () => {
+  const convo = [msg('u1', 'user'), msg('a1', 'assistant'), msg('u2', 'user')];
+
+  it('returns the transcript unchanged when not streaming', () => {
+    const withTrailingAssistant = [...convo, msg('a2', 'assistant')];
+    expect(transcriptForRender(withTrailingAssistant, false, true)).toBe(withTrailingAssistant);
+  });
+
+  it('drops a trailing in-progress assistant turn while streaming with a live buffer', () => {
+    const withTrailingAssistant = [...convo, msg('a2', 'assistant')];
+    expect(transcriptForRender(withTrailingAssistant, true, true)).toEqual(convo);
+  });
+
+  it('leaves a trailing user message (normal streaming) untouched', () => {
+    // A just-sent turn: the optimistic user message trails; StreamingMessage owns the reply.
+    expect(transcriptForRender(convo, true, true)).toBe(convo);
+  });
+
+  it('does not blank the turn when the replay buffer is still empty', () => {
+    const withTrailingAssistant = [...convo, msg('a2', 'assistant')];
+    expect(transcriptForRender(withTrailingAssistant, true, false)).toBe(withTrailingAssistant);
+  });
+
+  it('is safe on an empty transcript', () => {
+    expect(transcriptForRender([], true, true)).toEqual([]);
+  });
+});
+
+describe('dropInProgressAssistant', () => {
+  beforeEach(() => useChatStore.setState({ messages: [] }));
+
+  it('drops a trailing assistant turn (the resumed turn persisted copy)', () => {
+    useChatStore.setState({ messages: [msg('u1', 'user'), msg('a1', 'assistant')] });
+    useChatStore.getState().dropInProgressAssistant();
+    expect(useChatStore.getState().messages.map((m) => m.id)).toEqual(['u1']);
+  });
+
+  it('is a no-op when the last message is a user turn (fresh, non-resumed turn)', () => {
+    const msgs = [msg('u1', 'user'), msg('a1', 'assistant'), msg('u2', 'user')];
+    useChatStore.setState({ messages: msgs });
+    useChatStore.getState().dropInProgressAssistant();
+    expect(useChatStore.getState().messages.map((m) => m.id)).toEqual(['u1', 'a1', 'u2']);
+  });
+
+  it('is safe on an empty transcript', () => {
+    useChatStore.getState().dropInProgressAssistant();
+    expect(useChatStore.getState().messages).toEqual([]);
+  });
+});
 
 describe('groupServerMessages', () => {
   it('folds a tool_result row into the preceding assistant message', () => {

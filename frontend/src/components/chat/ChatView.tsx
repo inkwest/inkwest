@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Share2 } from 'lucide-react';
-import { useChatStore } from '@/store/chat';
+import { useChatStore, transcriptForRender } from '@/store/chat';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { useEgressSocket, isBlocked, isError } from '@/hooks/useEgressSocket';
@@ -190,6 +190,10 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
       active ? 'border-blue-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'
     );
 
+  // Don't render a persisted in-progress turn beneath the live/replayed StreamingMessage (the
+  // reload-during-ask double) — see transcriptForRender.
+  const displayMessages = transcriptForRender(messages, isStreaming, streamingBlocks.length > 0);
+
   return (
     <div className="flex-1 flex flex-col h-full relative min-h-0 overflow-hidden">
       <ErrorBanner />
@@ -278,8 +282,7 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
           <div ref={contentRef}>
             {sessionId && <ConnectorInlineNotice sessionId={sessionId} />}
             <McpInlineNotice sessionId={sessionId} />
-            <McpAskNotice sessionId={sessionId} />
-            <MessageList messages={messages} highlightedId={highlightId} onRetry={onRetryMessage} />
+            <MessageList messages={displayMessages} highlightedId={highlightId} onRetry={onRetryMessage} />
             {isStreaming && <div className={compact ? 'mt-4' : 'mt-6'}><StreamingMessage /></div>}
           </div>
         </div>
@@ -294,6 +297,9 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
           <div className="pointer-events-none absolute bottom-0 left-0 right-4">
             <div ref={composerRef} className="pointer-events-auto">
               <div className={cn('mx-auto', wideComposer ? 'max-w-none' : 'max-w-[72rem]')}>
+                {/* Held-ask fallback: anchored right above the composer as solid cards (not a
+                    floating top banner) with the same decision affordances as the in-bubble bar. */}
+                <McpAskNotice sessionId={sessionId} />
                 <ChatInput
                   onSend={onSendMessage}
                   onStop={onStopStreaming}
