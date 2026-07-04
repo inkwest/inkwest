@@ -327,7 +327,7 @@ export function UsagePage() {
                       labelStyle={{ color: '#E5E7EB' }}
                       formatter={(value, name) =>
                         name === 'cost_usd'
-                          ? [formatCost(Number(value) || 0), 'Cost']
+                          ? [formatCost(Number(value) || 0), TOKEN_SERIES_LABELS.cost_usd]
                           : [formatTokens(Number(value) || 0), TOKEN_SERIES_LABELS[String(name)] ?? String(name)]
                       }
                     />

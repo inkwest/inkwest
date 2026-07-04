@@ -194,7 +194,7 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
                 </>
               )}
               <span className="shrink-0">{formatRelativeTime(shownTime)}</span>
-              {(session.total_input_tokens || session.total_output_tokens) ? (
+              {(session.total_input_tokens || session.total_output_tokens || session.total_cache_read_tokens || session.total_cache_write_tokens) ? (
                 <>
                   <span className="text-gray-600">&middot;</span>
                   <TokenGlyphs

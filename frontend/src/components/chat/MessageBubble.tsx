@@ -188,6 +188,15 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
   const compact = useSettingsStore((s) => s.compactToolCards);
   const showTimestamps = useSettingsStore((s) => s.showTimestamps);
   const showTokenCounts = useSettingsStore((s) => s.showTokenCounts);
+  // Same guard as TokenCountsLine's own null-row check, hoisted so the footer div
+  // doesn't render as an empty spacer on rows predating the token columns.
+  const hasTokenCounts =
+    showTokenCounts &&
+    message.role === 'assistant' &&
+    (message.input_tokens != null ||
+      message.output_tokens != null ||
+      (message.cache_read_tokens ?? 0) > 0 ||
+      (message.cache_write_tokens ?? 0) > 0);
   const currentSession = useSessionsStore((s) => s.currentSession);
   const user = useAuthStore((s) => s.user);
   const config = useConfigStore((s) => s.config);
@@ -455,9 +464,9 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
           <MessageAttachments sessionId={message.session_id} attachments={message.attachments} />
         )}
 
-        {((showTimestamps && message.created_at) || canReusePrompt || (showTokenCounts && !isUser)) && (
+        {((showTimestamps && message.created_at) || canReusePrompt || hasTokenCounts) && (
           <div className={cn('mt-1 flex items-center justify-end gap-2', TEXT_SIZE.label(compact))}>
-            {showTokenCounts && !isUser && <TokenCountsLine message={message} compact={compact} />}
+            {hasTokenCounts && <TokenCountsLine message={message} compact={compact} />}
             {canReusePrompt && (
               <button
                 type="button"

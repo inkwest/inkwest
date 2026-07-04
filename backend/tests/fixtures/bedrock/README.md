@@ -8,7 +8,13 @@ verbatim source). Eventstream frames are re-encoded with recomputed CRC32; untou
 are emitted verbatim.
 
 Verbatim originals + the redaction/inspection scripts live in `misc/bedrock-fixtures-verbatim/`
-(gitignored). Re-run: `backend/.venv/bin/python misc/bedrock-fixtures-verbatim/redact_fixtures.py`.
+(gitignored via the repo `.gitignore` `misc/` entry — NEVER commit verbatim captures).
+Re-run: `backend/.venv/bin/python misc/bedrock-fixtures-verbatim/redact_fixtures.py`.
+
+Redaction scope note: model-generated content STRINGS are neutralized; thinking-block
+`signature` blobs (opaque, non-reversible Anthropic signatures over the now-redacted
+content), numeric tool-input values and `toolUseId`s survive verbatim — none carry
+credentials or PII.
 
 ## Files
 

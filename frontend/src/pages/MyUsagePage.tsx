@@ -271,7 +271,7 @@ export function MyUsagePage() {
                       labelStyle={{ color: '#E5E7EB' }}
                       formatter={(value, name) =>
                         name === 'cost_usd'
-                          ? [formatCost(Number(value) || 0), 'Cost']
+                          ? [formatCost(Number(value) || 0), TOKEN_SERIES_LABELS.cost_usd]
                           : [formatTokens(Number(value) || 0), TOKEN_SERIES_LABELS[String(name)] ?? String(name)]
                       }
                     />
@@ -326,7 +326,7 @@ export function MyUsagePage() {
                     <p className="text-xl font-bold">{formatTokens(summary.total_cache_read_tokens || 0)}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-400" title="Written to the prompt cache (billed ~1.25x input rate)">Cache Write</p>
+                    <p className="text-sm text-gray-400" title="Written to the prompt cache (billed ~1.25x input rate; 2x for 1h TTL)">Cache Write</p>
                     <p className="text-xl font-bold">{formatTokens(summary.total_cache_write_tokens || 0)}</p>
                   </div>
                   <div>

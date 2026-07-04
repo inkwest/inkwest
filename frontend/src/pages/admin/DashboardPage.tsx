@@ -108,7 +108,7 @@ export function DashboardPage() {
                       <span>{(summary.total_cache_read_tokens || 0).toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-400" title="Written to the prompt cache (billed ~1.25x input rate)">Cache Write Tokens</span>
+                      <span className="text-gray-400" title="Written to the prompt cache (billed ~1.25x input rate; 2x for 1h TTL)">Cache Write Tokens</span>
                       <span>{(summary.total_cache_write_tokens || 0).toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between">

@@ -449,3 +449,48 @@ class TestBudgetServiceIntegration:
             )
         calc.assert_called_once()
         assert record.cost_usd == Decimal("0.5")
+
+
+class TestRecordUsageHardening:
+    @pytest.mark.asyncio
+    async def test_negative_counts_are_clamped(self):
+        """A forged negative count must not create a negative-cost row (budget evasion)."""
+        from app.services.budget_service import record_usage
+
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=-100_000,
+                output_tokens=-5,
+                model="claude-sonnet-4-20250514",
+                cache_read_tokens=-1,
+                cache_write_tokens=-2,
+            )
+        assert record.input_tokens == 0
+        assert record.output_tokens == 0
+        assert record.cache_read_tokens == 0
+        assert record.cache_write_tokens == 0
+        assert record.cost_usd == 0
+
+    @pytest.mark.asyncio
+    async def test_metrics_failure_never_blocks_persistence(self):
+        from app.services.budget_service import record_usage
+
+        with (
+            patch("app.services.budget_service.metrics.turn_engine", return_value="claude-cli"),
+            patch(
+                "app.services.budget_service.metrics.tokens_total.labels",
+                side_effect=RuntimeError("prometheus down"),
+            ),
+        ):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=10,
+                output_tokens=5,
+                model="claude-sonnet-4-20250514",
+            )
+        assert record.input_tokens == 10  # row still created

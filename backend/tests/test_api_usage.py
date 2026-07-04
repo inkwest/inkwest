@@ -17,10 +17,12 @@ async def test_my_usage_summary_allows_non_admin(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
     mock_result = MagicMock()
+    # Distinct sentinels: cache_read must NOT equal total_tokens (5000+3000) or a
+    # column mix-up would pass unnoticed (same discipline as the admin twin).
     mock_result.one.return_value = SimpleNamespace(
         input_tokens=5000,
         output_tokens=3000,
-        cache_read_tokens=8000,
+        cache_read_tokens=7777,
         cache_write_tokens=2000,
         cost_usd=0.12,
         request_count=10,
@@ -34,7 +36,7 @@ async def test_my_usage_summary_allows_non_admin(
     assert data["total_input_tokens"] == 5000
     assert data["total_output_tokens"] == 3000
     assert data["total_tokens"] == 8000
-    assert data["total_cache_read_tokens"] == 8000
+    assert data["total_cache_read_tokens"] == 7777
     assert data["total_cache_write_tokens"] == 2000
     assert data["request_count"] == 10
     assert data["period"] == "monthly"

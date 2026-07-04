@@ -465,6 +465,19 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
     # Bedrock these dominate a turn's real cost — dropping them caused a ~10x undercount.
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
+    # 1h-TTL portion of the writes (billed 2x, not 1.25x) — the Anthropic usage block
+    # carries the split under cache_creation.ephemeral_1h_input_tokens.
+    total_cache_write_1h_tokens = 0
+    done_emitted = False
+
+    def _usage_meta() -> dict[str, int]:
+        return {
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "cache_read_tokens": total_cache_read_tokens,
+            "cache_write_tokens": total_cache_write_tokens,
+            "cache_write_1h_tokens": total_cache_write_1h_tokens,
+        }
 
     lines = aiter(output_stream)
     while True:
@@ -477,16 +490,10 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
             # terminal `done` could arrive). Surface the usage accumulated so far on an
             # internal usage_stats event — a failed turn still burned Bedrock spend — then
             # re-raise so the orchestrator handles the failure. The orchestrator consumes
-            # usage_stats (never forwarded to the client). Mirrors parse_opencode_response.
-            yield ChatEvent(
-                type="usage_stats",
-                metadata={
-                    "input_tokens": total_input_tokens,
-                    "output_tokens": total_output_tokens,
-                    "cache_read_tokens": total_cache_read_tokens,
-                    "cache_write_tokens": total_cache_write_tokens,
-                },
-            )
+            # usage_stats (never forwarded to the client). Same GOAL as
+            # parse_opencode_response's cut-stream handling, different mechanism (opencode
+            # attaches the usage to its client-visible error event instead).
+            yield ChatEvent(type="usage_stats", metadata=_usage_meta())
             raise
         parsed = parse_cli_stream_line(line)
         if not parsed:
@@ -517,6 +524,10 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 total_output_tokens += usage.get("output_tokens", 0)
                 total_cache_read_tokens += usage.get("cache_read_input_tokens", 0) or 0
                 total_cache_write_tokens += usage.get("cache_creation_input_tokens", 0) or 0
+                cache_creation = usage.get("cache_creation") or {}
+                total_cache_write_1h_tokens += (
+                    cache_creation.get("ephemeral_1h_input_tokens", 0) or 0
+                )
 
             content = message.get("content", [])
             for block in content:
@@ -582,29 +593,17 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 total_cache_read_tokens = usage["cache_read_input_tokens"]
             if usage.get("cache_creation_input_tokens"):
                 total_cache_write_tokens = usage["cache_creation_input_tokens"]
+            if (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"):
+                total_cache_write_1h_tokens = usage["cache_creation"]["ephemeral_1h_input_tokens"]
 
             subtype = parsed.get("subtype")
             if subtype == "success":
-                yield ChatEvent(
-                    type="done",
-                    metadata={
-                        "input_tokens": total_input_tokens,
-                        "output_tokens": total_output_tokens,
-                        "cache_read_tokens": total_cache_read_tokens,
-                        "cache_write_tokens": total_cache_write_tokens,
-                    },
-                )
+                done_emitted = True
+                yield ChatEvent(type="done", metadata=_usage_meta())
 
         elif event_type in ("message_stop", "done", "end"):
-            yield ChatEvent(
-                type="done",
-                metadata={
-                    "input_tokens": total_input_tokens,
-                    "output_tokens": total_output_tokens,
-                    "cache_read_tokens": total_cache_read_tokens,
-                    "cache_write_tokens": total_cache_write_tokens,
-                },
-            )
+            done_emitted = True
+            yield ChatEvent(type="done", metadata=_usage_meta())
 
         elif event_type == "error":
             error_msg = parsed.get("message", parsed.get("error", "Unknown error"))
@@ -621,6 +620,12 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 tool_input=parsed.get("input", {}),
                 tool_use_id=parsed.get("id"),
             )
+
+    # Clean stream end without a terminal done (user Stop kills the CLI mid-turn and the
+    # stream just ends): surface whatever accumulated so the orchestrator's stop path can
+    # persist the burned tokens. Internal event — the orchestrator consumes it.
+    if not done_emitted and (total_input_tokens or total_output_tokens):
+        yield ChatEvent(type="usage_stats", metadata=_usage_meta())
 
 
 async def execute_agent(

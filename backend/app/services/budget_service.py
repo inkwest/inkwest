@@ -384,6 +384,16 @@ async def record_usage(
     Returns:
         Created UsageRecord
     """
+    # SECURITY: engine-reported counts arrive from the sandboxed process's stdout — a
+    # compromised/prompt-injected agent could emit negative numbers, and a negative
+    # cost_usd row would REDUCE the user's summed spend (budget-cap evasion broker-off).
+    # Clamp at the sink; the broker path parses real wire bytes but shares the sink.
+    input_tokens = max(0, int(input_tokens))
+    output_tokens = max(0, int(output_tokens))
+    cache_read_tokens = max(0, int(cache_read_tokens))
+    cache_write_tokens = max(0, int(cache_write_tokens))
+    cache_write_1h_tokens = max(0, int(cache_write_1h_tokens))
+
     if model is None:
         model = default_model()
     if provider is None:

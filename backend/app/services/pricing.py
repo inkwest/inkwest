@@ -161,7 +161,7 @@ def is_legacy_model(model_id: str) -> bool:
 _ROUTE_PREFIX_RE = re.compile(r"^(?:us|eu|apac|us-gov|global)\.")
 
 
-def _pricing_candidates(model: str) -> list[str]:
+def pricing_candidates(model: str) -> list[str]:
     """Progressively normalized forms of a (possibly Bedrock-routed) model ID.
 
     eu.anthropic.claude-haiku-4-5-20251001-v1:0 ->
@@ -236,7 +236,7 @@ def get_model_pricing(model: str) -> ModelPricing:
     live = _live_pricing(model)
     if live is not None:
         return live
-    for candidate in _pricing_candidates(model):
+    for candidate in pricing_candidates(model):
         if candidate in MODEL_PRICING:
             return MODEL_PRICING[candidate]
     return DEFAULT_PRICING

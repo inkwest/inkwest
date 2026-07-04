@@ -526,6 +526,12 @@ async def stamp_message_usage(
     inert today (callers stamp an id they just created) but keeps the helper safe by
     construction should it ever meet request-derived input.
     """
+    # Same clamp rationale as update_session_stats (engine-reported values).
+    input_tokens = max(0, int(input_tokens))
+    output_tokens = max(0, int(output_tokens))
+    cache_read_tokens = max(0, int(cache_read_tokens))
+    cache_write_tokens = max(0, int(cache_write_tokens))
+
     stmt = update(Message).where(Message.id == message_id)
     if session_id is not None:
         stmt = stmt.where(Message.session_id == session_id)
@@ -569,6 +575,13 @@ async def update_session_stats(
     """
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
+
+    # SECURITY: counts come from the sandboxed engine's stdout — clamp so a forged
+    # negative can't walk the session totals backwards (same rationale as record_usage).
+    input_tokens = max(0, int(input_tokens))
+    output_tokens = max(0, int(output_tokens))
+    cache_read_tokens = max(0, int(cache_read_tokens))
+    cache_write_tokens = max(0, int(cache_write_tokens))
 
     # Use atomic increment to prevent race conditions
     await db.execute(

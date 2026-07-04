@@ -121,7 +121,7 @@ export function Header() {
             (ConnectorPanel). No global default badge here: outside a session it
             named only a model with no engine, which is ambiguous now that a model
             can run on more than one engine. */}
-        {currentSession && (currentSession.total_input_tokens || currentSession.total_output_tokens) ? (
+        {currentSession && (currentSession.total_input_tokens || currentSession.total_output_tokens || currentSession.total_cache_read_tokens || currentSession.total_cache_write_tokens) ? (
           <TokenGlyphs
             className="text-xs text-gray-500 hidden sm:inline"
             input={currentSession.total_input_tokens || 0}

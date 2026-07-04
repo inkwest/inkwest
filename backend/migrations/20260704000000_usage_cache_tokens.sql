@@ -1,5 +1,11 @@
 -- migrate:up
 
+-- usage_records is written on every turn (and, post-branch, every Bedrock call) and
+-- scanned by the usage dashboards: the ALTER takes ACCESS EXCLUSIVE and would queue
+-- behind any long report scan, pinning every insert behind it. Fail fast instead.
+-- Transaction-scoped (the runner wraps each migration).
+SET LOCAL lock_timeout = '5s';
+
 -- Prompt-cache-aware usage accounting (budget accuracy):
 --   * cache_read_tokens / cache_write_tokens — cache tokens were previously dropped
 --     entirely (~10x cost undercount on cache-heavy Claude Code turns).
@@ -17,6 +23,8 @@ ALTER TABLE inkwest.usage_records
 CREATE INDEX ix_usage_records_turn_id ON inkwest.usage_records (turn_id);
 
 -- migrate:down
+
+SET LOCAL lock_timeout = '5s';
 
 DROP INDEX inkwest.ix_usage_records_turn_id;
 

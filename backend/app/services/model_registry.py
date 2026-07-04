@@ -49,10 +49,10 @@ from app.services.pricing import (
     model_label,
 )
 from app.services.pricing import (
-    _pricing_candidates as _id_candidates,
+    calculate_cost as _table_cost,
 )
 from app.services.pricing import (
-    calculate_cost as _table_cost,
+    pricing_candidates as _id_candidates,
 )
 
 logger = logging.getLogger(__name__)

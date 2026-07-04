@@ -15,13 +15,20 @@ backend process. Every sandboxed transport sends `Authorization: Bearer …` —
 (`ANTHROPIC_BEDROCK_BASE_URL`), the inkwest-agent's boto3 (`endpoint_url`), and opencode's AI
 SDK (`opencode.json` `provider.amazon-bedrock.options.baseURL`) — with **no SigV4**, so the
 broker is a pure header swap + transparent byte passthrough; the eventstream is streamed back
-untouched.
+untouched. Since the budget-accuracy work the broker additionally **meters** each data-plane
+call: a passive tee (`app/services/llm_metering.py`) observes the forwarded bytes and, in a
+post-stream background task, persists one authoritative `usage_records` row per Bedrock call
+(`source='broker'`, cache tokens included, shared per-turn `turn_id`) — with the broker on,
+the orchestrators skip their own budget row (see `docs/BUDGET.md`). The bytes themselves are
+still forwarded unmodified; a metering failure only logs `llm_proxy_metering_*` warnings and
+bumps `inkwest_llm_metering_failures_total{reason}` — it never breaks the stream.
 
 ## Components
 
 | Piece | File | Role |
 |---|---|---|
-| Broker route (data plane) | `app/api/routes/llm_proxy.py` | `POST /api/llm-proxy/model/{id}/{op}` — verify grant, RESTRICT (`model_id` ∈ enabled registry models/ARNs, `op` ∈ `converse`/`converse-stream`/`invoke`/`invoke-with-response-stream`), swap `Authorization` → real bearer, stream to `bedrock-runtime.<region>.amazonaws.com`. |
+| Broker route (data plane) | `app/api/routes/llm_proxy.py` | `POST /api/llm-proxy/model/{id}/{op}` — verify grant, RESTRICT (`model_id` ∈ enabled registry models/ARNs, `op` ∈ `converse`/`converse-stream`/`invoke`/`invoke-with-response-stream`), swap `Authorization` → real bearer, stream to `bedrock-runtime.<region>.amazonaws.com`, and meter the response (one `source='broker'` usage row per call). |
+| Metering tee | `app/services/llm_metering.py` | Decodes the forwarded bytes (eventstream via botocore / JSON body) into the billed token counts — `invocationMetrics` is the invoke-stream truth, Converse `usage` accepts both cache-key spellings; fail-safe (parse failure ⇒ no row + warning, never touches the stream). |
 | Broker route (control plane) | same file | `GET /api/llm-proxy/{resource}` for a read-only allowlist (`inference-profiles`, `foundation-models`) → `bedrock.<region>.amazonaws.com`. Claude Code lists these to resolve a model to its **regional inference profile** (bare on-demand ids aren't invocable in regions like `eu-west-1`) and points the GETs at the same base URL — without this leg, resolution 404s and the data-plane invoke then fails. Same grant verify + bearer swap. |
 | Grant store | `app/services/llm_proxy_token.py` | In-process registry of opaque per-turn grants. `mint` at turn start, `verify` by lookup, `burn` at turn end. **Not a JWT** — a JWT can't be revoked before expiry; the grant must die when the turn ends. |
 | Wiring | `app/services/llm_broker.py` | `cli_broker_env` / `agent_broker_env` (inject), `agent_bedrock_endpoint_url`, `burn_env` (revoke). The single gate + base-URL derivation for all three engines (opencode reuses `agent_broker_env` + points its `provider.amazon-bedrock.options.baseURL` at the broker via its per-turn `opencode.json`). |

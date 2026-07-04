@@ -141,6 +141,15 @@ tokens_total = Counter(
 model_cost_usd_total = Counter(
     "inkwest_model_cost_usd_total", "Estimated model cost in USD", ["model", "engine"]
 )
+# Broker metering failures = billed Bedrock calls that produced NO usage row (broker-on
+# also skips the engine row, so each increment is real unaccounted spend). Alert on a
+# sustained rate: a wire-format drift would flip EVERY call to "no_usage" silently.
+# reason: no_usage (parse failure / no terminal frame) | no_session | persist_failed
+llm_metering_failures_total = Counter(
+    "inkwest_llm_metering_failures_total",
+    "Broker metering failures (no usage row persisted)",
+    ["reason"],
+)
 
 # --- Sandbox (only moves when sandbox_enabled) -----------------------------------------
 # No engine/model labels: a sandbox is provisioned once per conversation and reused across

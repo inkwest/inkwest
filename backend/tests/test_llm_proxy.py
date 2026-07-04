@@ -941,3 +941,51 @@ async def test_metering_legacy_grant_defaults(caplog) -> None:
     finally:
         for p in ps:
             p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_skips_grant_without_session(caplog) -> None:
+    """A grant minted with no session can't be attributed — warning + failure counter,
+    never an exception into the response lifecycle."""
+    record = AsyncMock()
+    db, ps = _metering_patches(lambda request: _fixture_streaming("invoke_nonstream.bin"), record)
+    for p in ps:
+        p.start()
+    try:
+        tok = llm_proxy_token.mint(None, None, engine=_ENGINE, turn_id=_TURN)
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/invoke",
+                    headers={"Authorization": f"Bearer {tok}"},
+                    content=b"{}",
+                )
+        assert resp.status_code == 200
+        record.assert_not_awaited()
+        assert "llm_proxy_metering_no_session" in caplog.text
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_control_plane_gets_are_never_metered() -> None:
+    """Only data-plane calls carry a tee: a control-plane GET (non-Bedrock-usage JSON)
+    must produce no usage row and no parse warning."""
+    record = AsyncMock()
+    db, ps = _metering_patches(
+        lambda request: _streaming(200, b'{"inferenceProfileSummaries": []}'), record
+    )
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.get(
+                "/api/llm-proxy/inference-profiles",
+                headers=_metered_bearer(),
+            )
+        assert resp.status_code == 200
+        record.assert_not_awaited()
+    finally:
+        for p in ps:
+            p.stop()

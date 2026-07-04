@@ -246,6 +246,7 @@ required.
     total_output_tokens = 0
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
+    total_cache_write_1h_tokens = 0
     turn_id = uuid.uuid4()
     usage_persisted = False
 
@@ -258,7 +259,14 @@ required.
         best-effort — a persistence failure never masks the turn's own outcome.
         """
         nonlocal usage_persisted
-        if usage_persisted or not (total_input_tokens or total_output_tokens):
+        # Cache counts join the gate: a fully-cached turn can report 0 fresh in/out yet
+        # still carry billable cache tokens (the frontend handles that shape already).
+        if usage_persisted or not (
+            total_input_tokens
+            or total_output_tokens
+            or total_cache_read_tokens
+            or total_cache_write_tokens
+        ):
             return
         usage_persisted = True
         try:
@@ -290,11 +298,19 @@ required.
                     model=actual_model or model_choice,
                     cache_read_tokens=total_cache_read_tokens,
                     cache_write_tokens=total_cache_write_tokens,
+                    cache_write_1h_tokens=total_cache_write_1h_tokens,
                     turn_id=turn_id,
                 )
             await db.commit()
         except Exception as e:
             logger.error(f"Failed to persist session stats/usage: {e}")
+            # A failed commit leaves the session in an aborted transaction; roll back so
+            # the next DB op on this session doesn't error (parity with the agent/opencode
+            # persist helpers).
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
     try:
         # Where the agent works. In sandbox mode `claude` runs inside this
@@ -391,6 +407,7 @@ required.
             total_output_tokens = 0
             total_cache_read_tokens = 0
             total_cache_write_tokens = 0
+            total_cache_write_1h_tokens = 0
             emitted = False
             try:
                 output_stream = execute_claude_cli(
@@ -428,6 +445,9 @@ required.
                             total_output_tokens = event.metadata.get("output_tokens", 0)
                             total_cache_read_tokens = event.metadata.get("cache_read_tokens", 0)
                             total_cache_write_tokens = event.metadata.get("cache_write_tokens", 0)
+                            total_cache_write_1h_tokens = event.metadata.get(
+                                "cache_write_1h_tokens", 0
+                            )
                         continue
 
                     if event.type == "session_info" and event.metadata.get("cli_session_id"):
@@ -484,6 +504,9 @@ required.
                             total_output_tokens = event.metadata.get("output_tokens", 0)
                             total_cache_read_tokens = event.metadata.get("cache_read_tokens", 0)
                             total_cache_write_tokens = event.metadata.get("cache_write_tokens", 0)
+                            total_cache_write_1h_tokens = event.metadata.get(
+                                "cache_write_1h_tokens", 0
+                            )
                         yield event
                     else:
                         yield event
@@ -492,6 +515,9 @@ required.
                 # on an explicit cancel; surface that to the client as a stopped turn.
                 if cancel_event and cancel_event.is_set():
                     logger.info("CLI chat cancelled by user")
+                    # A Stop kills the CLI mid-turn but AWS bills the completed calls —
+                    # persist whatever the parser surfaced (usage_stats on stream end).
+                    await _persist_accumulated_usage()
                     yield done_event(stopped=True)
                     return
                 break  # turn completed

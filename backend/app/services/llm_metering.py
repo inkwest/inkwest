@@ -154,7 +154,8 @@ class MeteringTee:
                 if isinstance(metrics, dict):
                     self._invocation_metrics = metrics
                 # message_start carries the full usage incl. the cache_creation TTL split;
-                # later message_delta usage blocks drop the nested split — keep the first seen.
+                # later message_delta usage blocks drop the nested split (the isinstance
+                # guard skips them), so in practice only message_start's survives.
                 usage = (inner.get("message") or {}).get("usage") or inner.get("usage")
                 if isinstance(usage, dict) and isinstance(usage.get("cache_creation"), dict):
                     self._anthropic_cache_creation = usage["cache_creation"]

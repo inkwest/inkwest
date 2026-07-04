@@ -486,4 +486,5 @@ docker compose exec backend python db_migrate.py
 | messages | ix_messages_status | Failed message lookup |
 | users | idx_users_oidc_subject | OIDC login lookup |
 | usage_records | idx_usage_recorded_at | Usage reporting queries |
+| usage_records | ix_usage_records_turn_id | Per-turn rollup (GROUP BY turn_id) |
 | oidc_pending_states | idx_oidc_pending_states_created | TTL cleanup of expired states |

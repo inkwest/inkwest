@@ -116,6 +116,9 @@ async def _run_loop(
     # unconditionally so metering is already correct when opportunistic caching lands.
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
+    # 1h-TTL portion of the writes (billed 2x): Converse reports it in
+    # usage.cacheDetails[{ttl, inputTokens}]. Always 0 today (no cachePoint yet).
+    total_cache_write_1h_tokens = 0
     total_tool_calls = 0
     iteration = 0
     iter_latency_ms = 0
@@ -128,6 +131,7 @@ async def _run_loop(
             "output_tokens": total_output_tokens,
             "cache_read_tokens": total_cache_read_tokens,
             "cache_write_tokens": total_cache_write_tokens,
+            "cache_write_1h_tokens": total_cache_write_1h_tokens,
             "tool_calls": total_tool_calls,
             "latency_ms": iter_latency_ms,
         }
@@ -185,6 +189,11 @@ async def _run_loop(
         )
         total_cache_write_tokens += (
             usage.get("cacheWriteInputTokens", usage.get("cacheWriteInputTokenCount", 0)) or 0
+        )
+        total_cache_write_1h_tokens += sum(
+            int(d.get("inputTokens") or 0)
+            for d in usage.get("cacheDetails") or []
+            if isinstance(d, dict) and d.get("ttl") == "1h"
         )
 
         out_content = response.get("output", {}).get("message", {}).get("content", [])

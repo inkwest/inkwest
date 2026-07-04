@@ -85,3 +85,7 @@ docker-compose.override.yaml
 
 # Handoff docs — local working notes, not committed.
 docs/HANDOFF-*.md
+# Local working area — holds VERBATIM (unredacted) wire captures; committed fixtures live in
+# backend/tests/fixtures/ after redaction. Repo-level on purpose: relying on a machine-local
+# excludesfile here would let another clone commit raw captures.
+misc/

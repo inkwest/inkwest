@@ -83,7 +83,7 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
 |---|---|
 | Compute budget status (`is_allowed`, action, warnings) | `backend/app/services/budget_service.py::check_budget` |
 | Enforcement gate (request path) | `backend/app/api/routes/chat.py::_budget_block_reason` |
-| Record real usage per turn | `budget_service.py::record_usage`, called by every orchestrator |
+| Record real usage per turn | `budget_service.py::record_usage` — broker OFF: called by every orchestrator (one row/turn); broker ON: called by `llm_proxy.py::_finish_stream` via `llm_metering.MeteringTee` (one row per Bedrock call, `source='broker'`) |
 | Enforcement settings | `is_budget_enabled` / `default_monthly_cost_limit` in `budget_service.py`; keys in `app_settings.py` |
 | Admin settings endpoint | `admin.py::get_budget_settings` / `update_budget_settings` |
 | Budget CRUD | `admin.py` `/budgets` endpoints |

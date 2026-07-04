@@ -367,3 +367,241 @@ async def test_done_turn_persists_cache_tokens() -> None:
     assert ru.await_args.kwargs["cache_write_tokens"] == 26797
     assert uss.await_args.kwargs["cache_write_tokens"] == 26797
     assert uss.await_args.kwargs["cache_read_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_timeout_turn_persists_accumulated_usage() -> None:
+    """H: the TimeoutError handler must persist too (a timed-out turn burned real spend)."""
+
+    async def parse_with_timeout(_stream):
+        from app.services.events import ChatEvent
+
+        yield ChatEvent(type="text_delta", content="partial")
+        yield ChatEvent(
+            type="usage_stats",
+            metadata={
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+            },
+        )
+        raise TimeoutError("idle stall")
+
+    capture: dict = {}
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse_with_timeout),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    assert events[-1].type == "error"
+    ru.assert_awaited_once()
+    assert ru.await_args.kwargs["input_tokens"] == 12
+    # containment: the internal accounting event never reaches the client
+    assert all(e.type != "usage_stats" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_persists_accumulated_usage() -> None:
+    """H: the generic Exception handler must persist too."""
+
+    async def parse_with_boom(_stream):
+        from app.services.events import ChatEvent
+
+        yield ChatEvent(
+            type="usage_stats",
+            metadata={
+                "input_tokens": 7,
+                "output_tokens": 2,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+            },
+        )
+        # Neither RuntimeError nor TimeoutError -> lands in the generic Exception handler.
+        raise ValueError("unexpected parser blowup")
+
+    capture: dict = {}
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse_with_boom),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    assert events[-1].type == "error"
+    ru.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_persists_usage_surfaced_on_clean_stream_end() -> None:
+    """A user Stop kills the CLI (clean stream end, no done): the parser's trailing
+    usage_stats must feed a persist before the stopped done."""
+    import asyncio as aio
+
+    from app.services.events import ChatEvent
+
+    cancel = aio.Event()
+    cancel.set()
+
+    async def parse_stopped(_stream):
+        yield ChatEvent(type="text_delta", content="partial answer")
+        yield ChatEvent(
+            type="usage_stats",
+            metadata={
+                "input_tokens": 30,
+                "output_tokens": 11,
+                "cache_read_tokens": 5000,
+                "cache_write_tokens": 100,
+            },
+        )
+
+    capture: dict = {}
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse_stopped),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+                cancel_event=cancel,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    assert events[-1].type == "done" and events[-1].metadata.get("stopped") is True
+    ru.assert_awaited_once()
+    assert ru.await_args.kwargs["cache_read_tokens"] == 5000
+    assert all(e.type != "usage_stats" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_cache_only_turn_is_persisted() -> None:
+    """A fully-cached turn (0 fresh in/out) still burned billable cache tokens."""
+    from app.services.events import ChatEvent
+
+    async def parse_cached(_stream):
+        yield ChatEvent(
+            type="done",
+            metadata={
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 8000,
+                "cache_write_tokens": 0,
+            },
+        )
+
+    capture: dict = {}
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse_cached),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    ru.assert_awaited_once()
+    assert ru.await_args.kwargs["cache_read_tokens"] == 8000
+
+
+@pytest.mark.asyncio
+async def test_1h_ttl_split_threaded_to_record_usage() -> None:
+    from app.services.events import ChatEvent
+
+    async def parse_1h(_stream):
+        yield ChatEvent(
+            type="done",
+            metadata={
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 1000,
+                "cache_write_1h_tokens": 400,
+            },
+        )
+
+    capture: dict = {}
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse_1h),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    assert ru.await_args.kwargs["cache_write_1h_tokens"] == 400

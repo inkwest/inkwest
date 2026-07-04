@@ -328,7 +328,11 @@ async def orchestrate_chat_inkwest_agent(
             return
         in_tokens = done_meta.get("input_tokens", 0)
         out_tokens = done_meta.get("output_tokens", 0)
-        if not (in_tokens or out_tokens):
+        cache_read = done_meta.get("cache_read_tokens", 0)
+        cache_write = done_meta.get("cache_write_tokens", 0)
+        # Cache counts join the gate: a fully-cached turn can report 0 fresh in/out yet
+        # still carry billable cache tokens (the frontend handles that shape already).
+        if not (in_tokens or out_tokens or cache_read or cache_write):
             return
         usage_persisted = True
         try:
@@ -339,8 +343,8 @@ async def orchestrate_chat_inkwest_agent(
                 output_tokens=out_tokens,
                 tool_calls=done_meta.get("tool_calls", 0),
                 iterations=done_meta.get("iterations", 1),
-                cache_read_tokens=done_meta.get("cache_read_tokens", 0),
-                cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
             )
             # Broker-on: the proxy already persisted one authoritative UsageRecord per
             # Bedrock call (source='broker') — skip the engine-side budget row only;
@@ -353,8 +357,9 @@ async def orchestrate_chat_inkwest_agent(
                     input_tokens=in_tokens,
                     output_tokens=out_tokens,
                     model=model,
-                    cache_read_tokens=done_meta.get("cache_read_tokens", 0),
-                    cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+                    cache_read_tokens=cache_read,
+                    cache_write_tokens=cache_write,
+                    cache_write_1h_tokens=done_meta.get("cache_write_1h_tokens", 0),
                     turn_id=turn_id,
                 )
             await db.commit()
@@ -375,8 +380,8 @@ async def orchestrate_chat_inkwest_agent(
                     usage_message_id,
                     input_tokens=in_tokens,
                     output_tokens=out_tokens,
-                    cache_read_tokens=done_meta.get("cache_read_tokens", 0),
-                    cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+                    cache_read_tokens=cache_read,
+                    cache_write_tokens=cache_write,
                     session_id=session_uuid,
                 )
             except Exception as e:
@@ -602,6 +607,9 @@ async def orchestrate_chat_inkwest_agent(
             # partial (matches orchestrator_cli) and stop before _flush.
             if cancel_event and cancel_event.is_set():
                 logger.info("inkwest-agent chat cancelled by user")
+                # Persist whatever usage reached us before the kill (no-op when the agent
+                # died before any terminal metadata) — AWS bills the completed calls.
+                await _persist_accumulated_usage()
                 yield done_event(stopped=True)
                 return
 

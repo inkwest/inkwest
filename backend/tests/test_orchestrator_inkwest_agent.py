@@ -1567,3 +1567,32 @@ async def test_stamp_failure_never_loses_the_usage_row():
     assert events[-1].type == "done"  # turn outcome unaffected
     spies.record_usage.assert_awaited_once()  # budget row persisted BEFORE the stamp
     stamp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_only_turn_is_persisted():
+    """A fully-cached turn (0 fresh in/out, cache > 0) still burned billable tokens."""
+    patches, spies = _patch_broker()
+    lines = [
+        json.dumps(
+            {
+                "type": "done",
+                "metadata": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 9000,
+                    "cache_write_tokens": 0,
+                },
+            }
+        )
+    ]
+    for p in patches:
+        p.start()
+    try:
+        await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    spies.record_usage.assert_awaited_once()
+    assert spies.record_usage.await_args.kwargs["cache_read_tokens"] == 9000
+    assert spies.update_stats.await_args.kwargs["cache_read_tokens"] == 9000

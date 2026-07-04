@@ -77,7 +77,7 @@ export function ModelUsageTable({ data }: { data: ModelUsage[] }) {
                 className="text-right cursor-pointer select-none"
                 aria-sort={ariaSort(sort, 'cache_write_tokens')}
                 onClick={() => toggle('cache_write_tokens')}
-                title="Prompt-cache writes (billed ~1.25x input rate)"
+                title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)"
               >
                 Cache W{sortArrow(sort, 'cache_write_tokens')}
               </TableHead>

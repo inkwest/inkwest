@@ -55,7 +55,7 @@ from app.core.constants import LLM_PROXY_MAX_BODY_BYTES, LLM_PROXY_STREAM_MAX_SE
 from app.core.database import async_session_maker
 from app.services import model_catalog, model_registry
 from app.services.budget_service import record_usage
-from app.services.llm_metering import MeteringTee
+from app.services.llm_metering import STREAMING_OPS, MeteringTee
 from app.services.llm_proxy_token import LlmProxyClaims, ProxyAuthError, verify
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,9 @@ _transport: httpx.AsyncBaseTransport | None = None
 # Bedrock runtime operations the broker permits (the trailing path segment). converse /
 # converse-stream (Converse API, used by the inkwest-agent) and
 # invoke / invoke-with-response-stream (InvokeModel, used by the Claude CLI on Bedrock).
-_ALLOWED_OPS = frozenset({"converse", "converse-stream", "invoke", "invoke-with-response-stream"})
+# Composed from the metering module's STREAMING_OPS so the tee's stream/JSON detection
+# can never silently desync from the ops the route accepts.
+_ALLOWED_OPS = frozenset({"converse", "invoke"}) | STREAMING_OPS
 
 # Bedrock CONTROL-plane resources the broker proxies (read-only GET allowlist, first path
 # segment). Claude Code on Bedrock lists these to resolve a model to its regional inference
@@ -350,7 +352,7 @@ async def _send(
     handler and are closed by ``close_stream`` once the body is consumed (or the client
     disconnects); on any failure OR cancellation before the StreamingResponse is handed off,
     close the client here. Data-plane calls additionally carry a :class:`MeteringTee` that
-    observes the forwarded bytes and persists a usage row post-stream (2xx only — an errored
+    observes the forwarded bytes and persists a usage row post-stream (HTTP 200 only — an errored
     Bedrock call has no billable tokens)."""
     client = httpx.AsyncClient(transport=_transport, timeout=TIMEOUT)
     upstream: httpx.Response | None = None

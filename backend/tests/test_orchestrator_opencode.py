@@ -969,7 +969,7 @@ class TestOrchestrateOpencode:
 
     @pytest.mark.asyncio
     async def test_cost_fallback_prices_cache_tokens_at_cache_rates(self):
-        # Cache write/read tokens (folded into input for stats) must NOT be billed at the
+        # Cache write/read tokens must NOT be billed at the
         # full input rate — the estimate prices the fresh input at 1x and the cache splits
         # at their real rates (read 0.1x, write 1.25x) via the cache-aware calculate_cost.
         from app.services.budget_service import calculate_cost

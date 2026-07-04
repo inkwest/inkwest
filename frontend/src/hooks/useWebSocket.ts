@@ -174,6 +174,10 @@ export function useWebSocket(sessionId: string) {
             role: 'assistant',
             content: [{ type: 'text', text: '*Response interrupted by user.*' }],
             created_at: new Date().toISOString(),
+            input_tokens: (event.metadata?.input_tokens as number | undefined) ?? null,
+            output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
+            cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
+            cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
           });
         }
 
@@ -199,13 +203,23 @@ export function useWebSocket(sessionId: string) {
         break;
       }
 
-      case 'error':
+      case 'error': {
+        // Agent error events carry the usage burned before the failure — the backend
+        // persists it, so the badges should reflect it live too.
+        const eInp = event.metadata?.input_tokens as number | undefined;
+        const eOut = event.metadata?.output_tokens as number | undefined;
+        const eCr = event.metadata?.cache_read_tokens as number | undefined;
+        const eCw = event.metadata?.cache_write_tokens as number | undefined;
+        if (eInp || eOut || eCr || eCw) {
+          useSessionsStore.getState().updateSessionTokens(sessionId, eInp || 0, eOut || 0, eCr, eCw);
+        }
         setError(event.content || 'An error occurred');
         setIsStreaming(false);
         setResumingTurn(false);
         setActiveToolCall(null);
         flushQueue();
         break;
+      }
 
       case 'connector_required': {
         // A tool needs a connector that isn't granted/expired — surface a
