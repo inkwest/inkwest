@@ -545,14 +545,19 @@ async def orchestrate_chat_inkwest_agent(
                     tool_calls=done_meta.get("tool_calls", 0),
                     iterations=done_meta.get("iterations", 1),
                 )
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=session_uuid,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    model=model,
-                )
+                # Broker-on: the proxy already persisted one authoritative UsageRecord
+                # per Bedrock call (source='broker') — skip the engine-side budget row
+                # only; session stats above still come from the engine.
+                if not broker_env:
+                    await record_usage(
+                        db,
+                        user_id=user_id,
+                        session_id=session_uuid,
+                        input_tokens=in_tokens,
+                        output_tokens=out_tokens,
+                        model=model,
+                        turn_id=turn_id,
+                    )
                 await db.commit()
             except Exception as e:
                 logger.error(f"Failed to persist session stats/usage: {e}")

@@ -652,43 +652,51 @@ async def orchestrate_chat_opencode(
                     tool_calls=done_meta.get("tool_calls", 0),
                     iterations=done_meta.get("iterations", 1),
                 )
-                # opencode reports an authoritative per-turn USD cost (cache-aware) — pass it
-                # through so we don't recompute a wrong figure from token×rate. Guard the parse:
-                # a malformed value degrades to the token estimate rather than failing the turn.
-                oc_cost = done_meta.get("cost_usd")
-                cost_override: Decimal | None = None
-                # Truthy check on purpose: opencode reports 0.0 when models.dev has no
-                # pricing for the model (a genuinely free turn doesn't exist — output
-                # tokens always bill), so zero means "unknown" → estimate. Negative/malformed
-                # values likewise fall back.
-                if oc_cost:
-                    try:
-                        cost_override = Decimal(str(oc_cost))
-                    except (InvalidOperation, ValueError):
-                        cost_override = None
-                    if cost_override is not None and cost_override < 0:
-                        cost_override = None
-                if cost_override is None:
-                    # Fallback estimate from NON-cache input only. in_tokens folds Bedrock
-                    # cache write/read (so session stats reflect real prompt size), but
-                    # calculate_cost bills every "input" token at the full prompt rate — passing
-                    # the cache-inflated count (record_usage's own fallback does) overcharges the
-                    # cached prefix ~10x. Cache read is near-free and cache write is model-priced;
-                    # absent cache-aware rates in the estimator, cost only the fresh prompt input.
-                    from app.services.budget_service import calculate_cost
+                # Broker-on: the proxy already persisted one authoritative UsageRecord per
+                # Bedrock call (source='broker', wire-exact cache tokens) — skip the whole
+                # engine-side budget row (cost derivation included); session stats above
+                # still come from the engine.
+                if not broker_env:
+                    # opencode reports an authoritative per-turn USD cost (cache-aware) —
+                    # pass it through so we don't recompute a wrong figure from token×rate.
+                    # Guard the parse: a malformed value degrades to the token estimate
+                    # rather than failing the turn.
+                    oc_cost = done_meta.get("cost_usd")
+                    cost_override: Decimal | None = None
+                    # Truthy check on purpose: opencode reports 0.0 when models.dev has no
+                    # pricing for the model (a genuinely free turn doesn't exist — output
+                    # tokens always bill), so zero means "unknown" → estimate.
+                    # Negative/malformed values likewise fall back.
+                    if oc_cost:
+                        try:
+                            cost_override = Decimal(str(oc_cost))
+                        except (InvalidOperation, ValueError):
+                            cost_override = None
+                        if cost_override is not None and cost_override < 0:
+                            cost_override = None
+                    if cost_override is None:
+                        # Fallback estimate from NON-cache input only. in_tokens folds
+                        # Bedrock cache write/read (so session stats reflect real prompt
+                        # size), but calculate_cost bills every "input" token at the full
+                        # prompt rate — passing the cache-inflated count (record_usage's own
+                        # fallback does) overcharges the cached prefix ~10x. Cache read is
+                        # near-free and cache write is model-priced; absent cache-aware
+                        # rates in the estimator, cost only the fresh prompt input.
+                        from app.services.budget_service import calculate_cost
 
-                    fresh_input = in_tokens - done_meta.get("cache_read_tokens", 0)
-                    fresh_input -= done_meta.get("cache_write_tokens", 0)
-                    cost_override = calculate_cost(model, max(fresh_input, 0), out_tokens)
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=session_uuid,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    model=model,
-                    cost_usd=cost_override,
-                )
+                        fresh_input = in_tokens - done_meta.get("cache_read_tokens", 0)
+                        fresh_input -= done_meta.get("cache_write_tokens", 0)
+                        cost_override = calculate_cost(model, max(fresh_input, 0), out_tokens)
+                    await record_usage(
+                        db,
+                        user_id=user_id,
+                        session_id=session_uuid,
+                        input_tokens=in_tokens,
+                        output_tokens=out_tokens,
+                        model=model,
+                        cost_usd=cost_override,
+                        turn_id=turn_id,
+                    )
                 await db.commit()
             except Exception as e:
                 logger.error(f"Failed to persist session stats/usage: {e}")

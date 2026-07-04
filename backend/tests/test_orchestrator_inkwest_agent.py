@@ -1409,3 +1409,41 @@ async def test_grant_burned_when_agent_execute_raises() -> None:
     assert captured["token"]
     with pytest.raises(token.ProxyAuthError):  # burned in the finally despite the crash
         token.verify(captured["token"])
+
+
+# --- P2 authority switch: broker-on skips the engine-side budget row ----------------------
+
+
+@pytest.mark.asyncio
+async def test_broker_on_skips_engine_usage_row_keeps_stats():
+    patches, spies = _patch_broker(
+        broker_settings=SimpleNamespace(
+            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000"
+        )
+    )
+    lines = [json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}})]
+    for p in patches:
+        p.start()
+    try:
+        await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    spies.update_stats.assert_awaited_once()
+    spies.record_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broker_off_engine_usage_row_carries_turn_id():
+    patches, spies = _patch_broker()
+    lines = [json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}})]
+    for p in patches:
+        p.start()
+    try:
+        await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    spies.update_stats.assert_awaited_once()
+    spies.record_usage.assert_awaited_once()
+    assert isinstance(spies.record_usage.await_args.kwargs["turn_id"], uuid.UUID)

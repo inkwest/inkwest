@@ -229,6 +229,16 @@ class TestOrchestrateOpencode:
         )
         es.enter_context(patch.object(oo, "get_system_prompt", MagicMock(return_value="SYS")))
         es.enter_context(patch.object(oo, "resolve_session_model", AsyncMock(return_value="m")))
+        # Pin the LLM broker OFF by default so these tests are hermetic against the ambient
+        # LLM_BROKER_ENABLED (on in some dev .envs). With P2's authority switch, a live
+        # broker env would silently skip record_usage and invert the accounting asserts.
+        # Broker-specific tests re-patch these inside their own `with` (inner patch wins).
+        es.enter_context(
+            patch.object(oo.llm_broker, "agent_broker_env", MagicMock(return_value={}))
+        )
+        es.enter_context(
+            patch.object(oo.llm_broker, "agent_bedrock_endpoint_url", MagicMock(return_value=None))
+        )
         es.enter_context(patch.object(oo, "execute_opencode", exec_factory or fake_exec))
         # model_registry.get_entry + sandbox.* are imported lazily inside the broker, so patch
         # the real module functions (not sys.modules — `from app.services import sandbox` binds
@@ -1379,3 +1389,72 @@ class TestOpencodeHardening:
         dones = [e for e in events if e.type == "done"]
         assert len(dones) == 1 and not dones[0].metadata.get("stopped")  # genuine done, not stopped
         assert "assistant" in saved_roles  # the completed answer was persisted
+
+
+class TestBrokerAuthoritySwitch:
+    """P2: broker-on skips ONLY the engine-side budget row; session stats stay engine-fed."""
+
+    _patch = TestOrchestrateOpencode._patch
+
+    @pytest.mark.asyncio
+    async def test_broker_on_skips_engine_usage_row_keeps_stats(self):
+        line = (
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":10,"output":5},"cost":0.0123}}\n'
+        )
+        es, _cap = self._patch(history=[], exec_lines=[line])
+        with (
+            es,
+            patch.object(
+                oo.llm_broker,
+                "agent_broker_env",
+                MagicMock(return_value={"AWS_BEARER_TOKEN_BEDROCK": "grant-x"}),
+            ),
+            patch.object(
+                oo.llm_broker,
+                "agent_bedrock_endpoint_url",
+                MagicMock(return_value="http://broker/api/llm-proxy"),
+            ),
+            patch.object(oo.llm_broker, "burn_env", MagicMock()),
+            patch.object(oo, "_publish_workdir_file", lambda wd, name, content: None),
+        ):
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            oo.update_session_stats.assert_awaited_once()
+            oo.record_usage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_broker_off_engine_usage_row_carries_turn_id(self):
+        line = (
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":10,"output":5},"cost":0.0123}}\n'
+        )
+        es, _cap = self._patch(history=[], exec_lines=[line])
+        with (
+            es,
+            patch.object(oo.llm_broker, "agent_broker_env", MagicMock(return_value={})),
+            patch.object(oo.llm_broker, "agent_bedrock_endpoint_url", MagicMock(return_value=None)),
+        ):
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            oo.update_session_stats.assert_awaited_once()
+            oo.record_usage.assert_awaited_once()
+            assert isinstance(oo.record_usage.await_args.kwargs["turn_id"], uuid.UUID)

@@ -480,17 +480,24 @@ required.
                     tool_calls=len([b for b in content if b.get("type") == "tool_use"]),
                     iterations=1,
                 )
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=uuid.UUID(str(session_id)),
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    # Attribute to what actually ran: CLI-reported model, else the
-                    # explicit choice; None falls back to the catalog default
-                    # (approximate — the CLI used its own default then).
-                    model=actual_model or model_choice,
-                )
+                # Broker-on (grant minted ⇒ broker_env non-empty): the proxy already
+                # persisted one authoritative UsageRecord per Bedrock call
+                # (source='broker', cache tokens included) — an engine-side row would
+                # double-count the budget. Session stats above (and the Message row)
+                # still come from the engine.
+                if not broker_env:
+                    await record_usage(
+                        db,
+                        user_id=user_id,
+                        session_id=uuid.UUID(str(session_id)),
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        # Attribute to what actually ran: CLI-reported model, else the
+                        # explicit choice; None falls back to the catalog default
+                        # (approximate — the CLI used its own default then).
+                        model=actual_model or model_choice,
+                        turn_id=turn_id,
+                    )
                 await db.commit()
             except Exception as e:
                 logger.error(f"Failed to persist session stats/usage: {e}")

@@ -187,3 +187,85 @@ async def test_grant_burned_when_cancelled() -> None:
     assert capture["token"]
     with pytest.raises(token.ProxyAuthError):
         token.verify(capture["token"])
+
+
+# --- P2 authority switch: broker-on skips the engine-side budget row ----------------------
+
+
+def _usage_events():
+    from app.services.events import ChatEvent
+
+    events = [
+        ChatEvent(type="text_delta", content="hi"),
+        ChatEvent(type="done", metadata={"input_tokens": 10, "output_tokens": 5}),
+    ]
+
+    async def fake_parse(_stream):
+        for e in events:
+            yield e
+
+    return fake_parse
+
+
+@pytest.mark.asyncio
+async def test_broker_on_skips_engine_usage_row_keeps_stats() -> None:
+    """Broker metering is the authority: no engine UsageRecord, session stats still update."""
+    capture: dict = {}
+    ru, uss = AsyncMock(), AsyncMock()
+    ps = _patches(_settings(broker_enabled=True), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", uss),
+        patch.object(oc, "parse_cli_response", _usage_events()),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        db = AsyncMock()
+        await _collect(
+            oc.orchestrate_chat_cli(
+                db=db,
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="why crash?",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    uss.assert_awaited_once()
+    ru.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broker_off_engine_usage_row_carries_turn_id() -> None:
+    """Broker off: exactly one engine row per turn, stamped with the per-turn id."""
+    capture: dict = {}
+    ru, uss = AsyncMock(), AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", uss),
+        patch.object(oc, "parse_cli_response", _usage_events()),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="why crash?",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    uss.assert_awaited_once()
+    ru.assert_awaited_once()
+    assert isinstance(ru.await_args.kwargs["turn_id"], uuid.UUID)
