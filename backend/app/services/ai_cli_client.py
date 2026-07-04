@@ -461,8 +461,33 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
     has_sent_text = False
     total_input_tokens = 0
     total_output_tokens = 0
+    # Prompt-cache tokens (Anthropic usage shape). Claude Code caches aggressively, so on
+    # Bedrock these dominate a turn's real cost — dropping them caused a ~10x undercount.
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
 
-    async for line in output_stream:
+    lines = aiter(output_stream)
+    while True:
+        try:
+            line = await anext(lines)
+        except StopAsyncIteration:
+            break
+        except (RuntimeError, TimeoutError):
+            # Stream cut by a CLI crash/timeout (non-zero exit raises here, before any
+            # terminal `done` could arrive). Surface the usage accumulated so far on an
+            # internal usage_stats event — a failed turn still burned Bedrock spend — then
+            # re-raise so the orchestrator handles the failure. The orchestrator consumes
+            # usage_stats (never forwarded to the client). Mirrors parse_opencode_response.
+            yield ChatEvent(
+                type="usage_stats",
+                metadata={
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "cache_read_tokens": total_cache_read_tokens,
+                    "cache_write_tokens": total_cache_write_tokens,
+                },
+            )
+            raise
         parsed = parse_cli_stream_line(line)
         if not parsed:
             continue
@@ -490,6 +515,8 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
             if usage:
                 total_input_tokens += usage.get("input_tokens", 0)
                 total_output_tokens += usage.get("output_tokens", 0)
+                total_cache_read_tokens += usage.get("cache_read_input_tokens", 0) or 0
+                total_cache_write_tokens += usage.get("cache_creation_input_tokens", 0) or 0
 
             content = message.get("content", [])
             for block in content:
@@ -551,6 +578,10 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 total_input_tokens = usage["input_tokens"]
             if usage.get("output_tokens"):
                 total_output_tokens = usage["output_tokens"]
+            if usage.get("cache_read_input_tokens"):
+                total_cache_read_tokens = usage["cache_read_input_tokens"]
+            if usage.get("cache_creation_input_tokens"):
+                total_cache_write_tokens = usage["cache_creation_input_tokens"]
 
             subtype = parsed.get("subtype")
             if subtype == "success":
@@ -559,6 +590,8 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                     metadata={
                         "input_tokens": total_input_tokens,
                         "output_tokens": total_output_tokens,
+                        "cache_read_tokens": total_cache_read_tokens,
+                        "cache_write_tokens": total_cache_write_tokens,
                     },
                 )
 
@@ -568,6 +601,8 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 metadata={
                     "input_tokens": total_input_tokens,
                     "output_tokens": total_output_tokens,
+                    "cache_read_tokens": total_cache_read_tokens,
+                    "cache_write_tokens": total_cache_write_tokens,
                 },
             )
 

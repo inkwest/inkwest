@@ -269,3 +269,99 @@ async def test_broker_off_engine_usage_row_carries_turn_id() -> None:
     uss.assert_awaited_once()
     ru.assert_awaited_once()
     assert isinstance(ru.await_args.kwargs["turn_id"], uuid.UUID)
+
+
+@pytest.mark.asyncio
+async def test_errored_turn_persists_accumulated_usage() -> None:
+    """CLI exit 1 mid-turn (P3): tokens accumulated before the crash are still persisted."""
+    from app.services.events import ChatEvent
+
+    async def parse_with_crash(_stream):
+        yield ChatEvent(type="text_delta", content="partial")
+        yield ChatEvent(
+            type="usage_stats",
+            metadata={
+                "input_tokens": 10,
+                "output_tokens": 3,
+                "cache_read_tokens": 5000,
+                "cache_write_tokens": 100,
+            },
+        )
+        raise RuntimeError("Claude CLI failed with exit code 1")
+
+    capture: dict = {}
+    ru, uss = AsyncMock(), AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", uss),
+        patch.object(oc, "parse_cli_response", parse_with_crash),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="why crash?",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    assert events[-1].type == "error"  # the turn still surfaces its failure
+    uss.assert_awaited_once()
+    ru.assert_awaited_once()
+    kwargs = ru.await_args.kwargs
+    assert kwargs["input_tokens"] == 10
+    assert kwargs["cache_read_tokens"] == 5000
+    assert kwargs["cache_write_tokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_done_turn_persists_cache_tokens() -> None:
+    """Cache counts from the done metadata land in the engine usage row (broker off)."""
+    from app.services.events import ChatEvent
+
+    async def parse_done(_stream):
+        yield ChatEvent(type="text_delta", content="hi")
+        yield ChatEvent(
+            type="done",
+            metadata={
+                "input_tokens": 10,
+                "output_tokens": 349,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 26797,
+            },
+        )
+
+    capture: dict = {}
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch.object(oc, "record_usage", ru),
+        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse_done),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        await _collect(
+            oc.orchestrate_chat_cli(
+                db=AsyncMock(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    ru.assert_awaited_once()
+    assert ru.await_args.kwargs["cache_write_tokens"] == 26797

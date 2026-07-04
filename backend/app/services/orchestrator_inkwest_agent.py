@@ -305,6 +305,58 @@ async def orchestrate_chat_inkwest_agent(
         enabled_mcp = []
 
     container: str | None = None
+    # Accounting state, bound BEFORE the try so the error handlers can always persist
+    # whatever accumulated (an errored turn's completed Bedrock calls are still billed).
+    # broker_env itself is declared above (with the burn_env contract).
+    received_terminal = False
+    done_meta: dict[str, Any] = {}
+    turn_id = uuid.uuid4()
+    usage_persisted = False
+
+    async def _persist_accumulated_usage() -> None:
+        """Session stats + engine-side usage row for whatever the turn accumulated.
+
+        Called from the success path AND the error handlers — AWS bills every Bedrock
+        call that returned a response, so an errored turn's tokens must be accounted
+        too. Idempotent (one persist per turn) and best-effort: a persistence failure
+        never masks the turn's own outcome.
+        """
+        nonlocal usage_persisted
+        if usage_persisted:
+            return
+        in_tokens = done_meta.get("input_tokens", 0)
+        out_tokens = done_meta.get("output_tokens", 0)
+        if not (in_tokens or out_tokens):
+            return
+        usage_persisted = True
+        try:
+            await update_session_stats(
+                db,
+                session_id,
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                tool_calls=done_meta.get("tool_calls", 0),
+                iterations=done_meta.get("iterations", 1),
+            )
+            # Broker-on: the proxy already persisted one authoritative UsageRecord per
+            # Bedrock call (source='broker') — skip the engine-side budget row only;
+            # session stats above still come from the engine.
+            if not broker_env:
+                await record_usage(
+                    db,
+                    user_id=user_id,
+                    session_id=session_uuid,
+                    input_tokens=in_tokens,
+                    output_tokens=out_tokens,
+                    model=model,
+                    cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+                    cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+                    turn_id=turn_id,
+                )
+            await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to persist session stats/usage: {e}")
+
     try:
         # Mint the broker grant + resolve the matching endpoint as the FIRST thing in the try, so
         # the finally's burn_env always revokes it. Both gate on the same broker_base_url() (empty
@@ -312,7 +364,6 @@ async def orchestrate_chat_inkwest_agent(
         # AWS_BEARER_TOKEN_BEDROCK in sandbox.env so the real key need not live in the sandbox; the
         # endpoint rides the TurnSpec below. Off ⇒ empty ⇒ today's behavior (real bearer direct).
         # One turn_id for every usage row this turn produces (broker grant + engine fallback).
-        turn_id = uuid.uuid4()
         broker_env = llm_broker.agent_broker_env(
             user_id, session_uuid, engine=engines.INKWEST_AGENT, turn_id=turn_id
         )
@@ -435,8 +486,6 @@ async def orchestrate_chat_inkwest_agent(
         # arrives (text or a new tool call), keeping every stored message valid.
         assistant_blocks: list[dict[str, Any]] = []
         pending_results: list[dict[str, Any]] = []
-        received_terminal = False
-        done_meta: dict[str, Any] = {}
 
         async def _flush() -> None:
             nonlocal assistant_blocks, pending_results
@@ -506,6 +555,9 @@ async def orchestrate_chat_inkwest_agent(
                     if event.type == "done":
                         done_meta = event.metadata or {}
                     else:
+                        # Agent error events carry the usage accumulated before the failure
+                        # (additive keys) — a failed turn still burned Bedrock spend.
+                        done_meta = event.metadata or done_meta
                         event = _rewrite_protocol_mismatch(event, settings.app_env)
                 yield event
 
@@ -530,43 +582,18 @@ async def orchestrate_chat_inkwest_agent(
                 # landed) still reads as a protocol mismatch — rewrite it the same way as
                 # the streamed error so the actionable cause isn't lost on this path.
                 yield _rewrite_protocol_mismatch(error_event(str(e)), settings.app_env)
+            await _persist_accumulated_usage()
             return
 
-        # Persist usage from the terminal done meta (the agent reports aggregate totals).
-        in_tokens = done_meta.get("input_tokens", 0)
-        out_tokens = done_meta.get("output_tokens", 0)
-        if in_tokens or out_tokens:
-            try:
-                await update_session_stats(
-                    db,
-                    session_id,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    tool_calls=done_meta.get("tool_calls", 0),
-                    iterations=done_meta.get("iterations", 1),
-                )
-                # Broker-on: the proxy already persisted one authoritative UsageRecord
-                # per Bedrock call (source='broker') — skip the engine-side budget row
-                # only; session stats above still come from the engine.
-                if not broker_env:
-                    await record_usage(
-                        db,
-                        user_id=user_id,
-                        session_id=session_uuid,
-                        input_tokens=in_tokens,
-                        output_tokens=out_tokens,
-                        model=model,
-                        turn_id=turn_id,
-                    )
-                await db.commit()
-            except Exception as e:
-                logger.error(f"Failed to persist session stats/usage: {e}")
+        # Persist usage from the terminal meta (the agent reports aggregate totals).
+        await _persist_accumulated_usage()
 
         if not received_terminal:
             yield done_event()
 
     except Exception as e:
         logger.exception("Unexpected error in inkwest-agent orchestration")
+        await _persist_accumulated_usage()
         yield error_event(f"Unexpected error: {str(e)}")
 
     finally:

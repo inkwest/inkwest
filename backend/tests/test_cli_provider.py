@@ -927,3 +927,83 @@ class TestOrchestratorContentOrder:
         # not pushed to the end after a single merged text block.
         assert assistant_content[0]["text"] == "Let me check. "
         assert assistant_content[3]["text"] == "All good."  # consecutive deltas coalesced
+
+
+# --- P3: prompt-cache accumulation + usage-on-error in parse_cli_response ---------------
+#
+# NDJSON lines follow the Claude CLI stream-json contract; the usage field names are the
+# Anthropic usage shape as captured live in tests/fixtures/bedrock/invoke_stream_*.bin
+# (cache_read_input_tokens / cache_creation_input_tokens).
+
+
+class TestParseCliCacheTokens:
+    @pytest.mark.asyncio
+    async def test_assistant_usage_accumulates_cache_tokens(self):
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],'
+                '"usage":{"input_tokens":10,"output_tokens":3,'
+                '"cache_read_input_tokens":27082,"cache_creation_input_tokens":3242}}}'
+            )
+            yield '{"type":"result","subtype":"success","result":"hi"}'
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.type == "done"
+        assert done.metadata["cache_read_tokens"] == 27082
+        assert done.metadata["cache_write_tokens"] == 3242
+
+    @pytest.mark.asyncio
+    async def test_result_usage_overrides_cache_totals(self):
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":1,"output_tokens":1,'
+                '"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}'
+            )
+            yield (
+                '{"type":"result","subtype":"success","result":"x","usage":'
+                '{"input_tokens":10,"output_tokens":349,'
+                '"cache_read_input_tokens":27082,"cache_creation_input_tokens":26797}}'
+            )
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.metadata["input_tokens"] == 10
+        assert done.metadata["output_tokens"] == 349
+        assert done.metadata["cache_read_tokens"] == 27082
+        assert done.metadata["cache_write_tokens"] == 26797
+
+    @pytest.mark.asyncio
+    async def test_missing_cache_keys_default_zero(self):
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":365,"output_tokens":17}}}'
+            )
+            yield '{"type":"result","subtype":"success","result":"x"}'
+
+        events = [e async for e in parse_cli_response(stream())]
+        assert events[-1].metadata["cache_read_tokens"] == 0
+        assert events[-1].metadata["cache_write_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_stream_cut_surfaces_usage_stats_then_reraises(self):
+        """CLI exit 1 mid-turn: the accumulated usage must not vanish with the exception."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":10,"output_tokens":3,'
+                '"cache_read_input_tokens":5000,"cache_creation_input_tokens":100}}}'
+            )
+            raise RuntimeError("Claude CLI failed with exit code 1")
+
+        events = []
+        with pytest.raises(RuntimeError):
+            async for e in parse_cli_response(stream()):
+                events.append(e)
+        assert events[-1].type == "usage_stats"
+        assert events[-1].metadata["input_tokens"] == 10
+        assert events[-1].metadata["cache_read_tokens"] == 5000
+        assert events[-1].metadata["cache_write_tokens"] == 100

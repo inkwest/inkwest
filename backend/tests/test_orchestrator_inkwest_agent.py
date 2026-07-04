@@ -1447,3 +1447,39 @@ async def test_broker_off_engine_usage_row_carries_turn_id():
     spies.update_stats.assert_awaited_once()
     spies.record_usage.assert_awaited_once()
     assert isinstance(spies.record_usage.await_args.kwargs["turn_id"], uuid.UUID)
+
+
+@pytest.mark.asyncio
+async def test_errored_turn_persists_accumulated_usage():
+    """P3: an agent error event carries the usage burned before the failure — persist it."""
+    patches, spies = _patch_broker()
+    lines = [
+        json.dumps(
+            {
+                "type": "error",
+                "content": "AI service error: throttled",
+                "is_error": True,
+                "metadata": {
+                    "input_tokens": 8,
+                    "output_tokens": 4,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 12608,
+                    "tool_calls": 1,
+                    "iterations": 1,
+                },
+            }
+        )
+    ]
+    for p in patches:
+        p.start()
+    try:
+        events = await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert any(e.type == "error" for e in events)
+    spies.update_stats.assert_awaited_once()
+    spies.record_usage.assert_awaited_once()
+    kwargs = spies.record_usage.await_args.kwargs
+    assert kwargs["input_tokens"] == 8
+    assert kwargs["cache_write_tokens"] == 12608

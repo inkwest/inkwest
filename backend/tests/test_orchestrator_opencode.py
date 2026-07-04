@@ -968,9 +968,10 @@ class TestOrchestrateOpencode:
             assert passed is not None and passed >= 0
 
     @pytest.mark.asyncio
-    async def test_cost_fallback_excludes_cache_tokens(self):
-        # H1: on the estimate fallback, cache write/read tokens (folded into input for stats)
-        # must NOT be billed at the full input rate — the estimate uses fresh input only.
+    async def test_cost_fallback_prices_cache_tokens_at_cache_rates(self):
+        # Cache write/read tokens (folded into input for stats) must NOT be billed at the
+        # full input rate — the estimate prices the fresh input at 1x and the cache splits
+        # at their real rates (read 0.1x, write 1.25x) via the cache-aware calculate_cost.
         from app.services.budget_service import calculate_cost
 
         line = (
@@ -990,9 +991,14 @@ class TestOrchestrateOpencode:
                     user_id=USER_ID,
                 )
             )
-            # stats see the full cache-inflated input; cost sees only the 10 fresh tokens.
+            # stats see the full cache-inflated input; cost prices fresh + cache splits.
             assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 10 + 8000 + 4000
-            assert oo.record_usage.await_args.kwargs["cost_usd"] == calculate_cost("m", 10, 5)
+            assert oo.record_usage.await_args.kwargs["cost_usd"] == calculate_cost(
+                "m", 10, 5, cache_read_tokens=4000, cache_write_tokens=8000
+            )
+            # ...and the raw splits land in the usage row's cache columns.
+            assert oo.record_usage.await_args.kwargs["cache_read_tokens"] == 4000
+            assert oo.record_usage.await_args.kwargs["cache_write_tokens"] == 8000
 
     @pytest.mark.asyncio
     async def test_broker_on_with_no_enabled_models_errors_cleanly(self):

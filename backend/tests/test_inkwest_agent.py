@@ -536,3 +536,77 @@ async def test_run_turn_resume_mode_still_replays_history():
     # Seeded history is used (prior turn present) + the new user message appended.
     assert msgs[0]["content"][0]["text"] == "before"
     assert msgs[-1]["content"][0]["text"] == "now"
+
+
+# --- P3: Converse prompt-cache accumulation + usage on error paths ----------------------
+#
+# Cache usage keys mirror the live captures in tests/fixtures/bedrock/converse_nonstream_*
+# (documented ``…Tokens`` names + the ``…TokenCount`` alias observed on the agent path).
+
+
+def _converse_cached(text: str, usage: dict) -> dict:
+    return {
+        "usage": usage,
+        "output": {"message": {"content": [{"text": text}]}},
+        "stopReason": "end_turn",
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_turn_accumulates_cache_tokens_into_done_meta():
+    client = _client(
+        [
+            _converse_cached(
+                "ok",
+                {
+                    "inputTokens": 7,
+                    "outputTokens": 16,
+                    "cacheReadInputTokens": 0,
+                    "cacheWriteInputTokens": 12608,
+                },
+            )
+        ]
+    )
+    events = await _collect(_spec(), client)
+    meta = events[-1].metadata
+    assert events[-1].type == "done"
+    assert meta["cache_read_tokens"] == 0
+    assert meta["cache_write_tokens"] == 12608
+    assert meta["input_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_count_alias_spelling_accepted():
+    # The agent path emitted cacheReadInputTokenCount alongside the documented name
+    # (captured live); when only the alias is present it must still count.
+    client = _client(
+        [
+            _converse_cached(
+                "ok",
+                {"inputTokens": 5, "outputTokens": 2, "cacheReadInputTokenCount": 42},
+            )
+        ]
+    )
+    events = await _collect(_spec(), client)
+    assert events[-1].metadata["cache_read_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_run_turn_client_error_carries_accumulated_usage():
+    """A turn that errors after completed iterations still reports the burned tokens."""
+    err = ClientError({"Error": {"Message": "throttled"}}, "Converse")
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[_converse_tool("tu-1", "kubectl_get", {"resource": "pods"}), err]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("pod/foo Running", False)),
+    ):
+        events = await _collect(_spec(), client)
+    assert events[-1].type == "error"
+    meta = events[-1].metadata
+    # First iteration completed (8 in / 4 out) — billed by AWS, so reported on the error.
+    assert meta["input_tokens"] == 8
+    assert meta["output_tokens"] == 4
+    assert meta["cache_read_tokens"] == 0
