@@ -256,9 +256,10 @@ async def _bounded_aiter(upstream: httpx.Response) -> AsyncIterator[bytes]:
     unbounded wall-clock time (slowloris). This caps the whole response to a generous ceiling
     (longer than any real turn) so a single replica can't be held hostage. On expiry the
     BackgroundTask still runs, closing the client + stream. Accounting note: a call cut
-    here before its terminal usage frame yields NO usage row (nothing reliable to bill
-    from) — accepted; the cut is logged and the miss shows up on
-    ``inkwest_llm_metering_failures_total{reason="no_usage"}``."""
+    here before its terminal usage frame is billed from the Anthropic self-report on
+    invoke-stream (the tee's abort fallback); converse-stream carries no usage until its
+    terminal metadata event, so a cut converse-stream call yields NO row — that miss shows
+    up on ``inkwest_llm_metering_failures_total{reason="no_usage"}``."""
     try:
         async with asyncio.timeout(LLM_PROXY_STREAM_MAX_SECONDS):
             async for chunk in upstream.aiter_raw():
@@ -297,15 +298,18 @@ async def _finish_stream(
         return
     usage = meter.result()
     if usage is None:
-        # Parse failure or no terminal usage frame (e.g. disconnect mid-stream). The bytes
-        # were forwarded fine; we just can't account this call.
+        # Parse failure or no usage frame at all (invoke-stream aborts fall back to the
+        # self-report inside the tee; converse-stream aborts land here). The bytes were
+        # forwarded fine; we just can't account this call.
         logger.warning(
             "llm_proxy_metering_no_usage",
             extra={"target": target, "session_id": claims.session_id},
         )
+        metrics.llm_metering_failures_total.labels(reason="no_usage").inc()
         return
     if not claims.session_id:
         logger.warning("llm_proxy_metering_no_session", extra={"target": target})
+        metrics.llm_metering_failures_total.labels(reason="no_session").inc()
         return
     try:
         # Label the sink's Prometheus counters with the real engine: this background task
@@ -335,6 +339,7 @@ async def _finish_stream(
             extra={"target": target, "session_id": claims.session_id},
             exc_info=True,
         )
+        metrics.llm_metering_failures_total.labels(reason="persist_failed").inc()
 
 
 async def _send(

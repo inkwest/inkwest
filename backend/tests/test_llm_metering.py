@@ -3,15 +3,21 @@
 Every wire-shape assertion replays a REAL captured Bedrock response from
 ``tests/fixtures/bedrock/`` (redacted, usage numbers byte-exact — see the README there).
 No fabricated payloads: parse-failure cases degrade real bytes (truncation/corruption),
-never invent structure. The 1h-TTL ``cacheDetails`` value is unobserved live and stays
-untested (parser reads whatever ``ttl`` string is present).
+never invent structure. The 1h-TTL wire values are unobserved live, so their extraction
+is pinned at DICT level only (documented field names, mirroring the converse 1h tests) —
+no fabricated ``.bin`` fixture.
 """
 
 from pathlib import Path
 
 import pytest
 
-from app.services.llm_metering import CallUsage, MeteringTee, _from_converse_usage
+from app.services.llm_metering import (
+    CallUsage,
+    MeteringTee,
+    _from_anthropic_usage,
+    _from_converse_usage,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "bedrock"
 
@@ -97,10 +103,20 @@ def test_single_chunk_feed_equivalent():
 # --- Degraded real bytes: parse failure must not pretend to have usage ------------------
 
 
-def test_truncated_stream_yields_no_usage():
-    """Cut before the terminal message_stop frame (real bytes, truncated) ⇒ no usage."""
+def test_truncated_invoke_stream_falls_back_to_self_report():
+    """Cut before the terminal message_stop frame (real bytes, truncated): AWS bills the
+    call anyway, so the tee falls back to the Anthropic self-report — input+cache fixed
+    at message_start, output as of the last usage frame the cut left intact (lower than
+    the billed 349: the final cumulative message_delta was swallowed — still beats 0)."""
     data = _load("invoke_stream_cachewrite.bin")[:-500]
-    assert _run_tee("invoke-with-response-stream", data) is None
+    assert _run_tee("invoke-with-response-stream", data) == CallUsage(10, 3, 0, 26_797, 0)
+
+
+def test_truncated_converse_stream_yields_no_usage():
+    """converse-stream carries usage ONLY in the terminal metadata event — a cut stream
+    has nothing to bill from and must yield None (the broker counts the miss)."""
+    data = _load("converse_stream_nocache.bin")[:-200]
+    assert _run_tee("converse-stream", data) is None
 
 
 def test_corrupted_stream_fails_tee_without_raising(caplog):
@@ -110,6 +126,20 @@ def test_corrupted_stream_fails_tee_without_raising(caplog):
     tee = MeteringTee("converse-stream")
     with caplog.at_level("WARNING"):
         tee.feed(bytes(data))  # must not raise
+    assert tee.result() is None
+
+
+def test_corrupted_invoke_stream_after_self_report_yields_no_usage(caplog):
+    """A valid message_start (self-report retained) followed by corrupted bytes must NOT
+    bill the abort fallback: the _failed short-circuit outranks it — poisoned bytes mean
+    nothing downstream of the corruption is trustworthy, including 'the stream aborted'."""
+    data = _load("invoke_stream_cachewrite.bin")
+    tee = MeteringTee("invoke-with-response-stream")
+    tee.feed(data[:2048])  # real prefix, includes the message_start usage frame
+    assert tee._anthropic_usage is not None  # self-report captured — fallback is armed
+    with caplog.at_level("WARNING"):
+        tee.feed(b"\xff" * 64)  # then the stream corrupts
+    assert tee._failed
     assert tee.result() is None
 
 
@@ -173,6 +203,44 @@ def test_converse_cache_details_1h_portion_clamped():
     parsed = _from_converse_usage(usage)
     assert parsed.cache_write_tokens == 100
     assert parsed.cache_write_1h_tokens == 100
+
+
+def test_anthropic_usage_1h_write_portion():
+    """Anthropic ``cache_creation.ephemeral_1h_input_tokens`` feeds the 1h split (the 2x
+    write rate). Dict-level: documented field names, no 1h wire capture exists yet."""
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 100,
+        "cache_creation": {"ephemeral_5m_input_tokens": 40, "ephemeral_1h_input_tokens": 60},
+    }
+    assert _from_anthropic_usage(usage) == CallUsage(10, 2, 0, 100, 60)
+
+
+def test_anthropic_usage_1h_portion_clamped():
+    """Same clamp as converse: the 1h portion can never exceed total writes."""
+    usage = {
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "cache_creation_input_tokens": 50,
+        "cache_creation": {"ephemeral_1h_input_tokens": 80},
+    }
+    assert _from_anthropic_usage(usage) == CallUsage(1, 1, 0, 50, 50)
+
+
+def test_invoke_stream_1h_enrichment_joins_metrics():
+    """invoke-stream: billed totals come from invocationMetrics, the 1h split from the
+    self-report's cache_creation (metrics carry no TTL split). Dict-level on tee state —
+    field names as observed in the real fixtures."""
+    tee = MeteringTee("invoke-with-response-stream")
+    tee._invocation_metrics = {
+        "inputTokenCount": 5,
+        "outputTokenCount": 2,
+        "cacheWriteInputTokenCount": 100,
+    }
+    tee._anthropic_cache_creation = {"ephemeral_1h_input_tokens": 60}
+    assert tee.result() == CallUsage(5, 2, 0, 100, 60)
 
 
 def test_feed_after_failure_is_a_noop():

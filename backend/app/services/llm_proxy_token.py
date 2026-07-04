@@ -46,6 +46,14 @@ _TOKEN_PREFIX = "inkwest-ephemeral-"
 # above any realistic concurrent-turn count, so it never evicts a live, in-use grant in practice.
 _MAX_GRANTS = 10_000
 
+# Per-grant invocation ceiling (verify() counts every broker request against it). A real
+# turn makes one Bedrock call per assistant round plus a handful of control-plane GETs —
+# tens, not thousands — so hundreds never bites legitimate use. It bounds COST
+# AMPLIFICATION: a compromised/prompt-injected sandbox holding a live grant could
+# otherwise hammer any enabled model on the backend's real bearer for the grant's whole
+# lifetime (up to the 2h TTL backstop if the orchestrator crashes before its burn).
+_MAX_CALLS_PER_GRANT = 500
+
 
 class ProxyAuthError(Exception):
     """The broker grant is missing, expired, or already burned."""
@@ -77,6 +85,14 @@ class _Grant:
 
 # token -> grant. Event-loop-confined; see module docstring for the single-replica assumption.
 _grants: dict[str, _Grant] = {}
+# token -> requests served. Separate from the frozen _Grant (the one mutable per-grant datum);
+# entries live and die with their _grants entry.
+_grant_calls: dict[str, int] = {}
+
+
+def _drop(token: str) -> None:
+    _grants.pop(token, None)
+    _grant_calls.pop(token, None)
 
 
 def _sweep(now: float) -> None:
@@ -84,7 +100,7 @@ def _sweep(now: float) -> None:
     accumulate unbounded — the access path also lazily expires the one it looks up."""
     expired = [tok for tok, g in _grants.items() if g.expires_at <= now]
     for tok in expired:
-        del _grants[tok]
+        _drop(tok)
 
 
 def mint(
@@ -109,7 +125,7 @@ def mint(
     if len(_grants) >= _MAX_GRANTS:
         overflow = len(_grants) - _MAX_GRANTS + 1
         for tok in sorted(_grants, key=lambda t: _grants[t].expires_at)[:overflow]:
-            del _grants[tok]
+            _drop(tok)
         logger.warning(
             "llm_proxy_grant_store_capped",
             extra={"evicted": overflow, "cap": _MAX_GRANTS},
@@ -136,8 +152,16 @@ def verify(token: str) -> LlmProxyClaims:
     if grant is None:
         raise ProxyAuthError("unknown or burned grant")
     if grant.expires_at <= time.monotonic():
-        _grants.pop(token, None)  # lazily expire the orphan we just found
+        _drop(token)  # lazily expire the orphan we just found
         raise ProxyAuthError("expired grant")
+    # Per-grant invocation ceiling (see _MAX_CALLS_PER_GRANT): counts every verified
+    # request; past the cap the grant is dead even though its TTL hasn't run out.
+    calls = _grant_calls.get(token, 0) + 1
+    if calls > _MAX_CALLS_PER_GRANT:
+        _drop(token)
+        logger.warning("llm_proxy_grant_call_cap_exceeded", extra={"cap": _MAX_CALLS_PER_GRANT})
+        raise ProxyAuthError("grant call budget exhausted")
+    _grant_calls[token] = calls
     return LlmProxyClaims(
         user_id=grant.user_id,
         session_id=grant.session_id,
@@ -149,4 +173,4 @@ def verify(token: str) -> LlmProxyClaims:
 def burn(token: str | None) -> None:
     """Invalidate a grant at turn end. Idempotent and None-safe (callable from a ``finally``)."""
     if token:
-        _grants.pop(token, None)
+        _drop(token)

@@ -21,7 +21,10 @@ post-stream background task, persists one authoritative `usage_records` row per 
 (`source='broker'`, cache tokens included, shared per-turn `turn_id`) — with the broker on,
 the orchestrators skip their own budget row (see `docs/BUDGET.md`). The bytes themselves are
 still forwarded unmodified; a metering failure only logs `llm_proxy_metering_*` warnings and
-bumps `inkwest_llm_metering_failures_total{reason}` — it never breaks the stream.
+bumps `inkwest_llm_metering_failures_total{reason}` — it never breaks the stream. A stream cut
+mid-call (user Stop) is still billed by AWS: invoke-stream falls back to the Anthropic
+self-report seen so far; converse-stream has no pre-terminal usage, so the cut call yields no
+row and counts as a `no_usage` miss (stop semantics in `docs/BUDGET.md`).
 
 ## Components
 
@@ -66,7 +69,8 @@ direct-Anthropic-key shape can be added later without touching the route body.
 > broker if its baked-in `inkwest_agent` honours `bedrock_endpoint_url` (added in
 > `PROTOCOL_VERSION = 5`). A toolbox image built before that ignores/rejects the field and would
 > call Bedrock directly with the now-stripped key — broken model calls. Rebuild + redeploy the
-> agent toolbox image (protocol v5) **before** step 3 when the `inkwest-agent` engine is in use.
+> agent toolbox image (protocol ≥ v5 — v5 is the minimum, current images ship newer) **before**
+> step 3 when the `inkwest-agent` engine is in use.
 > This leg also requires the `inkwest-agent` engine enabled via `AGENTIC_ENGINES` (the CLI leg
 > does not). Broker-OFF turns are unaffected: the orchestrator omits the unset field from the
 > turn-spec, so an older agent still parses it.
@@ -97,7 +101,8 @@ Bedrock credential inside the sandbox it is no longer a credentialed Bedrock egr
 - **Per-turn grant, burned on turn end.** Minted at turn start, injected into the sandbox,
   and `burn`ed in the orchestrator `finally` (every exit path — cancel/error included, after
   the agent process is gone). A token exfiltrated from a sandbox is dead the moment the turn
-  ends; the exfiltration window is the turn's duration, not a fixed lifetime.
+  ends; the exfiltration window is the turn's duration, not a fixed lifetime — and within it
+  the grant is bounded to `_MAX_CALLS_PER_GRANT` requests (see the backstops below).
 - **Restriction (fail-closed).** Only enabled registry models (their ARNs + regional
   inference-profile ids) and the allowed Bedrock ops pass the broker. **No enabled rows ⇒
   nothing invocable** (unlike the default-open model picker — the broker is a credential gate).
@@ -114,12 +119,16 @@ Bedrock credential inside the sandbox it is no longer a credentialed Bedrock egr
   when `LLM_BROKER_ENABLED=true` and `WEB_CONCURRENCY>1` (`app/main.py`); `--workers N` without
   that env var, and cross-host replicas, are undetectable from app code and need single-replica
   deployment or sticky routing.
-- **TTL backstop + store cap + stream cap.** A 2 h TTL cleans up a grant orphaned when the
-  backend is SIGKILLed before its `finally` runs; the explicit `burn` is the primary path. The
-  store is also hard-capped (`_MAX_GRANTS`) — at the cap, mint evicts the oldest-expiring grant,
-  so a burst of un-burned grants can't grow memory without bound between TTLs. Each proxied
-  response stream is force-closed at a 2 h total wall-clock ceiling (`LLM_PROXY_STREAM_MAX_SECONDS`)
-  so a slowloris upstream can't pin a worker slot past the inter-byte idle timeout.
+- **TTL backstop + store cap + call cap + stream cap.** A 2 h TTL cleans up a grant orphaned
+  when the backend is SIGKILLed before its `finally` runs; the explicit `burn` is the primary
+  path. The store is also hard-capped (`_MAX_GRANTS`) — at the cap, mint evicts the
+  oldest-expiring grant, so a burst of un-burned grants can't grow memory without bound between
+  TTLs. Each grant additionally dies after `_MAX_CALLS_PER_GRANT` (500) verified requests —
+  legit turns use tens — bounding the cost amplification of a grant that outlives its turn (a
+  compromised sandbox in the crash-orphan window can no longer hammer Bedrock until the TTL).
+  Each proxied response stream is force-closed at a 2 h total wall-clock ceiling
+  (`LLM_PROXY_STREAM_MAX_SECONDS`) so a slowloris upstream can't pin a worker slot past the
+  inter-byte idle timeout.
 - **Recognizable grant.** Every grant is prefixed `inkwest-ephemeral-` (256-bit CSPRNG suffix),
   so it's instantly distinguishable in logs / `/proc/<pid>/environ` / a Bedrock error body from
   a real Bedrock key (`ABSK…`) — the prefix is cosmetic; the suffix is what's unguessable.

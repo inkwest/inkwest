@@ -583,18 +583,25 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
             if result_text and not has_sent_text:
                 yield ChatEvent(type="text_delta", content=result_text)
                 has_sent_text = True
-            # Result event carries final usage from CLI
-            usage = parsed.get("usage", {})
-            if usage.get("input_tokens"):
-                total_input_tokens = usage["input_tokens"]
-            if usage.get("output_tokens"):
-                total_output_tokens = usage["output_tokens"]
-            if usage.get("cache_read_input_tokens"):
-                total_cache_read_tokens = usage["cache_read_input_tokens"]
-            if usage.get("cache_creation_input_tokens"):
-                total_cache_write_tokens = usage["cache_creation_input_tokens"]
-            if (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"):
-                total_cache_write_1h_tokens = usage["cache_creation"]["ephemeral_1h_input_tokens"]
+            # Result event carries final usage from CLI. Override per-field on key
+            # PRESENCE, not truthiness: the result block is a cumulative authority, so a
+            # present-but-0 value (e.g. a fully-cached turn's input) must replace the
+            # accumulated per-assistant sum — mixing the two counting bases skews the turn.
+            # A key entirely absent keeps the accumulated value (older CLIs omit cache keys).
+            # `or {}`: a present-but-null "usage" must not crash the membership tests below.
+            usage = parsed.get("usage") or {}
+            if "input_tokens" in usage:
+                total_input_tokens = usage["input_tokens"] or 0
+            if "output_tokens" in usage:
+                total_output_tokens = usage["output_tokens"] or 0
+            if "cache_read_input_tokens" in usage:
+                total_cache_read_tokens = usage["cache_read_input_tokens"] or 0
+            if "cache_creation_input_tokens" in usage:
+                total_cache_write_tokens = usage["cache_creation_input_tokens"] or 0
+            if "ephemeral_1h_input_tokens" in (usage.get("cache_creation") or {}):
+                total_cache_write_1h_tokens = (
+                    usage["cache_creation"]["ephemeral_1h_input_tokens"] or 0
+                )
 
             subtype = parsed.get("subtype")
             if subtype == "success":
@@ -623,8 +630,15 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
 
     # Clean stream end without a terminal done (user Stop kills the CLI mid-turn and the
     # stream just ends): surface whatever accumulated so the orchestrator's stop path can
-    # persist the burned tokens. Internal event — the orchestrator consumes it.
-    if not done_emitted and (total_input_tokens or total_output_tokens):
+    # persist the burned tokens. Cache counts join the gate — a fully-cached turn reports
+    # 0 fresh in/out yet burned billable tokens (same rule as turn_usage's persist gate).
+    # Internal event — the orchestrator consumes it.
+    if not done_emitted and (
+        total_input_tokens
+        or total_output_tokens
+        or total_cache_read_tokens
+        or total_cache_write_tokens
+    ):
         yield ChatEvent(type="usage_stats", metadata=_usage_meta())
 
 

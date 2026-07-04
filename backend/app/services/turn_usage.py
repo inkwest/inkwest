@@ -17,7 +17,9 @@ Contracts:
 - **Best-effort + one retry**: a transient DB blip at turn end must not silently lose
   the turn's only accounting row (broker-off), so the stats+budget block retries once
   after a short pause; failures roll the session back (aborted-transaction hygiene) and
-  are logged, never raised — persistence must not mask the turn's own outcome.
+  are logged, never raised — persistence must not mask the turn's own outcome. The
+  retry first checks whether the turn's budget row already landed (an ambiguous
+  commit — succeeded server-side, ack lost — must not double-apply).
 - **Stamp isolation**: the per-bubble token stamp runs AFTER the budget row in its own
   try — its failure can never cost the turn its authoritative usage record.
 """
@@ -27,8 +29,10 @@ import logging
 import uuid
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.budget import UsageRecord
 from app.services.budget_service import record_usage
 from app.services.messages import stamp_message_usage, update_session_stats
 
@@ -37,6 +41,24 @@ logger = logging.getLogger(__name__)
 # One immediate-ish retry covers the transient-blip class (connection reset, brief
 # failover) without turning turn-end into a retry loop that delays the caller.
 _RETRY_DELAY_SECONDS = 0.5
+
+
+async def _engine_row_exists(db: AsyncSession, turn_id: uuid.UUID) -> bool:
+    """Did the turn's engine-side budget row already commit? False on any lookup error
+    (a still-down DB must fall through to the normal retry, not mask it)."""
+    try:
+        row = await db.scalar(
+            select(UsageRecord.id)
+            .where(UsageRecord.turn_id == turn_id, UsageRecord.source == "engine")
+            .limit(1)
+        )
+        return row is not None
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return False
 
 
 async def persist_turn_usage(
@@ -64,6 +86,19 @@ async def persist_turn_usage(
 
     for attempt in (1, 2):
         try:
+            # Commit-ambiguity guard: attempt 1's COMMIT can succeed server-side with the
+            # ack lost (connection reset at commit — the very blip this retry covers).
+            # Re-applying would double the session stats and insert a second budget row,
+            # silently inflating spend. The budget row landing proves the whole txn did
+            # (stats + row commit together). If this probe races a still-healing
+            # connection and misses the row, the DB backstop catches it: the unique
+            # partial index uq_usage_records_engine_turn rejects the second engine row
+            # and rolls the whole retry txn back. Broker-on turns write no engine row,
+            # so their retry has no marker — residual double-apply there touches display
+            # stats only, never the budget (broker rows are the accounting authority).
+            if attempt == 2 and not skip_budget_row and await _engine_row_exists(db, turn_id):
+                logger.info("Turn usage already committed (ambiguous first commit); not retrying")
+                break
             await update_session_stats(
                 db,
                 session_id,

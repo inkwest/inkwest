@@ -8,13 +8,14 @@ live separately under `/api/admin/usage/*`.
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import CurrentUser, get_db
 from app.models.budget import BudgetPeriod
+from app.models.schemas import TurnUsageEntry
 from app.services import usage_reports
 
 router = APIRouter(prefix="/me/usage", tags=["usage"])
@@ -83,19 +84,25 @@ async def get_my_usage_timeseries(
     return await usage_reports.timeseries(db, current_user.id, granularity, start, end)
 
 
-@router.get("/turns")
+@router.get("/turns", response_model=list[TurnUsageEntry])
 async def get_my_usage_turns(
     current_user: CurrentUser,
-    session_id: uuid.UUID | None = None,
+    session_id: Annotated[
+        uuid.UUID | None, Query(description="Restrict to one conversation")
+    ] = None,
     period: BudgetPeriod = BudgetPeriod.MONTHLY,
     start_date: dt.date | None = None,
     end_date: dt.date | None = None,
-    limit: int = Query(default=200, ge=1, le=1000),
+    limit: Annotated[
+        int, Query(ge=1, le=1000, description="Max turn groups returned (newest first)")
+    ] = 200,
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    """Per-turn rollup: broker rows grouped by turn_id ("this turn cost $X across N calls").
+    """Per-turn rollup: usage rows grouped by turn_id ("this turn cost $X across N calls").
 
-    Pre-cutover rows (no turn_id) degrade to per-call granularity.
+    Both authorities carry a turn_id — broker turns group their N per-call rows,
+    engine (broker-off) turns already persist one row per turn. Pre-cutover rows
+    (no turn_id) degrade to per-call granularity.
     """
     start, end = usage_reports.resolve_window(period, start_date, end_date)
     return await usage_reports.by_turn(

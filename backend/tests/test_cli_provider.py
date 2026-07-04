@@ -988,6 +988,86 @@ class TestParseCliCacheTokens:
         assert events[-1].metadata["cache_write_tokens"] == 0
 
     @pytest.mark.asyncio
+    async def test_result_usage_present_zero_overrides_accumulated(self):
+        """The result block is a cumulative authority: a present-but-0 field (fully-cached
+        turn's fresh input) must replace the accumulated sum — presence, not truthiness."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":42,"output_tokens":1,'
+                '"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}'
+            )
+            yield (
+                '{"type":"result","subtype":"success","result":"x","usage":'
+                '{"input_tokens":0,"output_tokens":7,'
+                '"cache_read_input_tokens":9000,"cache_creation_input_tokens":0}}'
+            )
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.metadata["input_tokens"] == 0
+        assert done.metadata["output_tokens"] == 7
+        assert done.metadata["cache_read_tokens"] == 9000
+        assert done.metadata["cache_write_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_result_usage_absent_cache_keys_keep_accumulated(self):
+        """An older CLI's result block without cache keys must not wipe the accumulated
+        cache counts (absent ≠ zero for the override)."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":1,"output_tokens":1,'
+                '"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}'
+            )
+            yield (
+                '{"type":"result","subtype":"success","result":"x","usage":'
+                '{"input_tokens":10,"output_tokens":3}}'
+            )
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.metadata["input_tokens"] == 10
+        assert done.metadata["cache_read_tokens"] == 100
+        assert done.metadata["cache_write_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_result_usage_null_is_tolerated(self):
+        """A present-but-null usage field must not crash the parser (latent TypeError
+        the presence-based rewrite hardened against)."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":3,"output_tokens":2}}}'
+            )
+            yield '{"type":"result","subtype":"success","result":"x","usage":null}'
+
+        events = [e async for e in parse_cli_response(stream())]
+        done = events[-1]
+        assert done.type == "done"
+        assert done.metadata["input_tokens"] == 3  # accumulated values survive
+
+    @pytest.mark.asyncio
+    async def test_clean_stream_end_cache_only_surfaces_usage_stats(self):
+        """User Stop after a fully-cached round: 0 fresh in/out but real cache burn — the
+        clean-end gate must include cache counts (same rule as the persist gate)."""
+
+        async def stream():
+            yield (
+                '{"type":"assistant","message":{"content":[],'
+                '"usage":{"input_tokens":0,"output_tokens":0,'
+                '"cache_read_input_tokens":8000,"cache_creation_input_tokens":0}}}'
+            )
+            # stream just ends — no terminal done (the Stop killed the CLI)
+
+        events = [e async for e in parse_cli_response(stream())]
+        assert events[-1].type == "usage_stats"
+        assert events[-1].metadata["cache_read_tokens"] == 8000
+
+    @pytest.mark.asyncio
     async def test_stream_cut_surfaces_usage_stats_then_reraises(self):
         """CLI exit 1 mid-turn: the accumulated usage must not vanish with the exception."""
 

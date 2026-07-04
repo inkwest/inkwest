@@ -635,3 +635,25 @@ class McpPolicyServerUpdate(BaseModel):
 
     server_key: str
     entries: list[McpToolVerdict]
+
+
+# ---- Usage reports ----------------------------------------------------------- //
+class TurnUsageEntry(BaseModel):
+    """One per-turn usage rollup row (GET /api/me/usage/turns).
+
+    ``turn_id`` is the grouping key: the shared turn_id for post-cutover rows, the
+    UsageRecord's own id for legacy rows that degrade to per-call granularity.
+    """
+
+    turn_id: str
+    session_id: str
+    model: str | None
+    engine: str | None
+    source: str | None
+    input_tokens: int  # fresh (uncached) input
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    cost_usd: float
+    call_count: int
+    last_call: str | None

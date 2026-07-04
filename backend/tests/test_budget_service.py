@@ -475,6 +475,24 @@ class TestRecordUsageHardening:
         assert record.cost_usd == 0
 
     @pytest.mark.asyncio
+    async def test_negative_engine_cost_is_clamped(self):
+        """An ENGINE-REPORTED negative cost bypasses the token clamps — the sink must
+        clamp it too, or a forged row REDUCES summed spend (budget-cap evasion)."""
+        from app.services.budget_service import record_usage
+
+        with patch("app.services.budget_service.metrics.turn_engine", return_value="opencode"):
+            record = await record_usage(
+                db=_usage_db(),
+                user_id=uuid4(),
+                session_id=uuid4(),
+                input_tokens=10,
+                output_tokens=5,
+                model="claude-sonnet-4-20250514",
+                cost_usd=Decimal("-12.34"),
+            )
+        assert record.cost_usd == 0
+
+    @pytest.mark.asyncio
     async def test_metrics_failure_never_blocks_persistence(self):
         from app.services.budget_service import record_usage
 

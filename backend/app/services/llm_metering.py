@@ -13,9 +13,11 @@ Wire truth per op (confirmed live 2026-07-03/04, real fixtures in ``tests/fixtur
   ``{"bytes": base64(anthropic event JSON)}``. The final ``message_stop`` inner event carries
   ``amazon-bedrock-invocationMetrics`` = the billed counts (``inputTokenCount``,
   ``outputTokenCount``, ``cacheReadInputTokenCount``/``cacheWriteInputTokenCount`` — the cache
-  keys are ABSENT when zero). The ``message_start`` Anthropic ``usage`` block is the model's
-  self-report (minor divergence vs metrics observed) and is used ONLY to enrich the cache-write
-  TTL split (``cache_creation.ephemeral_5m/1h_input_tokens``), never to override billed totals.
+  keys are ABSENT when zero). The ``message_start``/``message_delta`` Anthropic ``usage`` blocks are
+  the model's self-report (minor divergence vs metrics observed), used to enrich the cache-write
+  TTL split (``cache_creation.ephemeral_5m/1h_input_tokens``) and as the ABORT fallback when the
+  stream is cut before ``message_stop`` (AWS bills the cut call; the self-report beats a zero
+  row) — they never override billed totals when metrics arrive.
 - ``converse-stream`` — eventstream whose terminal ``metadata`` event payload carries ``usage``.
 - ``converse`` — JSON body ``usage``: ``inputTokens``/``outputTokens``, cache read/write under
   BOTH spellings (``cacheReadInputTokens`` and legacy ``cacheReadInputTokenCount`` — accept
@@ -82,6 +84,10 @@ def _from_converse_usage(usage: dict[str, Any]) -> CallUsage:
     if write is None:
         write = usage.get("cacheWriteInputTokenCount")
     write_total = _as_int(write)
+    # ASSUMPTION (1h TTL unobserved live — see tests/fixtures/bedrock/README.md): every
+    # cacheDetails entry is treated as WRITE-side. If Converse ever emits read-side entries
+    # at 1h TTL they'd be counted into the 2x-write portion — the min() clamp below bounds
+    # the error to never exceed total writes. Revisit on the first real 1h capture.
     write_1h = sum(
         _as_int(d.get("inputTokens"))
         for d in usage.get("cacheDetails") or []
@@ -126,6 +132,9 @@ class MeteringTee:
         # invoke-stream: billed truth (invocationMetrics) + TTL-split enrichment (usage).
         self._invocation_metrics: dict[str, Any] | None = None
         self._anthropic_cache_creation: dict[str, Any] | None = None
+        # Last full Anthropic usage self-report (message_start sets input+cache, each
+        # message_delta refreshes the cumulative output) — the ABORT fallback below.
+        self._anthropic_usage: dict[str, Any] | None = None
         # converse-stream: the terminal metadata event's usage block.
         self._converse_usage: dict[str, Any] | None = None
 
@@ -160,8 +169,13 @@ class MeteringTee:
                 # later message_delta usage blocks drop the nested split (the isinstance
                 # guard skips them), so in practice only message_start's survives.
                 usage = (inner.get("message") or {}).get("usage") or inner.get("usage")
-                if isinstance(usage, dict) and isinstance(usage.get("cache_creation"), dict):
-                    self._anthropic_cache_creation = usage["cache_creation"]
+                if isinstance(usage, dict):
+                    # Keep the freshest self-report: message_delta repeats the input/cache
+                    # figures and carries the CUMULATIVE output count (confirmed on the
+                    # real fixtures) — this is what the abort fallback bills from.
+                    self._anthropic_usage = usage
+                    if isinstance(usage.get("cache_creation"), dict):
+                        self._anthropic_cache_creation = usage["cache_creation"]
             elif isinstance(payload.get("usage"), dict):  # converse-stream metadata event
                 self._converse_usage = payload["usage"]
 
@@ -183,6 +197,20 @@ class MeteringTee:
     def _invoke_stream_result(self) -> CallUsage | None:
         metrics = self._invocation_metrics
         if metrics is None:
+            # ABORT fallback (user Stop / disconnect cut the stream before message_stop):
+            # AWS bills the call anyway, so a zero row would under-count the budget — the
+            # exact gap this feature exists to close. The Anthropic self-report (input +
+            # cache fixed at message_start, output cumulative per message_delta) diverges
+            # from invocationMetrics only marginally (±3 output tokens observed on the
+            # real fixtures), plus whatever was generated after the last delta the cut
+            # let through — strictly better than zero.
+            # converse-stream has no equivalent (usage arrives only in the terminal
+            # metadata event), so an aborted converse-stream call still yields None.
+            if self._anthropic_usage is not None:
+                usage = dict(self._anthropic_usage)
+                if self._anthropic_cache_creation is not None:
+                    usage["cache_creation"] = self._anthropic_cache_creation
+                return _from_anthropic_usage(usage)
             return None
         # invocationMetrics is what AWS bills — cache keys ABSENT when zero. The Anthropic
         # usage block only contributes the 1h-TTL write portion (metrics have no TTL split).

@@ -404,6 +404,11 @@ async def record_usage(
     # Prefer an engine-reported authoritative cost (e.g. opencode's per-turn USD, which
     # accounts for cache-token pricing) over the token×rate estimate; fall back to the
     # estimate when the engine doesn't report one (Anthropic/Converse paths).
+    # The token clamps above make the estimate non-negative, but an ENGINE-REPORTED cost
+    # bypasses them — clamp it too, or the sink's stated budget-cap-evasion defense holds
+    # only for callers that pre-validate (today just opencode's orchestrator).
+    if cost_usd is not None and cost_usd < 0:
+        cost_usd = Decimal(0)
     cost = (
         cost_usd
         if cost_usd is not None

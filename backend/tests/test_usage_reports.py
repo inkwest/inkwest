@@ -20,6 +20,7 @@ from sqlalchemy.ext.compiler import compiles
 import app.models  # noqa: F401  -- registers all tables on Base.metadata
 from app.models.base import Base
 from app.models.budget import UsageRecord
+from app.models.session import Session as ChatSession
 from app.services import usage_reports
 
 # Idempotent re-registration (same pattern as test_messages.py).
@@ -47,7 +48,9 @@ _TURN = uuid.uuid4()
 @pytest_asyncio.fixture
 async def db() -> AsyncIterator[AsyncSession]:
     engine = create_async_engine("sqlite+aiosqlite://")
-    tables = cast("list[Table]", [UsageRecord.__table__])
+    # sessions joins in for by_session's title lookup (no rows seeded ⇒ "Untitled");
+    # sqlite doesn't enforce its FKs, so the referenced tables can stay absent.
+    tables = cast("list[Table]", [UsageRecord.__table__, ChatSession.__table__])
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=tables)
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -143,3 +146,66 @@ async def test_by_turn_limit_caps_groups(db: AsyncSession) -> None:
     assert len(rows) == 1
     # newest-first: the other-session row was recorded last among _USER rows
     assert rows[0]["session_id"] == str(_OTHER_SESSION)
+
+
+async def test_by_model_sums_cache_columns(db: AsyncSession) -> None:
+    await _seed(db)
+    rows = await usage_reports.by_model(db, _USER, _T0 - timedelta(days=1), None)
+    assert len(rows) == 1  # one (model, provider) group across all _USER rows
+    assert rows[0]["cache_read_tokens"] == 27082
+    assert rows[0]["cache_write_tokens"] == 3242
+    assert rows[0]["total_tokens"] == (10 + 20 + 365 + 10) + (5 + 880 + 17 + 5)
+
+
+async def test_by_session_sums_cache_columns(db: AsyncSession) -> None:
+    await _seed(db)
+    rows = await usage_reports.by_session(db, _USER, _T0 - timedelta(days=1), None)
+    by_id = {r["session_id"]: r for r in rows}
+    assert by_id[str(_SESSION)]["cache_read_tokens"] == 27082
+    assert by_id[str(_SESSION)]["cache_write_tokens"] == 3242
+    assert by_id[str(_OTHER_SESSION)]["cache_read_tokens"] == 0
+
+
+class _SpyDB:
+    """Captures the statement instead of executing it — for dialect-level SQL pins on
+    queries aiosqlite can't run (date_trunc) or can't falsify (max over uuid)."""
+
+    def __init__(self) -> None:
+        self.stmts: list[Any] = []
+
+    async def execute(self, stmt: Any) -> Any:
+        self.stmts.append(stmt)
+
+        class _Empty:
+            def all(self) -> list[Any]:
+                return []
+
+        return _Empty()
+
+
+def _pg_sql(stmt: Any) -> str:
+    from sqlalchemy.dialects import postgresql as pg
+
+    return str(stmt.compile(dialect=pg.dialect())).lower()
+
+
+async def test_by_turn_pg_sql_never_max_aggregates_uuid_columns() -> None:
+    """Regression pin for d61cbb8: PostgreSQL has no max(uuid), but sqlite happily
+    max()es CHAR(36) — so the aiosqlite suite above cannot catch a reintroduction.
+    Pin the PostgreSQL-compiled SQL: uuid columns are grouped, never max-aggregated."""
+    spy = _SpyDB()
+    await usage_reports.by_turn(cast("AsyncSession", spy), _USER, _T0, None)
+    sql = _pg_sql(spy.stmts[0])
+    for uuid_col in ("session_id", "turn_id", "user_id", "id"):
+        assert f"max(usage_records.{uuid_col})" not in sql
+    assert "group by" in sql and "usage_records.session_id" in sql.split("group by")[1]
+
+
+async def test_timeseries_pg_sql_sums_cache_columns() -> None:
+    """sqlite has no date_trunc, so timeseries can't run on the aiosqlite fixture —
+    pin the cache-column sums at the compiled-SQL level instead."""
+    spy = _SpyDB()
+    await usage_reports.timeseries(cast("AsyncSession", spy), None, "day", _T0, None)
+    sql = _pg_sql(spy.stmts[0])
+    assert "sum(usage_records.cache_read_tokens)" in sql
+    assert "sum(usage_records.cache_write_tokens)" in sql

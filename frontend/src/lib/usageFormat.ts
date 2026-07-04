@@ -1,12 +1,11 @@
 /** Shared formatting for the usage reports (admin + self-service). */
 
-// Compact token counts: 1.23M / 4.5k / 123. Lowercase k (SI prefix) — matches the badge
-// formatter (lib/utils.ts::formatTokenCount) so the same figure never shows two spellings.
-export function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000) return (tokens / 1_000_000).toFixed(2) + 'M';
-  if (tokens >= 1_000) return (tokens / 1_000).toFixed(1) + 'k';
-  return tokens.toString();
-}
+import { formatTokenCount } from '@/lib/utils';
+
+// Compact token counts: 1.2M / 4.5k / 123. Delegates to the badge formatter
+// (lib/utils.ts::formatTokenCount) — one implementation, so the same figure can never
+// show two spellings between a table and a badge.
+export const formatTokens = formatTokenCount;
 
 // USD cost: 4 decimals for sub-cent non-zero amounts, 2 otherwise.
 export function formatCost(cost: number | string): string {

@@ -34,10 +34,11 @@
   row (no double count) but keep session stats + the per-message token counts.
   Broker off ⇒ one `source='engine'` row per turn, from the engine-reported
   usage (cache-aware since the cutover).
-- **Per-turn rollup** (`turn_id` column): the N broker rows of one turn share a
-  `turn_id`, exposed via `GET /api/me/usage/turns` ("this turn cost $X across
-  N calls"). Pre-cutover rows have `turn_id IS NULL` and degrade to per-call
-  granularity.
+- **Per-turn rollup** (`turn_id` column): every post-cutover row carries a
+  `turn_id` — a broker turn's N per-call rows share one, an engine turn's single
+  row has its own — exposed via `GET /api/me/usage/turns` ("this turn cost $X
+  across N calls"). Pre-cutover rows have `turn_id IS NULL` and degrade to
+  per-call granularity.
 - **Budgets** (`budgets` table): optional Global / Role / User limits. A budget
   may cap cost (`max_cost_usd`), tokens (`max_total_tokens`), or both — and both
   are evaluated (whichever is reached first blocks).
@@ -45,7 +46,10 @@
 > **Cutover 2026-07-04**: usage rows recorded before this date predate
 > cache-aware accounting — they under-count cache-heavy turns (observed ~10×
 > on a real production bill). No backfill;
-> comparisons across the cutover are apples-to-oranges.
+> comparisons across the cutover are apples-to-oranges. The cutover ships two
+> schema migrations (`20260704000000_usage_cache_tokens.sql`,
+> `20260704010000_message_session_cache_tokens.sql`) — apply them before
+> deploying; column semantics in `docs/DATABASE_SCHEMA.md`.
 
 ## Enforcement
 
@@ -112,3 +116,13 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
   *cost* does, via `cost_usd`). Deliberate for now: pricing already weights
   cache correctly, and counting a 0.1×-priced cache read as a full token would
   distort token caps the other way.
+- **Stopped/aborted turns (broker on).** A user Stop cuts the in-flight Bedrock
+  stream, but AWS bills it. On `invoke-with-response-stream` (Claude CLI) the
+  metering tee falls back to the Anthropic self-report seen so far (input+cache
+  exact, output as of the last usage frame — never over-billed) and a row is
+  still written. On `converse-stream` (inkwest-agent / opencode) usage rides
+  only the terminal metadata event, so a cut call yields **no row** — the miss
+  increments `inkwest_llm_metering_failures_total{reason="no_usage"}` (alert on
+  a sustained rate: wire-format drift makes EVERY call a miss). Session stats
+  stay engine-fed either way, so a stopped converse turn can show tokens in the
+  UI that never reached the budget — bounded to that turn.

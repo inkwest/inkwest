@@ -31,6 +31,7 @@ import {
   getBudgetUsage,
   getBudgetMembers,
 } from '@/services/adminApi';
+import { formatCostTotal } from '@/lib/usageFormat';
 
 const PERIOD_OPTIONS: { value: BudgetPeriod; label: string }[] = [
   { value: 'hourly', label: 'Hourly' },
@@ -51,7 +52,8 @@ const ACTION_OPTIONS = [
   { value: 'notify', label: 'Notify — track only, never block' },
 ];
 
-const fmtUsd = (n: number | null) => (n == null ? '—' : `$${n.toFixed(2)}`);
+// Null-aware wrapper over the shared USD formatter (null = "no cap set", not $0).
+const fmtUsd = (n: number | null) => (n == null ? '—' : formatCostTotal(n));
 
 // Seed the edit form from an existing budget (name/description are derived, not edited).
 const budgetToFormData = (b: Budget): Partial<CreateBudgetRequest> => ({

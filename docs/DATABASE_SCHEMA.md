@@ -50,6 +50,8 @@ Inkwest uses PostgreSQL for persistent storage. All tables reside in the `inkwes
 │ is_archived         │       │ status              │
 │ total_input_tokens  │       │ input_tokens        │
 │ total_output_tokens │       │ output_tokens       │
+│ total_cache_read_…  │       │ cache_read_tokens   │
+│ total_cache_write_… │       │ cache_write_tokens  │
 │ total_tool_calls    │       │ is_retryable        │
 │ total_iterations    │       │ retry_count         │
 │ cli_session_id      │       │ created_at          │
@@ -67,11 +69,15 @@ Inkwest uses PostgreSQL for persistent storage. All tables reside in the `inkwes
 │ session_id          │       │ budget_type         │
 │ input_tokens        │       │ target_id           │
 │ output_tokens       │       │ target_role         │
-│ model               │       │ max_total_tokens    │
-│ provider            │       │ max_cost_usd        │
-│ cost_usd            │       │ period              │
-│ recorded_at         │       │ is_active           │
-└─────────────────────┘       └─────────────────────┘
+│ cache_read_tokens   │       │ max_total_tokens    │
+│ cache_write_tokens  │       │ max_cost_usd        │
+│ source              │       │ period              │
+│ turn_id             │       │ is_active           │
+│ model               │       └─────────────────────┘
+│ provider            │
+│ cost_usd            │
+│ recorded_at         │
+└─────────────────────┘
 ```
 
 ## Tables
@@ -262,6 +268,10 @@ CREATE TABLE inkwest.usage_records (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX ix_usage_records_turn_id ON inkwest.usage_records (turn_id);
+-- One engine-side budget row per turn (DB backstop for the ambiguous-commit retry race;
+-- broker rows are N per turn and pre-cutover rows have turn_id NULL — both excluded).
+CREATE UNIQUE INDEX uq_usage_records_engine_turn ON inkwest.usage_records (turn_id)
+    WHERE source = 'engine' AND turn_id IS NOT NULL;
 ```
 
 ### role_kubeconfig_mappings
@@ -487,4 +497,5 @@ docker compose exec backend python db_migrate.py
 | users | idx_users_oidc_subject | OIDC login lookup |
 | usage_records | idx_usage_recorded_at | Usage reporting queries |
 | usage_records | ix_usage_records_turn_id | Per-turn rollup (GROUP BY turn_id) |
+| usage_records | uq_usage_records_engine_turn | Unique engine row per turn (partial; double-persist backstop) |
 | oidc_pending_states | idx_oidc_pending_states_created | TTL cleanup of expired states |

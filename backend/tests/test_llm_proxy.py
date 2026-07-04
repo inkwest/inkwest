@@ -783,6 +783,22 @@ def _metered_bearer() -> dict[str, str]:
     return {"Authorization": f"Bearer {tok}"}
 
 
+def _failures(reason: str) -> float:
+    """Current value of the metering-failure counter for one reason label, via the
+    public collect() API (never-incremented label ⇒ 0.0)."""
+    from app.core import metrics
+
+    for metric in metrics.llm_metering_failures_total.collect():
+        for sample in metric.samples:
+            if sample.name.endswith("_total") and sample.labels.get("reason") == reason:
+                return sample.value
+    return 0.0
+
+
+def _all_failures() -> float:
+    return sum(_failures(r) for r in ("no_usage", "no_session", "persist_failed"))
+
+
 _METER_CASES = [
     # (fixture, op, in, out, cache_read, cache_write)
     ("invoke_stream_nocache.bin", "invoke-with-response-stream", 365, 17, 0, 0),
@@ -808,6 +824,7 @@ async def test_metering_forwards_bytes_and_persists_one_row(
     data = (_FIXTURES / fixture).read_bytes()
     record = AsyncMock()
     db, ps = _metering_patches(lambda request: _fixture_streaming(fixture), record)
+    failures_before = _all_failures()
     for p in ps:
         p.start()
     try:
@@ -819,6 +836,8 @@ async def test_metering_forwards_bytes_and_persists_one_row(
             )
         assert resp.status_code == 200
         assert resp.content == data  # forwarded byte-identical
+        # No false alarms: a fully-metered call must leave the failure counter flat.
+        assert _all_failures() == failures_before
         record.assert_awaited_once()
         kwargs = record.await_args.kwargs
         assert kwargs["input_tokens"] == in_tok
@@ -838,9 +857,10 @@ async def test_metering_forwards_bytes_and_persists_one_row(
 
 
 @pytest.mark.asyncio
-async def test_metering_parse_failure_streams_fine_no_row(caplog) -> None:
-    """Truncated REAL fixture (no terminal metrics frame): bytes still forwarded
-    byte-identical, no usage row, a warning is logged."""
+async def test_metering_truncated_invoke_stream_bills_self_report(caplog) -> None:
+    """Truncated REAL invoke-stream fixture (no terminal metrics frame — the abort shape):
+    bytes still forwarded byte-identical, and the tee's self-report fallback persists a
+    row (AWS bills the cut call; see llm_metering) instead of dropping it."""
     data = (_FIXTURES / "invoke_stream_cachewrite.bin").read_bytes()[:-500]
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -854,10 +874,49 @@ async def test_metering_parse_failure_streams_fine_no_row(caplog) -> None:
     for p in ps:
         p.start()
     try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/invoke-with-response-stream",
+                headers=_metered_bearer(),
+                content=b"{}",
+            )
+        assert resp.status_code == 200
+        assert resp.content == data
+        record.assert_awaited_once()
+        kwargs = record.await_args.kwargs
+        # Self-report values (message_start), not the billed metrics the cut swallowed.
+        assert kwargs["input_tokens"] == 10
+        assert kwargs["cache_write_tokens"] == 26797
+        assert kwargs["source"] == "broker"
+        db.commit.assert_awaited_once()
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_truncated_converse_stream_no_row_bumps_counter(caplog) -> None:
+    """Truncated REAL converse-stream fixture: usage only rides the terminal metadata
+    event, so a cut stream yields no row — the documented alert counter must move
+    (reason=no_usage), the bytes still forward byte-identical."""
+    data = (_FIXTURES / "converse_stream_nocache.bin").read_bytes()[:-200]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        async def gen():
+            yield data
+
+        return httpx.Response(200, content=gen())
+
+    record = AsyncMock()
+    db, ps = _metering_patches(handler, record)
+    before = _failures("no_usage")
+    for p in ps:
+        p.start()
+    try:
         with caplog.at_level("WARNING"):
             async with await _client() as c:
                 resp = await c.post(
-                    f"/api/llm-proxy/model/{MODEL}/invoke-with-response-stream",
+                    f"/api/llm-proxy/model/{MODEL}/converse-stream",
                     headers=_metered_bearer(),
                     content=b"{}",
                 )
@@ -866,6 +925,7 @@ async def test_metering_parse_failure_streams_fine_no_row(caplog) -> None:
         record.assert_not_awaited()
         db.commit.assert_not_awaited()
         assert "llm_proxy_metering_no_usage" in caplog.text
+        assert _failures("no_usage") == before + 1
     finally:
         for p in ps:
             p.stop()
@@ -900,6 +960,7 @@ async def test_metering_persist_failure_never_breaks_the_stream(caplog) -> None:
     db, ps = _metering_patches(
         lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
     )
+    before = _failures("persist_failed")
     for p in ps:
         p.start()
     try:
@@ -913,6 +974,7 @@ async def test_metering_persist_failure_never_breaks_the_stream(caplog) -> None:
         assert resp.status_code == 200
         assert resp.content == (_FIXTURES / "converse_nonstream_cacheread.bin").read_bytes()
         assert "llm_proxy_metering_persist_failed" in caplog.text
+        assert _failures("persist_failed") == before + 1
     finally:
         for p in ps:
             p.stop()
@@ -953,6 +1015,7 @@ async def test_metering_skips_grant_without_session(caplog) -> None:
         p.start()
     try:
         tok = llm_proxy_token.mint(None, None, engine=_ENGINE, turn_id=_TURN)
+        before = _failures("no_session")
         with caplog.at_level("WARNING"):
             async with await _client() as c:
                 resp = await c.post(
@@ -963,6 +1026,7 @@ async def test_metering_skips_grant_without_session(caplog) -> None:
         assert resp.status_code == 200
         record.assert_not_awaited()
         assert "llm_proxy_metering_no_session" in caplog.text
+        assert _failures("no_session") == before + 1
     finally:
         for p in ps:
             p.stop()

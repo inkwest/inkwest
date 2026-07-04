@@ -190,6 +190,9 @@ async def _run_loop(
         total_cache_write_tokens += (
             usage.get("cacheWriteInputTokens", usage.get("cacheWriteInputTokenCount", 0)) or 0
         )
+        # ASSUMPTION (1h TTL unobserved live, same as llm_metering._from_converse_usage):
+        # every cacheDetails entry is treated as write-side; a read-side 1h entry would be
+        # over-priced into the 2x-write portion. Pricing clamps the 1h part to total writes.
         total_cache_write_1h_tokens += sum(
             int(d.get("inputTokens") or 0)
             for d in usage.get("cacheDetails") or []

@@ -231,7 +231,8 @@ async def by_turn(
     session_id: UUID | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Per-turn usage rollup: the N broker rows of one turn grouped by ``turn_id``.
+    """Per-turn usage rollup: one turn's usage rows grouped by ``turn_id`` (a broker
+    turn contributes N per-call rows; an engine turn contributes its single row).
 
     Pre-cutover rows (``turn_id IS NULL``) fall back to per-row granularity by grouping
     on the row's own id — they simply don't aggregate (see
