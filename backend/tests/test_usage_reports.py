@@ -135,3 +135,11 @@ async def test_summary_sums_cache_columns(db: AsyncSession) -> None:
     assert totals["total_cache_write_tokens"] == 3242
     # total_tokens keeps pre-cache semantics (fresh input + output only).
     assert totals["total_tokens"] == (10 + 20 + 365 + 10) + (5 + 880 + 17 + 5)
+
+
+async def test_by_turn_limit_caps_groups(db: AsyncSession) -> None:
+    await _seed(db)
+    rows = await usage_reports.by_turn(db, _USER, _T0 - timedelta(days=1), None, limit=1)
+    assert len(rows) == 1
+    # newest-first: the other-session row was recorded last among _USER rows
+    assert rows[0]["session_id"] == str(_OTHER_SESSION)

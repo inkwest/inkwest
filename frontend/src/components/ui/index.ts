@@ -32,3 +32,5 @@ export { Tooltip } from './Tooltip';
 
 export { ToggleSwitch } from './ToggleSwitch';
 export type { ToggleSwitchProps } from './ToggleSwitch';
+
+export { TokenGlyphs, TOKEN_GLYPH_TITLES } from './TokenGlyphs';

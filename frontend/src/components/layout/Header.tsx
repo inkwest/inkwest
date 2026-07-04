@@ -12,7 +12,7 @@ import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { SettingsModal } from '@/components/settings/SettingsModal';
 import { useSettingsUi, isSettingsTab } from '@/store/settingsUi';
 import { devSwitchUser } from '@/services/api';
-import { TokenGlyphs } from '@/components/usage/TokenGlyphs';
+import { TokenGlyphs } from '@/components/ui/TokenGlyphs';
 
 export function Header() {
   const navigate = useNavigate();

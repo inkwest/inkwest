@@ -255,7 +255,10 @@ async def _bounded_aiter(upstream: httpx.Response) -> AsyncIterator[bytes]:
     upstream that dribbles one byte just under that ceiling could pin a worker slot for an
     unbounded wall-clock time (slowloris). This caps the whole response to a generous ceiling
     (longer than any real turn) so a single replica can't be held hostage. On expiry the
-    BackgroundTask still runs, closing the client + stream."""
+    BackgroundTask still runs, closing the client + stream. Accounting note: a call cut
+    here before its terminal usage frame yields NO usage row (nothing reliable to bill
+    from) — accepted; the cut is logged and the miss shows up on
+    ``inkwest_llm_metering_failures_total{reason="no_usage"}``."""
     try:
         async with asyncio.timeout(LLM_PROXY_STREAM_MAX_SECONDS):
             async for chunk in upstream.aiter_raw():

@@ -25,8 +25,11 @@ Wire truth per op (confirmed live 2026-07-03/04, real fixtures in ``tests/fixtur
 
 Failure contract: metering is passive — any parse problem marks the tee failed and
 :meth:`result` returns None (caller logs a warning, no usage row); the forwarded bytes are
-never touched. botocore is already a backend dependency (boto3), so
-``botocore.eventstream.EventStreamBuffer`` decodes incrementally without buffering the body.
+never touched. Memory per in-flight call is bounded (botocore caps an eventstream frame at
+~24MB, non-stream bodies at ``_NONSTREAM_BODY_CAP``) but multiplies with concurrent calls —
+fine for the documented single-replica deployment, revisit before scale-out. botocore is
+already a backend dependency (boto3), so ``botocore.eventstream.EventStreamBuffer`` decodes
+incrementally without buffering the body.
 """
 
 import base64

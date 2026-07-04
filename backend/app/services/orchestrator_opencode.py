@@ -34,7 +34,6 @@ from app.core.config import get_settings
 from app.services import engines, llm_broker
 from app.services.ai_cli_client import execute_opencode, parse_opencode_response
 from app.services.ai_client import resolve_session_model
-from app.services.budget_service import record_usage
 from app.services.events import (
     ChatEvent,
     connector_required_event,
@@ -47,11 +46,10 @@ from app.services.messages import (
     get_enabled_mcp_servers,
     get_session_messages,
     save_message,
-    stamp_message_usage,
-    update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills, skills_container_root
+from app.services.turn_usage import persist_turn_usage
 from app.services.user_preferences import get_effective_skills
 
 logger = logging.getLogger(__name__)
@@ -365,111 +363,51 @@ async def orchestrate_chat_opencode(
     usage_message_id: uuid.UUID | None = None
 
     async def _persist_accumulated_usage() -> None:
-        """Session stats + engine-side usage row for whatever the turn accumulated.
-
-        Called from the success path AND the outer error handler — AWS bills every
-        Bedrock call that returned a response, so an errored turn's tokens must be
-        accounted too. Idempotent (one persist per turn) and best-effort: a
-        persistence failure never masks the turn's own outcome.
-        """
+        """Thin wrapper over the shared persist_turn_usage (single implementation of the
+        stats → budget-row → commit → Message-stamp sequence, with its gate/retry/rollback
+        contracts). Idempotent per turn; called from the success path, every error handler
+        AND the user-stop path — AWS bills every Bedrock call that returned a response."""
         nonlocal usage_persisted
-        in_tokens = done_meta.get("input_tokens", 0)
-        out_tokens = done_meta.get("output_tokens", 0)
-        cache_read = done_meta.get("cache_read_tokens", 0)
-        cache_write = done_meta.get("cache_write_tokens", 0)
-        # Cache counts join the gate: a fully-cached turn can report 0 fresh in/out yet
-        # still carry billable cache tokens (the frontend handles that shape already).
-        if usage_persisted or not (in_tokens or out_tokens or cache_read or cache_write):
+        if usage_persisted:
             return
         usage_persisted = True
-        try:
-            await update_session_stats(
-                db,
-                session_id,
-                input_tokens=in_tokens,
-                output_tokens=out_tokens,
-                tool_calls=done_meta.get("tool_calls", 0),
-                iterations=done_meta.get("iterations", 1),
-                cache_read_tokens=cache_read,
-                cache_write_tokens=cache_write,
-            )
-            # Broker-on: the proxy already persisted one authoritative UsageRecord per
-            # Bedrock call (source='broker', wire-exact cache tokens) — skip the whole
-            # engine-side budget row (cost derivation included); session stats above
-            # still come from the engine.
-            if not broker_env:
-                # opencode reports an authoritative per-turn USD cost (cache-aware) —
-                # pass it through so we don't recompute a wrong figure from token×rate.
-                # Guard the parse: a malformed value degrades to the token estimate
-                # rather than failing the turn.
-                oc_cost = done_meta.get("cost_usd")
-                cost_override: Decimal | None = None
-                # Truthy check on purpose: opencode reports 0.0 when models.dev has no
-                # pricing for the model (a genuinely free turn doesn't exist — output
-                # tokens always bill), so zero means "unknown" → estimate.
-                # Negative/malformed values likewise fall back.
-                if oc_cost:
-                    try:
-                        cost_override = Decimal(str(oc_cost))
-                    except (InvalidOperation, ValueError):
-                        cost_override = None
-                    if cost_override is not None and cost_override < 0:
-                        cost_override = None
-                if cost_override is None:
-                    # Fallback estimate: the cache-aware calculate_cost bills fresh
-                    # input, cache reads (0.1x) and cache writes (1.25x) at their real
-                    # rates. in_tokens is FRESH input (the parser no longer folds the
-                    # cache counts), so it feeds straight in with the splits alongside.
-                    from app.services.budget_service import calculate_cost
-
-                    cost_override = calculate_cost(
-                        model,
-                        in_tokens,
-                        out_tokens,
-                        cache_read_tokens=done_meta.get("cache_read_tokens", 0),
-                        cache_write_tokens=done_meta.get("cache_write_tokens", 0),
-                    )
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=session_uuid,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    model=model,
-                    cost_usd=cost_override,
-                    cache_read_tokens=cache_read,
-                    cache_write_tokens=cache_write,
-                    cache_write_1h_tokens=done_meta.get("cache_write_1h_tokens", 0),
-                    turn_id=turn_id,
-                )
-            await db.commit()
-        except Exception as e:
-            logger.error(f"Failed to persist session stats/usage: {e}")
-            # A failed commit leaves the session in an aborted transaction; roll back so
-            # the next DB op on this session doesn't error (parity with finalize_turn).
+        in_tokens = done_meta.get("input_tokens", 0)
+        out_tokens = done_meta.get("output_tokens", 0)
+        # opencode reports an authoritative per-turn USD cost (cache-aware) — pass it
+        # through so we don't recompute a wrong figure from token×rate. Guard the parse:
+        # a malformed value degrades to the shared helper's cache-aware token×rate
+        # estimate. Truthy check on purpose: opencode reports 0.0 when models.dev has no
+        # pricing for the model (a genuinely free turn doesn't exist — output tokens
+        # always bill), so zero means "unknown" → estimate. Negative/malformed fall back.
+        oc_cost = done_meta.get("cost_usd")
+        cost_override: Decimal | None = None
+        if oc_cost:
             try:
-                await db.rollback()
-            except Exception:
-                pass
-        # Display-only stamp, contained in its OWN try AFTER the budget row: a stamp
-        # failure must never cost the turn its authoritative usage record.
-        if usage_message_id is not None:
-            try:
-                await stamp_message_usage(
-                    db,
-                    usage_message_id,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    cache_read_tokens=cache_read,
-                    cache_write_tokens=cache_write,
-                    session_id=session_uuid,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to stamp message usage: {e}")
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
+                cost_override = Decimal(str(oc_cost))
+            except (InvalidOperation, ValueError):
+                cost_override = None
+            if cost_override is not None and cost_override < 0:
+                cost_override = None
+        await persist_turn_usage(
+            db,
+            session_id=session_id,
+            session_uuid=session_uuid,
+            user_id=user_id,
+            model=model,
+            turn_id=turn_id,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+            cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+            cache_write_1h_tokens=done_meta.get("cache_write_1h_tokens", 0),
+            tool_calls=done_meta.get("tool_calls", 0),
+            iterations=done_meta.get("iterations", 1),
+            skip_budget_row=bool(broker_env),
+            cost_usd=cost_override,
+            # First assistant row of the turn — bubble fusion keeps the first row's
+            # fields, so that row is what the per-bubble token line reads.
+            stamp_message_id=usage_message_id,
+        )
 
     try:
         from app.services import sandbox

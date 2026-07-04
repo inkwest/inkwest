@@ -8,7 +8,7 @@ import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils';
-import { TokenGlyphs } from '@/components/usage/TokenGlyphs';
+import { TokenGlyphs } from '@/components/ui/TokenGlyphs';
 import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal, PencilLine } from 'lucide-react';
 import { useComposerStore } from '@/store/composer';
 import * as api from '@/services/api';

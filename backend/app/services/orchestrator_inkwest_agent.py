@@ -34,18 +34,16 @@ from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
-from app.services.budget_service import record_usage
 from app.services.events import ChatEvent, done_event, error_event, mcp_auth_required_event
 from app.services.messages import (
     ensure_session_title,
     get_enabled_mcp_servers,
     get_session_messages,
     save_message,
-    stamp_message_usage,
-    update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills, skills_container_root
+from app.services.turn_usage import persist_turn_usage
 from app.services.user_preferences import get_effective_skills
 from app.tools.connector_exec import build_connector_env, session_kube_contexts
 from app.tools.definitions import get_tool_definitions
@@ -316,80 +314,33 @@ async def orchestrate_chat_inkwest_agent(
     usage_message_id: uuid.UUID | None = None
 
     async def _persist_accumulated_usage() -> None:
-        """Session stats + engine-side usage row for whatever the turn accumulated.
-
-        Called from the success path AND the error handlers — AWS bills every Bedrock
-        call that returned a response, so an errored turn's tokens must be accounted
-        too. Idempotent (one persist per turn) and best-effort: a persistence failure
-        never masks the turn's own outcome.
-        """
+        """Thin wrapper over the shared persist_turn_usage (single implementation of the
+        stats → budget-row → commit → Message-stamp sequence, with its gate/retry/rollback
+        contracts). Idempotent per turn; called from the success path, every error handler
+        AND the user-stop path — AWS bills every Bedrock call that returned a response."""
         nonlocal usage_persisted
         if usage_persisted:
             return
-        in_tokens = done_meta.get("input_tokens", 0)
-        out_tokens = done_meta.get("output_tokens", 0)
-        cache_read = done_meta.get("cache_read_tokens", 0)
-        cache_write = done_meta.get("cache_write_tokens", 0)
-        # Cache counts join the gate: a fully-cached turn can report 0 fresh in/out yet
-        # still carry billable cache tokens (the frontend handles that shape already).
-        if not (in_tokens or out_tokens or cache_read or cache_write):
-            return
         usage_persisted = True
-        try:
-            await update_session_stats(
-                db,
-                session_id,
-                input_tokens=in_tokens,
-                output_tokens=out_tokens,
-                tool_calls=done_meta.get("tool_calls", 0),
-                iterations=done_meta.get("iterations", 1),
-                cache_read_tokens=cache_read,
-                cache_write_tokens=cache_write,
-            )
-            # Broker-on: the proxy already persisted one authoritative UsageRecord per
-            # Bedrock call (source='broker') — skip the engine-side budget row only;
-            # session stats above still come from the engine.
-            if not broker_env:
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=session_uuid,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    model=model,
-                    cache_read_tokens=cache_read,
-                    cache_write_tokens=cache_write,
-                    cache_write_1h_tokens=done_meta.get("cache_write_1h_tokens", 0),
-                    turn_id=turn_id,
-                )
-            await db.commit()
-        except Exception as e:
-            logger.error(f"Failed to persist session stats/usage: {e}")
-            # A failed commit leaves the session in an aborted transaction; roll back so
-            # the next DB op on this session doesn't error (parity with opencode).
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-        # Display-only stamp, contained in its OWN try AFTER the budget row: a stamp
-        # failure must never cost the turn its authoritative usage record.
-        if usage_message_id is not None:
-            try:
-                await stamp_message_usage(
-                    db,
-                    usage_message_id,
-                    input_tokens=in_tokens,
-                    output_tokens=out_tokens,
-                    cache_read_tokens=cache_read,
-                    cache_write_tokens=cache_write,
-                    session_id=session_uuid,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to stamp message usage: {e}")
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
+        await persist_turn_usage(
+            db,
+            session_id=session_id,
+            session_uuid=session_uuid,
+            user_id=user_id,
+            model=model,
+            turn_id=turn_id,
+            input_tokens=done_meta.get("input_tokens", 0),
+            output_tokens=done_meta.get("output_tokens", 0),
+            cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+            cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+            cache_write_1h_tokens=done_meta.get("cache_write_1h_tokens", 0),
+            tool_calls=done_meta.get("tool_calls", 0),
+            iterations=done_meta.get("iterations", 1),
+            skip_budget_row=bool(broker_env),
+            # First assistant row of the turn — bubble fusion keeps the first row's
+            # fields, so that row is what the per-bubble token line reads.
+            stamp_message_id=usage_message_id,
+        )
 
     try:
         # Mint the broker grant + resolve the matching endpoint as the FIRST thing in the try, so

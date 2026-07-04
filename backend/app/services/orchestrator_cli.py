@@ -20,7 +20,6 @@ from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
 from app.services.ai_client import resolve_session_model_choice
-from app.services.budget_service import record_usage
 from app.services.events import (
     ChatEvent,
     done_event,
@@ -34,10 +33,10 @@ from app.services.messages import (
     get_enabled_mcp_servers,
     save_message,
     set_cli_session_id,
-    update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
 from app.services.session_skills import apply_session_skills
+from app.services.turn_usage import persist_turn_usage
 from app.services.user_preferences import get_effective_skills
 from app.tools.connector_exec import build_connector_env, connector_prompt_hint
 
@@ -251,66 +250,35 @@ required.
     usage_persisted = False
 
     async def _persist_accumulated_usage() -> None:
-        """Session stats + engine-side usage row for whatever the turn accumulated.
-
-        Called from the success path AND the error handlers (CLI exit 1 / timeout /
-        crash): AWS bills every Bedrock call that returned a response, so an errored
-        turn's tokens must be accounted too. Idempotent (one persist per turn) and
-        best-effort — a persistence failure never masks the turn's own outcome.
-        """
+        """Thin wrapper over the shared persist_turn_usage (single implementation of the
+        stats → budget-row → commit sequence, with its gate/retry/rollback contracts).
+        Idempotent per turn; called from the success path, every error handler AND the
+        user-stop path — AWS bills every Bedrock call that returned a response."""
         nonlocal usage_persisted
-        # Cache counts join the gate: a fully-cached turn can report 0 fresh in/out yet
-        # still carry billable cache tokens (the frontend handles that shape already).
-        if usage_persisted or not (
-            total_input_tokens
-            or total_output_tokens
-            or total_cache_read_tokens
-            or total_cache_write_tokens
-        ):
+        if usage_persisted:
             return
         usage_persisted = True
-        try:
-            await update_session_stats(
-                db,
-                session_id,
-                input_tokens=total_input_tokens,
-                output_tokens=total_output_tokens,
-                tool_calls=len([b for b in content if b.get("type") == "tool_use"]),
-                iterations=1,
-                cache_read_tokens=total_cache_read_tokens,
-                cache_write_tokens=total_cache_write_tokens,
-            )
-            # Broker-on (grant minted ⇒ broker_env non-empty): the proxy already
-            # persisted one authoritative UsageRecord per Bedrock call
-            # (source='broker', cache tokens included) — an engine-side row would
-            # double-count the budget. Session stats above (and the Message row)
-            # still come from the engine.
-            if not broker_env:
-                await record_usage(
-                    db,
-                    user_id=user_id,
-                    session_id=uuid.UUID(str(session_id)),
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    # Attribute to what actually ran: CLI-reported model, else the
-                    # explicit choice; None falls back to the catalog default
-                    # (approximate — the CLI used its own default then).
-                    model=actual_model or model_choice,
-                    cache_read_tokens=total_cache_read_tokens,
-                    cache_write_tokens=total_cache_write_tokens,
-                    cache_write_1h_tokens=total_cache_write_1h_tokens,
-                    turn_id=turn_id,
-                )
-            await db.commit()
-        except Exception as e:
-            logger.error(f"Failed to persist session stats/usage: {e}")
-            # A failed commit leaves the session in an aborted transaction; roll back so
-            # the next DB op on this session doesn't error (parity with the agent/opencode
-            # persist helpers).
-            try:
-                await db.rollback()
-            except Exception:
-                pass
+        await persist_turn_usage(
+            db,
+            session_id=session_id,
+            session_uuid=uuid.UUID(str(session_id)),
+            user_id=user_id,
+            # Attribute to what actually ran: CLI-reported model, else the explicit
+            # choice; None falls back to the catalog default (approximate — the CLI
+            # used its own default then).
+            model=actual_model or model_choice,
+            turn_id=turn_id,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            cache_read_tokens=total_cache_read_tokens,
+            cache_write_tokens=total_cache_write_tokens,
+            cache_write_1h_tokens=total_cache_write_1h_tokens,
+            tool_calls=len([b for b in content if b.get("type") == "tool_use"]),
+            iterations=1,
+            # Broker-on (grant minted ⇒ broker_env non-empty): the proxy already wrote
+            # the authoritative per-call rows.
+            skip_budget_row=bool(broker_env),
+        )
 
     try:
         # Where the agent works. In sandbox mode `claude` runs inside this

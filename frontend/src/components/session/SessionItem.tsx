@@ -3,7 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom';
 import { Trash2, Pencil, Check, X, GripVertical, LogOut, Share2 } from 'lucide-react';
 import { Session } from '@/types/api';
 import { formatRelativeTime, cn } from '@/lib/utils';
-import { TokenGlyphs } from '@/components/usage/TokenGlyphs';
+import { TokenGlyphs } from '@/components/ui/TokenGlyphs';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { ConfirmDialog } from '@/components/ui';

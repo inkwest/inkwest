@@ -71,8 +71,8 @@ def _patches(settings, capture, *, execute=None, entries=None):
         patch.object(oc, "get_enabled_mcp_servers", AsyncMock(return_value=[])),
         patch.object(oc, "get_effective_skills", AsyncMock(return_value=[])),
         patch.object(oc, "apply_session_skills", MagicMock()),
-        patch.object(oc, "update_session_stats", AsyncMock()),
-        patch.object(oc, "record_usage", AsyncMock()),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+        patch("app.services.turn_usage.record_usage", AsyncMock()),
         patch("app.services.sandbox.enforce_user_sandbox_cap", AsyncMock()),
         patch("app.services.sandbox.ensure", AsyncMock(return_value="conv")),
         patch("app.services.sandbox.release", AsyncMock()),
@@ -213,8 +213,8 @@ async def test_broker_on_skips_engine_usage_row_keeps_stats() -> None:
     capture: dict = {}
     ru, uss = AsyncMock(), AsyncMock()
     ps = _patches(_settings(broker_enabled=True), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", uss),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", uss),
         patch.object(oc, "parse_cli_response", _usage_events()),
     ]
     for p in ps:
@@ -245,8 +245,8 @@ async def test_broker_off_engine_usage_row_carries_turn_id() -> None:
     capture: dict = {}
     ru, uss = AsyncMock(), AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", uss),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", uss),
         patch.object(oc, "parse_cli_response", _usage_events()),
     ]
     for p in ps:
@@ -292,8 +292,8 @@ async def test_errored_turn_persists_accumulated_usage() -> None:
     capture: dict = {}
     ru, uss = AsyncMock(), AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", uss),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", uss),
         patch.object(oc, "parse_cli_response", parse_with_crash),
     ]
     for p in ps:
@@ -342,8 +342,8 @@ async def test_done_turn_persists_cache_tokens() -> None:
     capture: dict = {}
     ru, uss = AsyncMock(), AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", uss),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", uss),
         patch.object(oc, "parse_cli_response", parse_done),
     ]
     for p in ps:
@@ -391,8 +391,8 @@ async def test_timeout_turn_persists_accumulated_usage() -> None:
     capture: dict = {}
     ru = AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
         patch.object(oc, "parse_cli_response", parse_with_timeout),
     ]
     for p in ps:
@@ -441,8 +441,8 @@ async def test_unexpected_error_persists_accumulated_usage() -> None:
     capture: dict = {}
     ru = AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
         patch.object(oc, "parse_cli_response", parse_with_boom),
     ]
     for p in ps:
@@ -492,8 +492,8 @@ async def test_stop_persists_usage_surfaced_on_clean_stream_end() -> None:
     capture: dict = {}
     ru = AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
         patch.object(oc, "parse_cli_response", parse_stopped),
     ]
     for p in ps:
@@ -539,8 +539,8 @@ async def test_cache_only_turn_is_persisted() -> None:
     capture: dict = {}
     ru = AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
         patch.object(oc, "parse_cli_response", parse_cached),
     ]
     for p in ps:
@@ -583,8 +583,8 @@ async def test_1h_ttl_split_threaded_to_record_usage() -> None:
     capture: dict = {}
     ru = AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
-        patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch("app.services.turn_usage.record_usage", ru),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
         patch.object(oc, "parse_cli_response", parse_1h),
     ]
     for p in ps:

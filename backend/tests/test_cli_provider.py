@@ -740,8 +740,8 @@ class TestOrchestrateChatCliResume:
             patch.object(orchestrator_cli, "clear_cli_session_id", clear_mock),
             patch.object(orchestrator_cli, "save_message", AsyncMock()),
             patch.object(orchestrator_cli, "ensure_session_title", AsyncMock(return_value=None)),
-            patch.object(orchestrator_cli, "update_session_stats", AsyncMock()),
-            patch.object(orchestrator_cli, "record_usage", AsyncMock()),
+            patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+            patch("app.services.turn_usage.record_usage", AsyncMock()),
             patch.object(orchestrator_cli, "build_connector_env", AsyncMock(return_value=({}, []))),
             patch.object(
                 orchestrator_cli, "resolve_session_system_prompt", AsyncMock(return_value="")
@@ -802,8 +802,8 @@ class TestOrchestrateChatCliResume:
             patch.object(orchestrator_cli, "set_cli_session_id", AsyncMock()),
             patch.object(orchestrator_cli, "save_message", save_mock),
             patch.object(orchestrator_cli, "ensure_session_title", AsyncMock(return_value=None)),
-            patch.object(orchestrator_cli, "update_session_stats", AsyncMock()),
-            patch.object(orchestrator_cli, "record_usage", AsyncMock()),
+            patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+            patch("app.services.turn_usage.record_usage", AsyncMock()),
             patch.object(orchestrator_cli, "build_connector_env", AsyncMock(return_value=({}, []))),
             patch.object(
                 orchestrator_cli, "resolve_session_system_prompt", AsyncMock(return_value="")
@@ -897,8 +897,8 @@ class TestOrchestratorContentOrder:
             patch.object(
                 orchestrator_cli, "build_connector_env", new=AsyncMock(return_value=({}, set()))
             ),
-            patch.object(orchestrator_cli, "update_session_stats", new=AsyncMock()),
-            patch.object(orchestrator_cli, "record_usage", new=AsyncMock()),
+            patch("app.services.turn_usage.update_session_stats", new=AsyncMock()),
+            patch("app.services.turn_usage.record_usage", new=AsyncMock()),
             patch.object(orchestrator_cli.os, "makedirs"),
         ):
             db = AsyncMock()

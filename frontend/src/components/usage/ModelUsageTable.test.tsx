@@ -47,7 +47,7 @@ describe('ModelUsageTable cache columns', () => {
     const firstRow = screen.getAllByRole('row')[1];
     const cells = within(firstRow).getAllByRole('cell').map((c) => c.textContent);
     // model, engine, requests, tokens, cache R, cache W, cost
-    expect(cells).toEqual(['claude-opus-4-8', 'claude-cli', '3', '140', '27.1K', '3.2K', '$2.50']);
+    expect(cells).toEqual(['claude-opus-4-8', 'claude-cli', '3', '140', '27.1k', '3.2k', '$2.50']);
     const legacyRow = screen.getAllByRole('row')[2];
     const legacyCells = within(legacyRow).getAllByRole('cell').map((c) => c.textContent);
     expect(legacyCells[4]).toBe('0');

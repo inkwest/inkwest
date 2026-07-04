@@ -287,8 +287,8 @@ def _patch_broker(
         patch.object(oia, "get_session_messages", AsyncMock(return_value=history or [])),
         patch.object(oia, "save_message", spies.save_message),
         patch.object(oia, "ensure_session_title", spies.ensure_title),
-        patch.object(oia, "update_session_stats", spies.update_stats),
-        patch.object(oia, "record_usage", spies.record_usage),
+        patch("app.services.turn_usage.update_session_stats", spies.update_stats),
+        patch("app.services.turn_usage.record_usage", spies.record_usage),
         patch.object(oia, "resolve_session_system_prompt", AsyncMock(return_value="base")),
         patch.object(oia, "get_system_prompt", MagicMock(return_value="SYSTEM")),
         patch.object(oia, "resolve_session_model", AsyncMock(return_value=model)),
@@ -1528,7 +1528,7 @@ async def test_turn_totals_stamped_on_first_assistant_row():
     for p in patches:
         p.start()
     try:
-        with patch.object(oia, "stamp_message_usage", stamp):
+        with patch("app.services.turn_usage.stamp_message_usage", stamp):
             await _run_broker(spies, lines)
     finally:
         for p in reversed(patches):
@@ -1559,7 +1559,7 @@ async def test_stamp_failure_never_loses_the_usage_row():
     for p in patches:
         p.start()
     try:
-        with patch.object(oia, "stamp_message_usage", stamp):
+        with patch("app.services.turn_usage.stamp_message_usage", stamp):
             events = await _run_broker(spies, lines)
     finally:
         for p in reversed(patches):
