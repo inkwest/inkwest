@@ -133,6 +133,8 @@ tool_duration_seconds = Histogram(
 )
 
 # --- Tokens & cost (per resolved model + engine) ---------------------------------------
+# direction: input (fresh) | output | cache_read | cache_write — prompt-cache tokens are
+# reported separately on the wire and never included in "input".
 tokens_total = Counter(
     "inkwest_tokens_total", "Model tokens processed", ["model", "direction", "engine"]
 )

@@ -155,6 +155,34 @@ def test_calculate_cost_falls_back_to_static_table():
     assert calculate_cost("claude-opus-4-8", 1_000_000, 1_000_000) == Decimal("30.00")
 
 
+def test_calculate_cost_override_derives_cache_prices_from_override_input():
+    """Cache multipliers apply to the OVERRIDE's input price, not the table's."""
+    model_registry._rows = {
+        "custom-x": _row("custom-x", input_price=Decimal("2.00"), output_price=Decimal("8.00"))
+    }
+    # 1M cache-read at 0.1 x $2/M + 1M cache-write at 1.25 x $2/M = 0.20 + 2.50
+    cost = calculate_cost(
+        "custom-x", 0, 0, cache_read_tokens=1_000_000, cache_write_tokens=1_000_000
+    )
+    assert cost == Decimal("2.70")
+
+
+def test_calculate_cost_override_cache_write_1h_ttl():
+    model_registry._rows = {
+        "custom-x": _row("custom-x", input_price=Decimal("2.00"), output_price=Decimal("8.00"))
+    }
+    # 1h TTL writes bill 2x the override input price.
+    cost = calculate_cost(
+        "custom-x", 0, 0, cache_write_tokens=1_000_000, cache_write_1h_tokens=1_000_000
+    )
+    assert cost == Decimal("4.00")
+
+
+def test_calculate_cost_no_override_passes_cache_to_table():
+    # claude-opus-4-8: input $5/M -> 1M cache-read = $0.50.
+    assert calculate_cost("claude-opus-4-8", 0, 0, cache_read_tokens=1_000_000) == Decimal("0.50")
+
+
 def test_unpriced_model_flagged_in_merged_entry():
     model_catalog._live_models = ["totally-unknown-model"]
     entry = next(e for e in merged_entries() if e.model_id == "totally-unknown-model")

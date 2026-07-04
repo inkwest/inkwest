@@ -17,6 +17,19 @@ class ModelPricing(NamedTuple):
     # Older generation: kept for cost reporting on past usage, flagged in the
     # admin UI so admins know not to enable it for users.
     legacy: bool = False
+    # Explicit prompt-cache prices (USD per 1M tokens) for models where the default
+    # multipliers below are wrong (e.g. non-Anthropic vendors). None = derive from
+    # input_price via the multipliers.
+    cache_read_price: Decimal | None = None
+    cache_write_price: Decimal | None = None  # 5-minute-TTL write price
+
+
+# Default prompt-cache multipliers over the input rate (Anthropic pricing model):
+# reads 0.1x, 5m-TTL writes 1.25x, 1h-TTL writes 2x. Used when a model has no
+# explicit cache prices.
+CACHE_READ_MULTIPLIER = Decimal("0.1")
+CACHE_WRITE_5M_MULTIPLIER = Decimal("1.25")
+CACHE_WRITE_1H_MULTIPLIER = Decimal("2")
 
 
 # Pricing as of June 2026 (USD per million tokens). Dict order = display order
@@ -229,29 +242,78 @@ def get_model_pricing(model: str) -> ModelPricing:
     return DEFAULT_PRICING
 
 
+_MILLION = Decimal(1_000_000)
+
+
+def cost_for_pricing(
+    pricing: ModelPricing,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
+) -> Decimal:
+    """Cost in USD for a given ModelPricing (shared with registry overrides).
+
+    ``input_tokens`` is the FRESH (uncached) input only — on the Anthropic/Bedrock
+    wire, cache tokens are reported separately and never included in it.
+    ``cache_write_1h_tokens`` is the portion of ``cache_write_tokens`` written with a
+    1-hour TTL (billed 2x instead of 1.25x); the rest bills at the 5m rate.
+    """
+    read_price = (
+        pricing.cache_read_price
+        if pricing.cache_read_price is not None
+        else pricing.input_price * CACHE_READ_MULTIPLIER
+    )
+    write_5m_price = (
+        pricing.cache_write_price
+        if pricing.cache_write_price is not None
+        else pricing.input_price * CACHE_WRITE_5M_MULTIPLIER
+    )
+    # Preserve the 1h/5m premium ratio (2/1.25) when an explicit write price is set —
+    # vendors publish the 5m price; the 1h tier tracks it proportionally.
+    write_1h_price = write_5m_price * (CACHE_WRITE_1H_MULTIPLIER / CACHE_WRITE_5M_MULTIPLIER)
+    write_1h = min(max(cache_write_1h_tokens, 0), max(cache_write_tokens, 0))
+    write_5m = max(cache_write_tokens, 0) - write_1h
+    return (
+        (Decimal(input_tokens) / _MILLION) * pricing.input_price
+        + (Decimal(output_tokens) / _MILLION) * pricing.output_price
+        + (Decimal(cache_read_tokens) / _MILLION) * read_price
+        + (Decimal(write_5m) / _MILLION) * write_5m_price
+        + (Decimal(write_1h) / _MILLION) * write_1h_price
+    )
+
+
 def calculate_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
 ) -> Decimal:
     """
-    Calculate cost for token usage.
+    Calculate cost for token usage, prompt-cache aware.
 
     Args:
         model: Model name or ID
-        input_tokens: Number of input tokens
+        input_tokens: Number of fresh (uncached) input tokens
         output_tokens: Number of output tokens
+        cache_read_tokens: Tokens served from the prompt cache (billed ~0.1x input)
+        cache_write_tokens: Total tokens written to the prompt cache (billed ~1.25x)
+        cache_write_1h_tokens: Portion of cache_write_tokens with 1h TTL (billed 2x)
 
     Returns:
         Cost in USD
     """
-    pricing = get_model_pricing(model)
-
-    # Convert to millions and calculate
-    input_cost = (Decimal(input_tokens) / Decimal(1_000_000)) * pricing.input_price
-    output_cost = (Decimal(output_tokens) / Decimal(1_000_000)) * pricing.output_price
-
-    return input_cost + output_cost
+    return cost_for_pricing(
+        get_model_pricing(model),
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        cache_write_1h_tokens=cache_write_1h_tokens,
+    )
 
 
 def estimate_cost(

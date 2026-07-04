@@ -192,6 +192,35 @@ class UsageRecord(Base):
         nullable=False,
         default=0,
     )
+    # Prompt-cache tokens (input-side only; Bedrock/Anthropic never cache output).
+    # input_tokens above is FRESH input — cache tokens are additive, not a subset.
+    cache_read_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Tokens served from the prompt cache (billed ~0.1x input rate)",
+    )
+    cache_write_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Tokens written to the prompt cache (billed ~1.25x input rate)",
+    )
+
+    # Accounting authority that wrote the row: 'engine' (orchestrator fallback) or
+    # 'broker' (LLM proxy metering — one row per Bedrock call).
+    source: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="engine",
+    )
+    # Per-turn aggregation key: the N broker rows of one turn (and the single engine
+    # row) share it. Nullable — pre-cutover rows have none and don't group.
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        index=True,
+    )
 
     # Model info
     model: Mapped[str] = mapped_column(

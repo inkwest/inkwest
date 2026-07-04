@@ -42,6 +42,7 @@ from app.services.model_catalog import (
 from app.services.pricing import (
     DEFAULT_PRICING,
     ModelPricing,
+    cost_for_pricing,
     get_model_pricing,
     is_legacy_model,
     model_label,
@@ -131,14 +132,37 @@ def _row_pricing(row: dict[str, Any] | None) -> tuple[ModelPricing | None, bool]
     return None, False
 
 
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> Decimal:
-    """Cost in USD honoring any per-model pricing override."""
+def calculate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
+) -> Decimal:
+    """Cost in USD honoring any per-model pricing override (prompt-cache aware).
+
+    Overrides carry input/output prices only; cache prices derive from the
+    override's input_price via the default multipliers (cost_for_pricing).
+    """
     override, _ = _row_pricing(_rows.get(model))
     if override is None:
-        return _table_cost(model, input_tokens, output_tokens)
-    return (Decimal(input_tokens) / Decimal(1_000_000)) * override.input_price + (
-        Decimal(output_tokens) / Decimal(1_000_000)
-    ) * override.output_price
+        return _table_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cache_write_1h_tokens=cache_write_1h_tokens,
+        )
+    return cost_for_pricing(
+        override,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        cache_write_1h_tokens=cache_write_1h_tokens,
+    )
 
 
 def _entry(model_id: str, row: dict[str, Any] | None) -> ModelEntry:
