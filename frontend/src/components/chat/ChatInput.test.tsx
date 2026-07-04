@@ -671,6 +671,73 @@ describe('ChatInput', () => {
       expect(onSend).toHaveBeenCalledTimes(1);
     });
 
+    it('the Enter that opens the modal never bubbles to the document (one-keystroke bypass)', async () => {
+      noConnectors();
+      const user = userEvent.setup();
+      const enters: KeyboardEvent[] = [];
+      const spy = (e: KeyboardEvent) => {
+        if (e.key === 'Enter') enters.push(e);
+      };
+      document.addEventListener('keydown', spy);
+      try {
+        render(<ChatInput onSend={onSend} sessionId="s1" />);
+        await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'list pods{enter}');
+        expect(screen.getByRole('dialog')).toBeInTheDocument();
+        expect(onSend).not.toHaveBeenCalled();
+        // In a real browser React 18 flushes the modal's confirm-listener effect
+        // synchronously during this discrete event; if the composer's Enter still
+        // bubbled to the document it would confirm the modal in the same keystroke
+        // (send bypasses the popup — jsdom can't reproduce that flush ordering, so
+        // assert the propagation cut directly).
+        expect(enters).toHaveLength(0);
+      } finally {
+        document.removeEventListener('keydown', spy);
+      }
+    });
+
+    it('a held Enter (key repeat) cannot auto-confirm the modal it just opened', async () => {
+      noConnectors();
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} sessionId="s1" />);
+      await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'list pods{enter}');
+      // The key is still physically down: its repeats land on the autofocused confirm
+      // button and must neither confirm (listener) nor natively click it — fireEvent
+      // returns false when preventDefault was called, i.e. native activation cancelled.
+      const notPrevented = fireEvent.keyDown(
+        screen.getByRole('button', { name: /send anyway/i }),
+        { key: 'Enter', repeat: true },
+      );
+      expect(notPrevented).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+
+    it('Enter with focus back in the composer while the modal is open does not confirm it', async () => {
+      noConnectors();
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} sessionId="s1" />);
+      const ta = screen.getByPlaceholderText(/investigate or analyse/i);
+      await user.type(ta, 'list pods{enter}');
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      // e.g. Shift+Tab back into the composer: a text field owns its Enter — the modal's
+      // capture listener must bow out instead of treating it as a confirmation.
+      ta.focus();
+      fireEvent.keyDown(ta, { key: 'Enter' });
+      expect(onSend).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+
+    it('Enter on the focused Cancel button cancels instead of sending', async () => {
+      noConnectors();
+      const user = userEvent.setup();
+      render(<ChatInput onSend={onSend} sessionId="s1" />);
+      await user.type(screen.getByPlaceholderText(/investigate or analyse/i), 'list pods{enter}');
+      screen.getByRole('button', { name: /cancel/i }).focus();
+      await user.keyboard('{Enter}');
+      expect(onSend).not.toHaveBeenCalled();
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
     it('does not send when the confirm modal is cancelled', async () => {
       noConnectors();
       const user = userEvent.setup();

@@ -18,6 +18,7 @@ import { AttachmentChips, MessageAttachments, PendingAttachment } from './Attach
 import { formatArgs } from '@/lib/skillArgs';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
+import { useConfirmKey } from '@/hooks/useConfirmKey';
 
 interface Props {
   onSend: (message: string, attachments?: Attachment[]) => void;
@@ -477,22 +478,10 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     submit();
   };
 
-  // Enter confirms the no-connector modal (Escape closes it via Modal). Autofocus the
-  // primary button so Enter reads naturally; document-level listener because the modal
-  // has no dedicated focus trap. Mirrors ConfirmDialog's pattern.
-  useEffect(() => {
-    if (!confirmOpen) return;
-    confirmButtonRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Enter') return;
-      e.preventDefault();
-      confirmSendAnyway();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-    // confirmSendAnyway reads current state via submit(); re-bind only on open toggle.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confirmOpen]);
+  // Enter confirms the no-connector modal (Escape closes it via Modal); autofocuses the
+  // primary button so Enter reads naturally. Shared with ConfirmDialog — the hardening
+  // against key-repeat / same-keystroke / Enter-on-Cancel bypasses lives in the hook.
+  useConfirmKey(confirmOpen, confirmButtonRef, confirmSendAnyway);
 
   // Auto-submit the handed-off prompt once the WS is connected. Only fires for the
   // untouched seed: if the user has started editing it, we defer to them. If connect
@@ -595,6 +584,12 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      // stopPropagation: React 18 flushes the confirm-modal effect synchronously during
+      // this discrete event, so its freshly-attached document keydown listener would
+      // catch THIS same native keydown as it bubbles past the root and instantly
+      // confirm the modal it just opened (send bypasses the popup). jsdom tests can't
+      // reproduce this — act() flushes effects only after the event fully propagated.
+      e.stopPropagation();
       handleSend();
     }
   };

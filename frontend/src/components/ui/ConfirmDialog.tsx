@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { Button } from './Button';
 import { Modal } from './Modal';
+import { useConfirmKey } from '@/hooks/useConfirmKey';
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -25,21 +26,9 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    if (!isOpen) return;
-
-    confirmButtonRef.current?.focus();
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        onConfirm();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onConfirm]);
+  // Enter/Space confirm with the primary button autofocused; the hook hardens against
+  // key-repeat, same-keystroke and Enter-on-Cancel bypasses (see useConfirmKey).
+  useConfirmKey(isOpen, confirmButtonRef, onConfirm, { space: true });
 
   const buttonVariant = variant === 'danger' ? 'danger' : 'primary';
 

@@ -26,11 +26,36 @@ export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
   bodyClassName?: string;
 }
 
+// What the focus trap counts as tabbable inside the dialog. tabindex="-1" is excluded on
+// every branch (an element removed from the tab order must not become a wrap target —
+// focus() on it would succeed but the user couldn't Tab away from it as an edge).
+// Known limitation: visibility (display:none etc.) isn't checked; keep dialog edges free
+// of hidden focusables.
+const FOCUSABLE = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]',
+]
+  .map((s) => `${s}:not([tabindex="-1"])`)
+  .join(', ');
+
 export const Modal = forwardRef<HTMLDivElement, ModalProps>(
   ({ className, isOpen, onClose, title, size = 'md', align = 'center', bodyClassName, children, ...props }, ref) => {
     // Stable identity for this modal instance in the stack.
     const idRef = useRef<symbol>();
     if (!idRef.current) idRef.current = Symbol('modal');
+
+    // Internal handle on the dialog node for the focus trap; the forwarded ref (public
+    // API) is fed from the same callback so both stay in sync.
+    const dialogRef = useRef<HTMLDivElement | null>(null);
+    const setDialogRef = (node: HTMLDivElement | null) => {
+      dialogRef.current = node;
+      if (typeof ref === 'function') ref(node);
+      else if (ref) ref.current = node;
+    };
 
     useEffect(() => {
       if (!isOpen) return;
@@ -50,8 +75,39 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
       };
       document.addEventListener('keydown', handleEscape);
 
+      // Keyboard focus trap (topmost modal only): the overlay blocks clicks but not Tab,
+      // so without this, focus escapes to controls behind the modal and Enter activates
+      // them "through" it (WCAG 2.4.3). Tab cycles inside the dialog; a Tab from outside
+      // (focus never entered, or was lost) pulls focus in.
+      const handleTab = (e: KeyboardEvent) => {
+        if (e.key !== 'Tab') return;
+        if (modalStack[modalStack.length - 1] !== id) return;
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const focusables = dialog.querySelectorAll<HTMLElement>(FOCUSABLE);
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (!dialog.contains(active)) {
+          e.preventDefault();
+          (e.shiftKey ? last : first).focus();
+        } else if (e.shiftKey && active === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      };
+      document.addEventListener('keydown', handleTab, true);
+
       return () => {
         document.removeEventListener('keydown', handleEscape);
+        document.removeEventListener('keydown', handleTab, true);
         const i = modalStack.lastIndexOf(id);
         if (i !== -1) modalStack.splice(i, 1);
         // Release the scroll-lock only once the last modal is gone (a stacked modal above may
@@ -100,7 +156,7 @@ export const Modal = forwardRef<HTMLDivElement, ModalProps>(
           />
 
           <div
-            ref={ref}
+            ref={setDialogRef}
             role="dialog"
             aria-modal="true"
             className={clsx(
