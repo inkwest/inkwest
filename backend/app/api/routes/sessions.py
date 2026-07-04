@@ -896,6 +896,8 @@ async def get_session_stats(
         "session_id": str(session.id),
         "total_input_tokens": session.total_input_tokens,
         "total_output_tokens": session.total_output_tokens,
+        "total_cache_read_tokens": session.total_cache_read_tokens,
+        "total_cache_write_tokens": session.total_cache_write_tokens,
         "total_tokens": session.total_input_tokens + session.total_output_tokens,
         "total_tool_calls": session.total_tool_calls,
         "total_iterations": session.total_iterations,

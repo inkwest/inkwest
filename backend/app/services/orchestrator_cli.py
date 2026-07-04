@@ -269,6 +269,8 @@ required.
                 output_tokens=total_output_tokens,
                 tool_calls=len([b for b in content if b.get("type") == "tool_use"]),
                 iterations=1,
+                cache_read_tokens=total_cache_read_tokens,
+                cache_write_tokens=total_cache_write_tokens,
             )
             # Broker-on (grant minted ⇒ broker_env non-empty): the proxy already
             # persisted one authoritative UsageRecord per Bedrock call
@@ -531,6 +533,10 @@ required.
                     content,
                     model=actual_model or model_choice,
                     engine=engine,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_write_tokens=total_cache_write_tokens,
                 )
             except Exception as e:
                 logger.error(f"Failed to save assistant message: {e}")

@@ -53,22 +53,30 @@ async def summary(
     end: datetime | None,
 ) -> dict[str, Any]:
     """Total tokens/cost/requests over the window."""
+    # Labeled columns (not positional indexes): inserting a column can never silently
+    # renumber its neighbours.
     query = select(
-        func.coalesce(func.sum(UsageRecord.input_tokens), 0),
-        func.coalesce(func.sum(UsageRecord.output_tokens), 0),
-        func.coalesce(func.sum(UsageRecord.cost_usd), 0),
-        func.count(UsageRecord.id),
+        func.coalesce(func.sum(UsageRecord.input_tokens), 0).label("input_tokens"),
+        func.coalesce(func.sum(UsageRecord.output_tokens), 0).label("output_tokens"),
+        func.coalesce(func.sum(UsageRecord.cache_read_tokens), 0).label("cache_read_tokens"),
+        func.coalesce(func.sum(UsageRecord.cache_write_tokens), 0).label("cache_write_tokens"),
+        func.coalesce(func.sum(UsageRecord.cost_usd), 0).label("cost_usd"),
+        func.count(UsageRecord.id).label("request_count"),
     ).where(*_conditions(user_id, start, end))
 
     row = (await db.execute(query)).one()
-    input_tokens = int(row[0])
-    output_tokens = int(row[1])
+    input_tokens = int(row.input_tokens)
+    output_tokens = int(row.output_tokens)
+    # total_tokens stays fresh-input + output (pre-cache semantics); the cache splits are
+    # additive fields so no consumer's math silently changes.
     return {
         "total_input_tokens": input_tokens,
         "total_output_tokens": output_tokens,
+        "total_cache_read_tokens": int(row.cache_read_tokens),
+        "total_cache_write_tokens": int(row.cache_write_tokens),
         "total_tokens": input_tokens + output_tokens,
-        "total_cost_usd": float(row[2]),
-        "request_count": int(row[3]),
+        "total_cost_usd": float(row.cost_usd),
+        "request_count": int(row.request_count),
     }
 
 
@@ -88,6 +96,8 @@ async def by_model(
             UsageRecord.provider.label("engine"),
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
             func.count(UsageRecord.id).label("request_count"),
         )
@@ -103,6 +113,8 @@ async def by_model(
             "engine": row.engine,
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
             "total_tokens": row.input_tokens + row.output_tokens,
             "cost_usd": float(row.cost_usd),
             "request_count": row.request_count,
@@ -128,6 +140,8 @@ async def by_session(
             UsageRecord.session_id,
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
             func.count(UsageRecord.id).label("request_count"),
             func.min(UsageRecord.recorded_at).label("first_request"),
@@ -156,6 +170,8 @@ async def by_session(
             "title": titles.get(str(row.session_id), "Untitled"),
             "input_tokens": row.input_tokens,
             "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
             "total_tokens": row.input_tokens + row.output_tokens,
             "cost_usd": float(row.cost_usd),
             "request_count": row.request_count,
@@ -183,6 +199,8 @@ async def timeseries(
             bucket,
             func.sum(UsageRecord.input_tokens).label("input_tokens"),
             func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
             func.sum(UsageRecord.cost_usd).label("cost_usd"),
             func.count(UsageRecord.id).label("request_count"),
         )
@@ -196,8 +214,73 @@ async def timeseries(
             "timestamp": row.bucket.isoformat(),
             "input_tokens": int(row.input_tokens),
             "output_tokens": int(row.output_tokens),
+            "cache_read_tokens": int(row.cache_read_tokens),
+            "cache_write_tokens": int(row.cache_write_tokens),
             "cost_usd": float(row.cost_usd),
             "request_count": int(row.request_count),
+        }
+        for row in (await db.execute(query)).all()
+    ]
+
+
+async def by_turn(
+    db: AsyncSession,
+    user_id: UUID | None,
+    start: datetime,
+    end: datetime | None,
+    session_id: UUID | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Per-turn usage rollup: the N broker rows of one turn grouped by ``turn_id``.
+
+    Pre-cutover rows (``turn_id IS NULL``) fall back to per-row granularity by grouping
+    on the row's own id — they simply don't aggregate (see
+    ``migrations/20260704000000_usage_cache_tokens.sql``). The returned ``turn_id`` is the
+    grouping key, so for those legacy rows it carries the UsageRecord id. Newest turns
+    first. No frontend consumer yet — groundwork for a per-turn cost drill-down
+    (documented in docs/BUDGET.md).
+    """
+    turn_key = func.coalesce(UsageRecord.turn_id, UsageRecord.id).label("turn_key")
+    conditions = _conditions(user_id, start, end)
+    if session_id is not None:
+        conditions.append(UsageRecord.session_id == session_id)
+
+    query = (
+        select(
+            turn_key,
+            func.max(UsageRecord.session_id).label("session_id"),
+            func.max(UsageRecord.model).label("model"),
+            func.max(UsageRecord.provider).label("engine"),
+            func.max(UsageRecord.source).label("source"),
+            func.sum(UsageRecord.input_tokens).label("input_tokens"),
+            func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
+            func.sum(UsageRecord.cost_usd).label("cost_usd"),
+            func.count(UsageRecord.id).label("call_count"),
+            func.max(UsageRecord.recorded_at).label("last_call"),
+        )
+        .where(*conditions)
+        .group_by(turn_key)
+        .order_by(func.max(UsageRecord.recorded_at).desc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+
+    return [
+        {
+            "turn_id": str(row.turn_key),
+            "session_id": str(row.session_id),
+            "model": row.model,
+            "engine": row.engine,
+            "source": row.source,
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
+            "cost_usd": float(row.cost_usd),
+            "call_count": row.call_count,
+            "last_call": row.last_call.isoformat() if row.last_call else None,
         }
         for row in (await db.execute(query)).all()
     ]

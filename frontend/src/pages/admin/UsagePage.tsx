@@ -18,7 +18,7 @@ import { TrendingUp, Users, Cpu, DollarSign, ChevronRight, ChevronDown, Wallet }
 import { UserSessionsUsage } from '@/types/admin';
 import * as adminApi from '@/services/adminApi';
 import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost } from '@/lib/usageFormat';
+import { formatTokens, formatCost, TOKEN_SERIES_LABELS } from '@/lib/usageFormat';
 import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
 import {
   ComposedChart,
@@ -55,6 +55,8 @@ type UserSortKey =
   | 'display_name'
   | 'conversation_count'
   | 'mean_req'
+  | 'cache_read_tokens'
+  | 'cache_write_tokens'
   | 'total_tokens'
   | 'cost_usd';
 
@@ -107,7 +109,7 @@ export function UsagePage() {
             return dir * (a.display_name || a.email).localeCompare(b.display_name || b.email);
           }
           const val = (u: typeof a) =>
-            userKey === 'mean_req' ? meanRequestsPerConv(u) : (u[userKey] as number);
+            userKey === 'mean_req' ? meanRequestsPerConv(u) : ((u[userKey] as number) || 0);
           return dir * (val(a) - val(b));
         });
   const toggleUserSort = (key: UserSortKey) => {
@@ -326,12 +328,17 @@ export function UsagePage() {
                       formatter={(value, name) =>
                         name === 'cost_usd'
                           ? [formatCost(Number(value) || 0), 'Cost']
-                          : [formatTokens(Number(value) || 0), name === 'input_tokens' ? 'Input' : 'Output']
+                          : [formatTokens(Number(value) || 0), TOKEN_SERIES_LABELS[String(name)] ?? String(name)]
                       }
                     />
-                    <Legend formatter={(value) => value === 'input_tokens' ? 'Input tokens' : value === 'output_tokens' ? 'Output tokens' : 'Cost'} />
+                    <Legend formatter={(value) => TOKEN_SERIES_LABELS[String(value)] ?? String(value)} />
+                    {/* Cache bars stack separately: the primary bar keeps matching the
+                        "Total Tokens" figure (fresh+output, cache excluded), and cache-heavy
+                        turns don't crush the fresh/output bars into slivers. */}
                     <Bar yAxisId="tokens" dataKey="input_tokens" stackId="tokens" fill="#3B82F6" radius={[0, 0, 0, 0]} />
                     <Bar yAxisId="tokens" dataKey="output_tokens" stackId="tokens" fill="#10B981" radius={[4, 4, 0, 0]} />
+                    <Bar yAxisId="tokens" dataKey="cache_read_tokens" stackId="cache" fill="#8B5CF6" radius={[0, 0, 0, 0]} />
+                    <Bar yAxisId="tokens" dataKey="cache_write_tokens" stackId="cache" fill="#EC4899" radius={[4, 4, 0, 0]} />
                     <Line yAxisId="cost" type="monotone" dataKey="cost_usd" stroke="#F59E0B" strokeWidth={2} dot={false} />
                   </ComposedChart>
                 </ResponsiveContainer>
@@ -398,6 +405,12 @@ export function UsagePage() {
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'total_tokens')} onClick={() => toggleUserSort('total_tokens')}>
                         Tokens{sortArrow(userSort, 'total_tokens')}
                       </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cache_read_tokens')} onClick={() => toggleUserSort('cache_read_tokens')} title="Prompt-cache reads (billed ~0.1x input rate)">
+                        Cache R{sortArrow(userSort, 'cache_read_tokens')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cache_write_tokens')} onClick={() => toggleUserSort('cache_write_tokens')} title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)">
+                        Cache W{sortArrow(userSort, 'cache_write_tokens')}
+                      </TableHead>
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cost_usd')} onClick={() => toggleUserSort('cost_usd')}>
                         Cost{sortArrow(userSort, 'cost_usd')}
                       </TableHead>
@@ -441,6 +454,12 @@ export function UsagePage() {
                           <TableCell className="text-right">
                             {formatTokens(usage.total_tokens)}
                           </TableCell>
+                          <TableCell className="text-right text-gray-400">
+                            {formatTokens(usage.cache_read_tokens || 0)}
+                          </TableCell>
+                          <TableCell className="text-right text-gray-400">
+                            {formatTokens(usage.cache_write_tokens || 0)}
+                          </TableCell>
                           <TableCell className="text-right">
                             {formatCost(usage.cost_usd)}
                           </TableCell>
@@ -460,7 +479,7 @@ export function UsagePage() {
                         </TableRow>
                         {expandedUser === usage.user_id && (
                           <TableRow key={`${usage.user_id}-sessions`}>
-                            <TableCell colSpan={7} className="bg-gray-900/50 p-0">
+                            <TableCell colSpan={9} className="bg-gray-900/50 p-0">
                               {sessionsLoading ? (
                                 <div className="flex items-center justify-center py-4">
                                   <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500" />
@@ -504,7 +523,7 @@ export function UsagePage() {
                     ))}
                     {userUsage.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-8 text-gray-400">
+                        <TableCell colSpan={9} className="text-center py-8 text-gray-400">
                           No usage data for this period
                         </TableCell>
                       </TableRow>

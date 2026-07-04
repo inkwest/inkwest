@@ -15,7 +15,14 @@ import type { ModelUsage } from '@/types/admin';
 import { cycleSort, sortArrow, ariaSort, type SortState } from '@/lib/tableSort';
 import { formatTokens, formatCost } from '@/lib/usageFormat';
 
-type ModelSortKey = 'model' | 'engine' | 'request_count' | 'total_tokens' | 'cost_usd';
+type ModelSortKey =
+  | 'model'
+  | 'engine'
+  | 'request_count'
+  | 'total_tokens'
+  | 'cache_read_tokens'
+  | 'cache_write_tokens'
+  | 'cost_usd';
 
 /**
  * "Usage by Model" — flat Model×Engine breakdown with tristate column sort. Identical on the
@@ -33,7 +40,7 @@ export function ModelUsageTable({ data }: { data: ModelUsage[] }) {
           if (key === 'model' || key === 'engine') {
             return dir * (a[key] || '').localeCompare(b[key] || '');
           }
-          return dir * ((a[key] as number) - (b[key] as number));
+          return dir * (((a[key] as number) || 0) - (((b[key] as number) || 0)));
         });
   const toggle = (k: ModelSortKey) => setSort((s) => cycleSort(s, k));
 
@@ -58,6 +65,22 @@ export function ModelUsageTable({ data }: { data: ModelUsage[] }) {
               <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sort, 'total_tokens')} onClick={() => toggle('total_tokens')}>
                 Tokens{sortArrow(sort, 'total_tokens')}
               </TableHead>
+              <TableHead
+                className="text-right cursor-pointer select-none"
+                aria-sort={ariaSort(sort, 'cache_read_tokens')}
+                onClick={() => toggle('cache_read_tokens')}
+                title="Prompt-cache reads (billed ~0.1x input rate)"
+              >
+                Cache R{sortArrow(sort, 'cache_read_tokens')}
+              </TableHead>
+              <TableHead
+                className="text-right cursor-pointer select-none"
+                aria-sort={ariaSort(sort, 'cache_write_tokens')}
+                onClick={() => toggle('cache_write_tokens')}
+                title="Prompt-cache writes (billed ~1.25x input rate)"
+              >
+                Cache W{sortArrow(sort, 'cache_write_tokens')}
+              </TableHead>
               <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sort, 'cost_usd')} onClick={() => toggle('cost_usd')}>
                 Cost{sortArrow(sort, 'cost_usd')}
               </TableHead>
@@ -70,12 +93,14 @@ export function ModelUsageTable({ data }: { data: ModelUsage[] }) {
                 <TableCell className="text-gray-400">{usage.engine}</TableCell>
                 <TableCell className="text-right">{usage.request_count}</TableCell>
                 <TableCell className="text-right">{formatTokens(usage.total_tokens)}</TableCell>
+                <TableCell className="text-right text-gray-400">{formatTokens(usage.cache_read_tokens || 0)}</TableCell>
+                <TableCell className="text-right text-gray-400">{formatTokens(usage.cache_write_tokens || 0)}</TableCell>
                 <TableCell className="text-right">{formatCost(usage.cost_usd)}</TableCell>
               </TableRow>
             ))}
             {sorted.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center py-8 text-gray-400">
+                <TableCell colSpan={7} className="text-center py-8 text-gray-400">
                   No usage data for this period
                 </TableCell>
               </TableRow>

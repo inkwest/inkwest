@@ -24,6 +24,7 @@ describe('SettingsModal', () => {
     useSettingsStore.setState({
       compactToolCards: true,
       showTimestamps: true,
+      showTokenCounts: true,
       wideComposer: false,
       sidebarWidth: 256,
     });
@@ -31,6 +32,17 @@ describe('SettingsModal', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('persists the token-counts toggle through saveUi', async () => {
+    render(<SettingsModal isOpen onClose={() => {}} />);
+    await userEvent.click(screen.getByText('Show token counts'));
+    expect(useSettingsStore.getState().showTokenCounts).toBe(false);
+    await waitFor(() => {
+      const put = vi.mocked(api.updateMyPreferences);
+      expect(put).toHaveBeenCalled();
+      expect(put.mock.calls[0][0].ui?.showTokenCounts).toBe(false);
+    });
   });
 
   it('renders the three tabs', async () => {

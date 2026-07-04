@@ -293,6 +293,8 @@ async def test_create_session_success(
         obj.is_archived = False
         obj.total_input_tokens = 0
         obj.total_output_tokens = 0
+        obj.total_cache_read_tokens = 0
+        obj.total_cache_write_tokens = 0
         obj.total_tool_calls = 0
         obj.total_iterations = 0
         obj.created_at = datetime.now(UTC)
@@ -330,6 +332,8 @@ async def test_create_session_without_cluster(
         obj.is_archived = False
         obj.total_input_tokens = 0
         obj.total_output_tokens = 0
+        obj.total_cache_read_tokens = 0
+        obj.total_cache_write_tokens = 0
         obj.total_tool_calls = 0
         obj.total_iterations = 0
         obj.created_at = datetime.now(UTC)

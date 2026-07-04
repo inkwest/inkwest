@@ -899,15 +899,12 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
             iterations += 1
             tokens = _as_dict(part.get("tokens"))
             cache = _as_dict(tokens.get("cache"))
-            # Bedrock prompt caching moves most of the prompt into cache.write/read (the
-            # live fixture shows input=3, cache.write=7949 on a step) — fold them into the
-            # input count so session token stats aren't off by orders of magnitude. USD cost
-            # is opencode's own cache-aware figure (cost_usd), unaffected by this sum.
-            in_tokens += (
-                int(tokens.get("input") or 0)
-                + int(cache.get("write") or 0)
-                + int(cache.get("read") or 0)
-            )
+            # FRESH input only — cache tokens ride their own counters (parity with the
+            # claude-cli and inkwest-agent paths, and with the broker's wire metering).
+            # They used to be folded into in_tokens "so stats reflect real prompt size";
+            # now that every surface shows the cache splits explicitly, folding would
+            # double-count them (once in the input figure, again in the cache columns).
+            in_tokens += int(tokens.get("input") or 0)
             cache_read += int(cache.get("read") or 0)
             cache_write += int(cache.get("write") or 0)
             out_tokens += int(tokens.get("output") or 0)

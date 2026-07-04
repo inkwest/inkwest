@@ -47,6 +47,7 @@ from app.services.messages import (
     get_enabled_mcp_servers,
     get_session_messages,
     save_message,
+    stamp_message_usage,
     update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
@@ -361,6 +362,7 @@ async def orchestrate_chat_opencode(
     done_meta: dict[str, Any] = {}
     turn_id = uuid.uuid4()
     usage_persisted = False
+    usage_message_id: uuid.UUID | None = None
 
     async def _persist_accumulated_usage() -> None:
         """Session stats + engine-side usage row for whatever the turn accumulated.
@@ -384,6 +386,8 @@ async def orchestrate_chat_opencode(
                 output_tokens=out_tokens,
                 tool_calls=done_meta.get("tool_calls", 0),
                 iterations=done_meta.get("iterations", 1),
+                cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+                cache_write_tokens=done_meta.get("cache_write_tokens", 0),
             )
             # Broker-on: the proxy already persisted one authoritative UsageRecord per
             # Bedrock call (source='broker', wire-exact cache tokens) — skip the whole
@@ -410,20 +414,16 @@ async def orchestrate_chat_opencode(
                 if cost_override is None:
                     # Fallback estimate: the cache-aware calculate_cost bills fresh
                     # input, cache reads (0.1x) and cache writes (1.25x) at their real
-                    # rates. in_tokens folds the cache counts (session stats reflect
-                    # real prompt size), so hand the estimator the FRESH portion plus
-                    # the cache splits separately.
+                    # rates. in_tokens is FRESH input (the parser no longer folds the
+                    # cache counts), so it feeds straight in with the splits alongside.
                     from app.services.budget_service import calculate_cost
 
-                    cache_read = done_meta.get("cache_read_tokens", 0)
-                    cache_write = done_meta.get("cache_write_tokens", 0)
-                    fresh_input = max(in_tokens - cache_read - cache_write, 0)
                     cost_override = calculate_cost(
                         model,
-                        fresh_input,
+                        in_tokens,
                         out_tokens,
-                        cache_read_tokens=cache_read,
-                        cache_write_tokens=cache_write,
+                        cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+                        cache_write_tokens=done_meta.get("cache_write_tokens", 0),
                     )
                 await record_usage(
                     db,
@@ -446,6 +446,25 @@ async def orchestrate_chat_opencode(
                 await db.rollback()
             except Exception:
                 pass
+        # Display-only stamp, contained in its OWN try AFTER the budget row: a stamp
+        # failure must never cost the turn its authoritative usage record.
+        if usage_message_id is not None:
+            try:
+                await stamp_message_usage(
+                    db,
+                    usage_message_id,
+                    input_tokens=in_tokens,
+                    output_tokens=out_tokens,
+                    cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+                    cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+                    session_id=session_uuid,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to stamp message usage: {e}")
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
     try:
         from app.services import sandbox
@@ -591,12 +610,18 @@ async def orchestrate_chat_opencode(
         aws_reauth_sent = False
 
         async def _flush() -> None:
-            nonlocal assistant_blocks, pending_results
+            nonlocal assistant_blocks, pending_results, usage_message_id
             if assistant_blocks:
                 try:
-                    await save_message(
+                    saved = await save_message(
                         db, session_id, "assistant", assistant_blocks, model=model, engine=engine
                     )
+                    # The turn's token totals are only known at the terminal event; the
+                    # persist helper stamps them onto the FIRST assistant row — bubble
+                    # fusion (groupServerMessages) keeps the first row's fields, so that
+                    # row is what the per-bubble token line reads.
+                    if usage_message_id is None:
+                        usage_message_id = saved.id
                 except Exception as e:
                     logger.error(f"Failed to save assistant message: {e}")
             if pending_results:

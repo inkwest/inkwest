@@ -155,8 +155,10 @@ CREATE TABLE inkwest.sessions (
     title VARCHAR(255),
     summary TEXT,
     is_archived BOOLEAN NOT NULL DEFAULT false,
-    total_input_tokens INTEGER NOT NULL DEFAULT 0,
+    total_input_tokens INTEGER NOT NULL DEFAULT 0,   -- FRESH (uncached) input
     total_output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,   -- prompt-cache reads (input-side)
+    total_cache_write_tokens INTEGER NOT NULL DEFAULT 0,  -- prompt-cache writes (input-side)
     total_tool_calls INTEGER NOT NULL DEFAULT 0,
     total_iterations INTEGER NOT NULL DEFAULT 0,
     cli_session_id VARCHAR(50),
@@ -181,8 +183,10 @@ CREATE TABLE inkwest.messages (
     tool_calls JSONB,
     tool_call_id VARCHAR(255),
     token_count INTEGER,
-    input_tokens INTEGER,
+    input_tokens INTEGER,      -- FRESH (uncached) input for the turn
     output_tokens INTEGER,
+    cache_read_tokens INTEGER,   -- prompt-cache reads (NULL on rows predating the column)
+    cache_write_tokens INTEGER,  -- prompt-cache writes (NULL on rows predating the column)
     thinking_content TEXT,
     latency_ms INTEGER,
     status VARCHAR(20) NOT NULL DEFAULT 'success',
@@ -246,13 +250,18 @@ CREATE TABLE inkwest.usage_records (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID,
     session_id UUID NOT NULL,
-    input_tokens INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,          -- FRESH (uncached) input
     output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,      -- prompt-cache reads (billed ~0.1x)
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,     -- prompt-cache writes (billed ~1.25x)
+    source VARCHAR(16) NOT NULL DEFAULT 'engine',      -- accounting authority: engine | broker
+    turn_id UUID,                                      -- per-turn rollup key (indexed; NULL pre-cutover)
     model VARCHAR(100) NOT NULL,
     provider VARCHAR(50) NOT NULL,
     cost_usd NUMERIC(10, 6) NOT NULL DEFAULT 0,
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX ix_usage_records_turn_id ON inkwest.usage_records (turn_id);
 ```
 
 ### role_kubeconfig_mappings
@@ -462,6 +471,8 @@ docker compose exec backend python db_migrate.py
 | _… intervening migrations (connectors, skills, system prompts, app_settings, session model) — see `backend/migrations/`_ | |
 | `20260612140000_mcp_oauth.sql` | OAuth2 MCP brokering: `mcp_oauth_clients`, `mcp_user_tokens`, `mcp_oauth_pending_states`, `mcp_user_keys`; relaxes `connector_audit_log.session_id` to nullable (user-level MCP grant events). **Down-path deletes all `session_id IS NULL` audit rows** |
 | `20260619000000_model_registry.sql` | Admin-managed model registry (replaces the model keys in app_settings) |
+| `20260704000000_usage_cache_tokens.sql` | usage_records: prompt-cache columns, source, indexed turn_id (budget accuracy) |
+| `20260704010000_message_session_cache_tokens.sql` | messages/sessions: prompt-cache columns for per-bubble/badge surfacing |
 
 ## Key Indexes
 

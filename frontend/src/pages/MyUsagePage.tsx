@@ -17,7 +17,7 @@ import { useMyUsageStore, MY_USAGE_SESSIONS_LIMIT } from '@/store/usage';
 import { TrendingUp, MessageSquare, Cpu, DollarSign } from 'lucide-react';
 import type { UsageDateRange } from '@/services/usageApi';
 import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost } from '@/lib/usageFormat';
+import { formatTokens, formatCost, TOKEN_SERIES_LABELS } from '@/lib/usageFormat';
 import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
 import {
   ComposedChart,
@@ -56,7 +56,13 @@ function formatTimeseriesLabel(iso: string, period: string) {
   return d.toISOString().slice(0, 10);
 }
 
-type SessionSortKey = 'title' | 'request_count' | 'total_tokens' | 'cost_usd';
+type SessionSortKey =
+  | 'title'
+  | 'request_count'
+  | 'total_tokens'
+  | 'cache_read_tokens'
+  | 'cache_write_tokens'
+  | 'cost_usd';
 
 const SESSIONS_PAGE_SIZE = 10;
 
@@ -89,7 +95,7 @@ export function MyUsagePage() {
           if (sessionKey === 'title') {
             return dir * (a.title || '').localeCompare(b.title || '');
           }
-          return dir * ((a[sessionKey] as number) - (b[sessionKey] as number));
+          return dir * (((a[sessionKey] as number) || 0) - (((b[sessionKey] as number) || 0)));
         });
 
   // Front-only pager over the conversation rows.
@@ -266,12 +272,17 @@ export function MyUsagePage() {
                       formatter={(value, name) =>
                         name === 'cost_usd'
                           ? [formatCost(Number(value) || 0), 'Cost']
-                          : [formatTokens(Number(value) || 0), name === 'input_tokens' ? 'Input' : 'Output']
+                          : [formatTokens(Number(value) || 0), TOKEN_SERIES_LABELS[String(name)] ?? String(name)]
                       }
                     />
-                    <Legend formatter={(value) => value === 'input_tokens' ? 'Input tokens' : value === 'output_tokens' ? 'Output tokens' : 'Cost'} />
+                    <Legend formatter={(value) => TOKEN_SERIES_LABELS[String(value)] ?? String(value)} />
+                    {/* Cache bars stack separately: the primary bar keeps matching the
+                        "Total Tokens" figure (fresh+output, cache excluded), and cache-heavy
+                        turns don't crush the fresh/output bars into slivers. */}
                     <Bar yAxisId="tokens" dataKey="input_tokens" stackId="tokens" fill="#3B82F6" radius={[0, 0, 0, 0]} />
                     <Bar yAxisId="tokens" dataKey="output_tokens" stackId="tokens" fill="#10B981" radius={[4, 4, 0, 0]} />
+                    <Bar yAxisId="tokens" dataKey="cache_read_tokens" stackId="cache" fill="#8B5CF6" radius={[0, 0, 0, 0]} />
+                    <Bar yAxisId="tokens" dataKey="cache_write_tokens" stackId="cache" fill="#EC4899" radius={[4, 4, 0, 0]} />
                     <Line yAxisId="cost" type="monotone" dataKey="cost_usd" stroke="#F59E0B" strokeWidth={2} dot={false} />
                   </ComposedChart>
                 </ResponsiveContainer>
@@ -338,6 +349,12 @@ export function MyUsagePage() {
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'total_tokens')} onClick={() => toggleSessionSort('total_tokens')}>
                         Tokens{sortArrow(sessionSort, 'total_tokens')}
                       </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cache_read_tokens')} onClick={() => toggleSessionSort('cache_read_tokens')} title="Prompt-cache reads (billed ~0.1x input rate)">
+                        Cache R{sortArrow(sessionSort, 'cache_read_tokens')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cache_write_tokens')} onClick={() => toggleSessionSort('cache_write_tokens')} title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)">
+                        Cache W{sortArrow(sessionSort, 'cache_write_tokens')}
+                      </TableHead>
                       <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cost_usd')} onClick={() => toggleSessionSort('cost_usd')}>
                         Cost{sortArrow(sessionSort, 'cost_usd')}
                       </TableHead>
@@ -356,12 +373,14 @@ export function MyUsagePage() {
                         </TableCell>
                         <TableCell className="text-right text-gray-400">{s.request_count}</TableCell>
                         <TableCell className="text-right">{formatTokens(s.total_tokens)}</TableCell>
+                        <TableCell className="text-right text-gray-400">{formatTokens(s.cache_read_tokens || 0)}</TableCell>
+                        <TableCell className="text-right text-gray-400">{formatTokens(s.cache_write_tokens || 0)}</TableCell>
                         <TableCell className="text-right">{formatCost(s.cost_usd)}</TableCell>
                       </TableRow>
                     ))}
                     {sessions.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={4} className="text-center py-8 text-gray-400">
+                        <TableCell colSpan={6} className="text-center py-8 text-gray-400">
                           No usage data for this period
                         </TableCell>
                       </TableRow>
@@ -381,7 +400,7 @@ export function MyUsagePage() {
                 <CardTitle>Token Breakdown</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
                   <div>
                     <p className="text-sm text-gray-400">Input Tokens</p>
                     <p className="text-xl font-bold">{formatTokens(summary.total_input_tokens)}</p>
@@ -405,6 +424,14 @@ export function MyUsagePage() {
                         }}
                       />
                     </div>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-400" title="Served from the prompt cache (billed ~0.1x input rate)">Cache Read</p>
+                    <p className="text-xl font-bold">{formatTokens(summary.total_cache_read_tokens || 0)}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-400" title="Written to the prompt cache (billed ~1.25x input rate)">Cache Write</p>
+                    <p className="text-xl font-bold">{formatTokens(summary.total_cache_write_tokens || 0)}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-400">Requests</p>

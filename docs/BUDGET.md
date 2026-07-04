@@ -21,9 +21,31 @@
 - **Per-turn usage**: input/output tokens and computed cost are written to
   `usage_records` after each model response, across every provider orchestrator
   via `record_usage`.
+- **Prompt-cache tokens** (`cache_read_tokens` / `cache_write_tokens` columns):
+  on the Anthropic/Bedrock wire, `input_tokens` is the FRESH (uncached) input
+  only — cache tokens are reported separately and billed at their own rates
+  (reads ~0.1×, 5m-TTL writes ~1.25×, 1h-TTL writes 2× the input rate; see
+  `pricing.cost_for_pricing`). Cache is **input-side only** — output is never
+  cached.
+- **Source of truth** (`source` column): with the LLM auth broker enabled
+  (`llm_broker_enabled`), the broker meters **each Bedrock call** from the exact
+  wire data AWS bills (`invocationMetrics` / Converse `usage`) and writes one
+  `source='broker'` row per call; the orchestrators then skip their own budget
+  row (no double count) but keep session stats + the per-message token counts.
+  Broker off ⇒ one `source='engine'` row per turn, from the engine-reported
+  usage (cache-aware since the cutover).
+- **Per-turn rollup** (`turn_id` column): the N broker rows of one turn share a
+  `turn_id`, exposed via `GET /api/me/usage/turns` ("this turn cost $X across
+  N calls"). Pre-cutover rows have `turn_id IS NULL` and degrade to per-call
+  granularity.
 - **Budgets** (`budgets` table): optional Global / Role / User limits. A budget
   may cap cost (`max_cost_usd`), tokens (`max_total_tokens`), or both — and both
   are evaluated (whichever is reached first blocks).
+
+> **Cutover 2026-07-04**: usage rows recorded before this date predate
+> cache-aware accounting — they under-count cache-heavy turns (observed ~10×
+> on a real production bill). No backfill;
+> comparisons across the cutover are apples-to-oranges.
 
 ## Enforcement
 
@@ -85,3 +107,8 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
   user. A user driving two sessions concurrently can have both pass the check and
   both spend — consistent with the single-replica caveats elsewhere; overshoot
   stays bounded.
+- **Token caps ignore cache tokens.** `max_total_tokens` sums fresh input +
+  output only — cache reads/writes don't count toward token budgets (their
+  *cost* does, via `cost_usd`). Deliberate for now: pricing already weights
+  cache correctly, and counting a 0.1×-priced cache read as a full token would
+  distort token caps the other way.

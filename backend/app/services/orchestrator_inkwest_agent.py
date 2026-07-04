@@ -41,6 +41,7 @@ from app.services.messages import (
     get_enabled_mcp_servers,
     get_session_messages,
     save_message,
+    stamp_message_usage,
     update_session_stats,
 )
 from app.services.prompts import get_system_prompt, resolve_session_system_prompt
@@ -312,6 +313,7 @@ async def orchestrate_chat_inkwest_agent(
     done_meta: dict[str, Any] = {}
     turn_id = uuid.uuid4()
     usage_persisted = False
+    usage_message_id: uuid.UUID | None = None
 
     async def _persist_accumulated_usage() -> None:
         """Session stats + engine-side usage row for whatever the turn accumulated.
@@ -337,6 +339,8 @@ async def orchestrate_chat_inkwest_agent(
                 output_tokens=out_tokens,
                 tool_calls=done_meta.get("tool_calls", 0),
                 iterations=done_meta.get("iterations", 1),
+                cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+                cache_write_tokens=done_meta.get("cache_write_tokens", 0),
             )
             # Broker-on: the proxy already persisted one authoritative UsageRecord per
             # Bedrock call (source='broker') — skip the engine-side budget row only;
@@ -356,6 +360,31 @@ async def orchestrate_chat_inkwest_agent(
             await db.commit()
         except Exception as e:
             logger.error(f"Failed to persist session stats/usage: {e}")
+            # A failed commit leaves the session in an aborted transaction; roll back so
+            # the next DB op on this session doesn't error (parity with opencode).
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        # Display-only stamp, contained in its OWN try AFTER the budget row: a stamp
+        # failure must never cost the turn its authoritative usage record.
+        if usage_message_id is not None:
+            try:
+                await stamp_message_usage(
+                    db,
+                    usage_message_id,
+                    input_tokens=in_tokens,
+                    output_tokens=out_tokens,
+                    cache_read_tokens=done_meta.get("cache_read_tokens", 0),
+                    cache_write_tokens=done_meta.get("cache_write_tokens", 0),
+                    session_id=session_uuid,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to stamp message usage: {e}")
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
     try:
         # Mint the broker grant + resolve the matching endpoint as the FIRST thing in the try, so
@@ -488,12 +517,18 @@ async def orchestrate_chat_inkwest_agent(
         pending_results: list[dict[str, Any]] = []
 
         async def _flush() -> None:
-            nonlocal assistant_blocks, pending_results
+            nonlocal assistant_blocks, pending_results, usage_message_id
             if assistant_blocks:
                 try:
-                    await save_message(
+                    saved = await save_message(
                         db, session_id, "assistant", assistant_blocks, model=model, engine=engine
                     )
+                    # The turn's token totals are only known at the terminal event; the
+                    # persist helper stamps them onto the FIRST assistant row — bubble
+                    # fusion (groupServerMessages) keeps the first row's fields, so that
+                    # row is what the per-bubble token line reads.
+                    if usage_message_id is None:
+                        usage_message_id = saved.id
                 except Exception as e:
                     logger.error(f"Failed to save assistant message: {e}")
             if pending_results:

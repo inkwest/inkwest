@@ -160,6 +160,12 @@ export function useWebSocket(sessionId: string) {
             role: 'assistant',
             content,
             created_at: new Date().toISOString(),
+            // Token counts from the done metadata so the per-bubble line renders on the
+            // live turn too (the persisted row carries the same values after reload).
+            input_tokens: (event.metadata?.input_tokens as number | undefined) ?? null,
+            output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
+            cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
+            cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
           });
         } else if (wasStopped) {
           addMessage({
@@ -174,8 +180,13 @@ export function useWebSocket(sessionId: string) {
         if (event.metadata) {
           const inp = event.metadata.input_tokens as number | undefined;
           const out = event.metadata.output_tokens as number | undefined;
-          if (inp || out) {
-            useSessionsStore.getState().updateSessionTokens(sessionId, inp || 0, out || 0);
+          const cacheRead = event.metadata.cache_read_tokens as number | undefined;
+          const cacheWrite = event.metadata.cache_write_tokens as number | undefined;
+          // Include cache in the gate: a fully-cached turn can report 0 fresh in/out.
+          if (inp || out || cacheRead || cacheWrite) {
+            useSessionsStore
+              .getState()
+              .updateSessionTokens(sessionId, inp || 0, out || 0, cacheRead, cacheWrite);
           }
         }
 

@@ -103,6 +103,14 @@ export function DashboardPage() {
                       <span>{summary.total_output_tokens.toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between">
+                      <span className="text-gray-400" title="Served from the prompt cache (billed ~0.1x input rate)">Cache Read Tokens</span>
+                      <span>{(summary.total_cache_read_tokens || 0).toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400" title="Written to the prompt cache (billed ~1.25x input rate)">Cache Write Tokens</span>
+                      <span>{(summary.total_cache_write_tokens || 0).toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between">
                       <span className="text-gray-400">Total Cost</span>
                       <span>${summary.total_cost_usd.toFixed(4)}</span>
                     </div>

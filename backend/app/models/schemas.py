@@ -318,6 +318,9 @@ class MessageResponse(MessageBase):
     token_count: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # Prompt-cache splits for the turn (per-bubble token line); NULL for older rows.
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
     thinking_content: str | None = None
     latency_ms: int | None = None
     status: str = "success"  # pending, success, error
@@ -410,6 +413,8 @@ class SessionResponse(SessionBase):
     # Usage statistics
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
     total_tool_calls: int = 0
     total_iterations: int = 0
     # Timestamps

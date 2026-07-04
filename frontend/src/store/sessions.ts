@@ -129,7 +129,13 @@ interface SessionsState {
   setPendingPrompt: (prompt: string | null, attachments?: Attachment[] | null) => void;
   consumePendingPrompt: () => string | null;
   consumePendingAttachments: () => Attachment[] | null;
-  updateSessionTokens: (id: string, inputTokens: number, outputTokens: number) => void;
+  updateSessionTokens: (
+    id: string,
+    inputTokens: number,
+    outputTokens: number,
+    cacheReadTokens?: number,
+    cacheWriteTokens?: number,
+  ) => void;
   searchGlobal: (query: string) => Promise<void>;
   clearSearch: () => void;
 }
@@ -449,15 +455,21 @@ export const useSessionsStore = create<SessionsState>()(
         }
       },
 
-      updateSessionTokens: (id, inputTokens, outputTokens) => {
+      updateSessionTokens: (id, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens) => {
+        // NB: same replace semantics as before for the base counts (the done event carries
+        // per-turn totals; the true cumulative arrives on the next session fetch). Cache
+        // counts follow the same convention; undefined leaves the fetched value alone.
+        const patch = <T extends Session>(s: T): T => ({
+          ...s,
+          total_input_tokens: inputTokens,
+          total_output_tokens: outputTokens,
+          ...(cacheReadTokens !== undefined ? { total_cache_read_tokens: cacheReadTokens } : {}),
+          ...(cacheWriteTokens !== undefined ? { total_cache_write_tokens: cacheWriteTokens } : {}),
+        });
         set((state) => ({
-          sessions: state.sessions.map((s) =>
-            s.id === id ? { ...s, total_input_tokens: inputTokens, total_output_tokens: outputTokens } : s,
-          ),
+          sessions: state.sessions.map((s) => (s.id === id ? patch(s) : s)),
           currentSession:
-            state.currentSession?.id === id
-              ? { ...state.currentSession, total_input_tokens: inputTokens, total_output_tokens: outputTokens }
-              : state.currentSession,
+            state.currentSession?.id === id ? patch(state.currentSession) : state.currentSession,
         }));
       },
 

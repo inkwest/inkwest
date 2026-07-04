@@ -991,8 +991,11 @@ class TestOrchestrateOpencode:
                     user_id=USER_ID,
                 )
             )
-            # stats see the full cache-inflated input; cost prices fresh + cache splits.
-            assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 10 + 8000 + 4000
+            # stats see FRESH input (cache rides its own counters — no double count);
+            # cost prices fresh + cache splits at their real rates.
+            assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 10
+            assert oo.update_session_stats.await_args.kwargs["cache_read_tokens"] == 4000
+            assert oo.update_session_stats.await_args.kwargs["cache_write_tokens"] == 8000
             assert oo.record_usage.await_args.kwargs["cost_usd"] == calculate_cost(
                 "m", 10, 5, cache_read_tokens=4000, cache_write_tokens=8000
             )
@@ -1464,3 +1467,54 @@ class TestBrokerAuthoritySwitch:
             oo.update_session_stats.assert_awaited_once()
             oo.record_usage.assert_awaited_once()
             assert isinstance(oo.record_usage.await_args.kwargs["turn_id"], uuid.UUID)
+
+
+class TestStampFirstAssistantRow:
+    _patch = TestOrchestrateOpencode._patch
+
+    @pytest.mark.asyncio
+    async def test_turn_totals_stamped_on_first_assistant_row(self):
+        """Bubble fusion keeps the FIRST assistant row's fields — stamp must target it."""
+        lines = [
+            b'{"type":"text","part":{"type":"text","text":"looking..."}}\n',
+            (
+                b'{"type":"tool_use","part":{"tool":"bash","callID":"c1",'
+                b'"state":{"status":"completed","input":{},"output":"ok","metadata":{"exit":0}}}}\n'
+            ),
+            b'{"type":"text","part":{"type":"text","text":"done."}}\n',
+            (
+                b'{"type":"step_finish","part":{"reason":"stop",'
+                b'"tokens":{"input":7,"output":16,"cache":{"read":12608,"write":0}},"cost":0.0}}\n'
+            ),
+        ]
+        es, _cap = self._patch(history=[], exec_lines=lines)
+        stamp = AsyncMock()
+        # save order: user turn, FIRST assistant flush (text+tool), tool_result, trailing text.
+        user_row = SimpleNamespace(id=uuid.uuid4())
+        first_row = SimpleNamespace(id=uuid.uuid4())
+        with es, patch.object(oo, "stamp_message_usage", stamp):
+            oo.save_message.side_effect = [
+                user_row,
+                first_row,
+                SimpleNamespace(id=uuid.uuid4()),
+                SimpleNamespace(id=uuid.uuid4()),
+            ]
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            stamp.assert_awaited_once()
+            args, kwargs = stamp.await_args
+            assert args[1] == first_row.id
+            assert kwargs["input_tokens"] == 7  # FRESH input — cache not folded in
+            assert kwargs["cache_read_tokens"] == 12608
+            # session stats carry the splits too
+            assert oo.update_session_stats.await_args.kwargs["input_tokens"] == 7
+            assert oo.update_session_stats.await_args.kwargs["cache_read_tokens"] == 12608

@@ -158,6 +158,9 @@ export interface UsageSummary {
   period_start: string;
   total_input_tokens: number;
   total_output_tokens: number;
+  /** Prompt-cache splits (input-side; total_input_tokens is fresh input, total_tokens excludes cache). */
+  total_cache_read_tokens?: number;
+  total_cache_write_tokens?: number;
   total_tokens: number;
   total_cost_usd: number;
   request_count: number;
@@ -171,6 +174,8 @@ export interface UserUsage {
   conversation_count: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
   total_tokens: number;
   cost_usd: number;
 }
@@ -180,6 +185,8 @@ export interface ModelUsage {
   engine: string;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
   total_tokens: number;
   cost_usd: number;
   request_count: number;
@@ -190,6 +197,8 @@ export interface SessionUsage {
   title: string;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
   total_tokens: number;
   cost_usd: number;
   request_count: number;
@@ -215,6 +224,8 @@ export interface UsageTimeseriesPoint {
   timestamp: string;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
   cost_usd: number;
   request_count: number;
 }

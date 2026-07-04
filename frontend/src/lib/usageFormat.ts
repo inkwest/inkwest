@@ -12,3 +12,12 @@ export function formatCost(cost: number | string): string {
   const n = typeof cost === 'string' ? parseFloat(cost) : cost;
   return n < 0.01 && n > 0 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
 }
+
+// Chart series keys → display labels, shared by the self-service and admin usage charts.
+export const TOKEN_SERIES_LABELS: Record<string, string> = {
+  input_tokens: 'Input tokens',
+  output_tokens: 'Output tokens',
+  cache_read_tokens: 'Cache read',
+  cache_write_tokens: 'Cache write',
+  cost_usd: 'Cost',
+};

@@ -33,6 +33,7 @@ function uiFromCache(): UiPreferences {
   return {
     compactToolCards: s.compactToolCards,
     showTimestamps: s.showTimestamps,
+    showTokenCounts: s.showTokenCounts,
     wideComposer: s.wideComposer,
     sidebarWidth: s.sidebarWidth,
   };
@@ -43,6 +44,7 @@ function applyUiToCache(ui: UiPreferences | undefined): void {
   const patch: Partial<UiPreferences> = {};
   if (typeof ui.compactToolCards === 'boolean') patch.compactToolCards = ui.compactToolCards;
   if (typeof ui.showTimestamps === 'boolean') patch.showTimestamps = ui.showTimestamps;
+  if (typeof ui.showTokenCounts === 'boolean') patch.showTokenCounts = ui.showTokenCounts;
   if (typeof ui.wideComposer === 'boolean') patch.wideComposer = ui.wideComposer;
   if (typeof ui.sidebarWidth === 'number') patch.sidebarWidth = ui.sidebarWidth;
   // setState merges; the persist middleware writes the cache back to localStorage.

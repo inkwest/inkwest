@@ -8,6 +8,7 @@ import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils';
+import { TokenGlyphs } from '@/components/usage/TokenGlyphs';
 import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal, PencilLine } from 'lucide-react';
 import { useComposerStore } from '@/store/composer';
 import * as api from '@/services/api';
@@ -153,6 +154,27 @@ function SessionEventLine({
   );
 }
 
+/** Per-turn token line for assistant bubbles (delegates the glyph rendering to the
+ *  shared TokenGlyphs). Renders nothing when the row predates the token columns
+ *  (all four fields null) — a partially-null row (odd data) shows zeros rather than
+ *  hiding a non-zero cache count. */
+function TokenCountsLine({ message, compact }: { message: Message; compact: boolean }) {
+  const input = message.input_tokens ?? null;
+  const output = message.output_tokens ?? null;
+  const cacheRead = message.cache_read_tokens ?? 0;
+  const cacheWrite = message.cache_write_tokens ?? 0;
+  if (input === null && output === null && !cacheRead && !cacheWrite) return null;
+  return (
+    <TokenGlyphs
+      className={cn('font-mono text-gray-400', TEXT_SIZE.label(compact))}
+      input={input ?? 0}
+      output={output ?? 0}
+      cacheRead={cacheRead}
+      cacheWrite={cacheWrite}
+    />
+  );
+}
+
 export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighted, isLatest = true }: Props) {
   const isUser = message.role === 'user';
   const hasError = message.status === 'error';
@@ -165,6 +187,7 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
   const copyMenuRef = useRef<HTMLDivElement>(null);
   const compact = useSettingsStore((s) => s.compactToolCards);
   const showTimestamps = useSettingsStore((s) => s.showTimestamps);
+  const showTokenCounts = useSettingsStore((s) => s.showTokenCounts);
   const currentSession = useSessionsStore((s) => s.currentSession);
   const user = useAuthStore((s) => s.user);
   const config = useConfigStore((s) => s.config);
@@ -432,8 +455,9 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
           <MessageAttachments sessionId={message.session_id} attachments={message.attachments} />
         )}
 
-        {((showTimestamps && message.created_at) || canReusePrompt) && (
+        {((showTimestamps && message.created_at) || canReusePrompt || (showTokenCounts && !isUser)) && (
           <div className={cn('mt-1 flex items-center justify-end gap-2', TEXT_SIZE.label(compact))}>
+            {showTokenCounts && !isUser && <TokenCountsLine message={message} compact={compact} />}
             {canReusePrompt && (
               <button
                 type="button"

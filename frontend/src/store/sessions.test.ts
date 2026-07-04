@@ -310,3 +310,37 @@ describe('sessionsStore sort/filter + pagination', () => {
     expect(params?.activity_before).toBeUndefined();
   });
 });
+
+describe('sessionsStore updateSessionTokens', () => {
+  const base: Session = {
+    id: 's1',
+    total_input_tokens: 1000,
+    total_output_tokens: 500,
+    total_cache_read_tokens: 111,
+    total_cache_write_tokens: 22,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  } as Session;
+
+  beforeEach(() => {
+    useSessionsStore.setState({ sessions: [base], currentSession: null });
+  });
+
+  it('replaces base counts and cache counts when provided', () => {
+    useSessionsStore.getState().updateSessionTokens('s1', 10, 5, 27082, 3242);
+    const s = useSessionsStore.getState().sessions[0];
+    expect(s.total_input_tokens).toBe(10);
+    expect(s.total_output_tokens).toBe(5);
+    expect(s.total_cache_read_tokens).toBe(27082);
+    expect(s.total_cache_write_tokens).toBe(3242);
+  });
+
+  it('leaves fetched cache values alone when the metadata omits them', () => {
+    useSessionsStore.getState().updateSessionTokens('s1', 10, 5);
+    const s = useSessionsStore.getState().sessions[0];
+    expect(s.total_input_tokens).toBe(10);
+    // undefined cache args must NOT overwrite the fetched cumulative values
+    expect(s.total_cache_read_tokens).toBe(111);
+    expect(s.total_cache_write_tokens).toBe(22);
+  });
+});

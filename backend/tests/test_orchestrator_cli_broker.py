@@ -340,10 +340,10 @@ async def test_done_turn_persists_cache_tokens() -> None:
         )
 
     capture: dict = {}
-    ru = AsyncMock()
+    ru, uss = AsyncMock(), AsyncMock()
     ps = _patches(_settings(broker_enabled=False), capture) + [
         patch.object(oc, "record_usage", ru),
-        patch.object(oc, "update_session_stats", AsyncMock()),
+        patch.object(oc, "update_session_stats", uss),
         patch.object(oc, "parse_cli_response", parse_done),
     ]
     for p in ps:
@@ -365,3 +365,5 @@ async def test_done_turn_persists_cache_tokens() -> None:
             p.stop()
     ru.assert_awaited_once()
     assert ru.await_args.kwargs["cache_write_tokens"] == 26797
+    assert uss.await_args.kwargs["cache_write_tokens"] == 26797
+    assert uss.await_args.kwargs["cache_read_tokens"] == 0

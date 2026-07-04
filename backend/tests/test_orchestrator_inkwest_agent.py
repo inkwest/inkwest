@@ -1483,3 +1483,87 @@ async def test_errored_turn_persists_accumulated_usage():
     kwargs = spies.record_usage.await_args.kwargs
     assert kwargs["input_tokens"] == 8
     assert kwargs["cache_write_tokens"] == 12608
+
+
+@pytest.mark.asyncio
+async def test_turn_totals_stamped_on_first_assistant_row():
+    """Bubble fusion (groupServerMessages) keeps the FIRST assistant row's fields, so the
+    turn totals must be stamped there — not on the last flush's row."""
+    patches, spies = _patch_broker()
+    # save_message order: user turn, FIRST assistant flush, tool_result, trailing flush.
+    user_row = SimpleNamespace(id=uuid.uuid4())
+    first_row = SimpleNamespace(id=uuid.uuid4())
+    spies.save_message.side_effect = [
+        user_row,
+        first_row,
+        SimpleNamespace(id=uuid.uuid4()),
+        SimpleNamespace(id=uuid.uuid4()),
+    ]
+    stamp = AsyncMock()
+    # Two assistant flushes (text -> tool exchange -> trailing text) + terminal done.
+    lines = [
+        json.dumps({"type": "text_delta", "content": "looking..."}),
+        json.dumps(
+            {
+                "type": "tool_start",
+                "tool_name": "kubectl_get",
+                "tool_input": {"resource": "pods"},
+                "tool_use_id": "t1",
+            }
+        ),
+        json.dumps({"type": "tool_result", "content": "pod/x", "tool_use_id": "t1"}),
+        json.dumps({"type": "text_delta", "content": "done."}),
+        json.dumps(
+            {
+                "type": "done",
+                "metadata": {
+                    "input_tokens": 7,
+                    "output_tokens": 16,
+                    "cache_read_tokens": 12608,
+                    "cache_write_tokens": 0,
+                },
+            }
+        ),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(oia, "stamp_message_usage", stamp):
+            await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    stamp.assert_awaited_once()
+    args, kwargs = stamp.await_args
+    assert args[1] == first_row.id  # FIRST assistant row, not the trailing flush's
+    assert kwargs["input_tokens"] == 7
+    assert kwargs["cache_read_tokens"] == 12608
+    # session stats carry the cache splits too
+    assert spies.update_stats.await_args.kwargs["cache_read_tokens"] == 12608
+    assert spies.update_stats.await_args.kwargs["cache_write_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stamp_failure_never_loses_the_usage_row():
+    """The stamp is display-only: its failure must not cost the turn its budget row."""
+    patches, spies = _patch_broker()
+    spies.save_message.side_effect = [
+        SimpleNamespace(id=uuid.uuid4()),  # user turn
+        SimpleNamespace(id=uuid.uuid4()),  # assistant flush
+    ]
+    stamp = AsyncMock(side_effect=RuntimeError("db blip"))
+    lines = [
+        json.dumps({"type": "text_delta", "content": "hi"}),
+        json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}}),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with patch.object(oia, "stamp_message_usage", stamp):
+            events = await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    assert events[-1].type == "done"  # turn outcome unaffected
+    spies.record_usage.assert_awaited_once()  # budget row persisted BEFORE the stamp
+    stamp.assert_awaited_once()

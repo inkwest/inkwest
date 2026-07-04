@@ -99,6 +99,19 @@ class Session(Base, TimestampMixin):
         default=0,
         nullable=False,
     )
+    # Cumulative prompt-cache tokens (input-side; total_input_tokens counts FRESH input
+    # on the Anthropic/Converse wire) — without them the token badges undercount
+    # cache-heavy turns ~10x.
+    total_cache_read_tokens: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+    total_cache_write_tokens: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
     total_tool_calls: Mapped[int] = mapped_column(
         Integer,
         default=0,

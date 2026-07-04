@@ -56,10 +56,10 @@ async def test_tool_turn_emits_start_result_and_aggregates_usage() -> None:
     meta = events[-1].metadata
     assert meta["tool_calls"] == 1
     assert meta["iterations"] == 2  # two step_finish events
-    # Cache write/read tokens count as input: Bedrock prompt caching moves most of the
-    # prompt there (step 1: input=3, cache.write=7949) — ignoring them would under-report
-    # session token stats by orders of magnitude.
-    assert meta["input_tokens"] == (3 + 7949 + 0) + (6 + 72 + 7949)
+    # input_tokens is FRESH input only — the cache splits ride their own counters
+    # (parity with the other engines; folding them here would double-count now that
+    # every surface shows the cache columns explicitly).
+    assert meta["input_tokens"] == 3 + 6
     assert meta["cache_write_tokens"] == 7949 + 72
     assert meta["cache_read_tokens"] == 0 + 7949
     assert meta["output_tokens"] == 57 + 2

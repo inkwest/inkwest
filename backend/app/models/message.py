@@ -92,6 +92,16 @@ class Message(Base):
         Integer,
         nullable=True,
     )
+    # Prompt-cache splits for the turn (input-side only; input_tokens above is FRESH
+    # input). NULL for rows predating the columns / turns with no reported usage.
+    cache_read_tokens: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    cache_write_tokens: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     thinking_content: Mapped[str | None] = mapped_column(
         String,
         nullable=True,

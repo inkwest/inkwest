@@ -2,7 +2,8 @@ import { useState, useRef, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { Trash2, Pencil, Check, X, GripVertical, LogOut, Share2 } from 'lucide-react';
 import { Session } from '@/types/api';
-import { formatRelativeTime, formatTokenCount, cn } from '@/lib/utils';
+import { formatRelativeTime, cn } from '@/lib/utils';
+import { TokenGlyphs } from '@/components/usage/TokenGlyphs';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { ConfirmDialog } from '@/components/ui';
@@ -196,9 +197,13 @@ export function SessionItem({ session, dragHandleProps, isDragging }: Props) {
               {(session.total_input_tokens || session.total_output_tokens) ? (
                 <>
                   <span className="text-gray-600">&middot;</span>
-                  <span className="shrink-0" title="Input / Output tokens">
-                    {formatTokenCount(session.total_input_tokens || 0)}&darr; {formatTokenCount(session.total_output_tokens || 0)}&uarr;
-                  </span>
+                  <TokenGlyphs
+                    className="shrink-0"
+                    input={session.total_input_tokens || 0}
+                    output={session.total_output_tokens || 0}
+                    cacheRead={session.total_cache_read_tokens || 0}
+                    cacheWrite={session.total_cache_write_tokens || 0}
+                  />
                 </>
               ) : null}
             </div>

@@ -7,6 +7,7 @@ live separately under `/api/admin/usage/*`.
 """
 
 import datetime as dt
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -80,3 +81,23 @@ async def get_my_usage_timeseries(
     """
     start, end = usage_reports.resolve_window(period, start_date, end_date)
     return await usage_reports.timeseries(db, current_user.id, granularity, start, end)
+
+
+@router.get("/turns")
+async def get_my_usage_turns(
+    current_user: CurrentUser,
+    session_id: uuid.UUID | None = None,
+    period: BudgetPeriod = BudgetPeriod.MONTHLY,
+    start_date: dt.date | None = None,
+    end_date: dt.date | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Per-turn rollup: broker rows grouped by turn_id ("this turn cost $X across N calls").
+
+    Pre-cutover rows (no turn_id) degrade to per-call granularity.
+    """
+    start, end = usage_reports.resolve_window(period, start_date, end_date)
+    return await usage_reports.by_turn(
+        db, current_user.id, start, end, session_id=session_id, limit=limit
+    )
