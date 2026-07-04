@@ -245,10 +245,12 @@ async def by_turn(
     if session_id is not None:
         conditions.append(UsageRecord.session_id == session_id)
 
+    # session_id joins the GROUP BY instead of being aggregated: a turn never spans
+    # sessions (so the grouping is unchanged), and PostgreSQL has no max(uuid).
     query = (
         select(
             turn_key,
-            func.max(UsageRecord.session_id).label("session_id"),
+            UsageRecord.session_id,
             func.max(UsageRecord.model).label("model"),
             func.max(UsageRecord.provider).label("engine"),
             func.max(UsageRecord.source).label("source"),
@@ -261,7 +263,7 @@ async def by_turn(
             func.max(UsageRecord.recorded_at).label("last_call"),
         )
         .where(*conditions)
-        .group_by(turn_key)
+        .group_by(turn_key, UsageRecord.session_id)
         .order_by(func.max(UsageRecord.recorded_at).desc())
     )
     if limit is not None:

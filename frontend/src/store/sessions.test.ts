@@ -335,6 +335,14 @@ describe('sessionsStore updateSessionTokens', () => {
     expect(s.total_cache_write_tokens).toBe(3242);
   });
 
+  it('does not wipe cumulative in/out with zeros on a fully-cached turn', () => {
+    useSessionsStore.getState().updateSessionTokens('s1', 0, 0, 5000, undefined);
+    const s = useSessionsStore.getState().sessions[0];
+    expect(s.total_input_tokens).toBe(1000); // fetched cumulative preserved
+    expect(s.total_output_tokens).toBe(500);
+    expect(s.total_cache_read_tokens).toBe(5000); // cache still refreshed
+  });
+
   it('leaves fetched cache values alone when the metadata omits them', () => {
     useSessionsStore.getState().updateSessionTokens('s1', 10, 5);
     const s = useSessionsStore.getState().sessions[0];

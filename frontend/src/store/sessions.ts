@@ -461,8 +461,11 @@ export const useSessionsStore = create<SessionsState>()(
         // counts follow the same convention; undefined leaves the fetched value alone.
         const patch = <T extends Session>(s: T): T => ({
           ...s,
-          total_input_tokens: inputTokens,
-          total_output_tokens: outputTokens,
+          // A fully-cached turn legitimately reports 0 fresh in/out — don't wipe the
+          // fetched cumulative figures with zeros; the cache counters still refresh.
+          ...(inputTokens || outputTokens
+            ? { total_input_tokens: inputTokens, total_output_tokens: outputTokens }
+            : {}),
           ...(cacheReadTokens !== undefined ? { total_cache_read_tokens: cacheReadTokens } : {}),
           ...(cacheWriteTokens !== undefined ? { total_cache_write_tokens: cacheWriteTokens } : {}),
         });
