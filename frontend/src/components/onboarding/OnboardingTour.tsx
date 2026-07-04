@@ -137,7 +137,10 @@ export function OnboardingTour() {
       if (e.key !== 'Enter' || e.repeat) return;
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
-      if (dialogRef.current?.contains(el)) return;
+      // Any open dialog owns Enter: the tour's own bubble (Back/Skip/Next buttons), but
+      // also app modals like the no-connector "send anyway" confirm — otherwise the tour
+      // eats the Enter meant for the modal's autofocused primary button.
+      if (el?.closest('[role="dialog"]')) return;
       e.preventDefault();
       e.stopPropagation();
       if (index === STEPS.length - 1) complete();

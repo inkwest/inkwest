@@ -101,6 +101,23 @@ describe('OnboardingTour', () => {
     expect(screen.getByText('Attachments')).toBeInTheDocument();
   });
 
+  it('does not hijack Enter when focus is inside an app modal (role="dialog")', () => {
+    render(
+      <>
+        <Anchors />
+        <div role="dialog">
+          <button data-testid="modal-ok">ok</button>
+        </div>
+        <OnboardingTour />
+      </>,
+    );
+    // e.g. the no-connector confirm's autofocused "Send anyway" button: the modal owns
+    // Enter, the tour must not eat it (nor advance).
+    screen.getByTestId('modal-ok').focus();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(screen.getByText('Step 1/5')).toBeInTheDocument();
+  });
+
   it('a held Enter (repeat) does not blast through the tour', () => {
     render(<><Anchors /><OnboardingTour /></>);
     fireEvent.keyDown(window, { key: 'Enter', repeat: true });
