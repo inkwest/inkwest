@@ -40,7 +40,7 @@ export function ModelUsageTable({ data }: { data: ModelUsage[] }) {
           if (key === 'model' || key === 'engine') {
             return dir * (a[key] || '').localeCompare(b[key] || '');
           }
-          return dir * (((a[key] as number) || 0) - (((b[key] as number) || 0)));
+          return dir * (((a[key] as number) || 0) - ((b[key] as number) || 0));
         });
   const toggle = (k: ModelSortKey) => setSort((s) => cycleSort(s, k));
 

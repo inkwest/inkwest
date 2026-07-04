@@ -94,7 +94,7 @@ export function UsagePage() {
             return dir * (a.display_name || a.email).localeCompare(b.display_name || b.email);
           }
           const val = (u: typeof a) =>
-            userKey === 'mean_req' ? meanRequestsPerConv(u) : ((u[userKey] as number) || 0);
+            userKey === 'mean_req' ? meanRequestsPerConv(u) : (u[userKey] as number) || 0;
           return dir * (val(a) - val(b));
         });
   const toggleUserSort = (key: UserSortKey) => {

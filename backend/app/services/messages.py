@@ -513,18 +513,16 @@ async def stamp_message_usage(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
-    session_id: uuid.UUID | None = None,
 ) -> None:
     """Stamp a turn's token totals onto an already-saved assistant message.
 
-    The agent/opencode orchestrators persist assistant rows incrementally while
-    streaming (before the terminal usage metadata exists), so the counts are written
-    back onto the turn's FIRST assistant row once known — bubble fusion
-    (frontend ``groupServerMessages``) keeps the first row's fields, so that row is
-    what the per-bubble token line reads. Commits immediately (same granularity as
-    save_message). ``session_id`` (when given) scopes the UPDATE to that session —
-    inert today (callers stamp an id they just created) but keeps the helper safe by
-    construction should it ever meet request-derived input.
+    CANONICAL bubble-fusion rationale (the orchestrators/tests reference this): the
+    agent/opencode orchestrators persist assistant rows incrementally while streaming
+    (before the terminal usage metadata exists), so the counts are written back onto
+    the turn's FIRST assistant row once known — bubble fusion (frontend
+    ``groupServerMessages``) keeps the first row's fields, so that row is what the
+    per-bubble token line reads. Commits immediately (same granularity as
+    save_message).
     """
     # Same clamp rationale as update_session_stats (engine-reported values).
     input_tokens = max(0, int(input_tokens))
@@ -532,11 +530,10 @@ async def stamp_message_usage(
     cache_read_tokens = max(0, int(cache_read_tokens))
     cache_write_tokens = max(0, int(cache_write_tokens))
 
-    stmt = update(Message).where(Message.id == message_id)
-    if session_id is not None:
-        stmt = stmt.where(Message.session_id == session_id)
     await db.execute(
-        stmt.values(
+        update(Message)
+        .where(Message.id == message_id)
+        .values(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             # Keep token_count coherent with save_message's fallback semantics.
@@ -557,6 +554,7 @@ async def update_session_stats(
     iterations: int = 0,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    commit: bool = True,
 ) -> None:
     """
     Update session usage statistics.
@@ -572,6 +570,10 @@ async def update_session_stats(
         iterations: Number of iterations to add
         cache_read_tokens: Prompt-cache read tokens to add (input-side)
         cache_write_tokens: Prompt-cache write tokens to add (input-side)
+        commit: ``False`` joins the caller's transaction instead of self-committing —
+            turn_usage folds the increment into the budget-row txn so its retry guard
+            (the uq_usage_records_engine_turn backstop) covers the stats too; a
+            self-committed increment could double-apply on an ambiguous-commit retry
     """
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
@@ -596,7 +598,8 @@ async def update_session_stats(
             total_iterations=Session.total_iterations + iterations,
         )
     )
-    await db.commit()
+    if commit:
+        await db.commit()
     logger.debug(
         f"Updated stats for session {session_id}: "
         f"+{input_tokens} in, +{output_tokens} out, +{tool_calls} tools, +{iterations} iters"

@@ -11,9 +11,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
@@ -113,6 +115,28 @@ async def test_by_turn_groups_by_turn_id_and_degrades_null(db: AsyncSession) -> 
     assert len(solo) == 1
     # Newest-first ordering (other-session row recorded last among _USER rows).
     assert rows[0]["session_id"] == str(_OTHER_SESSION)
+
+
+async def test_engine_turn_unique_index_rejects_double_persist(db: AsyncSession) -> None:
+    """The DB backstop turn_usage's ambiguous-commit retry relies on
+    (uq_usage_records_engine_turn, mirrored on the model so this suite enforces it):
+    a second source='engine' row for one turn must be rejected, while broker rows
+    (N per turn) and legacy NULL-turn rows stay unaffected."""
+    turn = uuid.uuid4()
+    db.add(_record(0, source="engine", turn_id=turn))
+    await db.commit()
+
+    # Broker rows share the turn_id by design; legacy rows carry none — both allowed.
+    db.add(_record(1, source="broker", turn_id=turn))
+    db.add(_record(2, source="broker", turn_id=turn))
+    db.add(_record(3, source="engine", turn_id=None))
+    db.add(_record(4, source="engine", turn_id=None))
+    await db.commit()
+
+    db.add(_record(5, source="engine", turn_id=turn))
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
 
 
 async def test_by_turn_session_filter_scopes_rows(db: AsyncSession) -> None:

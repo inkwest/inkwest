@@ -27,11 +27,11 @@ Wire truth per op (confirmed live 2026-07-03/04, real fixtures in ``tests/fixtur
 
 Failure contract: metering is passive — any parse problem marks the tee failed and
 :meth:`result` returns None (caller logs a warning, no usage row); the forwarded bytes are
-never touched. Memory per in-flight call is bounded (botocore caps an eventstream frame at
-~24MB, non-stream bodies at ``_NONSTREAM_BODY_CAP``) but multiplies with concurrent calls —
-fine for the documented single-replica deployment, revisit before scale-out. botocore is
-already a backend dependency (boto3), so ``botocore.eventstream.EventStreamBuffer`` decodes
-incrementally without buffering the body.
+never touched. Memory is bounded per call (botocore caps an eventstream frame at ~24MB,
+non-stream bodies at ``_NONSTREAM_BODY_CAP``) AND in aggregate for the buffering path
+(``_AGGREGATE_BUFFER_CAP`` across concurrent non-stream tees — a burst degrades metering,
+never memory). botocore is already a backend dependency (boto3), so
+``botocore.eventstream.EventStreamBuffer`` decodes incrementally without buffering the body.
 """
 
 import base64
@@ -50,6 +50,14 @@ STREAMING_OPS = frozenset({"invoke-with-response-stream", "converse-stream"})
 # Buffer cap for non-stream JSON bodies awaiting parse. A text response tops out well below
 # this; past the cap we drop metering for the call (never the forwarded bytes).
 _NONSTREAM_BODY_CAP = 8 * 1024 * 1024
+
+# Aggregate ceiling across ALL concurrently-buffering non-stream tees: the per-call cap
+# bounds one call, but N concurrent large responses multiply. Past the budget a tee gives
+# up its OWN metering (row dropped, alarmed via the caller's no_usage path) — the
+# forwarded bytes are never touched. Event-loop-confined bookkeeping (no await between
+# check and update), same single-replica assumption as the grant store.
+_AGGREGATE_BUFFER_CAP = 64 * 1024 * 1024
+_inflight_buffered_bytes = 0
 
 
 @dataclass(frozen=True)
@@ -129,6 +137,8 @@ class MeteringTee:
         self._failed = False
         self._buffer = EventStreamBuffer() if self._streaming else None
         self._body = bytearray()
+        # Bytes this tee holds against the module-wide aggregate budget (non-stream only).
+        self._accounted = 0
         # invoke-stream: billed truth (invocationMetrics) + TTL-split enrichment (usage).
         self._invocation_metrics: dict[str, Any] | None = None
         self._anthropic_cache_creation: dict[str, Any] | None = None
@@ -138,8 +148,15 @@ class MeteringTee:
         # converse-stream: the terminal metadata event's usage block.
         self._converse_usage: dict[str, Any] | None = None
 
+    def _release_buffer(self) -> None:
+        """Return this tee's bytes to the aggregate budget. Idempotent (fail + result)."""
+        global _inflight_buffered_bytes
+        _inflight_buffered_bytes -= self._accounted
+        self._accounted = 0
+
     def feed(self, chunk: bytes) -> None:
         """Observe one forwarded chunk. Never raises — a parse problem fails the tee only."""
+        global _inflight_buffered_bytes
         if self._failed:
             return
         try:
@@ -148,9 +165,14 @@ class MeteringTee:
             else:
                 if len(self._body) + len(chunk) > _NONSTREAM_BODY_CAP:
                     raise ValueError("non-stream body exceeds metering cap")
+                if _inflight_buffered_bytes + len(chunk) > _AGGREGATE_BUFFER_CAP:
+                    raise ValueError("aggregate metering buffer cap exceeded")
                 self._body.extend(chunk)
+                _inflight_buffered_bytes += len(chunk)
+                self._accounted += len(chunk)
         except Exception:
             self._failed = True
+            self._release_buffer()
             logger.warning("llm_metering_feed_failed", extra={"op": self._op}, exc_info=True)
 
     def _feed_eventstream(self, chunk: bytes) -> None:
@@ -181,10 +203,12 @@ class MeteringTee:
 
     def result(self) -> CallUsage | None:
         """The call's billed usage, or None when parsing failed / no usage frame was seen
-        (e.g. client disconnect before the terminal frame — nothing reliable to record)."""
-        if self._failed:
-            return None
+        (e.g. client disconnect before the terminal frame — nothing reliable to record).
+        Called exactly once per call (the route's post-stream task); also releases this
+        tee's share of the aggregate buffer budget."""
         try:
+            if self._failed:
+                return None
             if self._op == "invoke-with-response-stream":
                 return self._invoke_stream_result()
             if self._op == "converse-stream":
@@ -193,6 +217,8 @@ class MeteringTee:
         except Exception:
             logger.warning("llm_metering_result_failed", extra={"op": self._op}, exc_info=True)
             return None
+        finally:
+            self._release_buffer()
 
     def _invoke_stream_result(self) -> CallUsage | None:
         metrics = self._invocation_metrics

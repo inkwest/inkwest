@@ -603,22 +603,19 @@ async def test_stamp_message_usage_backfills_saved_row(db: AsyncSession) -> None
     assert msg.cache_write_tokens == 0
 
 
-async def test_stamp_message_usage_session_guard_matches(db: AsyncSession) -> None:
+async def test_update_session_stats_no_commit_joins_caller_txn(db: AsyncSession) -> None:
+    """commit=False leaves the increment uncommitted — turn_usage folds it into the
+    budget-row transaction so the two land (or roll back) together."""
     sid = await _make_session(db)
-    msg = await save_message(db, sid, "assistant", "x")
-    await stamp_message_usage(db, msg.id, input_tokens=5, output_tokens=2, session_id=sid)
-    await db.refresh(msg)
-    assert msg.input_tokens == 5
+    await update_session_stats(db, sid, input_tokens=10, output_tokens=5, commit=False)
+    await db.rollback()
+    stats = await get_session_stats(db, sid)
+    assert stats["total_input_tokens"] == 0  # rolled back with the caller's txn
 
-
-async def test_stamp_message_usage_session_guard_mismatch_is_noop(db: AsyncSession) -> None:
-    """The defensive WHERE: a foreign session id must match zero rows (silent no-op)."""
-    sid = await _make_session(db)
-    other = await _make_session(db)
-    msg = await save_message(db, sid, "assistant", "x")
-    await stamp_message_usage(db, msg.id, input_tokens=5, output_tokens=2, session_id=other)
-    await db.refresh(msg)
-    assert msg.input_tokens is None  # untouched
+    await update_session_stats(db, sid, input_tokens=10, output_tokens=5, commit=False)
+    await db.commit()
+    stats = await get_session_stats(db, sid)
+    assert stats["total_input_tokens"] == 10
 
 
 async def test_update_session_stats_clamps_negative_inputs(db: AsyncSession) -> None:

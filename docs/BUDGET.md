@@ -38,7 +38,10 @@
   `turn_id` — a broker turn's N per-call rows share one, an engine turn's single
   row has its own — exposed via `GET /api/me/usage/turns` ("this turn cost $X
   across N calls"). Pre-cutover rows have `turn_id IS NULL` and degrade to
-  per-call granularity.
+  per-call granularity. Response: a list of `TurnUsageEntry`
+  (`app/models/schemas.py`) — `{turn_id, session_id, model, engine, source,
+  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+  call_count, last_call}`, newest first; filters `session_id`, `days`, `limit`.
 - **Budgets** (`budgets` table): optional Global / Role / User limits. A budget
   may cap cost (`max_cost_usd`), tokens (`max_total_tokens`), or both — and both
   are evaluated (whichever is reached first blocks).
@@ -87,7 +90,8 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
 |---|---|
 | Compute budget status (`is_allowed`, action, warnings) | `backend/app/services/budget_service.py::check_budget` |
 | Enforcement gate (request path) | `backend/app/api/routes/chat.py::_budget_block_reason` |
-| Record real usage per turn | `budget_service.py::record_usage` — broker OFF: called by every orchestrator (one row/turn); broker ON: called by `llm_proxy.py::_finish_stream` via `llm_metering.MeteringTee` (one row per Bedrock call, `source='broker'`) |
+| Shared end-of-turn persistence (stats + budget row + Message stamp, gate/retry/rollback contracts) | `backend/app/services/turn_usage.py::persist_turn_usage` — called by all three orchestrators on success/error/stop |
+| Record real usage per turn | `budget_service.py::record_usage` (the single sink) — broker OFF: via `turn_usage.persist_turn_usage` (one row/turn); broker ON: via `llm_proxy.py::_finish_stream` + `llm_metering.MeteringTee` (one row per Bedrock call, `source='broker'`, persisted by a bounded background task with one idempotent retry) |
 | Enforcement settings | `is_budget_enabled` / `default_monthly_cost_limit` in `budget_service.py`; keys in `app_settings.py` |
 | Admin settings endpoint | `admin.py::get_budget_settings` / `update_budget_settings` |
 | Budget CRUD | `admin.py` `/budgets` endpoints |

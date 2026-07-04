@@ -62,7 +62,10 @@ export function TokenBreakdownCard({ summary }: { summary: TokenBreakdownSummary
           <div>
             <p className="text-sm text-gray-400">Requests</p>
             <p className="text-xl font-bold">{summary.request_count}</p>
-            <p className="text-sm text-gray-500 mt-2">
+            <p
+              className="text-sm text-gray-500 mt-2"
+              title="Fresh input + output per request — cache tokens excluded, matching the Total Tokens figure"
+            >
               ~{summary.request_count > 0 ? Math.round(summary.total_tokens / summary.request_count) : 0} tokens/request
             </p>
           </div>

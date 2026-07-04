@@ -20,6 +20,15 @@ export function formatCostTotal(cost: number | string): string {
   return `$${(Number.isFinite(n) ? n : 0).toFixed(2)}`;
 }
 
+// Time-axis labels for the usage chart: time-of-day for short windows (hourly/daily
+// buckets), ISO date otherwise.
+export function formatTimeseriesLabel(iso: string, period: string): string {
+  const d = new Date(iso);
+  if (period === 'hourly' || period === 'daily')
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toISOString().slice(0, 10);
+}
+
 // Chart series keys → display labels, shared by the self-service and admin usage charts.
 export const TOKEN_SERIES_LABELS: Record<string, string> = {
   input_tokens: 'Input tokens',

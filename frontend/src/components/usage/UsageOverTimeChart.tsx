@@ -1,5 +1,10 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
-import { formatTokens, formatCost, TOKEN_SERIES_LABELS } from '@/lib/usageFormat';
+import {
+  formatTokens,
+  formatCost,
+  formatTimeseriesLabel,
+  TOKEN_SERIES_LABELS,
+} from '@/lib/usageFormat';
 import type { UsageTimeseriesPoint } from '@/types/admin';
 import {
   ComposedChart,
@@ -12,12 +17,6 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts';
-
-function formatTimeseriesLabel(iso: string, period: string) {
-  const d = new Date(iso);
-  if (period === 'hourly' || period === 'daily') return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return d.toISOString().slice(0, 10);
-}
 
 /**
  * The "Usage Over Time" composed chart (stacked token bars + cost line on its own axis).

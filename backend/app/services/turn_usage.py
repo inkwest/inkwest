@@ -99,6 +99,10 @@ async def persist_turn_usage(
             if attempt == 2 and not skip_budget_row and await _engine_row_exists(db, turn_id):
                 logger.info("Turn usage already committed (ambiguous first commit); not retrying")
                 break
+            # commit=False: the stats increment joins the budget row's transaction so
+            # they land (and the retry guard above protects them) together — a
+            # self-committed increment could double-apply when attempt 1's stats
+            # commit lands but the budget commit fails.
             await update_session_stats(
                 db,
                 session_id,
@@ -108,6 +112,7 @@ async def persist_turn_usage(
                 iterations=iterations,
                 cache_read_tokens=cache_read_tokens,
                 cache_write_tokens=cache_write_tokens,
+                commit=False,
             )
             # Broker-on: the proxy already persisted one authoritative UsageRecord per
             # Bedrock call (source='broker', wire-exact cache tokens) — an engine-side
@@ -150,7 +155,6 @@ async def persist_turn_usage(
                 output_tokens=output_tokens,
                 cache_read_tokens=cache_read_tokens,
                 cache_write_tokens=cache_write_tokens,
-                session_id=session_uuid,
             )
         except Exception as e:
             logger.warning(f"Failed to stamp message usage: {e}")

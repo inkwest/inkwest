@@ -363,10 +363,8 @@ async def orchestrate_chat_opencode(
     usage_message_id: uuid.UUID | None = None
 
     async def _persist_accumulated_usage() -> None:
-        """Thin wrapper over the shared persist_turn_usage (single implementation of the
-        stats → budget-row → commit → Message-stamp sequence, with its gate/retry/rollback
-        contracts). Idempotent per turn; called from the success path, every error handler
-        AND the user-stop path — AWS bills every Bedrock call that returned a response."""
+        """Idempotent per-turn handoff to the shared persist_turn_usage (see its module
+        contracts); called from success, every error handler AND the user-stop path."""
         nonlocal usage_persisted
         if usage_persisted:
             return
@@ -399,13 +397,15 @@ async def orchestrate_chat_opencode(
             output_tokens=out_tokens,
             cache_read_tokens=done_meta.get("cache_read_tokens", 0),
             cache_write_tokens=done_meta.get("cache_write_tokens", 0),
-            cache_write_1h_tokens=done_meta.get("cache_write_1h_tokens", 0),
+            # No cache_write_1h_tokens: opencode's tokens.cache carries no TTL split, so
+            # the 1h portion is unknowable here — the fallback estimate prices all cache
+            # writes at the 5m rate. Moot whenever opencode reports its authoritative
+            # cache-aware cost_usd (the normal case, passed through below).
             tool_calls=done_meta.get("tool_calls", 0),
             iterations=done_meta.get("iterations", 1),
             skip_budget_row=bool(broker_env),
             cost_usd=cost_override,
-            # First assistant row of the turn — bubble fusion keeps the first row's
-            # fields, so that row is what the per-bubble token line reads.
+            # Turn's FIRST assistant row — see stamp_message_usage for the fusion rationale.
             stamp_message_id=usage_message_id,
         )
 
@@ -559,10 +559,8 @@ async def orchestrate_chat_opencode(
                     saved = await save_message(
                         db, session_id, "assistant", assistant_blocks, model=model, engine=engine
                     )
-                    # The turn's token totals are only known at the terminal event; the
-                    # persist helper stamps them onto the FIRST assistant row — bubble
-                    # fusion (groupServerMessages) keeps the first row's fields, so that
-                    # row is what the per-bubble token line reads.
+                    # Track the turn's FIRST assistant row: the persist helper stamps the
+                    # token totals onto it (see stamp_message_usage for the fusion WHY).
                     if usage_message_id is None:
                         usage_message_id = saved.id
                 except Exception as e:

@@ -80,7 +80,7 @@ export function MyUsagePage() {
           if (sessionKey === 'title') {
             return dir * (a.title || '').localeCompare(b.title || '');
           }
-          return dir * (((a[sessionKey] as number) || 0) - (((b[sessionKey] as number) || 0)));
+          return dir * (((a[sessionKey] as number) || 0) - ((b[sessionKey] as number) || 0));
         });
 
   // Front-only pager over the conversation rows.

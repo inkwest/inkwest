@@ -17,7 +17,9 @@ SDK (`opencode.json` `provider.amazon-bedrock.options.baseURL`) — with **no Si
 broker is a pure header swap + transparent byte passthrough; the eventstream is streamed back
 untouched. Since the budget-accuracy work the broker additionally **meters** each data-plane
 call: a passive tee (`app/services/llm_metering.py`) observes the forwarded bytes and, in a
-post-stream background task, persists one authoritative `usage_records` row per Bedrock call
+detached post-stream task (bounded concurrency + pending cap, one idempotent retry — a slow
+billing DB never sits in the proxied call's teardown), persists one authoritative
+`usage_records` row per Bedrock call
 (`source='broker'`, cache tokens included, shared per-turn `turn_id`) — with the broker on,
 the orchestrators skip their own budget row (see `docs/BUDGET.md`). The bytes themselves are
 still forwarded unmodified; a metering failure only logs `llm_proxy_metering_*` warnings and

@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import Enum
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Integer, Numeric, String, func
+from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, func, text
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -161,6 +161,21 @@ class UsageRecord(Base):
     """
 
     __tablename__ = "usage_records"
+
+    # Mirror of the migration's DB backstop (20260704000000_usage_cache_tokens.sql):
+    # one engine-side budget row per turn — turn_usage's ambiguous-commit retry relies
+    # on the re-INSERT failing. Declared on the model (with a sqlite_where twin) so the
+    # real-SQL test suites built from Base.metadata enforce it too; dropping it from
+    # the migration alone can no longer pass silently.
+    __table_args__ = (
+        Index(
+            "uq_usage_records_engine_turn",
+            "turn_id",
+            unique=True,
+            postgresql_where=text("source = 'engine' AND turn_id IS NOT NULL"),
+            sqlite_where=text("source = 'engine' AND turn_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

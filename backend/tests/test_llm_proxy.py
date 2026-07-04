@@ -64,9 +64,11 @@ def _reset_proxy_state():
 
     llm_proxy._transport = None
     llm_proxy_token._grants.clear()
+    llm_proxy._persist_tasks.clear()
     yield
     llm_proxy._transport = None
     llm_proxy_token._grants.clear()
+    llm_proxy._persist_tasks.clear()
 
 
 def _patches(handler, *, settings=None, allowed=None):
@@ -775,7 +777,15 @@ def _metering_patches(handler, record_usage_mock):
     return db, _patches(handler) + [
         patch("app.api.routes.llm_proxy.record_usage", record_usage_mock),
         patch("app.api.routes.llm_proxy.async_session_maker", session_maker),
+        patch("app.api.routes.llm_proxy._PERSIST_RETRY_DELAY_SECONDS", 0),
     ]
+
+
+async def _drain():
+    """The persist runs in a detached task — settle it before asserting."""
+    from app.api.routes import llm_proxy
+
+    await llm_proxy.drain_metering_persists()
 
 
 def _metered_bearer() -> dict[str, str]:
@@ -836,6 +846,7 @@ async def test_metering_forwards_bytes_and_persists_one_row(
             )
         assert resp.status_code == 200
         assert resp.content == data  # forwarded byte-identical
+        await _drain()
         # No false alarms: a fully-metered call must leave the failure counter flat.
         assert _all_failures() == failures_before
         record.assert_awaited_once()
@@ -850,6 +861,13 @@ async def test_metering_forwards_bytes_and_persists_one_row(
         assert kwargs["turn_id"] == _TURN
         assert kwargs["session_id"] == _S
         assert kwargs["user_id"] == _U
+        # target → model normalization ran: the row aggregates under the registry's
+        # friendly id (route prefix stripped), not the raw invoke target.
+        from app.services import model_registry
+
+        assert kwargs["model"] == model_registry.resolve_invoke_target(MODEL)
+        assert kwargs["model"] == "claude-opus-4-8"
+        assert kwargs["record_id"] is not None  # fixed PK = the retry idempotency key
         db.commit.assert_awaited_once()
     finally:
         for p in ps:
@@ -882,6 +900,7 @@ async def test_metering_truncated_invoke_stream_bills_self_report(caplog) -> Non
             )
         assert resp.status_code == 200
         assert resp.content == data
+        await _drain()
         record.assert_awaited_once()
         kwargs = record.await_args.kwargs
         # Self-report values (message_start), not the billed metrics the cut swallowed.
@@ -971,9 +990,141 @@ async def test_metering_persist_failure_never_breaks_the_stream(caplog) -> None:
                     headers=_metered_bearer(),
                     content=b"{}",
                 )
+            await _drain()
         assert resp.status_code == 200
         assert resp.content == (_FIXTURES / "converse_nonstream_cacheread.bin").read_bytes()
+        assert record.await_count == 2  # one retry before giving up
         assert "llm_proxy_metering_persist_failed" in caplog.text
+        assert _failures("persist_failed") == before + 1
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_persist_retries_transient_failure() -> None:
+    """A one-off DB blip (broker rows are the turn's ONLY budget record) must not drop
+    the row: attempt 2 lands it, no failure counted."""
+    record = AsyncMock(side_effect=[RuntimeError("blip"), AsyncMock()])
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    failures_before = _all_failures()
+    for p in ps:
+        p.start()
+    try:
+        async with await _client() as c:
+            resp = await c.post(
+                f"/api/llm-proxy/model/{MODEL}/converse",
+                headers=_metered_bearer(),
+                content=b"{}",
+            )
+        await _drain()
+        assert resp.status_code == 200
+        assert record.await_count == 2
+        # Same PK on both attempts: an ambiguous first commit can only collide, not double.
+        first, second = record.await_args_list
+        assert first.kwargs["record_id"] == second.kwargs["record_id"]
+        db.commit.assert_awaited_once()
+        assert _all_failures() == failures_before
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_persist_retry_pk_collision_is_success(caplog) -> None:
+    """Ambiguous first commit (landed server-side, ack lost): the retry's re-INSERT hits
+    the fixed record_id PK — logged as already-persisted, NOT a failure."""
+    from sqlalchemy.exc import IntegrityError
+
+    record = AsyncMock(
+        side_effect=[
+            RuntimeError("commit ack lost"),
+            IntegrityError("dup pk", params=None, orig=Exception("duplicate key")),
+        ]
+    )
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    before = _failures("persist_failed")
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("INFO"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+            await _drain()
+        assert resp.status_code == 200
+        assert record.await_count == 2
+        assert "llm_proxy_metering_already_persisted" in caplog.text
+        assert _failures("persist_failed") == before  # not a failure
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_finish_stream_teardown_failure_still_persists(caplog) -> None:
+    """An already-reset connection makes close_stream raise inside the BackgroundTask —
+    the call's usage row must still land (billing can't hinge on teardown hygiene)."""
+    record = AsyncMock()
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    ps.append(
+        patch(
+            "app.api.routes.llm_proxy.close_stream",
+            AsyncMock(side_effect=RuntimeError("already reset")),
+        )
+    )
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+            await _drain()
+        assert resp.status_code == 200
+        assert "llm_proxy_stream_teardown_failed" in caplog.text
+        record.assert_awaited_once()
+    finally:
+        for p in ps:
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_metering_persist_overflow_drops_and_counts(caplog) -> None:
+    """The pending-task cap (DB-outage backstop): past it the row is dropped and alarmed,
+    never queued unboundedly."""
+    record = AsyncMock()
+    db, ps = _metering_patches(
+        lambda request: _fixture_streaming("converse_nonstream_cacheread.bin"), record
+    )
+    ps.append(patch("app.api.routes.llm_proxy._MAX_PENDING_PERSISTS", 0))
+    before = _failures("persist_failed")
+    for p in ps:
+        p.start()
+    try:
+        with caplog.at_level("WARNING"):
+            async with await _client() as c:
+                resp = await c.post(
+                    f"/api/llm-proxy/model/{MODEL}/converse",
+                    headers=_metered_bearer(),
+                    content=b"{}",
+                )
+            await _drain()
+        assert resp.status_code == 200
+        assert "llm_proxy_metering_persist_overflow" in caplog.text
+        record.assert_not_awaited()
         assert _failures("persist_failed") == before + 1
     finally:
         for p in ps:
@@ -996,6 +1147,7 @@ async def test_metering_legacy_grant_defaults(caplog) -> None:
                 content=b"{}",
             )
         assert resp.status_code == 200
+        await _drain()
         record.assert_awaited_once()
         kwargs = record.await_args.kwargs
         assert kwargs["provider"] == "unknown"

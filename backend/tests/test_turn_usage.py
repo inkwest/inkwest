@@ -78,6 +78,9 @@ async def test_happy_path_order_stats_row_commit() -> None:
     stamp.assert_not_awaited()
     # The contract, not just the participants: budget row joins the stats txn, then commit.
     assert _call_order(manager) == ["stats", "record", "db.commit"]
+    # commit=False: the stats increment must NOT self-commit — it shares the budget
+    # row's transaction so the retry guard / unique-index backstop covers both.
+    assert stats.await_args.kwargs["commit"] is False
 
 
 @pytest.mark.asyncio

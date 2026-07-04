@@ -361,6 +361,7 @@ async def record_usage(
     cache_write_1h_tokens: int = 0,
     source: str = "engine",
     turn_id: UUID | None = None,
+    record_id: UUID | None = None,
 ) -> UsageRecord:
     """
     Record token usage for budget tracking.
@@ -380,6 +381,9 @@ async def record_usage(
             feeds cost only — persisted inside cache_write_tokens
         source: Accounting authority — 'engine' (orchestrator) or 'broker' (LLM proxy)
         turn_id: Per-turn aggregation key (broker rows of one turn share it)
+        record_id: Caller-fixed row PK. The broker persist retry reuses one id across
+            attempts so an ambiguous first commit (landed server-side, ack lost) makes
+            the re-INSERT collide on the PK instead of double-billing the call
 
     Returns:
         Created UsageRecord
@@ -446,6 +450,7 @@ async def record_usage(
         logger.warning("usage_metrics_emit_failed", exc_info=True)
 
     record = UsageRecord(
+        **({"id": record_id} if record_id is not None else {}),
         user_id=user_id,
         session_id=session_id,
         input_tokens=input_tokens,

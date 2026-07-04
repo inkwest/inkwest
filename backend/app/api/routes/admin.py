@@ -888,57 +888,7 @@ async def get_usage_by_user(
 ) -> list[dict[str, Any]]:
     """Get usage breakdown by user."""
     filter_start, filter_end = _usage_date_filters(period, start_date, end_date)
-
-    conditions = [UsageRecord.recorded_at >= filter_start]
-    if filter_end:
-        conditions.append(UsageRecord.recorded_at <= filter_end)
-
-    query = (
-        select(
-            UsageRecord.user_id,
-            func.sum(UsageRecord.input_tokens).label("input_tokens"),
-            func.sum(UsageRecord.output_tokens).label("output_tokens"),
-            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
-            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
-            func.sum(UsageRecord.cost_usd).label("cost_usd"),
-            func.count(UsageRecord.id).label("request_count"),
-            func.count(func.distinct(UsageRecord.session_id)).label("conversation_count"),
-        )
-        .where(*conditions)
-        .group_by(UsageRecord.user_id)
-        .order_by(func.sum(UsageRecord.cost_usd).desc())
-        .limit(limit)
-    )
-
-    result = await db.execute(query)
-    rows = result.all()
-
-    user_ids = [row.user_id for row in rows if row.user_id]
-    users_map: dict[str, User] = {}
-    if user_ids:
-        users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
-        users_map = {str(u.id): u for u in users_result.scalars().all()}
-
-    return [
-        {
-            "user_id": str(row.user_id) if row.user_id else None,
-            "email": users_map[str(row.user_id)].email
-            if row.user_id and str(row.user_id) in users_map
-            else "",
-            "display_name": users_map[str(row.user_id)].display_name
-            if row.user_id and str(row.user_id) in users_map
-            else "Unknown",
-            "input_tokens": row.input_tokens,
-            "output_tokens": row.output_tokens,
-            "cache_read_tokens": row.cache_read_tokens,
-            "cache_write_tokens": row.cache_write_tokens,
-            "total_tokens": row.input_tokens + row.output_tokens,
-            "cost_usd": float(row.cost_usd),
-            "request_count": row.request_count,
-            "conversation_count": row.conversation_count,
-        }
-        for row in rows
-    ]
+    return await usage_reports.by_user(db, filter_start, filter_end, limit=limit)
 
 
 @router.get("/usage/by-model")

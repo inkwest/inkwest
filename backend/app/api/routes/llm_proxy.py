@@ -34,11 +34,12 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from urllib.parse import quote
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.background import BackgroundTask
 
 from app.api.routes._proxy_stream import (
@@ -55,7 +56,7 @@ from app.core.constants import LLM_PROXY_MAX_BODY_BYTES, LLM_PROXY_STREAM_MAX_SE
 from app.core.database import async_session_maker
 from app.services import model_catalog, model_registry
 from app.services.budget_service import record_usage
-from app.services.llm_metering import STREAMING_OPS, MeteringTee
+from app.services.llm_metering import STREAMING_OPS, CallUsage, MeteringTee
 from app.services.llm_proxy_token import LlmProxyClaims, ProxyAuthError, verify
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,88 @@ async def _metered_aiter(
         yield chunk
 
 
+# The metering persist runs in fire-and-forget tasks, NOT inline in the response
+# BackgroundTask: Starlette awaits that task in the proxied call's teardown, so a
+# slow/blocked billing DB would add its latency to every Bedrock call and throttle
+# proxy throughput. The semaphore bounds DB-write concurrency; the pending-set cap
+# bounds task pileup during a DB outage (dropping the row is the lesser harm, and
+# it's alarmed like any persist failure).
+_PERSIST_DB_CONCURRENCY = asyncio.Semaphore(4)
+_MAX_PENDING_PERSISTS = 256
+_persist_tasks: set[asyncio.Task[None]] = set()
+# One immediate-ish retry covers the transient-blip class (same rationale/delay as
+# turn_usage._RETRY_DELAY_SECONDS). Patched to 0 in tests.
+_PERSIST_RETRY_DELAY_SECONDS = 0.5
+
+
+async def drain_metering_persists() -> None:
+    """Await every in-flight metering persist. TESTS ONLY — production never blocks on
+    metering; tests need the offloaded write to have landed before asserting on it."""
+    while _persist_tasks:
+        await asyncio.gather(*tuple(_persist_tasks), return_exceptions=True)
+        # Awaiting already-done tasks returns WITHOUT yielding, which would starve the
+        # call_soon queue holding the set-discard callbacks — and spin this loop forever.
+        await asyncio.sleep(0)
+
+
+async def _persist_metered_usage(
+    usage: CallUsage, claims: LlmProxyClaims, target: str, session_uuid: UUID
+) -> None:
+    """Persist one broker usage row, retrying once — this row is the turn's ONLY budget
+    record (broker-on turns skip the engine row), so a transient DB blip must not drop
+    it permanently. Idempotent across attempts: the row PK is fixed up front, so an
+    ambiguous first commit (landed server-side, ack lost) makes the retry's re-INSERT
+    collide instead of double-billing the call."""
+    # Label the sink's Prometheus counters with the real engine: this task runs outside
+    # the orchestrator's turn context, so turn_engine() would be "unknown".
+    metrics.set_turn_engine(claims.engine or "unknown")
+    model = model_registry.resolve_invoke_target(target)
+    record_id = uuid4()
+    async with _PERSIST_DB_CONCURRENCY:
+        for attempt in (1, 2):
+            try:
+                # The route has no request-scoped DB session — a fresh one per attempt
+                # (its close discards any aborted transaction, no explicit rollback).
+                async with async_session_maker() as db:
+                    await record_usage(
+                        db,
+                        user_id=UUID(claims.user_id) if claims.user_id else None,
+                        session_id=session_uuid,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        model=model,
+                        provider=claims.engine or "unknown",
+                        cache_read_tokens=usage.cache_read_tokens,
+                        cache_write_tokens=usage.cache_write_tokens,
+                        cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                        source="broker",
+                        turn_id=UUID(claims.turn_id) if claims.turn_id else None,
+                        record_id=record_id,
+                    )
+                    await db.commit()
+                return
+            except IntegrityError:
+                if attempt == 2:
+                    # The fixed record_id collided: attempt 1's commit landed server-side
+                    # with the ack lost. The row exists — success, not a failure.
+                    logger.info(
+                        "llm_proxy_metering_already_persisted",
+                        extra={"target": target, "session_id": claims.session_id},
+                    )
+                    return
+                await asyncio.sleep(_PERSIST_RETRY_DELAY_SECONDS)
+            except Exception:
+                if attempt == 2:
+                    logger.warning(
+                        "llm_proxy_metering_persist_failed",
+                        extra={"target": target, "session_id": claims.session_id},
+                        exc_info=True,
+                    )
+                    metrics.llm_metering_failures_total.labels(reason="persist_failed").inc()
+                    return
+                await asyncio.sleep(_PERSIST_RETRY_DELAY_SECONDS)
+
+
 async def _finish_stream(
     upstream: httpx.Response,
     client: httpx.AsyncClient,
@@ -287,13 +370,21 @@ async def _finish_stream(
     claims: LlmProxyClaims | None,
     target: str | None,
 ) -> None:
-    """Post-stream BackgroundTask: tear down the upstream, then persist the metered usage.
+    """Post-stream BackgroundTask: tear down the upstream, then hand the metered usage
+    off to a bounded persist task.
 
-    Runs after the response body was fully sent (or the client vanished) — decoupled from the
-    orchestrator's control flow, so a call completed before an engine crash is still billed
-    (AWS bills it too). Persistence is best-effort: any failure logs a warning and never
-    propagates into the response lifecycle."""
-    await close_stream(upstream, client)
+    Runs after the response body was fully sent (or the client vanished) — decoupled from
+    the orchestrator's control flow, so a call completed before an engine crash is still
+    billed (AWS bills it too). Starlette awaits this inline in the response teardown, so
+    it stays fast (teardown + tee readout); the DB write happens in
+    :func:`_persist_metered_usage`. Best-effort throughout: nothing here may propagate
+    into the response lifecycle."""
+    try:
+        await close_stream(upstream, client)
+    except Exception:
+        # An already-reset connection can make aclose() raise; swallowing it here keeps
+        # the teardown failure from silently costing the call its usage row below.
+        logger.warning("llm_proxy_stream_teardown_failed", extra={"target": target}, exc_info=True)
     if meter is None or claims is None or target is None:
         return
     usage = meter.result()
@@ -311,35 +402,18 @@ async def _finish_stream(
         logger.warning("llm_proxy_metering_no_session", extra={"target": target})
         metrics.llm_metering_failures_total.labels(reason="no_session").inc()
         return
-    try:
-        # Label the sink's Prometheus counters with the real engine: this background task
-        # runs outside the orchestrator's turn context, so turn_engine() would be "unknown".
-        metrics.set_turn_engine(claims.engine or "unknown")
-        model = model_registry.resolve_invoke_target(target)
-        # The route has no request-scoped DB session — open a fresh one for the write.
-        async with async_session_maker() as db:
-            await record_usage(
-                db,
-                user_id=UUID(claims.user_id) if claims.user_id else None,
-                session_id=UUID(claims.session_id),
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                model=model,
-                provider=claims.engine or "unknown",
-                cache_read_tokens=usage.cache_read_tokens,
-                cache_write_tokens=usage.cache_write_tokens,
-                cache_write_1h_tokens=usage.cache_write_1h_tokens,
-                source="broker",
-                turn_id=UUID(claims.turn_id) if claims.turn_id else None,
-            )
-            await db.commit()
-    except Exception:
+    if len(_persist_tasks) >= _MAX_PENDING_PERSISTS:
         logger.warning(
-            "llm_proxy_metering_persist_failed",
+            "llm_proxy_metering_persist_overflow",
             extra={"target": target, "session_id": claims.session_id},
-            exc_info=True,
         )
         metrics.llm_metering_failures_total.labels(reason="persist_failed").inc()
+        return
+    task = asyncio.create_task(
+        _persist_metered_usage(usage, claims, target, UUID(claims.session_id))
+    )
+    _persist_tasks.add(task)
+    task.add_done_callback(_persist_tasks.discard)
 
 
 async def _send(

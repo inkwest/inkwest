@@ -479,6 +479,9 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
             "cache_write_1h_tokens": total_cache_write_1h_tokens,
         }
 
+    # Manual aiter/anext (not `async for`) ON PURPOSE: the except below must cover ONLY
+    # the read — wrapping the whole loop would also catch exceptions thrown into the
+    # body's yields and misreport them as a cut stream.
     lines = aiter(output_stream)
     while True:
         try:
@@ -871,6 +874,8 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
             "cost_usd": cost_usd,
         }
 
+    # Manual aiter/anext for the same reason as parse_cli_response: the except must
+    # cover ONLY the read, never exceptions thrown into the body's yields.
     lines = aiter(output_stream)
     while True:
         try:

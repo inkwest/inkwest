@@ -43,3 +43,12 @@ Still unobserved (capture, don't fabricate):
 - **1-hour-TTL cache** — only the `ttl:"5m"` `cacheDetails` value was seen; a `ttl:"1h"` turn needs
   a real 1h-TTL `cachePoint`. Parser reads whatever `ttl` string is present; the 1h *value* is
   untested.
+
+How to capture fresh verbatim bytes: either (a) temporarily dump the broker tee's input —
+in `MeteringTee.feed`, append each `chunk` to a file under `misc/bedrock-fixtures-verbatim/`
+while running a real turn through the LLM proxy (streaming ops keep their eventstream
+framing this way); or (b) probe directly with boto3 against `bedrock-runtime` using
+`invoke_model[_with_response_stream]` / `converse[_stream]` with a `cachePoint` in the
+request (how the 2026-07-04 Converse cache shapes were obtained) and save the raw HTTP body
+(`resp["body"].read()` for non-stream ops). Then redact via `redact_fixtures.py` before
+anything leaves `misc/`.

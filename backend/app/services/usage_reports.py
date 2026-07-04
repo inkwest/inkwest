@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.budget import BudgetPeriod, UsageRecord
 from app.models.session import Session
+from app.models.user import User
 from app.services.budget_service import get_period_start
 
 
@@ -118,6 +119,62 @@ async def by_model(
             "total_tokens": row.input_tokens + row.output_tokens,
             "cost_usd": float(row.cost_usd),
             "request_count": row.request_count,
+        }
+        for row in rows
+    ]
+
+
+async def by_user(
+    db: AsyncSession,
+    start: datetime,
+    end: datetime | None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Per-user usage breakdown (identities resolved), costliest first. Admin-only by
+    nature (it spans users), so there is no ``user_id`` scope parameter."""
+    query = (
+        select(
+            UsageRecord.user_id,
+            func.sum(UsageRecord.input_tokens).label("input_tokens"),
+            func.sum(UsageRecord.output_tokens).label("output_tokens"),
+            func.sum(UsageRecord.cache_read_tokens).label("cache_read_tokens"),
+            func.sum(UsageRecord.cache_write_tokens).label("cache_write_tokens"),
+            func.sum(UsageRecord.cost_usd).label("cost_usd"),
+            func.count(UsageRecord.id).label("request_count"),
+            func.count(func.distinct(UsageRecord.session_id)).label("conversation_count"),
+        )
+        .where(*_conditions(None, start, end))
+        .group_by(UsageRecord.user_id)
+        .order_by(func.sum(UsageRecord.cost_usd).desc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+
+    rows = (await db.execute(query)).all()
+
+    user_ids = [row.user_id for row in rows if row.user_id]
+    users_map: dict[str, User] = {}
+    if user_ids:
+        result = await db.execute(select(User).where(User.id.in_(user_ids)))
+        users_map = {str(u.id): u for u in result.scalars().all()}
+
+    return [
+        {
+            "user_id": str(row.user_id) if row.user_id else None,
+            "email": users_map[str(row.user_id)].email
+            if row.user_id and str(row.user_id) in users_map
+            else "",
+            "display_name": users_map[str(row.user_id)].display_name
+            if row.user_id and str(row.user_id) in users_map
+            else "Unknown",
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "cache_write_tokens": row.cache_write_tokens,
+            "total_tokens": row.input_tokens + row.output_tokens,
+            "cost_usd": float(row.cost_usd),
+            "request_count": row.request_count,
+            "conversation_count": row.conversation_count,
         }
         for row in rows
     ]

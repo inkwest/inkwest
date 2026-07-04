@@ -249,11 +249,20 @@ required.
     turn_id = uuid.uuid4()
     usage_persisted = False
 
+    def _apply_usage_meta(meta: dict) -> None:
+        """One unpacker for the terminal `done` and the crash-path `usage_stats` events
+        (same keys) — two inline copies could drift on a future cache field."""
+        nonlocal total_input_tokens, total_output_tokens, total_cache_read_tokens
+        nonlocal total_cache_write_tokens, total_cache_write_1h_tokens
+        total_input_tokens = meta.get("input_tokens", 0)
+        total_output_tokens = meta.get("output_tokens", 0)
+        total_cache_read_tokens = meta.get("cache_read_tokens", 0)
+        total_cache_write_tokens = meta.get("cache_write_tokens", 0)
+        total_cache_write_1h_tokens = meta.get("cache_write_1h_tokens", 0)
+
     async def _persist_accumulated_usage() -> None:
-        """Thin wrapper over the shared persist_turn_usage (single implementation of the
-        stats → budget-row → commit sequence, with its gate/retry/rollback contracts).
-        Idempotent per turn; called from the success path, every error handler AND the
-        user-stop path — AWS bills every Bedrock call that returned a response."""
+        """Idempotent per-turn handoff to the shared persist_turn_usage (see its module
+        contracts); called from success, every error handler AND the user-stop path."""
         nonlocal usage_persisted
         if usage_persisted:
             return
@@ -409,13 +418,7 @@ required.
                         # — the stale-resume retry keys off "no client-visible output") so
                         # the error-path persist below still accounts the burned tokens.
                         if event.metadata:
-                            total_input_tokens = event.metadata.get("input_tokens", 0)
-                            total_output_tokens = event.metadata.get("output_tokens", 0)
-                            total_cache_read_tokens = event.metadata.get("cache_read_tokens", 0)
-                            total_cache_write_tokens = event.metadata.get("cache_write_tokens", 0)
-                            total_cache_write_1h_tokens = event.metadata.get(
-                                "cache_write_1h_tokens", 0
-                            )
+                            _apply_usage_meta(event.metadata)
                         continue
 
                     if event.type == "session_info" and event.metadata.get("cli_session_id"):
@@ -468,13 +471,7 @@ required.
                     elif event.type == "done":
                         received_done = True
                         if event.metadata:
-                            total_input_tokens = event.metadata.get("input_tokens", 0)
-                            total_output_tokens = event.metadata.get("output_tokens", 0)
-                            total_cache_read_tokens = event.metadata.get("cache_read_tokens", 0)
-                            total_cache_write_tokens = event.metadata.get("cache_write_tokens", 0)
-                            total_cache_write_1h_tokens = event.metadata.get(
-                                "cache_write_1h_tokens", 0
-                            )
+                            _apply_usage_meta(event.metadata)
                         yield event
                     else:
                         yield event
