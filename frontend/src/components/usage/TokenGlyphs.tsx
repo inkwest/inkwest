@@ -39,8 +39,10 @@ export function TokenGlyphs({
       {cacheRead > 0 && (
         <>
           {' '}
+          {/* U+FE0E forces the text (monochrome) presentation — the default emoji
+              rendering of U+26A1 ignores the span's CSS color. */}
           <span title={TOKEN_GLYPH_TITLES.cacheRead(cacheRead)}>
-            {formatTokenCount(cacheRead)}&#x26a1;
+            {formatTokenCount(cacheRead)}&#x26a1;&#xfe0e;
           </span>
         </>
       )}
