@@ -456,18 +456,16 @@ export const useSessionsStore = create<SessionsState>()(
       },
 
       updateSessionTokens: (id, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens) => {
-        // NB: same replace semantics as before for the base counts (the done event carries
-        // per-turn totals; the true cumulative arrives on the next session fetch). Cache
-        // counts follow the same convention; undefined leaves the fetched value alone.
+        // The done event reports the TURN's usage; the header/list badges show the
+        // conversation total — so ACCUMULATE onto the fetched cumulative. The next
+        // session fetch replaces everything with server truth (update_session_stats
+        // does the same atomic increment DB-side, so the figures converge).
         const patch = <T extends Session>(s: T): T => ({
           ...s,
-          // A fully-cached turn legitimately reports 0 fresh in/out — don't wipe the
-          // fetched cumulative figures with zeros; the cache counters still refresh.
-          ...(inputTokens || outputTokens
-            ? { total_input_tokens: inputTokens, total_output_tokens: outputTokens }
-            : {}),
-          ...(cacheReadTokens !== undefined ? { total_cache_read_tokens: cacheReadTokens } : {}),
-          ...(cacheWriteTokens !== undefined ? { total_cache_write_tokens: cacheWriteTokens } : {}),
+          total_input_tokens: (s.total_input_tokens || 0) + inputTokens,
+          total_output_tokens: (s.total_output_tokens || 0) + outputTokens,
+          total_cache_read_tokens: (s.total_cache_read_tokens || 0) + (cacheReadTokens || 0),
+          total_cache_write_tokens: (s.total_cache_write_tokens || 0) + (cacheWriteTokens || 0),
         });
         set((state) => ({
           sessions: state.sessions.map((s) => (s.id === id ? patch(s) : s)),

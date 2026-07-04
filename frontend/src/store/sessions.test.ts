@@ -326,29 +326,32 @@ describe('sessionsStore updateSessionTokens', () => {
     useSessionsStore.setState({ sessions: [base], currentSession: null });
   });
 
-  it('replaces base counts and cache counts when provided', () => {
+  it('accumulates the turn usage onto the fetched cumulative totals', () => {
     useSessionsStore.getState().updateSessionTokens('s1', 10, 5, 27082, 3242);
     const s = useSessionsStore.getState().sessions[0];
-    expect(s.total_input_tokens).toBe(10);
-    expect(s.total_output_tokens).toBe(5);
-    expect(s.total_cache_read_tokens).toBe(27082);
-    expect(s.total_cache_write_tokens).toBe(3242);
+    // badges show the CONVERSATION total, not the last turn
+    expect(s.total_input_tokens).toBe(1010);
+    expect(s.total_output_tokens).toBe(505);
+    expect(s.total_cache_read_tokens).toBe(111 + 27082);
+    expect(s.total_cache_write_tokens).toBe(22 + 3242);
   });
 
-  it('does not wipe cumulative in/out with zeros on a fully-cached turn', () => {
+  it('a fully-cached turn (0 fresh in/out) keeps the cumulative and adds the cache', () => {
     useSessionsStore.getState().updateSessionTokens('s1', 0, 0, 5000, undefined);
     const s = useSessionsStore.getState().sessions[0];
-    expect(s.total_input_tokens).toBe(1000); // fetched cumulative preserved
+    expect(s.total_input_tokens).toBe(1000);
     expect(s.total_output_tokens).toBe(500);
-    expect(s.total_cache_read_tokens).toBe(5000); // cache still refreshed
+    expect(s.total_cache_read_tokens).toBe(111 + 5000);
+    expect(s.total_cache_write_tokens).toBe(22);
   });
 
-  it('leaves fetched cache values alone when the metadata omits them', () => {
-    useSessionsStore.getState().updateSessionTokens('s1', 10, 5);
+  it('accumulates across consecutive turns', () => {
+    useSessionsStore.getState().updateSessionTokens('s1', 10, 5, 100, 0);
+    useSessionsStore.getState().updateSessionTokens('s1', 20, 8, 0, 50);
     const s = useSessionsStore.getState().sessions[0];
-    expect(s.total_input_tokens).toBe(10);
-    // undefined cache args must NOT overwrite the fetched cumulative values
-    expect(s.total_cache_read_tokens).toBe(111);
-    expect(s.total_cache_write_tokens).toBe(22);
+    expect(s.total_input_tokens).toBe(1030);
+    expect(s.total_output_tokens).toBe(513);
+    expect(s.total_cache_read_tokens).toBe(211);
+    expect(s.total_cache_write_tokens).toBe(72);
   });
 });
