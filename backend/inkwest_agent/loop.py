@@ -13,6 +13,7 @@ SIGKILLs it. Tool execution reuses ``tool_execution.execute_tool_calls``
 """
 
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -38,6 +39,77 @@ from .exec import BASH_DEFAULT_TIMEOUT, is_exec_tool, run_exec_tool
 from .mcp import MCPManager, load_mcp_config
 from .protocol import TurnSpec
 from .skills import is_skill_tool, read_skill
+
+logger = logging.getLogger(__name__)
+
+# Opportunistic prompt caching: a Converse cachePoint content block. Everything
+# before a marker is a cacheable prefix. Three marker blocks (Anthropic documents 4 max):
+# system + toolConfig (the static prefix, stable across iterations AND turns) and the last
+# message (the growing history — each iteration/turn reads the previous write).
+_CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
+
+# Verbatim signature of the unsupported-model rejection, captured live 2026-07-04/05
+# (misc/bedrock-fixtures-verbatim/round3-cachepoint-placement-probe.md). The code alone is
+# NOT enough — a plain AccessDeniedException is a real IAM/permission failure and must
+# surface, not trigger a marker-strip retry.
+_CACHE_REJECTION_CODE = "AccessDeniedException"
+_CACHE_REJECTION_MARKER = "prompt caching"
+
+
+def is_cache_unsupported_rejection(e: ClientError) -> bool:
+    """True iff Bedrock rejected the call because the model doesn't allow prompt caching.
+
+    The rejection is pre-inference (bills zero tokens), so a strip-and-retry is free.
+    """
+    err = e.response.get("Error", {})
+    return err.get("Code") == _CACHE_REJECTION_CODE and _CACHE_REJECTION_MARKER in (
+        err.get("Message") or ""
+    )
+
+
+def add_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the built converse kwargs with cachePoint markers appended.
+
+    Pure — never mutates the input (the persisted history must stay marker-free; markers
+    are a wire concern on the converse-shaped copies only). Markers land after the system
+    blocks, as the last ``toolConfig.tools`` member (placement probed live — see the probe
+    record above), and after the last message's content.
+    """
+    out = dict(kwargs)
+    out["system"] = [*kwargs["system"], _CACHE_POINT]
+    tools = kwargs["toolConfig"].get("tools") or []
+    if tools:
+        out["toolConfig"] = {**kwargs["toolConfig"], "tools": [*tools, _CACHE_POINT]}
+    messages = kwargs["messages"]
+    if messages:
+        last = messages[-1]
+        out["messages"] = [
+            *messages[:-1],
+            {**last, "content": [*last["content"], _CACHE_POINT]},
+        ]
+    return out
+
+
+def strip_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the converse kwargs with every cachePoint block removed.
+
+    Pure inverse of ``add_cache_points`` for the one free retry on an unsupported model —
+    sweeps system, toolConfig.tools and every message so the rebuilt call is marker-free
+    regardless of where markers were placed.
+    """
+    out = dict(kwargs)
+    out["system"] = [b for b in kwargs["system"] if "cachePoint" not in b]
+    tools = kwargs["toolConfig"].get("tools")
+    if tools:
+        out["toolConfig"] = {
+            **kwargs["toolConfig"],
+            "tools": [b for b in tools if "cachePoint" not in b],
+        }
+    out["messages"] = [
+        {**m, "content": [b for b in m["content"] if "cachePoint" not in b]}
+        for m in kwargs["messages"]
+    ]
+    return out
 
 
 def _result_block(tool_use_id: str, content: str, is_error: bool) -> dict[str, Any]:
@@ -112,13 +184,16 @@ async def _run_loop(
 
     total_input_tokens = 0
     total_output_tokens = 0
-    # Converse cache tokens: always 0 today (the agent sets no cachePoint) but accumulated
-    # unconditionally so metering is already correct when opportunistic caching lands.
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
     # 1h-TTL portion of the writes (billed 2x): Converse reports it in
-    # usage.cacheDetails[{ttl, inputTokens}]. Always 0 today (no cachePoint yet).
+    # usage.cacheDetails[{ttl, inputTokens}]. Not observed live yet (cachePoint exposes
+    # no TTL knob; results report ttl:"5m").
     total_cache_write_1h_tokens = 0
+    # Opportunistic caching memo: markers are sent until the model rejects them with the
+    # captured signature, then stripped for the rest of this process (= this turn — the
+    # worker is spawned per turn). At most one free extra round-trip per turn.
+    cache_points_enabled = True
     total_tool_calls = 0
     iteration = 0
     iter_latency_ms = 0
@@ -156,28 +231,47 @@ async def _run_loop(
                     *converse_messages[pos]["content"],
                 ]
 
-        try:
-            response = await asyncio.to_thread(
-                lambda: client.converse(
-                    modelId=spec.invoke_target,
-                    messages=converse_messages,
-                    system=system_blocks,
-                    toolConfig=tool_config,
-                    inferenceConfig={"maxTokens": spec.limits.max_tokens},
+        converse_kwargs: dict[str, Any] = {
+            "modelId": spec.invoke_target,
+            "messages": converse_messages,
+            "system": system_blocks,
+            "toolConfig": tool_config,
+            "inferenceConfig": {"maxTokens": spec.limits.max_tokens},
+        }
+        if cache_points_enabled:
+            converse_kwargs = add_cache_points(converse_kwargs)
+
+        response: dict[str, Any] | None = None
+        # Two attempts max, structurally: the only non-terminal path (marker rejection)
+        # also flips cache_points_enabled, so a second rejection cannot loop.
+        for _ in range(2):
+            try:
+                response = await asyncio.to_thread(client.converse, **converse_kwargs)
+                iter_latency_ms = int((time.monotonic() - iter_start) * 1000)
+                break
+            except ClientError as e:
+                if cache_points_enabled and is_cache_unsupported_rejection(e):
+                    # The model doesn't allow prompt caching. The rejection is
+                    # pre-inference (zero tokens billed), so retry the same call once,
+                    # marker-free; the memo makes every later iteration skip markers,
+                    # and a repeat rejection falls through to the error path below.
+                    logger.info("cache_unsupported_model", extra={"model_id": spec.invoke_target})
+                    cache_points_enabled = False
+                    converse_kwargs = strip_cache_points(converse_kwargs)
+                    continue
+                # Carry the usage accumulated over prior iterations: those calls completed
+                # and AWS bills them even though this turn is now failing.
+                yield error_event(
+                    f"AI service error: {e.response.get('Error', {}).get('Message', str(e))}",
+                    metadata=_usage_meta(),
                 )
-            )
-            iter_latency_ms = int((time.monotonic() - iter_start) * 1000)
-        except ClientError as e:
-            # Carry the usage accumulated over prior iterations: those calls completed and
-            # AWS bills them even though this turn is now failing.
-            yield error_event(
-                f"AI service error: {e.response.get('Error', {}).get('Message', str(e))}",
-                metadata=_usage_meta(),
-            )
-            return
-        except Exception as e:
-            # converse() runs in a worker thread; nothing else can cancel it.
-            yield error_event(f"AI error: {str(e)}", metadata=_usage_meta())
+                return
+            except Exception as e:
+                # converse() runs in a worker thread; nothing else can cancel it.
+                yield error_event(f"AI error: {str(e)}", metadata=_usage_meta())
+                return
+        if response is None:  # unreachable: the rejection path can fire at most once
+            yield error_event("AI service error: converse retry exhausted", metadata=_usage_meta())
             return
 
         usage = response.get("usage", {})

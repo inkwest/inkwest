@@ -610,3 +610,253 @@ async def test_run_turn_client_error_carries_accumulated_usage():
     assert meta["input_tokens"] == 8
     assert meta["output_tokens"] == 4
     assert meta["cache_read_tokens"] == 0
+
+
+# --- Opportunistic prompt caching -------------------------------------------
+#
+# The rejection message is the VERBATIM live capture (2026-07-04/05 probes, recorded in
+# misc/bedrock-fixtures-verbatim/round3-cachepoint-placement-probe.md) — never invent
+# variants; the strip-and-retry matches on Code == AccessDeniedException AND this text.
+
+CACHE_POINT = {"cachePoint": {"type": "default"}}
+CACHE_REJECTION_MSG = (
+    "You invoked an unsupported model or your request did not allow prompt caching. "
+    "See the documentation for more information."
+)
+
+
+def _cache_rejection() -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": CACHE_REJECTION_MSG}}, "Converse"
+    )
+
+
+def _assert_marker_free(kwargs: dict) -> None:
+    assert all("cachePoint" not in b for b in kwargs["system"])
+    assert all("cachePoint" not in b for b in kwargs["toolConfig"]["tools"])
+    assert all("cachePoint" not in b for m in kwargs["messages"] for b in m["content"])
+
+
+@pytest.mark.asyncio
+async def test_run_turn_places_cache_points():
+    """(a) Markers land after system, as last tools member, and on the last message."""
+    client = _client([_converse_text("ok")])
+    await _collect(_spec(), client)
+
+    kw = client.converse.call_args.kwargs
+    assert kw["system"][-1] == CACHE_POINT
+    assert sum(1 for b in kw["system"] if "cachePoint" in b) == 1
+    assert kw["toolConfig"]["tools"][-1] == CACHE_POINT
+    assert sum(1 for b in kw["toolConfig"]["tools"] if "cachePoint" in b) == 1
+    # Only the LAST message carries a marker (the growing history is the cached prefix).
+    assert kw["messages"][-1]["content"][-1] == CACHE_POINT
+    assert sum(1 for m in kw["messages"] for b in m["content"] if "cachePoint" in b) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_points_follow_last_message_across_iterations():
+    """On a tool-use turn, iteration 2's marker sits on the tool-result message."""
+    client = _client(
+        [
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _converse_text("Found 3 pods."),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("pod/foo Running", False)),
+    ):
+        await _collect(_spec(), client)
+
+    for call in client.converse.call_args_list:
+        kw = call.kwargs
+        assert kw["messages"][-1]["content"][-1] == CACHE_POINT
+        assert sum(1 for m in kw["messages"] for b in m["content"] if "cachePoint" in b) == 1
+    # Iteration 2's last message is the toolResult user turn.
+    second = client.converse.call_args_list[1].kwargs["messages"][-1]
+    assert "toolResult" in second["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_rejection_strips_and_retries_once():
+    """(b) The captured signature → one marker-free retry, same messages, no extra usage."""
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[_cache_rejection(), _converse_text("ok", tokens=(12, 7))]
+    )
+    events = await _collect(_spec(), client)
+
+    assert [e.type for e in events] == ["text_delta", "done"]
+    assert client.converse.call_count == 2
+    first = client.converse.call_args_list[0].kwargs
+    retry = client.converse.call_args_list[1].kwargs
+    _assert_marker_free(retry)
+    # The retry is the SAME call minus every marker (nothing else rebuilt).
+    assert loop_mod.strip_cache_points(first)["messages"] == retry["messages"]
+    assert loop_mod.strip_cache_points(first)["system"] == retry["system"]
+    # The rejected call is pre-inference: only the successful call is counted.
+    meta = events[-1].metadata
+    assert meta["iterations"] == 1
+    assert meta["input_tokens"] == 12
+    assert meta["output_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_rejection_memo_skips_markers_for_later_iterations():
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[
+            _cache_rejection(),
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _converse_text("done."),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("ok", False)),
+    ):
+        events = await _collect(_spec(), client)
+
+    assert events[-1].type == "done"
+    # 1 rejection + 1 retry + 1 second iteration; the memo prevents further marker sends.
+    assert client.converse.call_count == 3
+    _assert_marker_free(client.converse.call_args_list[2].kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_rejection_twice_surfaces_error():
+    """One retry max: a second rejection surfaces as today's AI service error."""
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=[_cache_rejection(), _cache_rejection()])
+    events = await _collect(_spec(), client)
+
+    assert client.converse.call_count == 2
+    assert events[-1].type == "error"
+    assert "AI service error" in events[-1].content
+
+
+@pytest.mark.asyncio
+async def test_run_turn_plain_access_denied_does_not_retry():
+    """(c) AccessDeniedException WITHOUT 'prompt caching' = real IAM failure — no retry."""
+    err = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "User is not authorized"}},
+        "Converse",
+    )
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=err)
+    events = await _collect(_spec(), client)
+
+    assert client.converse.call_count == 1
+    assert events[-1].type == "error"
+    assert "not authorized" in events[-1].content
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_message_with_other_code_does_not_retry():
+    """The match needs BOTH halves: same message under another code → no retry."""
+    err = ClientError(
+        {"Error": {"Code": "ValidationException", "Message": CACHE_REJECTION_MSG}}, "Converse"
+    )
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=err)
+    events = await _collect(_spec(), client)
+
+    assert client.converse.call_count == 1
+    assert events[-1].type == "error"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_history_stays_marker_free():
+    """(d) Markers live on the converse-shaped copies only — history is never mutated."""
+    import copy
+
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": [{"type": "text", "text": "earlier answer"}]},
+    ]
+    snapshot = copy.deepcopy(history)
+    spec = _spec(history=history)
+    client = _client(
+        [
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _converse_text("done."),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("ok", False)),
+    ):
+        await _collect(spec, client)
+
+    assert spec.context.history == snapshot
+    assert "cachePoint" not in json.dumps(spec.context.history)
+
+
+def test_add_cache_points_is_pure_and_places_markers():
+    import copy
+
+    kwargs = {
+        "modelId": "m",
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "system": [{"text": "sys"}],
+        "toolConfig": {"tools": [{"toolSpec": {"name": "t"}}]},
+        "inferenceConfig": {"maxTokens": 5},
+    }
+    snapshot = copy.deepcopy(kwargs)
+    out = loop_mod.add_cache_points(kwargs)
+
+    assert kwargs == snapshot  # input untouched
+    assert out["system"][-1] == CACHE_POINT
+    assert out["toolConfig"]["tools"][-1] == CACHE_POINT
+    assert out["messages"][-1]["content"][-1] == CACHE_POINT
+
+
+def test_add_cache_points_skips_tools_marker_when_no_tools():
+    kwargs = {
+        "modelId": "m",
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "system": [{"text": "sys"}],
+        "toolConfig": {"tools": []},
+        "inferenceConfig": {"maxTokens": 5},
+    }
+    out = loop_mod.add_cache_points(kwargs)
+    assert out["toolConfig"]["tools"] == []
+    assert out["system"][-1] == CACHE_POINT
+
+
+def test_strip_cache_points_removes_all_markers_and_is_pure():
+    import copy
+
+    marked = loop_mod.add_cache_points(
+        {
+            "modelId": "m",
+            "messages": [
+                {"role": "user", "content": [{"text": "hi"}]},
+                {"role": "assistant", "content": [{"text": "yo"}, dict(CACHE_POINT)]},
+            ],
+            "system": [{"text": "sys"}],
+            "toolConfig": {"tools": [{"toolSpec": {"name": "t"}}]},
+            "inferenceConfig": {"maxTokens": 5},
+        }
+    )
+    snapshot = copy.deepcopy(marked)
+    out = loop_mod.strip_cache_points(marked)
+
+    assert marked == snapshot  # input untouched
+    _assert_marker_free(out)
+    # Idempotent — stripping a stripped call changes nothing.
+    assert loop_mod.strip_cache_points(out) == out
+
+
+def test_is_cache_unsupported_rejection_matches_both_halves():
+    assert loop_mod.is_cache_unsupported_rejection(_cache_rejection())
+    assert not loop_mod.is_cache_unsupported_rejection(
+        ClientError({"Error": {"Code": "AccessDeniedException", "Message": "denied"}}, "Converse")
+    )
+    assert not loop_mod.is_cache_unsupported_rejection(
+        ClientError(
+            {"Error": {"Code": "ValidationException", "Message": CACHE_REJECTION_MSG}}, "Converse"
+        )
+    )
+    # A malformed error payload (no Error/Message) must not crash the matcher.
+    assert not loop_mod.is_cache_unsupported_rejection(ClientError({}, "Converse"))
