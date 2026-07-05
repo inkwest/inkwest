@@ -231,8 +231,9 @@ async def orchestrate_chat_inkwest_agent(
     # year wrong (e.g. emit 2024 timestamps in metric queries) and don't chain a datetime
     # tool's output into later tool args — yielding empty windows that read as false "no
     # data" findings. DATE granularity, not second: a per-turn timestamp would make the
-    # system prompt unique every turn and defeat any prompt cache later added to this path
-    # (none today — no cachePoint here yet); a date stays stable within a UTC day and still
+    # system prompt unique every turn and defeat the loop's opportunistic prompt caching
+    # (the system prompt is the cached static prefix); a date stays stable
+    # within a UTC day and still
     # fixes the year/month guess. For an exact instant the agent has the synthetic
     # `current_datetime` tool (see the caveat) — accuracy on demand, reliability up front.
     today = datetime.now(UTC).date().isoformat()

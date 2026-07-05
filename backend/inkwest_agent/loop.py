@@ -14,6 +14,7 @@ SIGKILLs it. Tool execution reuses ``tool_execution.execute_tool_calls``
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -34,7 +35,15 @@ from app.services.message_window import truncate_messages
 from app.services.tool_execution import ToolRunResult, execute_tool_calls
 
 from .clock import current_datetime, is_datetime_tool
-from .converse import image_blocks_for_attachments, to_converse_message, to_converse_tools
+from .converse import (
+    add_cache_points,
+    image_blocks_for_attachments,
+    is_cache_placement_rejection,
+    is_cache_unsupported_rejection,
+    strip_cache_points,
+    to_converse_message,
+    to_converse_tools,
+)
 from .exec import BASH_DEFAULT_TIMEOUT, is_exec_tool, run_exec_tool
 from .mcp import MCPManager, load_mcp_config
 from .protocol import TurnSpec
@@ -42,74 +51,15 @@ from .skills import is_skill_tool, read_skill
 
 logger = logging.getLogger(__name__)
 
-# Opportunistic prompt caching: a Converse cachePoint content block. Everything
-# before a marker is a cacheable prefix. Three marker blocks (Anthropic documents 4 max):
-# system + toolConfig (the static prefix, stable across iterations AND turns) and the last
-# message (the growing history — each iteration/turn reads the previous write).
-_CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
-
-# Verbatim signature of the unsupported-model rejection, captured live 2026-07-04/05
-# (misc/bedrock-fixtures-verbatim/round3-cachepoint-placement-probe.md). The code alone is
-# NOT enough — a plain AccessDeniedException is a real IAM/permission failure and must
-# surface, not trigger a marker-strip retry.
-_CACHE_REJECTION_CODE = "AccessDeniedException"
-_CACHE_REJECTION_MARKER = "prompt caching"
+# Bedrock error messages can embed ARNs / account ids (e.g. on IAM denials). The user-facing
+# error event gets a masked copy; the verbatim message goes to stderr logs only.
+_ARN_RE = re.compile(r"arn:aws[^\s\"']*")
+_ACCOUNT_ID_RE = re.compile(r"\b\d{12}\b")
 
 
-def is_cache_unsupported_rejection(e: ClientError) -> bool:
-    """True iff Bedrock rejected the call because the model doesn't allow prompt caching.
-
-    The rejection is pre-inference (bills zero tokens), so a strip-and-retry is free.
-    """
-    err = e.response.get("Error", {})
-    return err.get("Code") == _CACHE_REJECTION_CODE and _CACHE_REJECTION_MARKER in (
-        err.get("Message") or ""
-    )
-
-
-def add_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of the built converse kwargs with cachePoint markers appended.
-
-    Pure — never mutates the input (the persisted history must stay marker-free; markers
-    are a wire concern on the converse-shaped copies only). Markers land after the system
-    blocks, as the last ``toolConfig.tools`` member (placement probed live — see the probe
-    record above), and after the last message's content.
-    """
-    out = dict(kwargs)
-    out["system"] = [*kwargs["system"], _CACHE_POINT]
-    tools = kwargs["toolConfig"].get("tools") or []
-    if tools:
-        out["toolConfig"] = {**kwargs["toolConfig"], "tools": [*tools, _CACHE_POINT]}
-    messages = kwargs["messages"]
-    if messages:
-        last = messages[-1]
-        out["messages"] = [
-            *messages[:-1],
-            {**last, "content": [*last["content"], _CACHE_POINT]},
-        ]
-    return out
-
-
-def strip_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of the converse kwargs with every cachePoint block removed.
-
-    Pure inverse of ``add_cache_points`` for the one free retry on an unsupported model —
-    sweeps system, toolConfig.tools and every message so the rebuilt call is marker-free
-    regardless of where markers were placed.
-    """
-    out = dict(kwargs)
-    out["system"] = [b for b in kwargs["system"] if "cachePoint" not in b]
-    tools = kwargs["toolConfig"].get("tools")
-    if tools:
-        out["toolConfig"] = {
-            **kwargs["toolConfig"],
-            "tools": [b for b in tools if "cachePoint" not in b],
-        }
-    out["messages"] = [
-        {**m, "content": [b for b in m["content"] if "cachePoint" not in b]}
-        for m in kwargs["messages"]
-    ]
-    return out
+def _public_error_message(message: str) -> str:
+    """Mask AWS resource identifiers before a Bedrock error reaches the transcript."""
+    return _ACCOUNT_ID_RE.sub("[account]", _ARN_RE.sub("[arn]", message))
 
 
 def _result_block(tool_use_id: str, content: str, is_error: bool) -> dict[str, Any]:
@@ -190,10 +140,14 @@ async def _run_loop(
     # usage.cacheDetails[{ttl, inputTokens}]. Not observed live yet (cachePoint exposes
     # no TTL knob; results report ttl:"5m").
     total_cache_write_1h_tokens = 0
-    # Opportunistic caching memo: markers are sent until the model rejects them with the
-    # captured signature, then stripped for the rest of this process (= this turn — the
-    # worker is spawned per turn). At most one free extra round-trip per turn.
+    # Opportunistic caching memos (per process = per turn — the worker is spawned per
+    # turn). Two tiers of degradation, both triggered by captured pre-inference rejection
+    # signatures: a PLACEMENT rejection (Nova: tools marker "extraneous") first drops only
+    # the tools marker (the model still caches via system/message markers); the
+    # no-caching-at-all rejection — or a second placement rejection — strips every marker.
+    # Each rejection flips one memo irreversibly, so retries are structurally bounded.
     cache_points_enabled = True
+    tools_marker_enabled = True
     total_tool_calls = 0
     iteration = 0
     iter_latency_ms = 0
@@ -217,7 +171,6 @@ async def _run_loop(
         if len(messages) > spec.limits.max_conversation_messages:
             messages = truncate_messages(messages, spec.limits.max_conversation_messages)
 
-        iter_start = time.monotonic()
         converse_messages = [to_converse_message(m) for m in messages]
         # Merge the P1.8 image blocks onto the original user turn (matched by object
         # identity so truncation/duplicate text can't misplace them). Skipped when
@@ -231,28 +184,51 @@ async def _run_loop(
                     *converse_messages[pos]["content"],
                 ]
 
-        converse_kwargs: dict[str, Any] = {
+        base_kwargs: dict[str, Any] = {
             "modelId": spec.invoke_target,
             "messages": converse_messages,
             "system": system_blocks,
             "toolConfig": tool_config,
             "inferenceConfig": {"maxTokens": spec.limits.max_tokens},
         }
-        if cache_points_enabled:
-            converse_kwargs = add_cache_points(converse_kwargs)
+        converse_kwargs = (
+            add_cache_points(base_kwargs, tools_marker=tools_marker_enabled)
+            if cache_points_enabled
+            else base_kwargs
+        )
 
         response: dict[str, Any] | None = None
-        # Two attempts max, structurally: the only non-terminal path (marker rejection)
-        # also flips cache_points_enabled, so a second rejection cannot loop.
-        for _ in range(2):
+        # Three attempts max, structurally: each non-terminal path (a captured cachePoint
+        # rejection, pre-inference = zero tokens billed) irreversibly flips one memo
+        # (tools marker → all markers), so the worst chain is reject-tools → reject-all →
+        # marker-free call; any further error is terminal.
+        for _ in range(3):
             try:
+                attempt_start = time.monotonic()
                 response = await asyncio.to_thread(client.converse, **converse_kwargs)
-                iter_latency_ms = int((time.monotonic() - iter_start) * 1000)
+                # Successful attempt only — rejected pre-inference round-trips excluded.
+                iter_latency_ms = int((time.monotonic() - attempt_start) * 1000)
                 break
             except ClientError as e:
+                if cache_points_enabled and is_cache_placement_rejection(e):
+                    if tools_marker_enabled:
+                        # The model caches but refuses the toolConfig marker (Nova):
+                        # keep caching via the system/message markers.
+                        logger.info(
+                            "cache_tools_marker_rejected", extra={"model_id": spec.invoke_target}
+                        )
+                        tools_marker_enabled = False
+                        converse_kwargs = add_cache_points(base_kwargs, tools_marker=False)
+                    else:
+                        # A second placement rejection: give up on markers entirely.
+                        logger.info(
+                            "cache_unsupported_model", extra={"model_id": spec.invoke_target}
+                        )
+                        cache_points_enabled = False
+                        converse_kwargs = strip_cache_points(converse_kwargs)
+                    continue
                 if cache_points_enabled and is_cache_unsupported_rejection(e):
-                    # The model doesn't allow prompt caching. The rejection is
-                    # pre-inference (zero tokens billed), so retry the same call once,
+                    # The model allows no prompt caching at all: retry the same call
                     # marker-free; the memo makes every later iteration skip markers,
                     # and a repeat rejection falls through to the error path below.
                     logger.info("cache_unsupported_model", extra={"model_id": spec.invoke_target})
@@ -260,9 +236,16 @@ async def _run_loop(
                     converse_kwargs = strip_cache_points(converse_kwargs)
                     continue
                 # Carry the usage accumulated over prior iterations: those calls completed
-                # and AWS bills them even though this turn is now failing.
+                # and AWS bills them even though this turn is now failing. The transcript
+                # gets a masked copy (ARNs/account ids); the verbatim message goes to
+                # stderr logs only.
+                raw_message = e.response.get("Error", {}).get("Message", str(e))
+                logger.warning(
+                    "converse_client_error",
+                    extra={"model_id": spec.invoke_target, "error": raw_message},
+                )
                 yield error_event(
-                    f"AI service error: {e.response.get('Error', {}).get('Message', str(e))}",
+                    f"AI service error: {_public_error_message(raw_message)}",
                     metadata=_usage_meta(),
                 )
                 return
@@ -270,7 +253,7 @@ async def _run_loop(
                 # converse() runs in a worker thread; nothing else can cancel it.
                 yield error_event(f"AI error: {str(e)}", metadata=_usage_meta())
                 return
-        if response is None:  # unreachable: the rejection path can fire at most once
+        if response is None:  # pragma: no cover — unreachable: each retry flips a memo
             yield error_event("AI service error: converse retry exhausted", metadata=_usage_meta())
             return
 

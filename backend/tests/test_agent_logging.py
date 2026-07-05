@@ -70,3 +70,15 @@ def test_setup_is_idempotent(capsys, _restore_root_logging) -> None:
     logging.getLogger("x").warning("once")
     # A single handler → exactly one rendered line, not duplicated.
     assert capsys.readouterr().err.strip().count('"event": "once"') == 1
+
+
+def test_stdlib_extra_fields_render(capsys, _restore_root_logging) -> None:
+    """The loop's cache_unsupported_model log carries model_id via stdlib ``extra`` — the
+    formatter must render such fields (ExtraAdder), not silently drop them."""
+    setup_logging(json_logs=True)
+    logging.getLogger("inkwest_agent.loop").info(
+        "cache_unsupported_model", extra={"model_id": "eu.test.model"}
+    )
+    line = json.loads(capsys.readouterr().err.strip())
+    assert line["event"] == "cache_unsupported_model"
+    assert line["model_id"] == "eu.test.model"
