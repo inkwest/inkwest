@@ -1,7 +1,9 @@
 """Tests for the standalone inkwest_agent package (loop + protocol + entrypoint)."""
 
+import copy
 import io
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -610,3 +612,483 @@ async def test_run_turn_client_error_carries_accumulated_usage():
     assert meta["input_tokens"] == 8
     assert meta["output_tokens"] == 4
     assert meta["cache_read_tokens"] == 0
+
+
+# --- Opportunistic prompt caching -------------------------------------------
+#
+# Rejection messages are VERBATIM live captures (2026-07-04/05 probes, recorded in the
+# gitignored misc/bedrock-fixtures-verbatim/round3-cachepoint-placement-probe.md) — never
+# invent variants. Two signatures, two degradation tiers:
+#   AccessDeniedException + "prompt caching"        -> model caches nothing: strip ALL markers
+#   ValidationException  + "extraneous key [cachePoint]" (Nova, toolConfig placement)
+#                                                   -> drop the TOOLS marker only, keep caching
+
+CACHE_POINT = {"cachePoint": {"type": "default"}}
+CACHE_REJECTION_MSG = (
+    "You invoked an unsupported model or your request did not allow prompt caching. "
+    "See the documentation for more information."
+)
+PLACEMENT_REJECTION_MSG = (
+    "The model returned the following errors: Malformed input request: #/toolConfig/tools/0: "
+    "extraneous key [cachePoint] is not permitted, please reformat your input and try again."
+)
+
+
+def _cache_rejection() -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": CACHE_REJECTION_MSG}}, "Converse"
+    )
+
+
+def _placement_rejection() -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "ValidationException", "Message": PLACEMENT_REJECTION_MSG}}, "Converse"
+    )
+
+
+def _assert_marker_free(kwargs: dict[str, Any]) -> None:
+    assert all("cachePoint" not in b for b in kwargs["system"])
+    assert all("cachePoint" not in b for b in kwargs["toolConfig"]["tools"])
+    assert all("cachePoint" not in b for m in kwargs["messages"] for b in m["content"])
+
+
+def _assert_markers_no_tools(kwargs: dict[str, Any]) -> None:
+    """System + last-message markers present, tools marker absent (Nova downgrade)."""
+    assert kwargs["system"][-1] == CACHE_POINT
+    assert all("cachePoint" not in b for b in kwargs["toolConfig"]["tools"])
+    assert kwargs["messages"][-1]["content"][-1] == CACHE_POINT
+
+
+@pytest.mark.asyncio
+async def test_run_turn_places_cache_points():
+    """(a) Markers land after system, as last tools member, and on the last message."""
+    client = _client([_converse_text("ok")])
+    await _collect(_spec(), client)
+
+    kw = client.converse.call_args.kwargs
+    assert kw["system"][-1] == CACHE_POINT
+    assert sum(1 for b in kw["system"] if "cachePoint" in b) == 1
+    assert kw["toolConfig"]["tools"][-1] == CACHE_POINT
+    assert sum(1 for b in kw["toolConfig"]["tools"] if "cachePoint" in b) == 1
+    # Only the LAST message carries a marker (the growing history is the cached prefix).
+    assert kw["messages"][-1]["content"][-1] == CACHE_POINT
+    assert sum(1 for m in kw["messages"] for b in m["content"] if "cachePoint" in b) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_points_follow_last_message_across_iterations():
+    """On a tool-use turn, iteration 2's marker sits on the tool-result message."""
+    client = _client(
+        [
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _converse_text("Found 3 pods."),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("pod/foo Running", False)),
+    ):
+        await _collect(_spec(), client)
+
+    for call in client.converse.call_args_list:
+        kw = call.kwargs
+        assert kw["messages"][-1]["content"][-1] == CACHE_POINT
+        assert sum(1 for m in kw["messages"] for b in m["content"] if "cachePoint" in b) == 1
+    # Iteration 2's last message is the toolResult user turn.
+    second = client.converse.call_args_list[1].kwargs["messages"][-1]
+    assert "toolResult" in second["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_points_survive_truncation():
+    """The marker rides the post-truncation last message (window slid, prefix intact)."""
+    history = [
+        {"role": "user", "content": f"question {i}"}
+        if i % 2 == 0
+        else {"role": "assistant", "content": [{"type": "text", "text": f"answer {i}"}]}
+        for i in range(8)
+    ]
+    client = _client([_converse_text("ok")])
+    await _collect(_spec(history=history, max_conversation_messages=4), client)
+
+    kw = client.converse.call_args.kwargs
+    assert len(kw["messages"]) <= 4
+    assert kw["messages"][-1]["content"][-1] == CACHE_POINT
+    assert sum(1 for m in kw["messages"] for b in m["content"] if "cachePoint" in b) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_rejection_strips_and_retries_once():
+    """(b) The captured signature → one marker-free retry, same call, no extra usage."""
+    from inkwest_agent.converse import strip_cache_points
+
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[_cache_rejection(), _converse_text("ok", tokens=(12, 7))]
+    )
+    events = await _collect(_spec(), client)
+
+    assert [e.type for e in events] == ["text_delta", "done"]
+    assert client.converse.call_count == 2
+    first = client.converse.call_args_list[0].kwargs
+    retry = client.converse.call_args_list[1].kwargs
+    _assert_marker_free(retry)
+    # The retry is the EXACT same call minus every marker — full-kwargs identity, so a
+    # regression rebuilding toolConfig/inferenceConfig/modelId on retry cannot slip past.
+    assert strip_cache_points(first) == retry
+    # The rejected call is pre-inference: only the successful call is counted.
+    meta = events[-1].metadata
+    assert meta["iterations"] == 1
+    assert meta["input_tokens"] == 12
+    assert meta["output_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_rejection_on_second_iteration_preserves_usage():
+    """A rejection mid-turn (iteration 2) retries marker-free and keeps iteration-1 usage."""
+    from inkwest_agent.converse import strip_cache_points
+
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _cache_rejection(),
+            _converse_text("Found 3 pods.", tokens=(20, 9)),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("pod/foo Running", False)),
+    ):
+        events = await _collect(_spec(), client)
+
+    assert events[-1].type == "done"
+    assert client.converse.call_count == 3
+    rejected = client.converse.call_args_list[1].kwargs
+    retry = client.converse.call_args_list[2].kwargs
+    assert strip_cache_points(rejected) == retry
+    _assert_marker_free(retry)
+    # Iteration-1 usage (8 in / 4 out) survives through the mid-turn retry.
+    meta = events[-1].metadata
+    assert meta["iterations"] == 2
+    assert meta["input_tokens"] == 28
+    assert meta["output_tokens"] == 13
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_rejection_memo_skips_markers_for_later_iterations():
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[
+            _cache_rejection(),
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _converse_text("done."),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("ok", False)),
+    ):
+        events = await _collect(_spec(), client)
+
+    assert events[-1].type == "done"
+    # 1 rejection + 1 retry + 1 second iteration; the memo prevents further marker sends.
+    assert client.converse.call_count == 3
+    _assert_marker_free(client.converse.call_args_list[2].kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_rejection_twice_surfaces_error_with_zero_usage():
+    """One full-strip retry max: a second rejection surfaces as the AI service error,
+    and both rejections being pre-inference the reported usage is all-zero."""
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=[_cache_rejection(), _cache_rejection()])
+    events = await _collect(_spec(), client)
+
+    assert client.converse.call_count == 2
+    assert events[-1].type == "error"
+    assert "AI service error" in events[-1].content
+    meta = events[-1].metadata
+    assert meta["input_tokens"] == 0
+    assert meta["output_tokens"] == 0
+    assert meta["cache_read_tokens"] == 0
+    assert meta["cache_write_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_turn_tools_marker_rejection_downgrades_and_keeps_caching():
+    """The Nova placement signature drops ONLY the tools marker — caching stays on."""
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[_placement_rejection(), _converse_text("ok", tokens=(5, 2))]
+    )
+    events = await _collect(_spec(), client)
+
+    assert [e.type for e in events] == ["text_delta", "done"]
+    assert client.converse.call_count == 2
+    first = client.converse.call_args_list[0].kwargs
+    retry = client.converse.call_args_list[1].kwargs
+    assert first["toolConfig"]["tools"][-1] == CACHE_POINT  # rejected shape had it
+    _assert_markers_no_tools(retry)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_tools_marker_memo_holds_for_later_iterations():
+    """After the placement downgrade, later iterations keep system+message markers only."""
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[
+            _placement_rejection(),
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _converse_text("done."),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("ok", False)),
+    ):
+        events = await _collect(_spec(), client)
+
+    assert events[-1].type == "done"
+    assert client.converse.call_count == 3
+    _assert_markers_no_tools(client.converse.call_args_list[2].kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_double_placement_rejection_strips_everything():
+    """A model refusing marker placement twice ends up marker-free — turn still completes."""
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[
+            _placement_rejection(),
+            _placement_rejection(),
+            _converse_text("ok", tokens=(5, 2)),
+        ]
+    )
+    events = await _collect(_spec(), client)
+
+    assert [e.type for e in events] == ["text_delta", "done"]
+    assert client.converse.call_count == 3
+    _assert_marker_free(client.converse.call_args_list[2].kwargs)
+    meta = events[-1].metadata
+    assert meta["iterations"] == 1
+    assert meta["input_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_run_turn_placement_then_unsupported_rejection_strips_everything():
+    """Mixed chain: tools-marker downgrade, then the no-caching signature → marker-free."""
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[
+            _placement_rejection(),
+            _cache_rejection(),
+            _converse_text("ok"),
+        ]
+    )
+    events = await _collect(_spec(), client)
+
+    assert events[-1].type == "done"
+    assert client.converse.call_count == 3
+    _assert_marker_free(client.converse.call_args_list[2].kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_plain_access_denied_does_not_retry():
+    """(c) AccessDeniedException WITHOUT 'prompt caching' = real IAM failure — no retry."""
+    err = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "User is not authorized"}},
+        "Converse",
+    )
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=err)
+    events = await _collect(_spec(), client)
+
+    assert client.converse.call_count == 1
+    assert events[-1].type == "error"
+    assert "not authorized" in events[-1].content
+
+
+@pytest.mark.asyncio
+async def test_run_turn_cache_message_with_other_code_does_not_retry():
+    """The match needs BOTH halves: the no-caching message under another code → no retry
+    (and the placement matcher needs its own message half, so it doesn't fire either)."""
+    err = ClientError(
+        {"Error": {"Code": "ValidationException", "Message": CACHE_REJECTION_MSG}}, "Converse"
+    )
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=err)
+    events = await _collect(_spec(), client)
+
+    assert client.converse.call_count == 1
+    assert events[-1].type == "error"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_error_event_masks_aws_identifiers():
+    """ARNs / account ids in a Bedrock error stay out of the user-facing transcript."""
+    err = ClientError(
+        {
+            "Error": {
+                "Code": "AccessDeniedException",
+                "Message": (
+                    "User arn:aws:sts::123456789012:assumed-role/inkwest/session is not "
+                    "authorized to invoke arn:aws:bedrock:eu-west-1::foundation-model/x"
+                ),
+            }
+        },
+        "Converse",
+    )
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=err)
+    events = await _collect(_spec(), client)
+
+    assert events[-1].type == "error"
+    assert "arn:aws" not in events[-1].content
+    assert "123456789012" not in events[-1].content
+    assert "[arn]" in events[-1].content
+
+
+def test_public_error_message_masks_arn_and_account():
+    masked = loop_mod._public_error_message(
+        "denied for arn:aws:iam::210987654321:role/foo (account 210987654321)"
+    )
+    assert masked == "denied for [arn] (account [account])"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_history_stays_marker_free():
+    """(d) Markers live on the converse-shaped copies only — history is never mutated."""
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": [{"type": "text", "text": "earlier answer"}]},
+    ]
+    snapshot = copy.deepcopy(history)
+    spec = _spec(history=history)
+    client = _client(
+        [
+            _converse_tool("tu-1", "kubectl_get", {"resource": "pods"}),
+            _converse_text("done."),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("ok", False)),
+    ):
+        await _collect(spec, client)
+
+    assert spec.context.history == snapshot
+    assert "cachePoint" not in json.dumps(spec.context.history)
+
+
+def test_add_cache_points_is_pure_and_places_markers():
+    from inkwest_agent.converse import add_cache_points
+
+    kwargs = {
+        "modelId": "m",
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "system": [{"text": "sys"}],
+        "toolConfig": {"tools": [{"toolSpec": {"name": "t"}}]},
+        "inferenceConfig": {"maxTokens": 5},
+    }
+    snapshot = copy.deepcopy(kwargs)
+    out = add_cache_points(kwargs)
+
+    assert kwargs == snapshot  # input untouched
+    assert out["system"][-1] == CACHE_POINT
+    assert out["toolConfig"]["tools"][-1] == CACHE_POINT
+    assert out["messages"][-1]["content"][-1] == CACHE_POINT
+    # Markers are fresh dicts per insertion — never a shared module-level object that an
+    # in-place kwargs mutation could corrupt everywhere at once.
+    assert out["system"][-1] is not out["toolConfig"]["tools"][-1]
+    assert out["system"][-1] is not add_cache_points(kwargs)["system"][-1]
+
+
+def test_add_cache_points_tools_marker_opt_out():
+    """tools_marker=False (Nova downgrade) marks system+message but leaves tools alone."""
+    from inkwest_agent.converse import add_cache_points
+
+    kwargs = {
+        "modelId": "m",
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "system": [{"text": "sys"}],
+        "toolConfig": {"tools": [{"toolSpec": {"name": "t"}}]},
+        "inferenceConfig": {"maxTokens": 5},
+    }
+    out = add_cache_points(kwargs, tools_marker=False)
+    _assert_markers_no_tools(out)
+
+
+def test_add_cache_points_skips_tools_marker_when_no_tools():
+    from inkwest_agent.converse import add_cache_points
+
+    kwargs = {
+        "modelId": "m",
+        "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        "system": [{"text": "sys"}],
+        "toolConfig": {"tools": []},
+        "inferenceConfig": {"maxTokens": 5},
+    }
+    out = add_cache_points(kwargs)
+    assert out["toolConfig"]["tools"] == []
+    assert out["system"][-1] == CACHE_POINT
+
+
+def test_strip_cache_points_removes_all_markers_and_is_pure():
+    from inkwest_agent.converse import add_cache_points, cache_point, strip_cache_points
+
+    marked = add_cache_points(
+        {
+            "modelId": "m",
+            "messages": [
+                {"role": "user", "content": [{"text": "hi"}]},
+                {"role": "assistant", "content": [{"text": "yo"}, cache_point()]},
+            ],
+            "system": [{"text": "sys"}],
+            "toolConfig": {"tools": [{"toolSpec": {"name": "t"}}]},
+            "inferenceConfig": {"maxTokens": 5},
+        }
+    )
+    snapshot = copy.deepcopy(marked)
+    out = strip_cache_points(marked)
+
+    assert marked == snapshot  # input untouched
+    _assert_marker_free(out)
+    # Idempotent — stripping a stripped call changes nothing.
+    assert strip_cache_points(out) == out
+
+
+def test_is_cache_unsupported_rejection_matches_both_halves():
+    from inkwest_agent.converse import is_cache_unsupported_rejection
+
+    assert is_cache_unsupported_rejection(_cache_rejection())
+    assert not is_cache_unsupported_rejection(
+        ClientError({"Error": {"Code": "AccessDeniedException", "Message": "denied"}}, "Converse")
+    )
+    assert not is_cache_unsupported_rejection(
+        ClientError(
+            {"Error": {"Code": "ValidationException", "Message": CACHE_REJECTION_MSG}}, "Converse"
+        )
+    )
+    # A malformed error payload (no Error/Message) must not crash the matcher.
+    assert not is_cache_unsupported_rejection(ClientError({}, "Converse"))
+
+
+def test_is_cache_placement_rejection_matches_both_halves():
+    from inkwest_agent.converse import is_cache_placement_rejection
+
+    assert is_cache_placement_rejection(_placement_rejection())
+    # Same message under the other code, or another ValidationException → no match.
+    assert not is_cache_placement_rejection(
+        ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": PLACEMENT_REJECTION_MSG}},
+            "Converse",
+        )
+    )
+    assert not is_cache_placement_rejection(
+        ClientError(
+            {"Error": {"Code": "ValidationException", "Message": "Malformed input request"}},
+            "Converse",
+        )
+    )
+    assert not is_cache_placement_rejection(ClientError({}, "Converse"))

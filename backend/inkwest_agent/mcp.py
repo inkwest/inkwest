@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from typing import Any
 
 from app.tools.definitions import get_tool_definitions
@@ -36,6 +37,22 @@ from app.tools.definitions import get_tool_definitions
 from .converse import fit_tool_name
 
 logger = logging.getLogger(__name__)
+
+# Exception text from server connects/config parsing can embed credential material
+# (Authorization headers, apikey/token query params from upstream URLs). Now that the
+# log formatter renders ``extra`` fields (ExtraAdder), mask the usual carriers and cap
+# length before an error string reaches stderr logs.
+_ERROR_SECRET_RE = re.compile(
+    r"(?i)\b(?:authorization:\s*\S+(?:\s+\S+)?|bearer\s+\S+|api[_-]?key=\S+|token=\S+)"
+)
+_ERROR_TEXT_MAX = 300
+
+
+def _safe_error(exc: object) -> str:
+    """Exception text safe for structured logs: secret-carriers masked, length capped."""
+    text = _ERROR_SECRET_RE.sub("[redacted]", str(exc))
+    return text[:_ERROR_TEXT_MAX]
+
 
 # Prefix + separator for advertised MCP tool names: ``mcp__<server>__<tool>`` (Claude
 # Code parity — keeps cross-engine replayed history coherent).
@@ -79,7 +96,7 @@ def load_mcp_config(path: str | None) -> dict[str, dict[str, Any]]:
     except FileNotFoundError:
         return {}
     except (json.JSONDecodeError, OSError) as e:
-        logger.warning("mcp_config_unreadable", extra={"path": path, "error": str(e)})
+        logger.warning("mcp_config_unreadable", extra={"path": path, "error": _safe_error(e)})
         return {}
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     if not isinstance(servers, dict):
@@ -186,7 +203,7 @@ class MCPManager:
         for key, result in zip(self._servers, results, strict=True):
             if isinstance(result, Exception):
                 logger.warning(
-                    "mcp_server_connect_failed", extra={"server": key, "error": str(result)}
+                    "mcp_server_connect_failed", extra={"server": key, "error": _safe_error(result)}
                 )
 
     async def _connect_one(self, key: str, server_def: dict[str, Any]) -> None:

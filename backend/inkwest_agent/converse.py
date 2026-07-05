@@ -20,6 +20,7 @@ from typing import Any
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from app.tools.definitions import get_tool_definitions
 
@@ -401,3 +402,95 @@ def to_converse_tools(
     if mcp_tools:
         tools.extend(mcp_tools)
     return {"tools": tools}
+
+
+# --- Opportunistic prompt caching --------------------------------------------
+# A cachePoint is a Converse content block: everything before a marker is a cacheable
+# prefix. Placement + rejection signatures were captured live (2026-07-04/05, gitignored
+# local record misc/bedrock-fixtures-verbatim/round3-cachepoint-placement-probe.md; the
+# messages are quoted verbatim in tests). Matching a CODE alone is never enough — a plain
+# AccessDeniedException is a real IAM failure and must surface, and ValidationException
+# covers many malformed-request causes; both matchers therefore require the code AND a
+# message half.
+_CACHE_REJECTION_CODE = "AccessDeniedException"
+_CACHE_REJECTION_MARKER = "prompt caching"
+# Nova (cache-capable) refuses ONLY the toolConfig placement, with a different signature —
+# so this rejection downgrades to system+message markers instead of disabling caching.
+_PLACEMENT_REJECTION_CODE = "ValidationException"
+_PLACEMENT_REJECTION_MARKER = "extraneous key [cachePoint]"
+
+
+def cache_point() -> dict[str, Any]:
+    """A fresh cachePoint content block (fresh dict per insertion — a shared module
+    constant would corrupt every occurrence if a kwargs consumer ever mutated one)."""
+    return {"cachePoint": {"type": "default"}}
+
+
+def _error_parts(e: ClientError) -> tuple[str, str]:
+    err = e.response.get("Error", {})
+    return err.get("Code") or "", err.get("Message") or ""
+
+
+def is_cache_unsupported_rejection(e: ClientError) -> bool:
+    """True iff Bedrock rejected the call because the model allows no prompt caching.
+
+    The rejection is pre-inference (bills zero tokens), so a marker-free retry is free.
+    """
+    code, message = _error_parts(e)
+    return code == _CACHE_REJECTION_CODE and _CACHE_REJECTION_MARKER in message
+
+
+def is_cache_placement_rejection(e: ClientError) -> bool:
+    """True iff Bedrock refused a cachePoint's PLACEMENT (not caching itself).
+
+    Captured on Nova: the tools marker is "extraneous", while system/message markers
+    cache fine — also pre-inference, so retrying without the refused marker is free.
+    """
+    code, message = _error_parts(e)
+    return code == _PLACEMENT_REJECTION_CODE and _PLACEMENT_REJECTION_MARKER in message
+
+
+def add_cache_points(kwargs: dict[str, Any], *, tools_marker: bool = True) -> dict[str, Any]:
+    """Return a copy of built converse kwargs with cachePoint markers appended.
+
+    Pure — never mutates the input (persisted history must stay marker-free; markers are
+    a wire concern on the converse-shaped copies only). Markers land after the system
+    blocks, as the last ``toolConfig.tools`` member (skippable via ``tools_marker=False``
+    for models like Nova that cache but refuse that placement), and after the last
+    message's content.
+    """
+    out = {**kwargs}
+    out["system"] = [*kwargs["system"], cache_point()]
+    tools = kwargs["toolConfig"].get("tools") or []
+    if tools and tools_marker:
+        out["toolConfig"] = {**kwargs["toolConfig"], "tools": [*tools, cache_point()]}
+    messages = kwargs["messages"]
+    if messages:
+        last = messages[-1]
+        out["messages"] = [
+            *messages[:-1],
+            {**last, "content": [*last["content"], cache_point()]},
+        ]
+    return out
+
+
+def strip_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of converse kwargs with every cachePoint block removed.
+
+    Pure inverse of ``add_cache_points`` for the free retry on an unsupported model —
+    sweeps system, toolConfig.tools and every message so the rebuilt call is marker-free
+    regardless of where markers were placed.
+    """
+    out = {**kwargs}
+    out["system"] = [b for b in kwargs["system"] if "cachePoint" not in b]
+    tools = kwargs["toolConfig"].get("tools")
+    if tools:
+        out["toolConfig"] = {
+            **kwargs["toolConfig"],
+            "tools": [b for b in tools if "cachePoint" not in b],
+        }
+    out["messages"] = [
+        {**m, "content": [b for b in m["content"] if "cachePoint" not in b]}
+        for m in kwargs["messages"]
+    ]
+    return out

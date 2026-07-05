@@ -796,3 +796,15 @@ async def test_open_connects_servers_concurrently(monkeypatch):
     await mgr.open()
     # Both started before either finished → truly concurrent, not serial.
     assert order[0][0] == "start" and order[1][0] == "start"
+
+
+def test_safe_error_masks_secret_carriers_and_caps_length():
+    """Exception text reaching structured logs (rendered since ExtraAdder) must not leak
+    credential material from upstream URLs/headers, and stays bounded."""
+    masked = mcp_mod._safe_error(
+        Exception("401 for https://mcp.example?apikey=sk-secret123 (Authorization: Bearer tok.abc)")
+    )
+    assert "sk-secret123" not in masked
+    assert "tok.abc" not in masked
+    assert "[redacted]" in masked
+    assert len(mcp_mod._safe_error(Exception("x" * 1000))) == 300

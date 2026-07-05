@@ -243,3 +243,28 @@ async def test_loop_emits_status_when_image_skipped_for_text_only_model(tmp_path
     # No image block reached Converse (text-only gate).
     user_content = client.converse.call_args.kwargs["messages"][-1]["content"]
     assert all("image" not in b for b in user_content)
+
+
+@pytest.mark.asyncio
+async def test_loop_image_blocks_and_cache_marker_coexist_on_last_message(tmp_path):
+    """Image merge and the cachePoint marker both touch the last message (
+    open-point 3): images must stay in front, the marker last — deterministic ordering
+    so the cached prefix isn't silently broken."""
+    p = tmp_path / "diagram.png"
+    p.write_bytes(_PNG)
+    spec = parse_turn_spec(
+        {
+            **_BASE_SPEC,
+            "input_modalities": ["TEXT", "IMAGE"],
+            "attachments": [
+                {"path": str(p), "content_type": "image/png", "filename": "diagram.png"}
+            ],
+        }
+    )
+    client = _client([_final("looks fine")])
+    events = await _collect(spec, client)
+    assert events[-1].type == "done"
+    user_content = client.converse.call_args.kwargs["messages"][-1]["content"]
+    assert user_content[0] == {"image": {"format": "png", "source": {"bytes": _PNG}}}
+    assert user_content[-1] == {"cachePoint": {"type": "default"}}
+    assert any(b.get("text") == spec.user_message for b in user_content)
