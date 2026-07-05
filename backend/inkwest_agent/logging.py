@@ -32,6 +32,9 @@ def setup_logging(*, json_logs: bool | None = None, level: str = "INFO") -> None
     shared: list = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
+        # Surface stdlib ``extra={...}`` fields (loop/mcp log structured context that
+        # way); without this, foreign records silently drop them from the output.
+        structlog.stdlib.ExtraAdder(),
         structlog.processors.TimeStamper(fmt="iso"),
     ]
     renderer: structlog.types.Processor = (

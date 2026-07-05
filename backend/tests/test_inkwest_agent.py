@@ -860,3 +860,22 @@ def test_is_cache_unsupported_rejection_matches_both_halves():
     )
     # A malformed error payload (no Error/Message) must not crash the matcher.
     assert not loop_mod.is_cache_unsupported_rejection(ClientError({}, "Converse"))
+
+
+def test_setup_logging_renders_stdlib_extra_fields(monkeypatch):
+    """The cache_unsupported_model log carries model_id via stdlib ``extra`` — the
+    formatter must render such fields (ExtraAdder), not silently drop them."""
+    import io
+    import logging as stdlib_logging
+
+    from inkwest_agent.logging import setup_logging
+
+    buf = io.StringIO()
+    monkeypatch.setattr("sys.stderr", buf)
+    setup_logging(json_logs=True)
+    stdlib_logging.getLogger("inkwest_agent.loop").info(
+        "cache_unsupported_model", extra={"model_id": "eu.test.model"}
+    )
+    line = json.loads(buf.getvalue().strip())
+    assert line["event"] == "cache_unsupported_model"
+    assert line["model_id"] == "eu.test.model"
