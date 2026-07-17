@@ -245,12 +245,6 @@ export function BudgetsPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // A budget with no cap is a no-op that, for a user/role scope, silently exempts
-    // the target from the default cap — almost always a mistake. Require one cap.
-    if (formData.max_cost_usd == null && formData.max_total_tokens == null) {
-      setFormError('Set at least one cap — a cost cap (USD) or a token cap.');
-      return;
-    }
     setFormError(null);
     try {
       if (editing) {
@@ -601,6 +595,16 @@ export function BudgetsPage() {
             }
             helperText="Max total tokens per period. Leave empty for no token cap."
           />
+
+          {formData.max_cost_usd == null && formData.max_total_tokens == null && (
+            // A no-cap budget is valid but subtle: it tracks usage only, and — because a
+            // matching budget row takes precedence — exempts the target from the default
+            // monthly cap. Surface that instead of blocking it.
+            <div className="bg-amber-900/30 border border-amber-700 text-amber-400 px-4 py-2 rounded text-sm">
+              No caps set — this budget will only track usage and exempts its target from the
+              default monthly cap.
+            </div>
+          )}
 
           <Select
             label="Period"

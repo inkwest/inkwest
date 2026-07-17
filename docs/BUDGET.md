@@ -43,8 +43,11 @@
   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
   call_count, last_call}`, newest first; filters `session_id`, `days`, `limit`.
 - **Budgets** (`budgets` table): optional Global / Role / User limits. A budget
-  may cap cost (`max_cost_usd`), tokens (`max_total_tokens`), or both — and both
-  are evaluated (whichever is reached first blocks).
+  may cap cost (`max_cost_usd`), tokens (`max_total_tokens`), both — and both
+  are evaluated (whichever is reached first blocks) — or **neither**: a no-cap
+  budget imposes nothing, but because a matching budget row wins the resolution
+  below, it **exempts its target from the default monthly cap** (track-only /
+  unlimited). The admin form surfaces this with an inline notice.
 
 > **Cutover 2026-07-04**: usage rows recorded before this date predate
 > cache-aware accounting — they under-count cache-heavy turns (observed ~10×
@@ -63,7 +66,8 @@ sees an error message in chat; nothing is spent.
 
 - **Resolution order** for the applicable limit: user budget > role budget >
   global budget > the per-user default monthly cap (settings). The first match
-  wins.
+  wins — including a **no-cap** budget, which allows everything and stops the
+  fallthrough to the default cap (the deliberate way to exempt a user/role).
 - **Post-hoc cost**: a turn's real cost is only known after it runs, so the cap
   blocks the *next* turn once cumulative spend has reached the limit. Overshoot
   is bounded to a single turn.
