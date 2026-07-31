@@ -24,6 +24,11 @@ engine = create_async_engine(
     max_overflow=20,
     pool_recycle=300,
     pool_timeout=10,
+    # Pin search_path at connection startup (asyncpg sends it in the startup packet)
+    # so unqualified table names resolve to the app's schema regardless of the DB
+    # role name — a prod role such as `app_<name>` != schema `inkwest`, so the default
+    # `"$user", public` misses it. `public` kept for extensions/functions homed there.
+    connect_args={"server_settings": {"search_path": f"{settings.db_schema},public"}},
 )
 
 # Create async session maker

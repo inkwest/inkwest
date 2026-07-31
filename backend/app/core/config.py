@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/inkwest"
 
+    # Postgres schema the app's tables live in; core.database pins it onto search_path.
+    db_schema: str = "inkwest"
+
     # DEPRECATED, ignored — TEMPORARY migration shim. AI_PROVIDER was removed (dispatch
     # is engine-only — see AGENTIC_ENGINES). Kept only as an accepted-but-unused field
     # so a stale value lingering in a .env file, compose env_file, or k8s manifest does

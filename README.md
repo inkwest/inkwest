@@ -191,8 +191,10 @@ Database migrations run separately (init container / Job pattern):
 docker run --rm -e DATABASE_URL=... --entrypoint /app/entrypoint-migrate.sh <image>
 ```
 
-Note: migrations create tables in the `inkwest` PostgreSQL schema — the app role
-needs it on its search_path (`ALTER ROLE <user> SET search_path = inkwest, public`).
+Note: migrations create tables in the `inkwest` PostgreSQL schema. The app pins its
+search_path to that schema at connection time (`DB_SCHEMA`, default `inkwest`), so no
+role setup is required. The `ALTER ROLE <user> SET search_path = inkwest, public` step
+is only needed for clients that reach the DB outside the app (e.g. manual `psql`).
 
 Dev is unchanged: `docker-compose.yml` runs vite (hot reload) + uvicorn `--reload`
 as two containers from `frontend/Dockerfile` and `backend/Dockerfile`.
