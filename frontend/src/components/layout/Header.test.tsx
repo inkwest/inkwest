@@ -7,6 +7,7 @@ import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
+import { useChatStore } from '@/store/chat';
 import { usePreferencesStore } from '@/store/preferences';
 import { useSettingsUi } from '@/store/settingsUi';
 import * as api from '@/services/api';
@@ -144,6 +145,67 @@ describe('Header', () => {
     renderHeader();
     expect(screen.getByTitle(/cache read: 27,082/i)).toHaveTextContent('27.1k');
     expect(screen.getByTitle(/cache write: 3,242/i)).toHaveTextContent('3.2k');
+  });
+
+  // --- context-pressure gauge -------------------------------------------------
+  function primeContextSession(contextWindow: number | null) {
+    useSessionsStore.setState({
+      currentSession: {
+        id: 's1',
+        cluster_id: 'c1',
+        title: 'Test',
+        model: 'claude-sonnet-5',
+        messages: [],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as never,
+    });
+    useConfigStore.setState({
+      config: {
+        model: 'claude-sonnet-5',
+        default_engine: 'claude-cli',
+        engines: ['claude-cli'],
+        attachments_enabled: false,
+        available_models: [
+          {
+            id: 'claude-sonnet-5',
+            label: 'Sonnet 5',
+            legacy: false,
+            engines: ['claude-cli'],
+            input_modalities: [],
+            context_window: contextWindow,
+          },
+        ],
+      },
+      fetchConfig: vi.fn(),
+    });
+    useChatStore.setState({
+      messages: [
+        {
+          id: 'm1',
+          session_id: 's1',
+          role: 'assistant',
+          content: 'done',
+          input_tokens: 5000,
+          cache_read_tokens: 120000,
+          cache_write_tokens: 3000,
+          created_at: new Date().toISOString(),
+        },
+      ] as never,
+    });
+  }
+
+  it('shows the context gauge when the model has a known window', () => {
+    primeContextSession(200_000);
+    renderHeader();
+    // 5000 fresh + 120000 cache-read + 3000 cache-write = 128000 of 200000 = 64%
+    expect(screen.getByTitle(/128,000 of 200,000 tokens \(64%\)/i)).toHaveTextContent('64%');
+  });
+
+  it('hides the context gauge when the window is unknown', () => {
+    primeContextSession(null);
+    renderHeader();
+    expect(screen.queryByTitle(/of .* tokens/i)).not.toBeInTheDocument();
   });
 
   it('shows connection status when session is active', () => {

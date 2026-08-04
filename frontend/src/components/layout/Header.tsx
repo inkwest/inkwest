@@ -11,8 +11,11 @@ import { useUpdateStore } from '@/store/update';
 import { ConnectionStatus } from '@/components/chat/ConnectionStatus';
 import { SettingsModal } from '@/components/settings/SettingsModal';
 import { useSettingsUi, isSettingsTab } from '@/store/settingsUi';
-import { devSwitchUser } from '@/services/api';
+import { devSwitchUser, modelContextWindow } from '@/services/api';
 import { TokenGlyphs } from '@/components/ui/TokenGlyphs';
+import { ContextGauge } from '@/components/ui/ContextGauge';
+import { contextUsage } from '@/lib/contextUsage';
+import { useChatStore } from '@/store/chat';
 
 export function Header() {
   const navigate = useNavigate();
@@ -30,6 +33,16 @@ export function Header() {
   // fetchConfig still primes the shared config (model picker, attachments gate) once
   // the user is authenticated, even though the header no longer renders a model badge.
   const { fetchConfig } = useConfigStore();
+  const config = useConfigStore((s) => s.config);
+  // Context occupancy comes from the transcript's last reported turn, so it needs the
+  // messages the chat already holds — not a separate fetch.
+  const messages = useChatStore((s) => s.messages);
+  const contextGauge = currentSession
+    ? contextUsage(
+        messages,
+        modelContextWindow(config?.available_models ?? [], currentSession.model ?? config?.model ?? null)
+      )
+    : null;
   const version = useUpdateStore((s) => s.loadedVersion);
   const [showMenu, setShowMenu] = useState(false);
   // Settings modal open-state lives in a store so deep components (e.g. the MCP panel) can open
@@ -130,6 +143,9 @@ export function Header() {
             cacheWrite={currentSession.total_cache_write_tokens || 0}
           />
         ) : null}
+        {contextGauge && (
+          <ContextGauge usage={contextGauge} className="text-xs hidden sm:inline-flex" />
+        )}
         {currentSession && <ConnectionStatus />}
 
         <div className="relative" ref={menuRef}>

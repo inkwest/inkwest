@@ -76,6 +76,9 @@ async def test_app_config_reflects_model_settings(
             "legacy": True,
             "engines": both,
             "input_modalities": [],
+            # Older Claude generations have no published context window, so the gauge
+            # stays off for them rather than assuming one (see context_window.py).
+            "context_window": None,
         },
         {
             "id": "claude-sonnet-4-20250514",
@@ -83,5 +86,8 @@ async def test_app_config_reflects_model_settings(
             "legacy": True,
             "engines": both,
             "input_modalities": [],
+            # Older Claude generations have no published context window, so the gauge
+            # stays off for them rather than assuming one (see context_window.py).
+            "context_window": None,
         },
     ]
