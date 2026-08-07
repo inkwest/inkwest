@@ -120,6 +120,27 @@ honored across **all** AI providers:
 **literal token replacement** (not `str.format`) so an admin custom prompt
 containing stray braces (e.g. JSON `{"k": "v"}`) never raises.
 
+### Compaction summary block
+
+On a session that has been compacted, every orchestrator appends one last block
+to the **assembled** prompt via
+`compaction.with_compaction_summary(db, session_id, system_prompt)`: the summary
+of everything before the boundary, plus the path of the `/workdir` archive the
+model can grep for the details the summary dropped.
+
+- It goes on the assembled prompt, never into the base persona — it is runtime
+  state, and admins manage the persona.
+- The summary is **model-authored, hence untrusted**: it is fenced in
+  `<compaction_summary untrusted="true">` and capped, so a tool result cannot
+  smuggle instructions into system-prompt authority. Any occurrence of the tag
+  inside the summary is renamed (`prompts.fence`) — without that, a summary
+  closing its own fence promotes the rest of itself to system authority.
+- It is byte-stable for the life of a boundary, so the agent loop's prompt cache
+  does not churn between turns.
+- Because the CLI freezes its system prompt at the first turn of a CLI session,
+  compaction clears `sessions.cli_session_id` — the next turn starts a fresh CLI
+  session that actually sees the new block.
+
 ## Frontend
 
 ### Management screen (admin)

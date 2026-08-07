@@ -17,10 +17,65 @@ from sqlalchemy.orm import aliased
 
 from app.models.message import Message
 from app.models.session import Session
-from app.services.message_window import prune_orphan_tool_calls
+from app.services.message_window import merge_consecutive_roles, prune_orphan_tool_calls
 from app.services.pubsub import notify
 
 logger = logging.getLogger(__name__)
+
+
+# A compaction boundary is a session-event row (so it renders as an inline note and stays
+# out of the model transcript like every other event) whose subject/action mark where the
+# replayed transcript starts. Policy lives in app.services.compaction; the shape and the
+# predicate live here, with the other row shapes.
+COMPACTION_SUBJECT = "context"
+COMPACTION_ACTION = "compacted"
+
+
+def is_compaction_boundary(msg: Message) -> bool:
+    """Whether a row is a compaction boundary that may cut the replayed transcript.
+
+    A boundary carrying no usable summary is NOT one: slicing at it would hand the model an
+    empty transcript with nothing put back — total amnesia, silently. The same predicate
+    gates both the slice and the summary injection so the two can never disagree.
+    """
+    content = msg.content
+    if not (
+        msg.role == "system"
+        and isinstance(content, dict)
+        and content.get("type") == "session_event"
+        and content.get("subject") == COMPACTION_SUBJECT
+        and content.get("action") == COMPACTION_ACTION
+    ):
+        return False
+    summary = content.get("summary")
+    return isinstance(summary, str) and bool(summary.strip())
+
+
+def last_boundary_index(rows: list[Message]) -> int | None:
+    """Index of the last compaction boundary in a chronological row list, or None.
+
+    The one rule that decides what the model sees; kept in a single place so the slicer and
+    the compaction policy cannot drift apart.
+    """
+    return max((i for i, msg in enumerate(rows) if is_compaction_boundary(msg)), default=None)
+
+
+async def delete_messages(
+    db: AsyncSession, session_id: str | uuid.UUID, message_ids: list[uuid.UUID]
+) -> None:
+    """Hard-delete rows by id within one session (undoes an abandoned compaction).
+
+    ``session_id`` is not redundant: a bare id list makes the helper able to delete across
+    conversations, which is one careless caller away from an IDOR-shaped data loss.
+    """
+    if not message_ids:
+        return
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+    await db.execute(
+        delete(Message).where(Message.session_id == session_id, Message.id.in_(message_ids))
+    )
+    await db.commit()
 
 
 async def get_session_messages(
@@ -45,7 +100,14 @@ async def get_session_messages(
     result = await db.execute(
         select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
     )
-    messages = result.scalars().all()
+    rows = list(result.scalars().all())
+
+    # Compaction boundary: only the rows AFTER the last one are replayed to the model —
+    # everything before it is represented by the summary the boundary carries, injected
+    # into the system prompt (see app.services.compaction). Sliced by INDEX, not by
+    # timestamp, so rows written in the same instant can't land on the wrong side.
+    last_boundary = last_boundary_index(rows)
+    messages = rows if last_boundary is None else rows[last_boundary + 1 :]
 
     formatted_messages = []
     for msg in messages:
@@ -76,6 +138,9 @@ async def get_session_messages(
     # Strip dangling tool_use / orphan tool_result left by a turn interrupted
     # mid-tool — replaying them would make the AI API reject the whole request.
     formatted_messages = prune_orphan_tool_calls(formatted_messages)
+    # Pruning can leave two same-role neighbours (and a compaction/retry can create them
+    # directly); both APIs reject a non-alternating transcript, so normalize last.
+    formatted_messages = merge_consecutive_roles(formatted_messages)
 
     logger.debug(f"Loaded {len(formatted_messages)} messages for session {session_id}")
     return formatted_messages
@@ -177,7 +242,9 @@ async def save_session_event(
     subject: str,
     action: str,
     targets: list[dict[str, Any]] | None = None,
-) -> None:
+    payload: dict[str, Any] | None = None,
+    strict: bool = False,
+) -> Message | None:
     """Record a session activity event as a fully-structured 'system' message.
 
     Stores subject-agnostic, machine-readable data — ``{type, subject, action, targets}``
@@ -187,21 +254,29 @@ async def save_session_event(
     conversation export is a plain ``SELECT`` with no string parsing.
 
     Surfaced inline in the conversation as a faded note. Excluded from the model's
-    context (see :func:`get_session_messages`). Best-effort — a failure here must never
-    break the change it accompanies.
+    context (see :func:`get_session_messages`).
+
+    ``payload`` merges extra top-level keys for events that carry more than a target list
+    (the compaction boundary's ``summary``). ``strict`` re-raises instead of swallowing:
+    a note about a change is best-effort, but an event the replay logic depends on is not.
     """
     content: dict[str, Any] = {"type": "session_event", "subject": subject, "action": action}
     if targets:
         content["targets"] = targets
+    if payload:
+        content.update(payload)
     try:
         # Own session: a failed write's rollback must not expire the caller's loaded rows.
         async with AsyncSession(db.bind, expire_on_commit=False) as own:
-            await save_message(own, session_id, "system", content)
+            return await save_message(own, session_id, "system", content)
     except Exception:  # noqa: BLE001 — the conversation note is non-critical
         logger.warning(
             "session_event_persist_failed",
             extra={"subject": subject, "action": action, "session_id": str(session_id)},
         )
+        if strict:
+            raise
+        return None
 
 
 # Shown on turns that never produced a reply — killed mid-flight by a server

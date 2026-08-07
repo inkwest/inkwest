@@ -24,6 +24,8 @@ It also solves the permissions problem. Instead of handing out broad access "jus
 
 ### Chat UI Features
 
+- **Context gauge**: Header meter showing how full the model's context window is, from the last turn's reported prompt size (amber past 75%, red past 90%; hidden for models with no published window)
+- **Compact context**: Summarize the conversation so far and continue from the summary — the full transcript stays visible, and the assistant can still grep the archived original. Offered past 75%; costs one billed turn; conversation owner only
 - **Inline tool execution**: Commands appear inline with reasoning text as they execute
 - **Stop mid-stream**: Cancel AI processing at any point; partial response preserved with interruption notice
 - **Smart tool cards**: Collapsible with description in title, auto-expand on run, auto-collapse on complete

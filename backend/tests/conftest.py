@@ -116,6 +116,32 @@ def _frozen_model_catalog():
     model_catalog._last_fetch_failed = False
 
 
+def empty_execute_result() -> MagicMock:
+    """An ``execute()`` result that yields no rows, for whatever shape the caller reads.
+
+    Without it a bare ``AsyncMock`` returns a MagicMock whose ``.scalars()`` is not
+    iterable, so every query in the code under test raises — and a caller that degrades
+    gracefully on failure (``with_compaction_summary``) then silently exercises only its
+    fail-open path.
+    """
+    result = MagicMock()
+    result.scalars.return_value = []
+    result.scalar_one_or_none.return_value = None
+    result.all.return_value = []
+    return result
+
+
+def mock_session(**overrides: Any) -> AsyncMock:
+    """A mock DB session whose queries return nothing instead of raising."""
+    db = AsyncMock()
+    db.commit = AsyncMock()
+    db.execute = AsyncMock(return_value=empty_execute_result())
+    db.scalar = AsyncMock(return_value=None)
+    for name, value in overrides.items():
+        setattr(db, name, value)
+    return db
+
+
 @pytest.fixture
 def mock_db() -> AsyncMock:
     """Mock async database session."""
@@ -127,6 +153,7 @@ def mock_db() -> AsyncMock:
     # fall back cleanly; tests that need a row override these explicitly.
     db.get = AsyncMock(return_value=None)
     db.scalar = AsyncMock(return_value=None)
+    db.execute = AsyncMock(return_value=empty_execute_result())
     return db
 
 

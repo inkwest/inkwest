@@ -3,7 +3,7 @@ import { useChatStore } from '@/store/chat';
 import { useSessionsStore } from '@/store/sessions';
 import { ChatWebSocket } from '@/services/websocket';
 import { ChatEvent } from '@/types/events';
-import { Attachment } from '@/types/api';
+import { Attachment, Message } from '@/types/api';
 import { useConnectorsStore } from '@/store/connectors';
 import { useMcpStore } from '@/store/mcp';
 import { ConnectorName } from '@/types/connectors';
@@ -239,6 +239,22 @@ export function useWebSocket(sessionId: string) {
         break;
       }
 
+      case 'context_compacted':
+        // The boundary row was just committed server-side. Append it now so the divider
+        // (and the fact that the model's memory restarts here) is visible without a
+        // reload; on reload the same row arrives from history under the same id, which is
+        // why addMessage dedupes on it. The content is the persisted row, shipped verbatim.
+        if (event.metadata?.id && event.metadata.content) {
+          useChatStore.getState().addMessage({
+            id: String(event.metadata.id),
+            session_id: sessionId,
+            role: 'system',
+            content: event.metadata.content as Message['content'],
+            created_at: String(event.metadata.created_at ?? new Date().toISOString()),
+          });
+        }
+        break;
+
       case 'mcp_tool_ask':
         // The proxy is holding a tool call on this user's decision — stack an ask banner.
         if (event.ask_id && event.mcp_key && event.tool) {
@@ -376,11 +392,19 @@ export function useWebSocket(sessionId: string) {
     setIsStreaming(true);
   }, [clearMessageError, setIsStreaming]);
 
+  // Compaction streams like any other turn (the summary renders as an assistant bubble),
+  // so the streaming flag flips exactly as it does for a user message.
+  const compactContext = useCallback(() => {
+    if (!wsRef.current?.sendCompact()) return;
+    setIsStreaming(true);
+  }, [setIsStreaming]);
+
   return {
     sendMessage,
     stopStreaming,
     sendTyping,
     retryMessage,
+    compactContext,
     isConnected: useChatStore((s) => s.isConnected),
     isStreaming: useChatStore((s) => s.isStreaming),
     error: useChatStore((s) => s.error),

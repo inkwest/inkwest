@@ -577,73 +577,25 @@ def truncate_kubectl_output(output: str, resource_type: str) -> str:
 
 ## Token Management
 
-Long conversations can exceed context limits:
+Long conversations walk into the model's context window. Inkwest does not estimate tokens
+locally (no tokenizer, no `count_tokens` call): the prompt size of a turn is what the engine
+already reported on the wire — `input_tokens + cache_read_tokens + cache_write_tokens` on the
+last assistant row — and the frontend renders that against the model's context window
+(`app/services/context_window.py`, `frontend/src/lib/contextUsage.ts`).
 
-```python
-import tiktoken
+Reclaiming context is **compaction** (`app/services/compaction.py`), not truncation:
 
-MAX_CONTEXT_TOKENS = 180000  # Leave room for response
-SUMMARY_THRESHOLD = 150000
+1. The pre-boundary transcript is dumped to `/workdir/.inkwest/history-<n>.md` in the
+   conversation's own workdir.
+2. A normal, billed turn on the session's engine writes a summary
+   (`prompts.get_compaction_prompt`).
+3. A `role='system'` boundary row commits, carrying that summary.
+4. `get_session_messages` then replays only the rows after the boundary, and the summary rides
+   the assembled system prompt (fenced as untrusted, see `docs/SYSTEM_PROMPTS.md`).
 
-def count_tokens(messages: list[dict]) -> int:
-    """Estimate token count for messages."""
-    # Rough estimation - actual count depends on model
-    encoder = tiktoken.encoding_for_model("gpt-4")  # Similar to Claude
-
-    total = 0
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            total += len(encoder.encode(content))
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    total += len(encoder.encode(str(block)))
-
-    return total
-
-
-async def manage_context(
-    messages: list[dict],
-    client: Anthropic
-) -> list[dict]:
-    """
-    If conversation is too long, summarize older messages.
-    """
-    token_count = count_tokens(messages)
-
-    if token_count < SUMMARY_THRESHOLD:
-        return messages
-
-    # Find a good split point (keep recent messages intact)
-    split_index = len(messages) // 2
-    old_messages = messages[:split_index]
-    recent_messages = messages[split_index:]
-
-    # Ask Claude to summarize the old part
-    summary_response = await client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{
-            "role": "user",
-            "content": f"""Summarize this conversation history concisely,
-            preserving key findings and context:
-
-            {json.dumps(old_messages, indent=2)}"""
-        }]
-    )
-
-    summary = summary_response.content[0].text
-
-    # Return condensed history
-    return [
-        {
-            "role": "user",
-            "content": f"[Previous conversation summary: {summary}]"
-        },
-        *recent_messages
-    ]
-```
+Nothing is deleted: Postgres keeps every row, the UI renders the whole thread with a divider,
+and the model recalls details by grepping the archive with the file tools it already has. See
+`specs/003-context-pressure.md`.
 
 ## Security: Input Validation
 

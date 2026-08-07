@@ -115,6 +115,13 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
 - **"Global" budget = per-user default**, not a shared org-wide pool: its usage
   is summed per-user, so each user gets a quota of that size. (A true org-wide
   pool would query usage with `user_id=None`.)
+- **Compaction is a billed turn.** "Compact context" runs the session's own engine
+  through the normal path, so it passes the same budget check and is metered like
+  any other turn (broker row or engine row — no accounting hole). It also
+  **invalidates the prompt cache**: the boundary changes the prefix, so the turn
+  right after a compaction re-pays full input and reads ~0 cache tokens. That is
+  the trade — one expensive turn now against every later turn re-paying a prompt
+  that only grows.
 - **Concurrency**: the pre-turn check is one active turn *per session*, not per
   user. A user driving two sessions concurrently can have both pass the check and
   both spend — consistent with the single-replica caveats elsewhere; overshoot

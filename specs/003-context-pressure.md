@@ -1,6 +1,6 @@
 # 003 — Context pressure: gauge, warning, compaction with a grep-able archive
 
-**Status**: draft
+**Status**: phases 1-2 implemented; phase 3 (auto-compaction) not started
 **Requested by**: @babs
 **Date**: 2026-07-28
 **Depends on**: nothing (branched off `develop`; `001`/`002` live on another branch — renumber if they land first)
@@ -60,19 +60,34 @@ deleting one marker row.
 - `context_window` resolution: static per-model table + `model_registry` `options.context_window`
   override; unknown ⇒ `null` (no gauge, no auto-compaction — never act on a guessed window).
 - `context_window` exposed on `AppConfig.available_models[]` (`/api/config`).
-- Header gauge (% of window, amber past warn, red past compact threshold) + a "Compact context"
-  action; pure client-side computation from the last assistant row + the resolved model.
-- WS `compact` message type (owner/editor only, rejected while a turn is active), running one turn
-  through the session's resolved engine with a new `COMPACTION_PROMPT`.
-- Boundary row: `role='system'`, `content = {event: 'context_compacted', summary, message_count,
-  archive_path}` — reuses the existing session-event rendering for the transcript divider.
-- `get_session_messages` returns only rows **after** the last boundary; new
-  `get_compaction_summary()` injected into the system prompt of all three orchestrators.
-- Engine resume handles reset on compaction: `sessions.cli_session_id = NULL`; opencode's `resume`
-  falls to `False` on its own (its history query returns empty post-boundary); `inkwest-agent` has
-  no handle.
+- Header gauge (% of window, amber past warn, red past compact threshold); pure client-side
+  computation from the last assistant row + the resolved model. The "Compact context" action sits in
+  the **composer toolbar**, not the header (see phase 2 for why).
+- WS `compact` message type (**owner only** — an editor can drive a turn but not rewrite what the
+  session remembers; rejected while a turn is active), running one turn through the session's
+  resolved engine with a new `COMPACTION_PROMPT`.
+- Boundary row: `role='system'`, `content = {type: 'session_event', subject: 'context', action:
+  'compacted', summary, targets: [{message_count, trigger, archive_path?}]}` — the existing
+  `save_session_event` shape, so the transcript divider reuses the session-event rendering. The
+  `summary` is server-only: it is stripped before the row reaches any client (authenticated or
+  public share link). A boundary row whose summary is missing or blank is **not** treated as a
+  boundary — it would cut the transcript while injecting nothing, i.e. silent amnesia.
+- `get_session_messages` returns only rows **after** the last boundary (sliced by row index, then
+  `merge_consecutive_roles()` so the post-slice head can't break Converse's alternation); new
+  `with_compaction_summary()` appended to the assembled system prompt of all three orchestrators.
+- Engine resume handles reset on compaction: `sessions.cli_session_id = NULL`, and opencode's own
+  on-disk session store is deleted (`sandbox.reset_opencode_store`) — `--continue` resolves against
+  THAT store, not the DB, so a surviving store replays the transcript the boundary just cut.
+  `inkwest-agent` has no handle. An engine that nonetheless starts a turn with an empty transcript
+  (stale CLI `--resume`, missing store) reports it (`compaction.note_empty_replay`) and the
+  compaction is abandoned rather than committing a "nothing to summarize" boundary.
 - Archive dump to `/workdir/.inkwest/history-<n>.md` (markdown, one section per message) + the
-  summary naming the path.
+  system prompt naming the path. Written through `sandbox.publish_workdir_file` — staged outside the
+  mount and `os.replace`d relative to a directory fd opened `O_NOFOLLOW` per segment, because the
+  sandbox can write to that volume: a planted symlink would otherwise redirect the dump anywhere the
+  backend can write, and a name-based check would still lose the race against a mid-write swap.
+  Capped (~4 M characters per archive, 200k per content block, every block kind) so one runaway
+  tool output can't fill the volume; the boundary is written whether or not the dump succeeded.
 - Auto-compaction before a user turn past the trigger, with a visible notice naming which signal
   fired; admin settings `context_autocompact_enabled` (default true), `context_warn_percent`
   (default 75), and the trigger set — `context_compact_percent` (default 90),
@@ -83,7 +98,11 @@ deleting one marker row.
 - One pure `context_pressure.should_compact()` over `(prompt_tokens, window, rounds_since_boundary)`
   returning the firing signal or `None` — the backend is the sole decision authority; the frontend
   only renders the gauge and its amber/red colour.
-- Broadcast: existing pubsub `notify` on the boundary row so every participant's transcript shows it.
+- Broadcast: a `context_compacted` `ChatEvent` carrying the boundary row's id, timestamp and its
+  persisted `content` (stripped of the summary), emitted by
+  the orchestrator after the row commits and fanned out on the chat socket like any other turn event
+  — `save_message` has no pubsub notify of its own, so without it a peer would only see the divider
+  on reload.
 - `pytest` + `vitest` coverage per phase; `docs/` update (BUDGET.md cost note, ARCHITECTURE.md).
 
 ## Out of scope
@@ -110,47 +129,67 @@ deleting one marker row.
 
 ## Acceptance criteria
 
-- [ ] Given an assistant row with `input_tokens=5000`, `cache_read_tokens=120000`,
+- [x] Given an assistant row with `input_tokens=5000`, `cache_read_tokens=120000`,
       `cache_write_tokens=3000` and a 200k-window model, then the gauge reads 64%.
-- [ ] Given a model whose context window is unknown, then no gauge is rendered and auto-compaction
-      never triggers for that session.
-- [ ] Given a model registry row with `options.context_window = 500000`, then that value wins over
+- [x] Given a model whose context window is unknown, then no gauge is rendered and auto-compaction
+      never triggers for that session — but the manual action is still offered past an absolute
+      prompt size (`COMPACT_OFFER_TOKENS`), so the escape hatch exists on an unsourced model.
+- [x] Given a model registry row with `options.context_window = 500000`, then that value wins over
       the static table.
-- [ ] Given usage past `context_warn_percent`, then the gauge is amber and the "Compact context"
-      action is offered; past `context_compact_percent` it is red.
-- [ ] Given a `compact` WS message from a viewer, then it is rejected like `message`/`retry`/`stop`.
-- [ ] Given a `compact` while a turn is active, then it is refused (one turn per session) and the
+- [x] Given usage past `GAUGE_WARN_PERCENT`, then the gauge is amber and the "Compact context"
+      action is offered; past `GAUGE_ALERT_PERCENT` it is red. (Client constants until phase 3
+      moves the thresholds server-side.)
+- [x] Given a `compact` WS message from a viewer **or an editor**, then it is rejected — unlike
+      `message`/`retry`/`stop`, which an editor may send.
+- [x] Given a `compact` while a turn is active, then it is refused (one turn per session) and the
       running turn is untouched.
-- [ ] Given a compaction on a session with N messages, then: a summary assistant bubble is persisted,
-      a `context_compacted` system row follows it, `get_session_messages` returns `[]` for that
-      session, and `sessions.cli_session_id` is `NULL`.
-- [ ] Given a compacted session, when the next turn runs, then the system prompt contains the summary
-      and the archive path, and the transcript sent to the model contains only post-boundary rows.
-- [ ] Given a compacted session, then `/workdir/.inkwest/history-1.md` exists in that conversation's
+- [x] Given a `compact` on a session with nothing after the last boundary, then the orchestrator
+      refuses it before reaching the engine, so no tokens are spent.
+- [x] Given a compaction on a session with N messages, then: a summary assistant bubble is persisted,
+      a `subject='context'`/`action='compacted'` system row follows it carrying that summary,
+      `get_session_messages` returns `[]` for that session, and `sessions.cli_session_id` is `NULL`.
+- [x] Given the summary turn errors, is cancelled, or produces no text, then no boundary is written,
+      the rows the failed turn created are deleted, the archive is removed, and the conversation is
+      exactly as it was — a blank summary must never become an amnesia boundary.
+- [x] Given a compaction, then the summary is the text of the rows **that turn** created (ids not
+      present before it started) — never a stale assistant row from earlier in the conversation.
+- [x] Given a compacted session, when the next turn runs, then the system prompt contains the summary
+      and the archive directory, and the transcript sent to the model contains only post-boundary
+      rows.
+- [x] Given a compacted session, then `/workdir/.inkwest/history-1.md` exists in that conversation's
       workdir and contains the pre-boundary messages; a second compaction writes `history-2.md` and
       leaves the first intact.
-- [ ] Given two compactions, then only the **last** boundary is applied when building the transcript
+- [x] Given `.inkwest` (or any segment of the archive path) is a symlink planted from inside the
+      sandbox, then the dump is refused and nothing is written outside the session's workdir.
+- [x] Given two compactions, then only the **last** boundary is applied when building the transcript
       (the summary of the second supersedes the first).
-- [ ] Given a compacted session, when the UI reloads, then the full history renders with a divider at
+- [x] Given a compacted session, when the UI reloads, then the full history renders with a divider at
       the boundary — no message disappears from the transcript.
-- [ ] Given `context_autocompact_enabled=false`, then crossing any trigger warns but never compacts.
-- [ ] Given 40 rounds since the last boundary at 60% of window, then the round trigger fires (percent
+- [ ] (phase 3) Given `context_autocompact_enabled=false`, then crossing any trigger warns but never
+      compacts.
+- [ ] (phase 3) Given 40 rounds since the last boundary at 60% of window, then the round trigger
+      fires (percent
       alone would not have).
-- [ ] Given 40 rounds since the last boundary at 12% of window (`min_percent=25`), then nothing
+- [ ] (phase 3) Given 40 rounds since the last boundary at 12% of window (`min_percent=25`), then
+      nothing
       compacts — the floor wins over the round counter.
-- [ ] Given a 1M-window model at 21% (210k prompt tokens) and `context_compact_prompt_tokens=200000`,
+- [ ] (phase 3) Given a 1M-window model at 21% (210k prompt tokens) and
+      `context_compact_prompt_tokens=200000`,
       then the ceiling fires even though the percent trigger is far away.
-- [ ] Given each trigger set to 0, then it never fires and the others still do.
-- [ ] Given a compaction, then the round counter restarts at 0 (counted from the last boundary row),
+- [ ] (phase 3) Given each trigger set to 0, then it never fires and the others still do.
+- [ ] (phase 3) Given a compaction, then the round counter restarts at 0 (counted from the last
+      boundary row),
       so no second compaction can chain onto the first.
-- [ ] Given an auto-compaction, then the system row and the UI notice name which signal fired
+- [ ] (phase 3) Given an auto-compaction, then the system row and the UI notice name which signal
+      fired
       (percent / rounds / token ceiling).
-- [ ] Given auto-compaction fires, then a system row records that it was automatic and the user's
+- [ ] (phase 3) Given auto-compaction fires, then a system row records that it was automatic and the
+      user's
       queued message runs on the compacted context.
-- [ ] Given a compaction turn, then its tokens are metered like any turn (broker row or engine row —
+- [x] Given a compaction turn, then its tokens are metered like any turn (broker row or engine row —
       no accounting hole) and the session's cache-read on the following turn is ~0 (prefix changed).
-- [ ] Given a shared conversation, when one participant compacts, then the others receive the
-      boundary row over the sync socket without reloading.
+- [x] Given a shared conversation, when one participant compacts, then the others receive the
+      boundary row over the **chat** socket, as a `context_compacted` event, without reloading.
 
 ## Phases
 
@@ -172,16 +211,25 @@ deleting one marker row.
 - Work: `COMPACTION_PROMPT` replacing the dead `SUMMARY_PROMPT`/`get_summary_prompt` (structured:
   goal, established facts, ruled-out hypotheses, current state, next step, and the archive path);
   `compact` WS type wired to `turn_runner` with `persist_user_message=False`; boundary row writer +
-  archive dump helper; `get_session_messages` slicing after the last boundary +
-  `get_compaction_summary()` injected into the three orchestrators' system prompts;
-  `cli_session_id` reset; `SessionEventContent` rendering for `context_compacted`; the header action
-  wired to the WS.
+  archive dump helper; `get_session_messages` slicing after the last boundary (by row **index**, so
+  same-instant rows can't land on the wrong side); `with_compaction_summary()` appended to each
+  orchestrator's **assembled** system prompt (alongside the other runtime blocks, not into the base
+  persona — it is runtime state, and it stays byte-stable for the life of the boundary so the agent
+  loop's prompt cache doesn't churn); `cli_session_id` reset; `SessionEventContent` rendering for the
+  `context`/`compacted` event; the action button in the **composer toolbar** next to the model picker
+  — not in the header: the header renders above `ChatPage`, which is where the chat socket lives, so
+  a header button would need the socket plumbed into a store to reach it.
 - **Data model impact**: none — the boundary is a `messages` row with `role='system'` (already
   excluded from the model transcript, already rendered as an event line).
 - **DoD**: `pytest tests/ -q` green with tests for (a) slicing at the last of two boundaries,
-  (b) the summary reaching each orchestrator's system prompt, (c) viewer rejection, (d) refusal while
-  a turn is active, (e) the archive file written under the conversation workdir; `npx vitest run`
-  green on the divider + the action; removing the slice makes (a) red (verify).
+  (b) the summary reaching each orchestrator's system prompt — asserted end-to-end per engine on what
+  the engine actually receives (agent: the TurnSpec's `system_prompt`; CLI: the `system_prompt` handed
+  to `execute_claude_cli`; opencode: the published `AGENTS.md`), (c) viewer rejection, via the
+  extracted `viewer_blocked()` predicate — the repo has no loop-level WS tests for any message type,
+  (d) refusal while a turn is active, which is `turn_runner`'s one-turn-per-session slot and is
+  covered by its own tests, (e) the archive file written under the conversation workdir; `npx vitest
+  run` green on the divider + the action button's show/hide/click; removing the slice makes (a) red
+  (verify).
 
 ### Phase 3 — Auto-compaction on the trigger set
 - Work: pure `should_compact()` over percent / rounds-since-boundary / absolute token ceiling, with
@@ -200,8 +248,10 @@ deleting one marker row.
   notice; `pre-commit run --all-files` clean; `docs/BUDGET.md` states the compaction turn is billed,
   invalidates the prompt cache, and explains why the round/token triggers exist.
 
-Single MR for all three phases (requested): an alert with no escape hatch is a worse product than no
-alert, and the auto path is what makes the feature survive a user who does not watch the gauge.
+Phases 1 and 2 ship together (requested): an alert with no escape hatch is a worse product than no
+alert. Phase 3 follows separately — the auto path is what makes the feature survive a user who does
+not watch the gauge, but it is the only part that spends money without being asked, so it lands on
+its own diff.
 
 ## Data model impact (summary)
 
@@ -215,9 +265,9 @@ alert, and the auto path is what makes the feature survive a user who does not w
 - [ ] Static context-window values must be sourced per model from vendor docs (neither Bedrock
       `ListFoundationModels` nor Anthropic `/v1/models` returns a context length). Any model we
       cannot source stays `None`.
-- [ ] Archive retention: the workdir is per-conversation and durable, so archives accumulate. Cap at
-      the last N, or leave to the existing workdir lifecycle? Leaning: leave it, revisit if a
-      conversation ever fills its volume.
+- [ ] Archive retention: the workdir is per-conversation and durable, so archives accumulate. Phase 2
+      ships per-file caps (4 MB, 200k chars per block) but **no** count cap — the existing workdir
+      lifecycle owns deletion. Revisit if a conversation ever fills its volume.
 
 ## Decisions
 
@@ -242,9 +292,11 @@ alert, and the auto path is what makes the feature survive a user who does not w
   that again. The three signals are three comparisons in one pure function, so the flexibility is
   ~free; the `min_percent` floor is the guard that stops the round counter from spending a
   full-context turn to reclaim a nearly-empty one.
-- **The backend owns the decision, the frontend owns the gauge.** The thresholds are not
-  re-implemented client-side: the UI colours the gauge from `warn_percent` and learns about a
-  compaction from the transcript row, so there is one place where "should we compact" is decided.
+- **The backend owns the decision, the frontend owns the gauge** — the phase-3 target. Until the
+  server-side thresholds exist, the gauge's two colours and the manual offer come from client
+  constants in `contextUsage.ts` (`GAUGE_WARN_PERCENT`, `GAUGE_ALERT_PERCENT`,
+  `COMPACT_OFFER_PERCENT`); they gate a colour and an affordance, never a spend. Phase 3 moves the
+  "should we compact" decision server-side, where it belongs once it can act unprompted.
 - **`Session.confirmation_mode` / `cost_confirmation_threshold` /
   `iteration_confirmation_interval` are dead columns** (nothing reads them) — this feature does not
   revive or extend them. Deleting them is a separate cleanup.
@@ -252,7 +304,22 @@ alert, and the auto path is what makes the feature survive a user who does not w
   engine, the broker, and the metering already in place. The user pays for the summary — stated in
   the UI action, not discovered in a usage report.
 - **The summary is a visible assistant bubble**, not a hidden field: the user can read what the model
-  will remember, and it lands in exports.
+  will remember, and it lands in exports. It is copied onto the boundary row so the replay logic has
+  one row to read, and stripped from `MessageResponse` so the API doesn't ship it twice.
+- **The summary is model-authored, therefore untrusted.** It is injected into the next turns' system
+  prompt inside a `<compaction_summary untrusted="true">` fence and capped at 8000 chars: without the
+  fence, anything a tool result talked the model into writing would be promoted to system-prompt
+  authority for the rest of the conversation.
+- **Compaction is owner-only**, though an editor can run turns. Compaction rewrites what the session
+  remembers from here on; that is closer to deleting the conversation than to answering in it.
+- **The turn's terminal event is held until the boundary commits.** `turn_runner` frees the session
+  slot on `done`, so emitting it before the boundary write would let a racing turn start against a
+  half-compacted session.
+- **The archive keeps tool output verbatim** — that is the point of it: recall must reproduce what the
+  investigation actually saw, and a summarised archive would just be a second lossy summary. It
+  therefore holds the same secrets the transcript holds (kubectl/AWS output), in the same
+  per-conversation volume as attachments and tool output. Contained by caps and by the workdir's
+  existing lifecycle, not by filtering — recorded in `docs/credentials-at-rest-audit.md`.
 - **Never compact on a guessed window.** An unknown context window disables the gauge and the auto
   path rather than assuming 200k — over-compacting a 1M-window model silently destroys context the
   user paid to build.

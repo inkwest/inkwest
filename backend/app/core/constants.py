@@ -17,6 +17,10 @@ MAX_RESPONSE_TOKENS = 4096
 
 # Truncate conversations beyond this many messages (~20 user-assistant exchanges)
 MAX_CONVERSATION_MESSAGES = 40
+# The compaction turn is the one turn that must see everything it is about to summarize,
+# so it replaces the window above. Still finite: a runaway conversation would otherwise be
+# sent whole to a model that will reject it.
+COMPACTION_MAX_MESSAGES = 2000
 
 # Retry configuration for API calls
 MAX_API_RETRIES = 3

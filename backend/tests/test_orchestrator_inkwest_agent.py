@@ -14,10 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.constants import COMPACTION_MAX_MESSAGES, MAX_CONVERSATION_MESSAGES
 from app.services import llm_broker
 from app.services import llm_proxy_token as token
 from app.services import orchestrator_inkwest_agent as oia
 from app.services.ai_cli_client import execute_agent, parse_agent_response
+from tests.conftest import mock_session
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -257,8 +259,7 @@ def _patch_broker(
     OFF so these tests are hermetic against the developer's ``.env`` (which may set
     ``LLM_BROKER_ENABLED``). The broker-on tests pass an enabled SimpleNamespace.
     """
-    db = AsyncMock()
-    db.commit = AsyncMock()
+    db = mock_session()
     spies = SimpleNamespace(
         save_message=AsyncMock(),
         ensure_title=AsyncMock(),
@@ -411,6 +412,65 @@ class TestOrchestrateInkwestAgent:
             )
             or 0
         ) >= 1
+
+    @pytest.mark.asyncio
+    async def test_compaction_summary_reaches_the_turn_spec(self):
+        """A compacted session's summary must ride the system prompt on every later turn."""
+        patches, spies = _patch_broker(history=[{"role": "user", "content": "after boundary"}])
+        lines = [json.dumps({"type": "done", "metadata": {}})]
+        patches.append(
+            patch(
+                "app.services.compaction._last_boundary",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        role="system",
+                        content={
+                            "type": "session_event",
+                            "subject": "context",
+                            "action": "compacted",
+                            "targets": [{"archive_path": "/workdir/.inkwest/history-1.md"}],
+                            "summary": "FACT: the pod was OOMKilled",
+                        },
+                    )
+                ),
+            )
+        )
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, lines)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        prompt = json.loads(spies.turn_spec)["system_prompt"]
+        assert "Earlier conversation (compacted)" in prompt
+        assert "FACT: the pod was OOMKilled" in prompt
+
+    @pytest.mark.asyncio
+    async def test_full_history_lifts_the_rolling_message_window(self):
+        """The compaction turn must summarize the WHOLE segment. Accepting the kwarg is not
+        honouring it: silently truncated to 40 rows, the summary drops most of what it is
+        supposed to preserve — and every assertion about the prompt still passes."""
+        lines = [json.dumps({"type": "done", "metadata": {}})]
+        history = [{"role": "user", "content": f"q{i}"} for i in range(200)]
+
+        async def limit_for(**kwargs):
+            patches, spies = _patch_broker(history=history)
+            for p in patches:
+                p.start()
+            try:
+                await _run_broker(spies, lines, **kwargs)
+            finally:
+                for p in reversed(patches):
+                    p.stop()
+            spec = json.loads(spies.turn_spec)
+            return spec["limits"]["max_conversation_messages"]
+
+        # The broker ships the whole segment either way; the cap it sends is what the
+        # in-sandbox loop truncates to (inkwest_agent.loop), so the cap IS the contract.
+        assert await limit_for(full_history=True) == COMPACTION_MAX_MESSAGES
+        assert await limit_for(full_history=False) == MAX_CONVERSATION_MESSAGES
 
     @pytest.mark.asyncio
     async def test_turn_spec_assembly(self):
@@ -921,7 +981,12 @@ class TestOrchestrateInkwestAgent:
         for p in patches:
             p.start()
         try:
-            await _run_broker(spies, [json.dumps({"type": "done"})], persist_user_message=False)
+            await _run_broker(
+                spies,
+                [json.dumps({"type": "done"})],
+                persist_user_message=False,
+                replace_last_user=True,
+            )
         finally:
             for p in reversed(patches):
                 p.stop()

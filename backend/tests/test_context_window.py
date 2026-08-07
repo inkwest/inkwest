@@ -16,7 +16,6 @@ from app.services.context_window import CONTEXT_WINDOWS, resolve_context_window
         ("claude-sonnet-4-5", 200_000),
         ("claude-sonnet-4-5-20250929", 200_000),
         ("claude-opus-4-5-20251101", 200_000),
-        ("anthropic.claude-opus-4-1-20250805-v1:0", 200_000),
         # Bedrock forms of the same models: routing prefix, namespace, date snapshot and
         # version suffix must all normalize to the same table row.
         ("anthropic.claude-opus-5", 1_000_000),
@@ -33,6 +32,23 @@ from app.services.context_window import CONTEXT_WINDOWS, resolve_context_window
 )
 def test_known_models_resolve(model_id: str, expected: int) -> None:
     assert resolve_context_window(model_id) == expected
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        # Retired (Opus 4.1, 2026-08-05) and the 3.x line: absent from the vendor tables the
+        # module cites, so a row would be a number nobody can re-verify. Registry override.
+        "anthropic.claude-opus-4-1-20250805-v1:0",
+        "claude-3-5-sonnet-20241022",
+        "anthropic.claude-3-7-sonnet-20250219-v1:0",
+        # Never published a window.
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-20250514",
+    ],
+)
+def test_unsourceable_models_have_no_window(model_id: str) -> None:
+    assert resolve_context_window(model_id) is None
 
 
 @pytest.mark.parametrize(

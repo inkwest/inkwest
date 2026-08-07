@@ -25,6 +25,7 @@ from app.services.ai_cli_client import (
     parse_cli_response,
 )
 from app.services.ai_client import resolve_session_model_choice
+from app.services.compaction import note_empty_replay, with_compaction_summary
 from app.services.events import (
     ChatEvent,
     done_event,
@@ -60,6 +61,10 @@ async def orchestrate_chat_cli(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict] | None = None,
     persist_user_message: bool = True,
+    # Both are part of the shared turn signature; this engine resumes its OWN transcript
+    # (--resume) and never replays DB history, so neither can be honoured here.
+    replace_last_user: bool = False,
+    full_history: bool = False,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """
@@ -125,6 +130,11 @@ async def orchestrate_chat_cli(
     cli_session_id = await get_cli_session_id(db, session_id)
     if cli_session_id:
         logger.info(f"Found existing CLI session: {cli_session_id}")
+    elif not persist_user_message:
+        # No --resume target: this engine never replays the DB transcript, so the turn runs
+        # blind. Only reported for a turn that isn't the user's own question (compaction,
+        # retry), where answering without the history silently produces a wrong result.
+        note_empty_replay()
 
     # Expose this session's connected connector credentials as standard env vars
     # (AWS_*, GITLAB_TOKEN, KUBECONFIG, …) so the agent can use `aws`/`kubectl`/`curl`
@@ -209,6 +219,8 @@ required.
         # tool descriptions the API providers receive).
         runtime_context += connector_prompt_hint(injected)
     system_prompt = f"{system_prompt}\n\n{runtime_context}"
+
+    system_prompt = await with_compaction_summary(db, session_id, system_prompt)
 
     prompt = user_message
     # Attached files live in this conversation's /workdir; append @/workdir/<file>
@@ -558,6 +570,7 @@ required.
                         await db.rollback()
                         logger.warning(f"Failed to clear stale CLI session ID: {ce}")
                     resume_id = None
+                    note_empty_replay()
                     continue
                 raise
 

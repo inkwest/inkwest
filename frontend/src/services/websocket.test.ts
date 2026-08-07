@@ -267,3 +267,34 @@ describe('ChatWebSocket — reconnect & teardown behavior', () => {
     expect(msgs[49].content).toBe('m49'); // newest-at-cap rejected (m50..m59 dropped)
   });
 });
+
+describe('ChatWebSocket — turn-driving frames', () => {
+  beforeEach(() => {
+    FakeWS.instances = [];
+    mockTicket.mockReset();
+    mockTicket.mockResolvedValue('TICKET');
+    vi.stubGlobal('WebSocket', FakeWS as unknown as typeof WebSocket);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('puts the wire type the backend dispatches on for compact and retry', async () => {
+    // Stubbed wholesale in the hook tests, so this is the only place the literal is pinned:
+    // rename it and the server answers "Unknown message type" with every test still green.
+    const ws = new ChatWebSocket('s1');
+    await ws.connect();
+    const sock = FakeWS.instances[0];
+    sock.readyState = FakeWS.OPEN;
+    sock.onopen?.();
+    sock.send.mockClear();
+
+    expect(ws.sendCompact()).toBe(true);
+    expect(ws.sendRetry()).toBe(true);
+
+    const types = sock.send.mock.calls.map((c) => JSON.parse(c[0] as string).type);
+    expect(types).toEqual(['compact', 'retry']);
+  });
+});

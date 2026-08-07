@@ -29,12 +29,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
-from app.core.constants import MAX_RESPONSE_TOKENS
+from app.core.constants import (
+    COMPACTION_MAX_MESSAGES,
+    MAX_CONVERSATION_MESSAGES,
+    MAX_RESPONSE_TOKENS,
+)
 from app.core.database import release_read_txn
 from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import ProgressTracker, execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
+from app.services.compaction import with_compaction_summary
 from app.services.events import ChatEvent, done_event, error_event, mcp_auth_required_event
 from app.services.messages import (
     ensure_session_title,
@@ -123,6 +128,13 @@ async def orchestrate_chat_inkwest_agent(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict[str, Any]] | None = None,
     persist_user_message: bool = True,
+    # Retry replays a user row that is ALREADY the last message in history; drop it so the
+    # engine doesn't see it twice. Distinct from persist_user_message: a compaction also
+    # skips the write, but its prompt is new and must not eat the real last user turn.
+    replace_last_user: bool = False,
+    # The compaction turn summarizes the whole segment, so it opts out of the rolling
+    # message window (honoured by the agent, which is the only engine that replays history).
+    full_history: bool = False,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Broker one turn through the sandboxed ``inkwest-agent``. Mirrors orchestrate_chat_cli.
@@ -160,7 +172,7 @@ async def orchestrate_chat_inkwest_agent(
         logger.error(f"Failed to load messages: {e}")
         yield error_event(f"Failed to load conversation history: {str(e)}")
         return
-    if not persist_user_message and history and history[-1]["role"] == "user":
+    if replace_last_user and history and history[-1]["role"] == "user":
         history = history[:-1]
 
     if persist_user_message:
@@ -245,6 +257,8 @@ async def orchestrate_chat_inkwest_agent(
         "This date is approximate — for an exact current instant, or before any "
         "time-sensitive query, call the `current_datetime` tool and re-check accurately."
     )
+
+    system_prompt = await with_compaction_summary(db, session_id, system_prompt)
 
     # Pre-provide the session's connector creds: build_connector_env renews-on-read and
     # projects the AWS profiles onto the shared tmpfs (write_aws_profiles), returning the
@@ -435,7 +449,11 @@ async def orchestrate_chat_inkwest_agent(
             # agent is settings-free, so carry the broker's claude_cli_timeout on the spec
             # (the same knob bounding the whole agent subprocess) — bash inherits that cap.
             limits=TurnLimits(
-                max_tokens=max_tokens, bash_timeout_seconds=settings.claude_cli_timeout
+                max_tokens=max_tokens,
+                bash_timeout_seconds=settings.claude_cli_timeout,
+                max_conversation_messages=(
+                    COMPACTION_MAX_MESSAGES if full_history else MAX_CONVERSATION_MESSAGES
+                ),
             ),
             tools=[ToolSpec(name=t["name"]) for t in get_tool_definitions()],
             skills=[SkillSpec(name=s.name, description=s.description or "") for s in active_skills],

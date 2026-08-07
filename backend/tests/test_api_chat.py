@@ -1,5 +1,6 @@
 """Tests for chat WebSocket route."""
 
+import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -333,3 +334,141 @@ async def test_budget_gate_fails_closed_on_error() -> None:
 
     assert result is not None
     assert "budget" in result.lower()
+
+
+# --- viewer gate ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("msg_type", ["message", "retry", "stop", "compact"])
+def test_viewer_cannot_drive_or_interrupt_a_turn(msg_type: str) -> None:
+    """Every turn-driving type is blocked for a read-only viewer — including compaction,
+    which spends the owner's budget and rewrites what the model sees."""
+    from app.services.session_access import turn_refusal
+
+    assert turn_refusal("viewer", msg_type) is not None
+    assert turn_refusal("owner", msg_type) is None
+
+
+@pytest.mark.parametrize("msg_type", ["message", "retry", "stop"])
+def test_editor_may_drive_the_conversation(msg_type: str) -> None:
+    from app.services.session_access import turn_refusal
+
+    assert turn_refusal("editor", msg_type) is None
+
+
+def test_only_the_owner_may_compact() -> None:
+    """Compaction is structural: it rewrites what the model can see for every participant
+    and drops the engine's own transcript, so it follows the owner-only rule."""
+    from app.services.session_access import turn_refusal
+
+    assert turn_refusal("owner", "compact") is None
+    for role in ("editor", "viewer", None):
+        assert turn_refusal(role, "compact") == "Only the conversation owner can compact it"
+
+
+def test_refusal_names_the_rule_that_fired() -> None:
+    """The caller forwards the message verbatim, so the wording has to distinguish the two
+    rules — an editor refused a compaction is not "view-only"."""
+    from app.services.session_access import turn_refusal
+
+    assert turn_refusal("viewer", "message") == "You have view-only access to this conversation"
+    assert turn_refusal("editor", "compact") == "Only the conversation owner can compact it"
+
+
+@pytest.mark.parametrize("msg_type", ["ping", "typing", "mcp_dek_offer"])
+def test_viewer_may_still_watch(msg_type: str) -> None:
+    from app.services.session_access import turn_refusal
+
+    assert turn_refusal("viewer", msg_type) is None
+
+
+# --- the shared turn gate (message / retry / compact) ---------------------------
+
+
+class _FakeSocket:
+    """Captures the frames a refused turn reports back."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent.append(payload)
+
+
+@pytest.mark.asyncio
+async def test_compaction_is_refused_while_a_turn_is_running() -> None:
+    """The one-turn-per-session slot is the only thing standing between two concurrent
+    compactions — which would write two boundaries and reuse the same archive index."""
+    from app.api.routes import chat as chat_route
+
+    ws = _FakeSocket()
+    with (
+        patch.object(chat_route, "_turn_rate_block_reason", return_value=None),
+        patch.object(chat_route, "_budget_block_reason", AsyncMock(return_value=None)),
+        patch.object(chat_route.turn_runner, "start", AsyncMock(return_value=False)) as start,
+    ):
+        started = await chat_route.start_gated_turn(
+            ws, "s1", uuid.uuid4(), [], chat_route.orchestrate_compaction, {}
+        )
+
+    assert started is False
+    assert ws.sent == [{"type": "error", "content": "A response is already in progress."}]
+    start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compaction_never_starts_when_the_budget_blocks() -> None:
+    """A compaction is a billable turn: it must not slip past the cap a message obeys."""
+    from app.api.routes import chat as chat_route
+
+    ws = _FakeSocket()
+    with (
+        patch.object(chat_route, "_turn_rate_block_reason", return_value=None),
+        patch.object(chat_route, "_budget_block_reason", AsyncMock(return_value="over budget")),
+        patch.object(chat_route.turn_runner, "start", AsyncMock()) as start,
+    ):
+        started = await chat_route.start_gated_turn(
+            ws, "s1", uuid.uuid4(), [], chat_route.orchestrate_compaction, {}
+        )
+
+    assert started is False
+    assert ws.sent == [{"type": "error", "content": "over budget"}]
+    start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compaction_never_starts_when_rate_limited() -> None:
+    from app.api.routes import chat as chat_route
+
+    ws = _FakeSocket()
+    with (
+        patch.object(chat_route, "_turn_rate_block_reason", return_value="slow down"),
+        patch.object(chat_route, "_budget_block_reason", AsyncMock()) as budget,
+        patch.object(chat_route.turn_runner, "start", AsyncMock()) as start,
+    ):
+        started = await chat_route.start_gated_turn(
+            ws, "s1", uuid.uuid4(), [], chat_route.orchestrate_compaction, {}
+        )
+
+    assert started is False
+    assert ws.sent == [{"type": "error", "content": "slow down"}]
+    budget.assert_not_awaited()
+    start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_gated_turn_starts_when_every_gate_passes() -> None:
+    from app.api.routes import chat as chat_route
+
+    ws = _FakeSocket()
+    with (
+        patch.object(chat_route, "_turn_rate_block_reason", return_value=None),
+        patch.object(chat_route, "_budget_block_reason", AsyncMock(return_value=None)),
+        patch.object(chat_route.turn_runner, "start", AsyncMock(return_value=True)),
+    ):
+        started = await chat_route.start_gated_turn(
+            ws, "s1", uuid.uuid4(), [], chat_route.orchestrate_compaction, {"trigger": "manual"}
+        )
+
+    assert started is True
+    assert ws.sent == []

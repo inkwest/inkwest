@@ -39,6 +39,7 @@ from app.services.ai_cli_client import (
     parse_opencode_response,
 )
 from app.services.ai_client import resolve_session_model
+from app.services.compaction import note_empty_replay, with_compaction_summary
 from app.services.events import (
     ChatEvent,
     connector_required_event,
@@ -170,6 +171,13 @@ async def orchestrate_chat_opencode(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict[str, Any]] | None = None,
     persist_user_message: bool = True,
+    # Retry replays a user row that is ALREADY the last message in history; drop it so the
+    # engine doesn't see it twice. Distinct from persist_user_message: a compaction also
+    # skips the write, but its prompt is new and must not eat the real last user turn.
+    replace_last_user: bool = False,
+    # Ignored: opencode resumes its own session store (--continue) rather than a DB
+    # transcript, so there is no rolling window here to opt out of.
+    full_history: bool = False,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Broker one turn through the sandboxed ``opencode`` engine. Mirrors orchestrate_chat_cli."""
@@ -201,7 +209,7 @@ async def orchestrate_chat_opencode(
         logger.error(f"Failed to load messages: {e}")
         yield error_event(f"Failed to load conversation history: {str(e)}")
         return
-    if not persist_user_message and history and history[-1]["role"] == "user":
+    if replace_last_user and history and history[-1]["role"] == "user":
         history = history[:-1]
     resume = bool(history)
 
@@ -345,6 +353,10 @@ async def orchestrate_chat_opencode(
             # agent's tool defs) — env alone leaves it claiming it has no AWS/GitLab.
             system_prompt += connector_prompt_hint(injected)
 
+    # Last block, as in the other two engines: the compaction summary is a document the
+    # model reads, and interleaving `##` sections after it would split it in two.
+    system_prompt = await with_compaction_summary(db, session_id, system_prompt)
+
     container: str | None = None
     # Path to the cred-bearing config; declared here so the finally can remove it even if the
     # turn throws between ensure() and the write (None ⇒ nothing was published yet).
@@ -441,6 +453,7 @@ async def orchestrate_chat_opencode(
                 extra={"session_id": session_id_str},
             )
             resume = False
+            note_empty_replay()
 
         # LLM auth broker (llm_broker_enabled): route opencode's model call through the backend
         # proxy. The provider gets the broker base as `baseURL` (it appends /model/{id}/{op},

@@ -213,6 +213,11 @@ export interface SessionEventTarget {
   account_id?: string;
   account_name?: string;
   role?: string;
+  /** Compaction boundary: how many rows it summarized, where the full transcript was
+   *  dumped, and whether the user asked for it (`manual`) or a threshold fired (`auto`). */
+  message_count?: number;
+  archive_path?: string;
+  trigger?: string;
   server?: string;
   model?: string | null;
   /** Abort marker (subject 'turn'): why the turn ended abnormally. */
@@ -227,6 +232,8 @@ export interface SessionEventContent {
   subject: string;
   action: string;
   targets?: SessionEventTarget[];
+  // No `summary` here on purpose: the compaction boundary carries one server-side, and the
+  // API strips it before the row is serialized (schemas.strip_boundary_summary).
 }
 
 export interface ContentBlock {

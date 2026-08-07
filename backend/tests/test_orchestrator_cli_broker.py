@@ -9,6 +9,7 @@ import pytest
 from app.services import llm_broker
 from app.services import llm_proxy_token as token
 from app.services import orchestrator_cli as oc
+from tests.conftest import mock_session
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -96,8 +97,7 @@ async def _run(
     settings, capture, *, execute=None, cancel_event=None, entries=None, db=None, ensure=None
 ):
     if db is None:
-        db = AsyncMock()
-        db.commit = AsyncMock()
+        db = mock_session()
     ps = _patches(settings, capture, execute=execute, entries=entries, ensure=ensure)
     for p in ps:
         p.start()
@@ -117,6 +117,36 @@ async def _run(
     finally:
         for p in ps:
             p.stop()
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_reaches_the_cli_system_prompt() -> None:
+    """A compacted session's summary must ride --append-system-prompt on every later turn."""
+    capture: dict = {}
+
+    def fake_execute(*, system_prompt=None, **kw):
+        capture["system_prompt"] = system_prompt
+        return _aiter([])
+
+    with patch(
+        "app.services.compaction._last_boundary",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                role="system",
+                content={
+                    "type": "session_event",
+                    "subject": "context",
+                    "action": "compacted",
+                    "targets": [{"archive_path": "/workdir/.inkwest/history-1.md"}],
+                    "summary": "FACT: the pod was OOMKilled",
+                },
+            )
+        ),
+    ):
+        await _run(_settings(broker_enabled=False), capture, execute=fake_execute)
+
+    assert "Earlier conversation (compacted)" in capture["system_prompt"]
+    assert "FACT: the pod was OOMKilled" in capture["system_prompt"]
 
 
 @pytest.mark.asyncio

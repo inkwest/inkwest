@@ -16,6 +16,7 @@ import pytest
 from app.services import orchestrator_opencode as oo
 from app.services import turn_usage as tu
 from app.services.ai_cli_client import execute_opencode
+from tests.conftest import mock_session
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -290,13 +291,57 @@ class TestOrchestrateOpencode:
         return es, cap
 
     @pytest.mark.asyncio
+    async def test_compaction_summary_reaches_the_published_prompt(self):
+        """A compacted session's summary must ride the AGENTS.md prompt on every later turn."""
+        published: dict = {}
+        es, cap = self._patch(history=[{"role": "user", "content": "after boundary"}])
+        with es:
+            with (
+                patch(
+                    "app.services.compaction._last_boundary",
+                    AsyncMock(
+                        return_value=SimpleNamespace(
+                            role="system",
+                            content={
+                                "type": "session_event",
+                                "subject": "context",
+                                "action": "compacted",
+                                "targets": [{"archive_path": "/workdir/.inkwest/history-1.md"}],
+                                "summary": "FACT: the pod was OOMKilled",
+                            },
+                        )
+                    ),
+                ),
+                patch.object(
+                    oo,
+                    "_publish_workdir_file",
+                    lambda wd, name, content: published.update({name: content}),
+                ),
+            ):
+                await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=mock_session(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+
+        prompt = published["AGENTS.md"]
+        assert "Earlier conversation (compacted)" in prompt
+        assert "FACT: the pod was OOMKilled" in prompt
+
+    @pytest.mark.asyncio
     async def test_sandbox_disabled_errors(self):
         with patch.object(oo, "get_settings") as gs:
             gs.return_value.sandbox_enabled = False
             with patch.object(oo, "get_session_messages", AsyncMock(return_value=[])):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -312,7 +357,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -332,7 +377,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -350,7 +395,7 @@ class TestOrchestrateOpencode:
         with es2:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -409,7 +454,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -432,7 +477,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -476,7 +521,7 @@ class TestOrchestrateOpencode:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -517,7 +562,7 @@ class TestOrchestrateOpencode:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -550,7 +595,7 @@ class TestOrchestrateOpencode:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -578,7 +623,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -616,7 +661,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -664,7 +709,7 @@ class TestOrchestrateOpencode:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -720,7 +765,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -762,7 +807,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -798,7 +843,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -833,7 +878,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -855,7 +900,7 @@ class TestOrchestrateOpencode:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -879,7 +924,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -901,7 +946,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -934,7 +979,7 @@ class TestOrchestrateOpencode:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -969,7 +1014,7 @@ class TestOrchestrateOpencode:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -990,7 +1035,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1017,7 +1062,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1043,7 +1088,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1080,7 +1125,7 @@ class TestOrchestrateOpencode:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -1107,7 +1152,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1186,7 +1231,7 @@ class TestOpencodeMcp:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -1246,7 +1291,7 @@ class TestOpencodeDispatch:
             gs.return_value.ai_provider = "claude-cli"
             gs.return_value.sandbox_enabled = sandbox_enabled
             orchestrator = get_orchestrator()
-            async for _ in orchestrator(db=AsyncMock(), session_id=SESSION_ID, user_message="x"):
+            async for _ in orchestrator(db=mock_session(), session_id=SESSION_ID, user_message="x"):
                 pass
         return seen.get("engine")
 
@@ -1304,7 +1349,9 @@ class TestOpencodeDispatch:
             gs.return_value.ai_provider = "claude-cli"
             gs.return_value.sandbox_enabled = sandbox_enabled
             orchestrator = get_orchestrator()
-            async for ev in orchestrator(db=AsyncMock(), session_id=SESSION_ID, user_message="x"):
+            async for ev in orchestrator(
+                db=mock_session(), session_id=SESSION_ID, user_message="x"
+            ):
                 events.append(ev)
         return seen.get("engine"), events
 
@@ -1381,7 +1428,7 @@ class TestOpencodeHardening:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1409,7 +1456,7 @@ class TestOpencodeHardening:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -1439,7 +1486,7 @@ class TestOpencodeHardening:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1488,7 +1535,7 @@ class TestBrokerAuthoritySwitch:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1514,7 +1561,7 @@ class TestBrokerAuthoritySwitch:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1560,7 +1607,7 @@ class TestStampFirstAssistantRow:
             ]
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,

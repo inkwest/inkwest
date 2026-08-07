@@ -8,16 +8,20 @@ capacity (spec 003: never act on a guessed window).
 Sources:
 - Anthropic (Claude): platform.claude.com/docs/en/about-claude/models/overview §Latest
   models comparison and §Legacy models — Fable 5, Mythos 5, Opus 5, Opus 4.8/4.7/4.6,
-  Sonnet 5 and Sonnet 4.6 are 1M; Haiku 4.5, Sonnet 4.5, Opus 4.5 and Opus 4.1 are 200K.
-  Claude on Bedrock carries the same windows (same models, ``anthropic.``-prefixed IDs).
+  Sonnet 5 and Sonnet 4.6 are 1M; Haiku 4.5, Sonnet 4.5 and Opus 4.5 are 200K. Claude on
+  Bedrock carries the same windows (same models, ``anthropic.``-prefixed IDs).
 - Amazon Nova: docs.aws.amazon.com/nova/latest/userguide/what-is-nova.html §Model
   specifications (Premier 1M, Pro 300k, Lite 300k, Micro 128k).
 - Other Bedrock vendors: the per-model Bedrock model card
   (``model-card-<vendor>-<model>.html``), "Context window" field.
 
-Deliberately absent: Claude Opus 4 / Sonnet 4 (the vendor table lists no window for them)
-and the long tail of the Bedrock catalog (Qwen, GLM, Kimi, Gemma, GPT-OSS, …). Both are
-covered by the per-model registry override, and adding a row here needs a citation.
+Deliberately absent — every one of these is covered by the per-model registry override,
+and adding a row here needs a citation from the sources above:
+- Claude Opus 4 / Sonnet 4: the vendor table lists no window for them.
+- Retired models (Opus 4.1, retired 2026-08-05, and the Claude 3.x line): they are gone
+  from the cited tables, so a row would be an unverifiable number that no live catalog
+  can surface anyway.
+- The long tail of the Bedrock catalog (Qwen, GLM, Kimi, Gemma, GPT-OSS, …).
 
 Values are the literal decimal count the vendor states ("128K" → 128_000), never a
 power-of-two reading.
@@ -43,7 +47,6 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "claudehaiku45": 200_000,
     "claudesonnet45": 200_000,
     "claudeopus45": 200_000,
-    "claudeopus41": 200_000,
     # Amazon Nova
     "novapremier": 1_000_000,
     "novapro": 300_000,

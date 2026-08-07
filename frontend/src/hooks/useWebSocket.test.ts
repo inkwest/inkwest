@@ -57,6 +57,11 @@ vi.mock('@/services/websocket', () => {
     sendRetry() {
       return this.retryShouldSend;
     }
+
+    compactShouldSend = true;
+    sendCompact() {
+      return this.compactShouldSend;
+    }
   }
 
   return { ChatWebSocket: MockChatWebSocket };
@@ -384,5 +389,88 @@ describe('done-event token accounting', () => {
     );
 
     expect(spy).toHaveBeenCalledWith('session-1', 0, 0, 5000, undefined);
+  });
+
+  it('compactContext marks the turn as streaming when the frame goes out', () => {
+    const spy = vi.spyOn(ChatWebSocket.prototype, 'sendCompact').mockReturnValue(true);
+    useChatStore.setState({ isStreaming: false });
+    const { result } = renderHook(() => useWebSocket('session-1'));
+
+    act(() => {
+      result.current.compactContext();
+    });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().isStreaming).toBe(true);
+    spy.mockRestore();
+  });
+
+  it('compactContext is a no-op when the socket cannot send (dropped frame)', () => {
+    // Same hazard as retry: faking success would strand the composer in a streaming
+    // state with no turn behind it.
+    const spy = vi.spyOn(ChatWebSocket.prototype, 'sendCompact').mockReturnValue(false);
+    useChatStore.setState({ isStreaming: false });
+    const { result } = renderHook(() => useWebSocket('session-1'));
+
+    act(() => {
+      result.current.compactContext();
+    });
+
+    expect(useChatStore.getState().isStreaming).toBe(false);
+    spy.mockRestore();
+  });
+
+  it('renders the compaction divider as soon as the boundary is committed', () => {
+    useChatStore.setState({ messages: [] });
+    renderHook(() => useWebSocket('session-1'));
+
+    act(() => {
+      MockWS.instances[MockWS.instances.length - 1].emit({
+        type: 'context_compacted',
+        metadata: {
+          id: 'boundary-1',
+          created_at: '2026-08-05T10:00:00Z',
+          // The persisted row, shipped verbatim — the client never re-encodes the shape.
+          content: {
+            type: 'session_event',
+            subject: 'context',
+            action: 'compacted',
+            targets: [{ message_count: 12, trigger: 'manual' }],
+          },
+        },
+      });
+    });
+
+    const rows = useChatStore.getState().messages;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe('boundary-1');  // same id as the DB row: no double divider on reload
+    expect(rows[0].role).toBe('system');
+    expect(rows[0].content).toMatchObject({
+      subject: 'context',
+      action: 'compacted',
+      targets: [{ message_count: 12, trigger: 'manual' }],
+    });
+  });
+
+  it('renders one divider when the row also arrives from a history fetch', () => {
+    // A history load landing between the boundary commit and the terminal `done` would
+    // otherwise duplicate the row — and its React key.
+    useChatStore.setState({ messages: [] });
+    renderHook(() => useWebSocket('session-1'));
+    const frame = {
+      type: 'context_compacted' as const,
+      metadata: {
+        id: 'boundary-1',
+        created_at: '2026-08-05T10:00:00Z',
+        content: { type: 'session_event', subject: 'context', action: 'compacted' },
+      },
+    };
+
+    act(() => {
+      MockWS.instances[MockWS.instances.length - 1].emit(frame);
+      MockWS.instances[MockWS.instances.length - 1].emit(frame);
+    });
+
+    expect(useChatStore.getState().messages).toHaveLength(1);
   });
 });

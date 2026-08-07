@@ -29,9 +29,12 @@ backend are swept by label on startup.
 """
 
 import asyncio
+import contextlib
+import errno
 import os
 import shutil
 import socket
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -121,6 +124,139 @@ def session_dir(session_id: str) -> str:
 def squid_log_path(session_id: str) -> str:
     """Absolute host path of a conversation's durable squid access log."""
     return os.path.join(session_dir(session_id), "logs", "squid", "access.log")
+
+
+# Where the conversation's workdir is mounted inside every sandbox container.
+CONTAINER_WORKDIR = "/workdir"
+
+
+def workdir_path(session_id: str) -> str:
+    """Absolute host path of a conversation's workdir (mounted at ``/workdir``)."""
+    return os.path.join(session_dir(session_id), "workdir")
+
+
+def reset_opencode_store(session_id: str) -> None:
+    """Drop the conversation's opencode session store.
+
+    opencode resumes with ``--continue``, which resolves to the newest session in ITS OWN
+    store — nothing the DB says. After a compaction boundary that store still holds the
+    pre-boundary session, so it has to go or the engine keeps replaying the transcript the
+    boundary just cut. The directory is recreated (world-writable) because it is bind-mounted
+    into a possibly-running container.
+    """
+    store = os.path.join(session_dir(session_id), "opencode")
+    with contextlib.suppress(OSError):
+        shutil.rmtree(store)
+    with contextlib.suppress(OSError):
+        os.makedirs(store, exist_ok=True)
+        os.chmod(store, 0o777)  # noqa: S103 — per-conversation dir, same as provisioning
+
+
+STAGING_PREFIX = ".publish."
+
+
+def _workdir_parts(relpath: str) -> list[str]:
+    parts = relpath.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"unsafe workdir relpath: {relpath!r}")
+    return parts
+
+
+def _open_workdir_dir(session_id: str, segments: list[str], *, create: bool) -> int:
+    """Open ``<workdir>/<segments…>`` as a directory fd, refusing symlinked segments.
+
+    Returns an fd the caller must close. ``O_NOFOLLOW`` makes the *kernel* refuse a
+    symlinked segment as it opens it, and every subsequent operation is performed
+    relative to that fd — so unlike an ``lstat`` check followed by a path-based write,
+    swapping a directory for a symlink after the check cannot re-point the operation
+    (CWE-367: the check and the use are the same object, not the same name).
+    """
+    fd = os.open(workdir_path(session_id), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for segment in segments:
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(segment, 0o755, dir_fd=fd)
+            try:
+                child = os.open(segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.EMLINK):
+                    raise ValueError(
+                        f"refusing to traverse a symlinked workdir segment: {segment}"
+                    ) from exc
+                raise
+            os.close(fd)
+            fd = child
+            if create:
+                os.fchmod(fd, 0o755)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def publish_workdir_file(session_id: str, relpath: str, content: str) -> str:
+    """Symlink-safe write of ``content`` to ``<workdir>/<relpath>``; returns the host path.
+
+    The workdir is world-writable and bind-mounted into the sandbox, so a prior turn's
+    (untrusted) agent can plant a symlink anywhere under it — at the destination file OR at
+    an intermediate directory. Two defences, because they cover different attacks:
+
+    - The destination directory is reached through ``O_NOFOLLOW`` fds and the rename is done
+      relative to that fd, so no path segment can be re-pointed, even mid-write.
+    - The content is staged OUTSIDE the mount and ``os.replace``d into place: rename acts on
+      the link itself, never its target, so a symlink at the destination is replaced rather
+      than followed.
+
+    Modes are forced (``0o755`` dirs, ``0o644`` file) because the toolbox runs as a
+    different uid than the backend — under a hardened umask the agent could not read what
+    we tell it to read. Same discipline as ``write_attachment``.
+    """
+    parts = _workdir_parts(relpath)
+    os.makedirs(workdir_path(session_id), exist_ok=True)
+    dir_fd = _open_workdir_dir(session_id, parts[:-1], create=True)
+    # Staged in the session root, i.e. one level ABOVE the bind mount, so the agent cannot
+    # reach the staging file either.
+    staging = os.path.join(session_dir(session_id), f"{STAGING_PREFIX}{uuid.uuid4().hex}")
+    try:
+        with open(staging, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(staging, 0o644)
+        os.replace(staging, parts[-1], dst_dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(staging)
+    return os.path.join(workdir_path(session_id), *parts)
+
+
+def remove_workdir_file(session_id: str, relpath: str) -> None:
+    """Symlink-safe delete of ``<workdir>/<relpath>``. A missing file is not an error.
+
+    Deleting through a joined path would follow a planted symlink and unlink a file outside
+    the mount, which is exactly what :func:`publish_workdir_file` refuses to write through.
+    """
+    parts = _workdir_parts(relpath)
+    try:
+        dir_fd = _open_workdir_dir(session_id, parts[:-1], create=False)
+    except (OSError, ValueError):
+        return
+    try:
+        os.unlink(parts[-1], dir_fd=dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def sweep_staging_files(session_id: str) -> None:
+    """Drop staging files orphaned by a crash between the write and the rename."""
+    root = session_dir(session_id)
+    with contextlib.suppress(OSError):
+        for name in os.listdir(root):
+            if name.startswith(STAGING_PREFIX):
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(root, name))
 
 
 async def _docker(*args: str, timeout: float = 30.0, check: bool = True) -> tuple[int, str, str]:
@@ -238,7 +374,7 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
     claude_dir = os.path.join(
         root, "claude"
     )  # CLAUDE_CONFIG_DIR -> durable Claude state (--resume)
-    work_dir = os.path.join(root, "workdir")
+    work_dir = workdir_path(session_id)
     # opencode engine: its per-conversation session store (SQLite opencode.db + storage/)
     # lives at $HOME/.local/share/opencode in-container; bind-mount it durably so a turn's
     # `--continue` resumes THIS conversation's session across turns + sandbox rebuilds.
@@ -248,6 +384,7 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
         # World-writable so the proxy (squid's uid) and the toolbox (its own uid, which may
         # differ from the backend's) can write their state. Per-conversation -> not a leak.
         os.chmod(path, 0o777)  # noqa: S103 — intentional, per-conversation dir
+    sweep_staging_files(session_id)
 
     # Pre-create the squid access log owned by the backend and world-writable. squid (a
     # different uid in the proxy) then appends to it (O_APPEND keeps the existing mode),

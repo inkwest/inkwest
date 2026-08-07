@@ -248,7 +248,7 @@ export function StartConversation() {
           sessionId={sessionId ?? undefined}
           onBeforeAttach={() => ensureSession()}
           tourAnchor={tourAnchor}
-          modelControl={
+          toolbarControls={
             config && (config.available_models.length > 1 || config.engines.length > 1) ? (
               <ModelEnginePicker
                 config={config}
