@@ -265,6 +265,68 @@ class TestParseCliResponse:
         assert any(e.type == "done" for e in events)
 
     @pytest.mark.asyncio
+    async def test_stream_event_lines_are_ignored(self):
+        """Partial-message deltas (--include-partial-messages) must not duplicate the
+        aggregated assistant text/usage — they are liveness signals for the idle guard."""
+
+        async def mock_stream():
+            yield (
+                '{"type": "stream_event", "event": {"type": "content_block_delta",'
+                ' "delta": {"type": "text_delta", "text": "The answer"}}}'
+            )
+            yield (
+                '{"type": "stream_event", "event": {"type": "content_block_delta",'
+                ' "delta": {"type": "text_delta", "text": " is 42."}}}'
+            )
+            yield (
+                '{"type": "assistant", "message": {"content":'
+                ' [{"type": "text", "text": "The answer is 42."}],'
+                ' "usage": {"input_tokens": 10, "output_tokens": 5}}}'
+            )
+            yield '{"type": "result", "result": "The answer is 42.", "subtype": "success"}'
+
+        events = [e async for e in parse_cli_response(mock_stream())]
+
+        text_events = [e for e in events if e.type == "text_delta"]
+        assert len(text_events) == 1
+        assert text_events[0].content == "The answer is 42."
+        done = [e for e in events if e.type == "done"]
+        assert len(done) == 1
+        assert done[0].metadata["input_tokens"] == 10
+        assert done[0].metadata["output_tokens"] == 5
+
+    @pytest.mark.asyncio
+    async def test_cut_stream_usage_counted_once_per_message(self):
+        """The CLI emits one assistant event per content block, all repeating the same
+        message usage — a stream cut before `result` (the correcting authority) must
+        persist that usage once, not once per block. Distinct messages still sum."""
+
+        def assistant(msg_id, block):
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": msg_id,
+                        "content": [block],
+                        "usage": {"input_tokens": 10, "output_tokens": 5},
+                    },
+                }
+            )
+
+        async def mock_stream():
+            yield assistant("msg_1", {"type": "thinking", "thinking": "..."})
+            yield assistant("msg_1", {"type": "text", "text": "The answer is 42."})
+            yield assistant("msg_2", {"type": "text", "text": "Anything else?"})
+            # stream cut: no result/done line
+
+        events = [e async for e in parse_cli_response(mock_stream())]
+
+        usage = [e for e in events if e.type == "usage_stats"]
+        assert len(usage) == 1
+        assert usage[0].metadata["input_tokens"] == 20  # msg_1 once + msg_2 once
+        assert usage[0].metadata["output_tokens"] == 10
+
+    @pytest.mark.asyncio
     async def test_parse_full_assistant_message(self):
         """Test parsing full assistant message with multiple content blocks."""
 
@@ -406,6 +468,29 @@ class TestExecuteClaudeCli:
         idx = with_model.index("--model")
         assert with_model[idx + 1] == "claude-opus-4-8"
         assert "--model" not in without_model
+
+    @pytest.mark.asyncio
+    async def test_execute_cli_streams_partial_messages(self):
+        """Deltas must flow during generation so the idle-stall guard keeps resetting."""
+        captured_cmd = None
+
+        def make_process(*cmd, **kwargs):
+            nonlocal captured_cmd
+            captured_cmd = list(cmd)
+            mock_process = MagicMock()
+            mock_process.stdout = AsyncMock()
+            mock_process.stderr = AsyncMock()
+            mock_process.returncode = 0
+            mock_process.stdout.readline = AsyncMock(side_effect=[b'{"type": "done"}\n', b""])
+            mock_process.stderr.read = AsyncMock(return_value=b"")
+            mock_process.wait = AsyncMock(return_value=0)
+            return mock_process
+
+        with patch("asyncio.create_subprocess_exec", side_effect=make_process):
+            async for _ in execute_claude_cli("s1", "Hello"):
+                pass
+
+        assert "--include-partial-messages" in captured_cmd
 
     @pytest.mark.asyncio
     async def test_execute_cli_timeout(self):
