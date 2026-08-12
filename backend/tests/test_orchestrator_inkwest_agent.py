@@ -326,7 +326,9 @@ def _patch_broker(
             llm_broker,
             "get_settings",
             return_value=broker_settings
-            or SimpleNamespace(llm_broker_enabled=False, mcp_proxy_base_url=""),
+            or SimpleNamespace(
+                llm_broker_enabled=False, mcp_proxy_base_url="", llm_broker_base_url=""
+            ),
         ),
     ]
     return patches, spies
@@ -1352,7 +1354,9 @@ async def _run_agent_with_broker(broker_settings):
 @pytest.mark.asyncio
 async def test_broker_on_sets_endpoint_injects_and_burns_grant() -> None:
     captured = await _run_agent_with_broker(
-        SimpleNamespace(llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000")
+        SimpleNamespace(
+            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000", llm_broker_base_url=""
+        )
     )
     assert captured["spec"]["bedrock_endpoint_url"] == "http://gw:8000/api/llm-proxy"
     assert captured["live_during_turn"] is True  # grant resolvable while the agent ran
@@ -1363,7 +1367,9 @@ async def test_broker_on_sets_endpoint_injects_and_burns_grant() -> None:
 @pytest.mark.asyncio
 async def test_broker_off_leaves_endpoint_none_and_no_grant() -> None:
     captured = await _run_agent_with_broker(
-        SimpleNamespace(llm_broker_enabled=False, mcp_proxy_base_url="http://gw:8000")
+        SimpleNamespace(
+            llm_broker_enabled=False, mcp_proxy_base_url="http://gw:8000", llm_broker_base_url=""
+        )
     )
     # Broker off ⇒ the unset field is OMITTED from the wire spec (forward-compat: an agent image
     # that predates bedrock_endpoint_url still parses the spec; parse_turn_spec re-applies None).
@@ -1385,7 +1391,7 @@ async def test_grant_burned_when_agent_execute_raises() -> None:
 
     patches, spies = _patch_broker(
         broker_settings=SimpleNamespace(
-            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000"
+            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000", llm_broker_base_url=""
         )
     )
     for p in patches:
@@ -1418,7 +1424,7 @@ async def test_grant_burned_when_agent_execute_raises() -> None:
 async def test_broker_on_skips_engine_usage_row_keeps_stats():
     patches, spies = _patch_broker(
         broker_settings=SimpleNamespace(
-            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000"
+            llm_broker_enabled=True, mcp_proxy_base_url="http://gw:8000", llm_broker_base_url=""
         )
     )
     lines = [json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}})]

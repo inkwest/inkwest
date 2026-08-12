@@ -26,6 +26,7 @@ def _settings(tmp_path):
         sandbox_squid_confd="",
         sandbox_proxy_dns="",
         mcp_proxy_base_url="",
+        llm_broker_base_url="",
         sandbox_env_file="",
         sandbox_sessions_root=str(tmp_path),
         sandbox_creds_root="",
@@ -423,6 +424,85 @@ async def test_provision_skips_add_host_for_service_dns_mcp_proxy(tmp_path):
         await sandbox.provision("sid")
 
     assert "--add-host" not in proxy_run
+
+
+@pytest.mark.asyncio
+async def test_provision_maps_broker_sentinel_when_split_from_mcp_proxy(tmp_path):
+    """the broker can point in-pod while the MCP proxy stays on its externally
+    resolvable host (it doubles as the OAuth2 redirect). Only the sentinel gets mapped."""
+    settings = _settings(tmp_path)
+    settings.mcp_proxy_base_url = "https://inkwest.example.private"
+    settings.llm_broker_base_url = "http://inkwest-backend.internal:8000"
+    proxy_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        if args[0] == "run" and settings.sandbox_squid_image in args:
+            proxy_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+        patch.object(sandbox.socket, "gethostname", return_value="backend-host"),
+        patch.object(sandbox.socket, "gethostbyname", return_value="192.0.2.123"),
+    ):
+        await sandbox.provision("sid")
+
+    assert "inkwest-backend.internal:192.0.2.123" in proxy_run
+    # The externally resolvable MCP host must reach the load balancer, never the pod.
+    assert not any(a.startswith("inkwest.example.private:") for a in proxy_run)
+
+
+@pytest.mark.asyncio
+async def test_provision_maps_each_sentinel_once_when_both_settings_share_a_host(tmp_path):
+    """Both settings naming the same sentinel must not emit a duplicate --add-host: docker
+    rejects a repeated host entry, which would fail provisioning outright."""
+    settings = _settings(tmp_path)
+    settings.mcp_proxy_base_url = "http://host.docker.internal:8000"
+    settings.llm_broker_base_url = "http://host.docker.internal:8000"
+    proxy_run: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        if args[0] == "run" and settings.sandbox_squid_image in args:
+            proxy_run.extend(args)
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+        patch.object(sandbox.socket, "gethostname", return_value="backend-host"),
+        patch.object(sandbox.socket, "gethostbyname", return_value="172.19.0.4"),
+    ):
+        await sandbox.provision("sid")
+
+    assert proxy_run.count("host.docker.internal:172.19.0.4") == 1
+
+
+@pytest.mark.asyncio
+async def test_provision_warns_on_internal_host_that_is_not_a_sentinel(tmp_path):
+    """A typo'd .internal host can never resolve (.internal has no public DNS) and is not
+    mapped by --add-host — without the warning it only surfaces as an opaque squid error
+    on the first model call."""
+    settings = _settings(tmp_path)
+    settings.llm_broker_base_url = "http://inkwest-backend.intenral.internal:8000"
+    warned: list[str] = []
+
+    async def fake_docker(*args, **kwargs):
+        return (0, "", "")
+
+    with (
+        patch.object(sandbox, "get_settings", return_value=settings),
+        patch.object(sandbox, "_docker", fake_docker),
+        patch.object(sandbox, "_wait_healthy", AsyncMock()),
+        patch.object(
+            sandbox.logger, "warning", side_effect=lambda event, **kw: warned.append(event)
+        ),
+    ):
+        await sandbox.provision("sid")
+
+    assert "sandbox_backend_host_not_a_sentinel" in warned
 
 
 @pytest.mark.asyncio

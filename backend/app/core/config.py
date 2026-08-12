@@ -338,6 +338,15 @@ class Settings(BaseSettings):
     # sandbox_env_file (see docs/llm-auth-broker.md §Rollback).
     # ==========================================================================
     llm_broker_enabled: bool = False
+    # Base URL the sandbox uses to reach the broker, when it must differ from
+    # mcp_proxy_base_url. Empty = inherit that host (today's behavior, one host for both).
+    # Splitting them exists for one reason: mcp_proxy_base_url doubles as the OAuth2 redirect
+    # host in .claude.json, so it MUST stay externally resolvable, while broker traffic is
+    # pod-local and should not leave the pod at all — routing it through the shared load
+    # balancer costs a hairpin, ~15x latency, and a 60s idle cut mid-generation.
+    # Set to a self-host sentinel (see sandbox._SELF_HOST_SENTINELS) to reach the backend
+    # directly; the sandbox proxy maps it to the backend's own address at provisioning.
+    llm_broker_base_url: str = ""
 
     # At-rest encryption keys for operator secrets (e.g. the OAuth2 MCP catalog client
     # secret). JSON map {"<version>": "<base64 32-byte key>"}; the highest version seals new

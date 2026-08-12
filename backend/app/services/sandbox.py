@@ -48,6 +48,15 @@ logger = get_logger(__name__)
 _LABEL_SANDBOX = "inkwest.sandbox=1"
 _REAP_INTERVAL_SECONDS = 60
 
+# Hostnames the squid container must resolve to the BACKEND ITSELF rather than via DNS.
+# Deliberately a closed set, not operator-configurable: an arbitrary host mapped to the
+# backend would let any allowlisted name reach it, which is an SSRF footgun.
+#   host.docker.internal     — local dev; Docker's own alias points at dind's inner bridge
+#                              (a dead end), so it must be overridden.
+#   inkwest-backend.internal — kube; the broker points here so model traffic stays pod-local
+#                              instead of hairpinning through the shared load balancer.
+_SELF_HOST_SENTINELS = frozenset({"host.docker.internal", "inkwest-backend.internal"})
+
 
 @dataclass
 class Sandbox:
@@ -295,31 +304,42 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
             proxy_run += ["-v", f"{settings.sandbox_squid_confd}:/conf.d:ro"]
         if settings.sandbox_proxy_dns:
             proxy_run += ["--dns", settings.sandbox_proxy_dns]
-        if settings.mcp_proxy_base_url:
-            # OAuth2 MCP reachability: the toolbox egresses ONLY through squid, so the CLI's
-            # MCP calls to mcp_proxy_base_url must resolve+reach the backend's MCP proxy from
-            # inside the squid container. The host must also be squid-allowlisted (see
-            # docs/mcp-oauth2-proxy.md §5). Never attach the backend to the per-conversation
-            # networks instead — that wedges network teardown. Two topologies:
-            proxy_host = urlparse(settings.mcp_proxy_base_url).hostname
-            if proxy_host == "host.docker.internal":
-                # Local dev runs the backend under docker-in-docker, so Docker's `host-gateway`
-                # magic resolves to dind's INNER bridge gateway (a dead end — nothing serves
-                # :8000 there), and there is no Service DNS. Map the sentinel host to the
-                # backend's OWN container IP, which the nested squid reaches via dind's NAT.
-                # Portable across developers — no hardcoded compose subnet (unlike pinning
-                # dind's --host-gateway-ip). Squid honours /etc/hosts (which --add-host writes).
-                try:
-                    self_ip = socket.gethostbyname(socket.gethostname())
-                    proxy_run += ["--add-host", f"{proxy_host}:{self_ip}"]
-                except OSError as e:
-                    # Degrade to no add-host rather than fail provisioning; OAuth2 MCP just
-                    # won't be reachable (logged so the cause is visible, not silent).
-                    logger.warning("mcp_proxy_self_ip_resolve_failed", error=str(e))
-            elif proxy_host:
-                # prod/kube: proxy_host is a resolvable Service DNS name reached via the
-                # squid container's own resolver + the allowlist — nothing to inject here.
-                pass
+        # Backend reachability from inside squid: the toolbox egresses ONLY through squid, so
+        # the CLI's MCP calls (mcp_proxy_base_url) and its model calls (llm_broker_base_url,
+        # when split off) must resolve+reach the backend from the proxy container. Each host
+        # must also be squid-allowlisted (see docs/mcp-oauth2-proxy.md §5). Never attach the
+        # backend to the per-conversation networks instead — that wedges network teardown.
+        #
+        # A sentinel host is one Docker/DNS cannot resolve correctly for us: in dev, Docker's
+        # `host-gateway` points at dind's INNER bridge (a dead end, nothing serves :8000); in
+        # kube, the in-pod broker address has no Service DNS name. Both are fixed the same
+        # way — map the name to the backend's OWN address, which the nested squid reaches via
+        # dind's NAT. Portable, with no hardcoded subnet (unlike pinning --host-gateway-ip).
+        # Squid honours /etc/hosts, which --add-host writes. Any other host is a real DNS name
+        # resolved by the proxy's own resolver, so there is nothing to inject.
+        backend_hosts = {
+            host
+            for url in (settings.mcp_proxy_base_url, settings.llm_broker_base_url)
+            if url
+            for host in (urlparse(url).hostname,)
+            if host
+        }
+        self_hosts = sorted(backend_hosts & _SELF_HOST_SENTINELS)
+        for host in backend_hosts - _SELF_HOST_SENTINELS:
+            # .internal is reserved (no public DNS), so such a host that is not a known
+            # sentinel can never resolve — a typo here otherwise surfaces only as an opaque
+            # squid error on the first model/MCP call.
+            if host.endswith(".internal"):
+                logger.warning("sandbox_backend_host_not_a_sentinel", host=host)
+        if self_hosts:
+            try:
+                self_ip = socket.gethostbyname(socket.gethostname())
+                for host in self_hosts:
+                    proxy_run += ["--add-host", f"{host}:{self_ip}"]
+            except OSError as e:
+                # Degrade to no add-host rather than fail provisioning; the affected paths just
+                # won't be reachable (logged so the cause is visible, not silent).
+                logger.warning("sandbox_self_ip_resolve_failed", error=str(e))
         proxy_run += [settings.sandbox_squid_image]
         await _docker(*proxy_run, timeout=settings.sandbox_provision_timeout)
         # Dual-home the proxy so it can resolve + egress to the internet.

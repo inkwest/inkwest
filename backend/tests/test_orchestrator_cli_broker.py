@@ -28,6 +28,7 @@ def _settings(*, broker_enabled: bool, base: str = "http://gw:8000") -> SimpleNa
         sandbox_enabled=True,
         llm_broker_enabled=broker_enabled,
         mcp_proxy_base_url=base,
+        llm_broker_base_url="",
         claude_cli_path="claude",
         claude_cli_timeout=120,
         agent_stream_idle_timeout=120,

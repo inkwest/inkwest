@@ -45,7 +45,10 @@ def broker_base_url() -> str | None:
     settings = get_settings()
     if not settings.llm_broker_enabled:
         return None
-    base = settings.mcp_proxy_base_url
+    # Prefer the dedicated broker host when set: broker traffic is pod-local and can skip the
+    # load balancer entirely, while mcp_proxy_base_url must stay externally resolvable for
+    # OAuth2 redirects. Unset ⇒ inherit that host, which is the previous behavior.
+    base = settings.llm_broker_base_url or settings.mcp_proxy_base_url
     if not base:
         # Enabled but unreachable: the sandbox can't egress to a broker that has no host (the
         # squid allowlist + --add-host both key off mcp_proxy_base_url). Fall back to direct
@@ -53,8 +56,9 @@ def broker_base_url() -> str | None:
         # sandbox env-file (the exact posture the broker removes), so log at ERROR (alertable),
         # not WARNING: a misconfiguration here is a silent security regression, not a hiccup.
         logger.error(
-            "llm_broker_enabled but mcp_proxy_base_url is unset; broker NOT wired — "
-            "falling back to the real Bedrock bearer in the sandbox (credential re-exposed)"
+            "llm_broker_enabled but neither llm_broker_base_url nor mcp_proxy_base_url is set; "
+            "broker NOT wired — falling back to the real Bedrock bearer in the sandbox "
+            "(credential re-exposed)"
         )
         return None
     return f"{base.rstrip('/')}/api/llm-proxy"

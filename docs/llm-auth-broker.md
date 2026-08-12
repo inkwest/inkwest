@@ -55,10 +55,15 @@ direct-Anthropic-key shape can be added later without touching the route body.
    stripping the sandbox cred in step 3 doesn't break catalog refresh. Enable at least one model
    in admin settings: the broker is **fail-closed**, so with no enabled models the CLI turn is
    refused with a clear error (the agent path 403s — see Restriction).
-2. **`MCP_PROXY_BASE_URL` must be set** — the broker base URL is `<that host>/api/llm-proxy`,
-   so it inherits the MCP proxy's squid allowlist + host-gateway `--add-host` (see Squid). If
-   it is unset the broker logs at **ERROR** (alertable — the fallback re-exposes the real bearer
-   in the sandbox) and falls back to direct Bedrock.
+2. **A broker host must be set** — the broker base URL is `<host>/api/llm-proxy`, where the
+   host is `LLM_BROKER_BASE_URL` when set, else the `MCP_PROXY_BASE_URL` host (one host for
+   both, the previous default). Splitting them keeps model traffic pod-local — the MCP
+   host must stay externally resolvable (OAuth2 redirects) and hairpins through the shared
+   load balancer, whose 60s idle timeout severs a response the model is still preparing.
+   Either way the host must be squid-allowlisted; a sentinel host (see
+   `sandbox._SELF_HOST_SENTINELS`) is additionally mapped to the backend's own address via
+   `--add-host`. If neither is set the broker logs at **ERROR** (alertable — the fallback
+   re-exposes the real bearer in the sandbox) and falls back to direct Bedrock.
 3. **Migration — strip the sandbox cred**: remove `AWS_BEARER_TOKEN_BEDROCK` from
    `sandbox_env_file`. `CLAUDE_CODE_USE_BEDROCK` / `ANTHROPIC_BEDROCK_BASE_URL` there are
    harmless (the orchestrator injects them per turn via `docker exec -e`, which overrides the
@@ -135,9 +140,10 @@ Bedrock credential inside the sandbox it is no longer a credentialed Bedrock egr
   so it's instantly distinguishable in logs / `/proc/<pid>/environ` / a Bedrock error body from
   a real Bedrock key (`ABSK…`) — the prefix is cosmetic; the suffix is what's unguessable.
 - **Network exposure.** The grant is the route's only application-level auth, so `/api/llm-proxy`
-  must NOT sit on a public ingress: the sandbox reaches it solely via the host-gateway alias
-  (the squid-allowlisted `mcp_proxy_base_url` host). Keep it off the public ALB / restrict it to
-  the host-gateway interface so a leaked grant alone isn't usable off-host for its lifetime.
+  must NOT sit on a public ingress: the sandbox reaches it solely via a squid-allowlisted host —
+  the in-pod `llm_broker_base_url` sentinel when set (mapped by `--add-host`, traffic never
+  leaves the pod), else the `mcp_proxy_base_url` host. Keep it off the public ALB / restrict it
+  so a leaked grant alone isn't usable off-host for its lifetime.
 
 ## Scope
 
