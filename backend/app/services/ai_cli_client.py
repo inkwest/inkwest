@@ -301,6 +301,9 @@ async def execute_claude_cli(
         "--output-format",
         "stream-json",
         "--verbose",
+        # stream_event delta lines feed the idle-stall guard during generation —
+        # without them a long completion is silent past agent_stream_idle_timeout.
+        "--include-partial-messages",
     ]
 
     # Layer the session's managed system prompt over Claude Code's default.
@@ -468,6 +471,9 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
     # 1h-TTL portion of the writes (billed 2x, not 1.25x) — the Anthropic usage block
     # carries the split under cache_creation.ephemeral_1h_input_tokens.
     total_cache_write_1h_tokens = 0
+    # The CLI emits one `assistant` event per content block, all repeating the SAME
+    # message usage — accumulate once per message id or a cut stream persists ~2x.
+    last_usage_message_id = None
     done_emitted = False
 
     def _usage_meta() -> dict[str, int]:
@@ -504,6 +510,13 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
 
         event_type = parsed.get("type")
 
+        # Partial-message deltas (--include-partial-messages) are liveness signals for
+        # the idle-stall guard upstream, not content: the aggregated assistant/result
+        # events still carry the full text and usage, so forwarding deltas here would
+        # duplicate both. Checked first — they dominate the stream by volume.
+        if event_type == "stream_event":
+            continue
+
         # Handle system init event - contains CLI session ID for --resume and
         # the model the CLI actually runs with (for accurate cost attribution).
         if event_type == "system" and parsed.get("subtype") == "init":
@@ -520,8 +533,15 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
 
         elif event_type == "assistant":
             message = parsed.get("message", {})
-            # Accumulate usage from assistant events
+            # Accumulate usage once per message: per-block events repeat it verbatim.
+            # id-less messages (legacy/simple format) keep the old per-event behavior.
             usage = message.get("usage") or parsed.get("usage")
+            message_id = message.get("id")
+            if usage and message_id is not None:
+                if message_id == last_usage_message_id:
+                    usage = None  # this message's usage was already counted
+                else:
+                    last_usage_message_id = message_id
             if usage:
                 total_input_tokens += usage.get("input_tokens", 0)
                 total_output_tokens += usage.get("output_tokens", 0)
