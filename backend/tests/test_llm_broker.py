@@ -13,8 +13,16 @@ _U = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _S = uuid.UUID("00000000-0000-4000-8000-000000000002")
 
 
-def _settings(enabled: bool, base: str = "http://host.docker.internal:8000") -> SimpleNamespace:
-    return SimpleNamespace(llm_broker_enabled=enabled, mcp_proxy_base_url=base)
+def _settings(
+    enabled: bool,
+    base: str = "http://host.docker.internal:8000",
+    broker_base: str = "",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        llm_broker_enabled=enabled,
+        mcp_proxy_base_url=base,
+        llm_broker_base_url=broker_base,
+    )
 
 
 def _patch(settings: SimpleNamespace):
@@ -38,6 +46,24 @@ def test_base_url_appends_proxy_path() -> None:
 
 def test_base_url_strips_trailing_slash() -> None:
     with _patch(_settings(enabled=True, base="http://gw:8000/")):
+        assert llm_broker.broker_base_url() == "http://gw:8000/api/llm-proxy"
+
+
+def test_base_url_prefers_dedicated_broker_host() -> None:
+    """broker traffic is pod-local and skips the load balancer, while
+    mcp_proxy_base_url stays externally resolvable for OAuth2 redirects."""
+    settings = _settings(
+        enabled=True,
+        base="https://inkwest.example.private",
+        broker_base="http://inkwest-backend.internal:8000",
+    )
+    with _patch(settings):
+        assert llm_broker.broker_base_url() == "http://inkwest-backend.internal:8000/api/llm-proxy"
+
+
+def test_base_url_falls_back_to_mcp_proxy_host_when_broker_host_unset() -> None:
+    """Unset is the default: one host serves both, which is the previous behavior."""
+    with _patch(_settings(enabled=True, base="http://gw:8000", broker_base="")):
         assert llm_broker.broker_base_url() == "http://gw:8000/api/llm-proxy"
 
 
