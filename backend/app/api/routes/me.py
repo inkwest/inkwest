@@ -28,6 +28,8 @@ from app.models.schemas import (
     McpPolicyServerUpdate,
     PreferencesResponse,
     PreferencesUpdate,
+    SkillList,
+    SkillResponse,
     UserSkillCreate,
     UserSkillResponse,
     UserSkillUpdate,
@@ -37,6 +39,7 @@ from app.models.user_skill import UserSkill
 from app.services.user_preferences import (
     CONFIG_SCHEMA_VERSION,
     ConfigImportError,
+    get_effective_skills,
     get_preferences,
     plan_import,
     set_preferences_document,
@@ -221,6 +224,26 @@ async def list_my_skills(
 ) -> list[UserSkillResponse]:
     skills = await _user_skills(db, current_user.id)
     return [UserSkillResponse.model_validate(s) for s in skills]
+
+
+@router.get("/skills/effective", response_model=SkillList)
+async def list_my_effective_skills(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> SkillList:
+    """The skills actually materialized into this user's sandbox, in sandbox order.
+
+    Backs the chat picker (palette + "/" autocomplete). It calls the same resolver the
+    orchestrators do, so the list can't drift from what the agent can really trigger:
+    active admin skills minus the ones the user disabled, overlaid by their active
+    personal skills (personal wins per slug). ``/api/skills`` stays admin-only — it feeds
+    the settings editor, which must still show skills the user disabled or overrode.
+
+    Both row types render as ``SkillResponse``: only the trigger surface (slug, argument
+    hint, description) matters here, not the personal-only provenance fields.
+    """
+    skills = await get_effective_skills(db, current_user.id)
+    return SkillList(items=[SkillResponse.model_validate(s) for s in skills], total=len(skills))
 
 
 @router.post("/skills", response_model=UserSkillResponse, status_code=status.HTTP_201_CREATED)

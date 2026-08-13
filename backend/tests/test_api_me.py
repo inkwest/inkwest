@@ -39,11 +39,16 @@ def _user_skill(name: str = "my-skill", *, is_override: bool = False, content: s
 
 
 def _admin_skill(name: str = "my-skill"):
+    # Carries the timestamp/is_active fields too so it also validates as a SkillResponse
+    # (the effective-skills endpoint renders admin and personal rows through that schema).
     return SimpleNamespace(
         id=uuid.uuid4(),
         name=name,
         content=f"---\nname: {name}\ndescription: Admin\n---\nAdmin body.\n",
         description="Admin",
+        is_active=True,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
 
 
@@ -125,6 +130,51 @@ async def test_list_my_skills(authenticated_client: AsyncClient, mock_db: AsyncM
     resp = await authenticated_client.get("/api/me/skills")
     assert resp.status_code == 200
     assert resp.json()[0]["name"] == "my-skill"
+
+
+@pytest.mark.asyncio
+async def test_list_my_effective_skills(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """The chat picker's list = the resolver's set, personal shadowing admin per slug."""
+    personal = "---\nname: shared\n---\nPERSONAL\n"
+    # The resolver's three reads: active admin skills, the prefs doc, active personal ones.
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            _result(scalars_all=[_admin_skill("shared"), _admin_skill("admin-only")]),
+            _result(scalar_one_or_none=None),  # no prefs row => nothing disabled
+            _result(scalars_all=[_user_skill("shared", content=personal)]),
+        ]
+    )
+    resp = await authenticated_client.get("/api/me/skills/effective")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [i["name"] for i in body["items"]] == ["admin-only", "shared"]
+    assert body["total"] == 2
+    items = {i["name"]: i for i in body["items"]}
+    assert items["shared"]["content"] == personal  # personal won the slug
+    assert items["shared"]["slug"] == "shared"  # the "/" trigger the picker inserts
+
+
+@pytest.mark.asyncio
+async def test_effective_skills_drops_disabled_admin(
+    authenticated_client: AsyncClient, mock_db: AsyncMock
+) -> None:
+    """A skill the user turned off is absent from the picker, as it is from the sandbox."""
+    mock_db.execute = AsyncMock(
+        side_effect=[
+            _result(scalars_all=[_admin_skill("keep"), _admin_skill("drop")]),
+            _result(
+                scalar_one_or_none=SimpleNamespace(
+                    document={"skills": {"disabled_admin": ["drop"]}}
+                )
+            ),
+            _result(scalars_all=[]),
+        ]
+    )
+    resp = await authenticated_client.get("/api/me/skills/effective")
+    assert resp.status_code == 200
+    assert [i["name"] for i in resp.json()["items"]] == ["keep"]
 
 
 @pytest.mark.asyncio

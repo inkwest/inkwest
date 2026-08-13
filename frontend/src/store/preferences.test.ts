@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { usePreferencesStore } from './preferences';
 import { useSettingsStore } from './settings';
+import { useSkillsStore } from './skills';
 import * as api from '@/services/api';
-import type { PreferencesResponse, UserSkill } from '@/types/api';
+import type { PreferencesResponse, Skill, UserSkill } from '@/types/api';
 
 function skill(name: string, over: Partial<UserSkill> = {}): UserSkill {
   return {
@@ -40,7 +41,11 @@ describe('preferencesStore', () => {
       wideComposer: false,
       sidebarWidth: 256,
     });
+    useSkillsStore.setState({ templates: [], isLoading: false, error: null });
     vi.restoreAllMocks();
+    // Every skill-affecting write refreshes the chat picker's store; stub the fetch so
+    // that fire-and-forget call never reaches the real network layer (and its retries).
+    vi.spyOn(api, 'getEffectiveSkills').mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -136,5 +141,57 @@ describe('preferencesStore', () => {
     vi.spyOn(api, 'updateMyPreferences').mockRejectedValue(new Error('boom'));
     await expect(usePreferencesStore.getState().saveUi({ wideComposer: true })).rejects.toThrow();
     expect(usePreferencesStore.getState().error).toBe('boom');
+  });
+
+  // Regression: Settings-side skill writes must reach the chat picker's store — the "/"
+  // autocomplete never remounts, so without an explicit refresh it kept the pre-edit list.
+  describe('chat-picker refresh on skill writes', () => {
+    const asSkill = (name: string): Skill => skill(name) as unknown as Skill;
+
+    it('createSkill pushes the new effective set into the chat store', async () => {
+      useSkillsStore.setState({ templates: [asSkill('admin-one')] });
+      vi.spyOn(api, 'createMySkill').mockResolvedValue(skill('brand-new'));
+      vi.mocked(api.getEffectiveSkills).mockResolvedValue([
+        asSkill('admin-one'),
+        asSkill('brand-new'),
+      ]);
+
+      await usePreferencesStore.getState().createSkill('---\nname: brand-new\n---\nb');
+      await vi.waitFor(() =>
+        expect(useSkillsStore.getState().templates.map((t) => t.slug)).toContain('brand-new')
+      );
+    });
+
+    it('disabling an admin skill drops it from the chat store', async () => {
+      useSkillsStore.setState({ templates: [asSkill('admin-one')] });
+      vi.spyOn(api, 'updateMyPreferences').mockResolvedValue(resp());
+      vi.mocked(api.getEffectiveSkills).mockResolvedValue([]);
+
+      await usePreferencesStore.getState().setAdminSkillEnabled('admin-one', false);
+      await vi.waitFor(() => expect(useSkillsStore.getState().templates).toEqual([]));
+    });
+
+    it('a failed write does not refresh the chat store', async () => {
+      vi.spyOn(api, 'createMySkill').mockRejectedValue(new Error('boom'));
+      await expect(usePreferencesStore.getState().createSkill('x')).rejects.toThrow();
+      expect(api.getEffectiveSkills).not.toHaveBeenCalled();
+    });
+
+    it('deleteSkill, updateSkill, overrideSkill and importConfig all refresh', async () => {
+      usePreferencesStore.setState({ skills: [skill('a')] });
+      vi.spyOn(api, 'deleteMySkill').mockResolvedValue(undefined);
+      vi.spyOn(api, 'updateMySkill').mockResolvedValue(skill('a'));
+      vi.spyOn(api, 'overrideAdminSkill').mockResolvedValue(skill('forked'));
+      vi.spyOn(api, 'importMyConfig').mockResolvedValue(resp());
+
+      await usePreferencesStore.getState().deleteSkill('a');
+      await usePreferencesStore.getState().updateSkill('a', { is_active: false });
+      await usePreferencesStore.getState().overrideSkill('forked');
+      await usePreferencesStore.getState().importConfig(
+        { schema_version: 1, exported_at: '2026-01-01T00:00:00Z', preferences: {}, skills: [] },
+        false
+      );
+      expect(api.getEffectiveSkills).toHaveBeenCalledTimes(4);
+    });
   });
 });

@@ -370,14 +370,23 @@ export async function getClusters(): Promise<Cluster[]> {
   return response.items;
 }
 
-// Skills (read-only; consumed by the chat palette)
+// Skills (read-only)
 interface PaginatedSkills {
   items: Skill[];
   total: number;
 }
 
+// The ADMIN skill catalog — including entries this user disabled or overrode, which the
+// settings editor needs to render. Not what the agent runs: see getEffectiveSkills.
 export async function getSkills(): Promise<Skill[]> {
   const response = await fetchAPI<PaginatedSkills>('/api/skills');
+  return response.items;
+}
+
+// What the sandbox actually gets for this user (admin minus disabled, overlaid by
+// personal). Server-resolved so the chat picker can't drift from the agent's real set.
+export async function getEffectiveSkills(): Promise<Skill[]> {
+  const response = await fetchAPI<PaginatedSkills>('/api/me/skills/effective');
   return response.items;
 }
 

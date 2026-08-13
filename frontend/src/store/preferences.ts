@@ -16,6 +16,7 @@ import {
   updateMySkill,
 } from '@/services/api';
 import { useSettingsStore } from '@/store/settings';
+import { useSkillsStore } from '@/store/skills';
 
 /**
  * DB-backed user preferences.
@@ -49,6 +50,15 @@ function applyUiToCache(ui: UiPreferences | undefined): void {
   if (typeof ui.sidebarWidth === 'number') patch.sidebarWidth = ui.sidebarWidth;
   // setState merges; the persist middleware writes the cache back to localStorage.
   useSettingsStore.setState(patch);
+}
+
+// Any write below that changes the user's EFFECTIVE skill set (create/update/delete/
+// override, disabled_admin toggle, import) must refresh the chat picker's store — it has
+// no other signal, and ChatInput's "/" autocomplete never remounts, so without this it
+// keeps the pre-edit list for the rest of the tab's life. Fire-and-forget: the write
+// already succeeded, a failed refresh keeps the last-good list (see store/skills.ts).
+function refreshChatSkills(): void {
+  void useSkillsStore.getState().fetchTemplates();
 }
 
 interface PreferencesState {
@@ -149,6 +159,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     set({ disabledAdmin: disabled, document, error: null, writeSeq: get().writeSeq + 1 });
     try {
       await updateMyPreferences(document);
+      refreshChatSkills();
     } catch (e) {
       set({ error: (e as Error).message });
       throw e;
@@ -160,6 +171,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     try {
       const created = await createMySkill(content);
       set({ skills: [...get().skills, created].sort((a, b) => a.name.localeCompare(b.name)) });
+      refreshChatSkills();
     } catch (e) {
       set({ error: (e as Error).message });
       throw e;
@@ -175,6 +187,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
           .skills.map((s) => (s.id === id ? updated : s))
           .sort((a, b) => a.name.localeCompare(b.name)),
       });
+      refreshChatSkills();
     } catch (e) {
       set({ error: (e as Error).message });
       throw e;
@@ -186,6 +199,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     try {
       await deleteMySkill(id);
       set({ skills: get().skills.filter((s) => s.id !== id) });
+      refreshChatSkills();
     } catch (e) {
       set({ error: (e as Error).message });
       throw e;
@@ -197,6 +211,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     try {
       const created = await overrideAdminSkill(adminName);
       set({ skills: [...get().skills, created].sort((a, b) => a.name.localeCompare(b.name)) });
+      refreshChatSkills();
     } catch (e) {
       set({ error: (e as Error).message });
       throw e;
@@ -216,6 +231,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         skills: resp.skills,
         disabledAdmin: resp.document.skills?.disabled_admin ?? [],
       });
+      refreshChatSkills();
     } catch (e) {
       set({ error: (e as Error).message });
       throw e;
