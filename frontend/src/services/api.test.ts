@@ -9,6 +9,7 @@ import {
   deleteSession,
   updateSession,
   getFailedMessages,
+  getEffectiveSkills,
   searchGlobal,
   fetchWsTicket,
   decideMcpAsk,
@@ -150,6 +151,20 @@ describe('getFailedMessages', () => {
 
     const result = await getFailedMessages('s1');
     expect(result).toEqual([]);
+  });
+});
+
+describe('getEffectiveSkills', () => {
+  it('reads the per-user effective set, not the admin catalog', async () => {
+    const skills = [{ id: '1', name: 'mine', slug: 'mine', content: 'x', is_active: true }];
+    mockFetch.mockReturnValue(jsonResponse({ items: skills, total: 1 }));
+
+    const result = await getEffectiveSkills();
+    expect(result).toEqual(skills);
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/me/skills/effective'),
+      expect.any(Object),
+    );
   });
 });
 

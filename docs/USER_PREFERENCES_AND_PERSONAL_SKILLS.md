@@ -136,6 +136,10 @@ is available at those points; if not, pass it through the turn context.
   - `GET  /api/me/preferences` → `{schema_version, document, skills:[...]}`
   - `PUT  /api/me/preferences` → update `document` (ui + disabled_admin)
   - `GET  /api/me/skills` · `POST /api/me/skills` · `PUT /api/me/skills/{id}` · `DELETE /api/me/skills/{id}`
+  - `GET  /api/me/skills/effective` → `get_effective_skills` rendered as `SkillList`: the
+    exact set materialized into the user's sandbox. Backs the chat picker (palette + `/`
+    autocomplete) so it can't drift from what the agent can trigger. `/api/skills` stays
+    the **admin catalog** — the settings editor needs the rows the user disabled/overrode.
   - `POST /api/me/skills/override/{admin_name}` → fork admin SKILL.md into a personal
     skill (`is_override=true`, `source_admin_skill_id` set), returns the new skill.
   - `GET  /api/me/export` → versioned JSON (download)
