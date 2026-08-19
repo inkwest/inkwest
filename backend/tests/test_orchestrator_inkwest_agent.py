@@ -280,6 +280,7 @@ def _patch_broker(
         sandbox_home="/home/agent",
         claude_cli_timeout=120,
         agent_stream_idle_timeout=120,
+        agent_progress_timeout=900,
         app_env="development",
     )
     patches = [
@@ -1030,11 +1031,13 @@ class TestOrchestrateInkwestAgent:
         spies.release.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_cancel_discards_partial_to_avoid_dangling_tool_use(self):
-        """Kill mid-tool: a tool_use with no tool_result must NOT be persisted.
+    async def test_cancel_persists_partial_with_dangling_tool_use(self):
+        """Kill mid-tool: the partial assistant content IS persisted, tool_use and all.
 
-        Otherwise the next Converse turn's history has a dangling toolUse and Bedrock
-        rejects it. On cancel the broker discards the partial assistant content.
+        The client already saw it streamed, so discarding it made a stopped turn
+        indistinguishable from one that never ran. The resulting dangling toolUse is safe
+        because the history read path prunes unpaired tool blocks before replay
+        (get_session_messages -> prune_orphan_tool_calls), so Bedrock never sees it.
         """
         patches, spies = _patch_broker()
         cancel_event = asyncio.Event()
@@ -1059,9 +1062,14 @@ class TestOrchestrateInkwestAgent:
             for p in reversed(patches):
                 p.stop()
         assert events[-1].type == "done" and events[-1].metadata.get("stopped") is True
-        # only the user message was persisted — no assistant/tool_result partial
-        roles = [c.args[2] for c in spies.save_message.await_args_list]
-        assert roles == ["user"]
+        # the partial assistant turn survives the stop, dangling tool_use included
+        calls = spies.save_message.await_args_list
+        roles = [c.args[2] for c in calls]
+        assert roles == ["user", "assistant"]
+        blocks = calls[1].args[3]
+        assert [b["type"] for b in blocks] == ["text", "tool_use"]
+        assert blocks[0]["text"] == "checking"
+        assert blocks[1]["id"] == "t1"
         spies.release.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1100,6 +1108,43 @@ class TestOrchestrateInkwestAgent:
         # exactly one error (the streamed one); the redundant raise is swallowed
         assert [e.type for e in events] == ["error"]
         assert events[0].content == "boom"
+
+    @pytest.mark.asyncio
+    async def test_silent_crash_persists_partial(self):
+        """A crashed turn keeps what already streamed — same contract as a user Stop."""
+        patches, spies = _patch_broker()
+
+        def failing(session_id, turn_spec, **kw):
+            spies.turn_spec = turn_spec
+
+            async def gen():
+                yield json.dumps({"type": "text_delta", "content": "found it"})
+                raise RuntimeError("inkwest-agent failed: Exit code 137")
+
+            return gen()
+
+        for p in patches:
+            p.start()
+        try:
+            with patch.object(oia, "execute_agent", side_effect=failing):
+                events = await _collect(
+                    oia.orchestrate_chat_inkwest_agent(
+                        db=spies.db,
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="why crash?",
+                        user_id=USER_ID,
+                    )
+                )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        assert any(e.type == "error" for e in events)
+        calls = [c for c in spies.save_message.await_args_list if c.args[2] == "assistant"]
+        assert len(calls) == 1
+        assert calls[0].args[3] == [{"type": "text", "text": "found it"}]
 
     @pytest.mark.asyncio
     async def test_silent_crash_surfaces_error(self):

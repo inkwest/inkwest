@@ -12,8 +12,9 @@ import json
 import logging
 import os
 import shlex
+import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +36,53 @@ _STOP_GRACE_SECONDS = 5.0
 # Large stdout buffer for big tool outputs (file reads, kubectl dumps) — shared by every
 # in-container spawn path (claude-cli, inkwest-agent, opencode).
 _SUBPROCESS_BUFFER_LIMIT = 100 * 1024 * 1024  # 100MB
+
+# Strong refs to in-flight SIGKILL escalations. A stop can be cancelled mid-grace (turn
+# teardown races it), so the kill is fired detached; asyncio holds only weak references to
+# tasks, so without this set a pending kill can be garbage-collected before it runs and the
+# agent survives the stop entirely (orphaned agents outliving cancelled turns).
+_PENDING_KILLS: set[asyncio.Task[Any]] = set()
+
+
+def _fire_and_forget(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Schedule `coro` detached, keeping a strong ref until it completes."""
+    task = asyncio.ensure_future(coro)
+    _PENDING_KILLS.add(task)
+    task.add_done_callback(_PENDING_KILLS.discard)
+    return task
+
+
+class ProgressTracker:
+    """Deadline that only resets on *meaningful* turn progress.
+
+    The stdout idle guard resets on every line the agent writes, which makes a wedged
+    agent that keeps dribbling output immortal: it renews its own deadline forever while
+    advancing nothing (observed in production — 55 min of no model call and no tool call,
+    with the 600 s idle guard never tripping). This tracker is bumped by the *consumer*
+    instead, from the same place it decides an event is client-visible, so keepalives and
+    partial-message noise can't renew it.
+
+    Kept deliberately dumb (monotonic clock, no I/O) so the streaming loop stays testable.
+    """
+
+    __slots__ = ("_last",)
+
+    def __init__(self) -> None:
+        self._last = time.monotonic()
+
+    def mark(self) -> None:
+        """Record that the turn advanced (a client-visible event was produced)."""
+        self._last = time.monotonic()
+
+    def idle_for(self) -> float:
+        """Seconds since the last recorded progress."""
+        return time.monotonic() - self._last
+
+
+async def _abort_read(task: asyncio.Task[bytes]) -> None:
+    """Cancel a pending readline and reap it, so no task is left dangling."""
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 def _terminate_quiet(process: asyncio.subprocess.Process) -> None:
@@ -119,33 +167,56 @@ async def _stop_agent(
     signals to it, so it's signaled directly by its recorded PID (the local client is
     just torn down alongside). In local mode `process` IS the agent, so it's signaled
     directly.
+
+    The SIGKILL escalation is NOT a safety net, it is the step that does the work: the
+    agent runtime installs a userspace SIGTERM handler dispatched by its own event loop
+    (confirmed via `SigCgt` in /proc/<pid>/status), so an agent wedged in that loop
+    *accepts* SIGTERM and then never acts on it. Only SIGKILL, which cannot be handled,
+    ends it. Turn teardown routinely cancels this coroutine mid-grace, so the escalation
+    runs from `finally` and detached — otherwise a CancelledError raised inside the grace
+    sleep skips it and the agent outlives the turn indefinitely.
     """
     if container and pid_file:
-        signaled = await _container_signal(docker_path, container, pid_file, "TERM")
-        if not signaled:
-            # No PID recorded inside the container (e.g. the launch wrapper couldn't
-            # write the pid file). The agent may still be running and we can't target
-            # it — surface it instead of silently regressing to "stop does nothing".
-            logger.warning(
-                "In-container stop found no agent PID to signal (container=%s); "
-                "the agent may still be running",
-                container,
-            )
-        _terminate_quiet(process)  # drop the local docker-exec client too
-        waited = 0.0
-        while waited < _STOP_GRACE_SECONDS:
-            if not await _container_alive(docker_path, container, pid_file):
-                break
-            await asyncio.sleep(0.5)
-            waited += 0.5
-        else:
-            await _container_signal(docker_path, container, pid_file, "KILL")
+        # The try covers the TERM signal itself, not just the grace loop: a cancellation
+        # landing during that docker exec (up to 10s under dind load) must still fire the
+        # kill, or the agent is re-orphaned through a narrower door.
+        needs_kill = True
+        try:
+            signaled = await _container_signal(docker_path, container, pid_file, "TERM")
+            if not signaled:
+                # No PID recorded inside the container (e.g. the launch wrapper couldn't
+                # write the pid file). The agent may still be running and we can't target
+                # it — surface it instead of silently regressing to "stop does nothing".
+                logger.warning(
+                    "In-container stop found no agent PID to signal (container=%s); "
+                    "the agent may still be running",
+                    container,
+                )
+            _terminate_quiet(process)  # drop the local docker-exec client too
+            waited = 0.0
+            while waited < _STOP_GRACE_SECONDS:
+                if not await _container_alive(docker_path, container, pid_file):
+                    needs_kill = False  # exited on SIGTERM, nothing to escalate
+                    break
+                await asyncio.sleep(0.5)
+                waited += 0.5
+        finally:
+            if needs_kill:
+                # Detached + strongly referenced so cancellation of *this* coroutine
+                # cannot prevent the kill from being delivered.
+                kill = _fire_and_forget(_container_signal(docker_path, container, pid_file, "KILL"))
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(kill)
     else:
         _terminate_quiet(process)
         try:
             await asyncio.wait_for(process.wait(), timeout=_STOP_GRACE_SECONDS)
         except TimeoutError:
             _kill_quiet(process)
+        except asyncio.CancelledError:
+            # `kill()` is synchronous, so it lands even while we're being torn down.
+            _kill_quiet(process)
+            raise
     # Reap the local client so no handle/zombie lingers.
     _kill_quiet(process)
     try:
@@ -162,6 +233,8 @@ async def _stream_stdout(
     docker_path: str,
     pid_file: str | None,
     idle_timeout: float | None = None,
+    progress: "ProgressTracker | None" = None,
+    progress_timeout: float | None = None,
 ) -> AsyncIterator[str]:
     """Yield decoded stdout lines; on an explicit cancel, stop the agent and end.
 
@@ -181,33 +254,39 @@ async def _stream_stdout(
     silence for the full window trips it. On trip the agent is killed and ``TimeoutError``
     is raised so the orchestrator surfaces a turn error and frees the loop. ``None``
     disables the guard.
+
+    ``progress`` + ``progress_timeout`` close the gap that window leaves open: output is
+    not progress. An agent can keep writing stdout while advancing nothing, renewing the
+    idle window forever (see :class:`ProgressTracker`). The consumer bumps the tracker only
+    on client-visible events, and this loop trips once nothing has advanced for
+    ``progress_timeout`` — regardless of how chatty the stream is. Both guards are active
+    together: ``idle_timeout`` catches a mute agent quickly, ``progress_timeout`` catches a
+    talkative wedged one. Omit either to disable it.
     """
     assert process.stdout is not None
     cancel_task = asyncio.ensure_future(cancel_event.wait()) if cancel_event else None
+    # Waits are capped at the shortest active deadline so the progress guard is still
+    # evaluated when the stream goes quiet (a chatty stream already re-checks it on every
+    # completed read). This only bounds detection latency when idle_timeout is unset or
+    # longer than progress_timeout. The pending read is carried ACROSS slices: recreating
+    # it per slice would drop a line mid-flight.
+    deadlines = [d for d in (idle_timeout, progress_timeout) if d is not None]
+    wait_slice = min(deadlines) if deadlines else None
+    read_task: asyncio.Task[bytes] | None = None
+    last_line = time.monotonic()
     try:
         while True:
-            read_task = asyncio.ensure_future(process.stdout.readline())
+            if read_task is None:
+                read_task = asyncio.ensure_future(process.stdout.readline())
             waiters = {read_task} | ({cancel_task} if cancel_task else set())
             done, _ = await asyncio.wait(
-                waiters, timeout=idle_timeout, return_when=asyncio.FIRST_COMPLETED
+                waiters, timeout=wait_slice, return_when=asyncio.FIRST_COMPLETED
             )
-            if not done:
-                # Neither a line nor a stop within the window → the subprocess is silent.
-                # Kill it and surface a timeout; the deadline having *not* reset (no line
-                # arrived this iteration) is exactly the stall signal we want to catch.
-                read_task.cancel()
-                await asyncio.gather(read_task, return_exceptions=True)
-                logger.error("Agent stream idle for %ss — stopping stalled agent", idle_timeout)
-                await _stop_agent(
-                    process,
-                    container=container,
-                    docker_path=docker_path,
-                    pid_file=pid_file,
-                )
-                raise TimeoutError(f"agent produced no output for {idle_timeout}s")
+
+            # An explicit stop wins over either guard — the user asked, don't report a
+            # timeout instead.
             if cancel_task is not None and cancel_task in done:
-                read_task.cancel()
-                await asyncio.gather(read_task, return_exceptions=True)
+                await _abort_read(read_task)
                 logger.info("Agent stream cancelled — stopping agent")
                 await _stop_agent(
                     process,
@@ -216,13 +295,54 @@ async def _stream_stdout(
                     pid_file=pid_file,
                 )
                 return
+
+            # Output is not progress: trip when nothing client-visible has advanced for the
+            # full window, however loud the stream has been in the meantime.
+            if progress is not None and progress_timeout is not None:
+                stalled = progress.idle_for()
+                if stalled >= progress_timeout:
+                    await _abort_read(read_task)
+                    logger.error(
+                        "Agent made no progress for %.0fs while still emitting output — "
+                        "stopping wedged agent",
+                        stalled,
+                    )
+                    await _stop_agent(
+                        process,
+                        container=container,
+                        docker_path=docker_path,
+                        pid_file=pid_file,
+                    )
+                    raise TimeoutError(f"agent made no progress for {progress_timeout}s")
+
+            if read_task not in done:
+                # No line this slice — only a full ``idle_timeout`` of silence is a stall,
+                # which is NOT the same as one empty wait slice.
+                if idle_timeout is not None and time.monotonic() - last_line >= idle_timeout:
+                    await _abort_read(read_task)
+                    logger.error("Agent stream idle for %ss — stopping stalled agent", idle_timeout)
+                    await _stop_agent(
+                        process,
+                        container=container,
+                        docker_path=docker_path,
+                        pid_file=pid_file,
+                    )
+                    raise TimeoutError(f"agent produced no output for {idle_timeout}s")
+                continue  # keep waiting on the SAME pending read
+
             line = read_task.result()
+            read_task = None
+            last_line = time.monotonic()
             if not line:
                 break
             decoded = line.decode().strip()
             if decoded:
                 yield decoded
     finally:
+        if read_task is not None:
+            # Reap, don't just cancel: a cancelled-but-unawaited task logs "Task was
+            # destroyed but it is pending" on teardown.
+            await _abort_read(read_task)
         if cancel_task is not None and not cancel_task.done():
             cancel_task.cancel()
 
@@ -251,6 +371,8 @@ async def execute_claude_cli(
     model: str | None = None,
     cancel_event: asyncio.Event | None = None,
     idle_timeout: float | None = None,
+    progress: ProgressTracker | None = None,
+    progress_timeout: float | None = None,
 ) -> AsyncIterator[str]:
     """
     Execute Claude CLI and stream output.
@@ -377,6 +499,8 @@ async def execute_claude_cli(
                 docker_path=docker_path,
                 pid_file=pid_file,
                 idle_timeout=idle_timeout,
+                progress=progress,
+                progress_timeout=progress_timeout,
             ):
                 yield line
         except asyncio.CancelledError:
@@ -676,6 +800,8 @@ async def execute_agent(
     timeout: int = 300,
     cancel_event: asyncio.Event | None = None,
     idle_timeout: float | None = None,
+    progress: ProgressTracker | None = None,
+    progress_timeout: float | None = None,
 ) -> AsyncIterator[str]:
     """Spawn the in-sandbox ``inkwest-agent`` for one turn; stream its NDJSON stdout.
 
@@ -766,6 +892,8 @@ async def execute_agent(
                 docker_path=docker_path,
                 pid_file=pid_file,
                 idle_timeout=idle_timeout,
+                progress=progress,
+                progress_timeout=progress_timeout,
             ):
                 yield line
         except asyncio.CancelledError:
@@ -994,6 +1122,8 @@ async def execute_opencode(
     extra_env: dict[str, str] | None = None,
     timeout: float = 300,
     cancel_event: asyncio.Event | None = None,
+    progress: ProgressTracker | None = None,
+    progress_timeout: float | None = None,
 ) -> AsyncIterator[str]:
     """Spawn ``opencode run`` in the conversation sandbox; stream its NDJSON stdout.
 
@@ -1065,6 +1195,8 @@ async def execute_opencode(
                 # Bound the gap between lines too, not just the post-EOF wait: a wedged opencode
                 # holding stdout open must not hang the turn (pinning slot + lease) forever.
                 idle_timeout=timeout,
+                progress=progress,
+                progress_timeout=progress_timeout,
             ):
                 yield line
         except asyncio.CancelledError:

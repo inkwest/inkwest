@@ -32,7 +32,7 @@ from app.core.config import get_settings
 from app.core.constants import MAX_RESPONSE_TOKENS
 from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
-from app.services.ai_cli_client import execute_agent, parse_agent_response
+from app.services.ai_cli_client import ProgressTracker, execute_agent, parse_agent_response
 from app.services.ai_client import resolve_session_model
 from app.services.events import ChatEvent, done_event, error_event, mcp_auth_required_event
 from app.services.messages import (
@@ -491,6 +491,9 @@ async def orchestrate_chat_inkwest_agent(
             assistant_blocks = []
             pending_results = []
 
+        # Bumped only on client-visible events below, so a loud-but-wedged agent still trips
+        # the progress guard (output is not progress).
+        progress = ProgressTracker()
         try:
             output_stream = execute_agent(
                 session_id_str,
@@ -501,10 +504,14 @@ async def orchestrate_chat_inkwest_agent(
                 timeout=settings.claude_cli_timeout,
                 cancel_event=cancel_event,
                 idle_timeout=settings.agent_stream_idle_timeout,
+                progress=progress,
+                progress_timeout=settings.agent_progress_timeout or None,
             )
             async for event in parse_agent_response(output_stream):
                 # Cancellation is handled inside execute_agent (races each read against
                 # the stop, kills the in-container agent, ends the stream) — not here.
+                if event.type in ("text_delta", "tool_start", "tool_result"):
+                    progress.mark()  # real turn advancement, for the stall guard
                 if event.type == "text_delta" and event.content:
                     if pending_results:
                         await _flush()  # new assistant turn closes the prior tool exchange
@@ -548,12 +555,16 @@ async def orchestrate_chat_inkwest_agent(
                         event = _rewrite_protocol_mismatch(event, settings.app_env)
                 yield event
 
-            # On an explicit cancel the agent was SIGKILLed mid-turn: assistant_blocks may
-            # hold a tool_use whose tool_result never arrived. Persisting that would leave a
-            # dangling toolUse in history and break the NEXT Converse turn — so discard the
-            # partial (matches orchestrator_cli) and stop before _flush.
+            # On an explicit cancel the agent was SIGKILLed mid-turn, so assistant_blocks may
+            # hold a tool_use whose tool_result never arrived. Persist it anyway: the client
+            # already saw this content streamed, and dropping it is what made a stopped turn
+            # indistinguishable from one that never ran. The dangling toolUse is safe because
+            # the history read path prunes unpaired tool blocks before replay
+            # (get_session_messages -> prune_orphan_tool_calls), so the NEXT Converse turn is
+            # unaffected.
             if cancel_event and cancel_event.is_set():
                 logger.info("inkwest-agent chat cancelled by user")
+                await _flush()
                 # Persist whatever usage reached us before the kill (no-op when the agent
                 # died before any terminal metadata) — AWS bills the completed calls.
                 await _persist_accumulated_usage()
@@ -572,6 +583,9 @@ async def orchestrate_chat_inkwest_agent(
                 # landed) still reads as a protocol mismatch — rewrite it the same way as
                 # the streamed error so the actionable cause isn't lost on this path.
                 yield _rewrite_protocol_mismatch(error_event(str(e)), settings.app_env)
+            # Keep what already streamed, for the same reason as the user-stop path above:
+            # a killed turn must not read as a turn that never ran.
+            await _flush()
             await _persist_accumulated_usage()
             return
 
