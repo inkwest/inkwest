@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     # (long tool call, model thinking) keeps it alive; only true silence trips it. Must
     # exceed the worst-case legit gap (cold sandbox + MCP handshake + slow tool).
     agent_stream_idle_timeout: int = 120
+    # Second, independent guard: max seconds with no *client-visible* progress (assistant
+    # text, tool start/result) while the agent is still writing stdout. The idle guard above
+    # resets on ANY line, so an agent that keeps emitting keepalives/partials while advancing
+    # nothing renews it forever and hangs the turn until the user gives up (observed: 55 min).
+    # Must exceed the slowest legitimate single step — a long model completion with thinking,
+    # or one slow tool call — since neither emits a client-visible event until it lands.
+    # 0 disables it.
+    agent_progress_timeout: int = 900
     # Comma-separated model IDs the CLI's backend serves (Anthropic API, Bedrock
     # profiles, gateway...). There is no catalog API for this provider, so the
     # operator declares it; selected models are passed via `claude --model`.

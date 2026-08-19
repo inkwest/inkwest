@@ -18,7 +18,11 @@ from app.core import metrics
 from app.core.config import get_settings
 from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
-from app.services.ai_cli_client import execute_claude_cli, parse_cli_response
+from app.services.ai_cli_client import (
+    ProgressTracker,
+    execute_claude_cli,
+    parse_cli_response,
+)
 from app.services.ai_client import resolve_session_model_choice
 from app.services.events import (
     ChatEvent,
@@ -248,6 +252,7 @@ required.
     total_cache_write_1h_tokens = 0
     turn_id = uuid.uuid4()
     usage_persisted = False
+    message_saved = False
 
     def _apply_usage_meta(meta: dict) -> None:
         """One unpacker for the terminal `done` and the crash-path `usage_stats` events
@@ -288,6 +293,41 @@ required.
             # the authoritative per-call rows.
             skip_budget_row=bool(broker_env),
         )
+
+    async def _save_assistant_content() -> None:
+        """Persist whatever the turn produced, once.
+
+        Called from every terminal path — normal completion, user stop, and each error
+        handler: a turn that was stopped or killed keeps the text and completed tool calls
+        it had already streamed, instead of leaving the conversation showing a prompt with
+        no reply (indistinguishable, after a reload, from a turn that never ran). Safe with
+        a trailing dangling ``tool_use``: the history read path prunes unpaired tool blocks
+        (``prune_orphan_tool_calls``), and this engine replays from the CLI's own transcript
+        rather than these rows.
+
+        Attributed to what actually ran (CLI-reported model, else the explicit choice) — the
+        same source the usage stats use — for accurate per-turn cost.
+        """
+        nonlocal message_saved
+        if message_saved or not content:
+            return
+        message_saved = True
+        try:
+            await save_message(
+                db,
+                session_id,
+                "assistant",
+                content,
+                model=actual_model or model_choice,
+                engine=engine,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                cache_read_tokens=total_cache_read_tokens,
+                cache_write_tokens=total_cache_write_tokens,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save assistant message: {e}")
+            # Continue anyway - response was already streamed
 
     try:
         # Where the agent works. In sandbox mode `claude` runs inside this
@@ -386,6 +426,9 @@ required.
             total_cache_write_tokens = 0
             total_cache_write_1h_tokens = 0
             emitted = False
+            # Only client-visible events bump this (see `emitted` below), so a stream that
+            # stays loud while the turn advances nothing still trips the progress guard.
+            progress = ProgressTracker()
             try:
                 output_stream = execute_claude_cli(
                     session_id=session_id_str,
@@ -401,6 +444,8 @@ required.
                     model=model_choice,
                     cancel_event=cancel_event,
                     idle_timeout=settings.agent_stream_idle_timeout,
+                    progress=progress,
+                    progress_timeout=settings.agent_progress_timeout or None,
                 )
 
                 async for event in parse_cli_response(output_stream):
@@ -433,8 +478,10 @@ required.
                             actual_model = event.metadata["model"]
                         continue
 
-                    # Any client-visible event means the turn produced output → don't retry.
+                    # Any client-visible event means the turn produced output → don't retry,
+                    # and it's the definition of progress for the stall guard.
                     emitted = True
+                    progress.mark()
                     if event.type == "text_delta" and event.content:
                         # Coalesce consecutive deltas into the trailing text block; start a
                         # new block if the last is a tool event, to keep order.
@@ -480,6 +527,9 @@ required.
                 # on an explicit cancel; surface that to the client as a stopped turn.
                 if cancel_event and cancel_event.is_set():
                     logger.info("CLI chat cancelled by user")
+                    # Keep the partial answer: the client saw it streamed, so dropping it
+                    # here is what made a stopped turn look like a turn that never ran.
+                    await _save_assistant_content()
                     # A Stop kills the CLI mid-turn but AWS bills the completed calls —
                     # persist whatever the parser surfaced (usage_stats on stream end).
                     await _persist_accumulated_usage()
@@ -512,26 +562,7 @@ required.
             except Exception as e:
                 logger.warning(f"Failed to store CLI session ID: {e}")
 
-        # Save assistant message if we have content. Attribute to what actually
-        # ran (CLI-reported model, else the explicit choice) — the same source the
-        # usage stats use below — for accurate per-turn cost.
-        if content:
-            try:
-                await save_message(
-                    db,
-                    session_id,
-                    "assistant",
-                    content,
-                    model=actual_model or model_choice,
-                    engine=engine,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    cache_read_tokens=total_cache_read_tokens,
-                    cache_write_tokens=total_cache_write_tokens,
-                )
-            except Exception as e:
-                logger.error(f"Failed to save assistant message: {e}")
-                # Continue anyway - response was already streamed
+        await _save_assistant_content()
 
         # Persist session stats and usage
         await _persist_accumulated_usage()
@@ -540,20 +571,26 @@ required.
             yield done_event()
 
     except TimeoutError as e:
-        # Surface the actual cause — there are two timeout sources with distinct messages:
-        # the post-stream process.wait() cap and the per-line idle-stall guard. A hardcoded
-        # "after {claude_cli_timeout}s" would misreport the idle case.
+        # Surface the actual cause — there are three timeout sources with distinct messages:
+        # the post-stream process.wait() cap, the per-line idle-stall guard and the progress
+        # guard. A hardcoded "after {claude_cli_timeout}s" would misreport the others.
         logger.error(f"Claude CLI timed out: {e}")
+        # Same reason as the user-stop path: the client already saw this content streamed, so
+        # dropping it leaves a prompt with no reply — indistinguishable, after a reload, from
+        # a turn that never ran. A killed turn keeps what it produced.
+        await _save_assistant_content()
         await _persist_accumulated_usage()
         yield error_event(f"Request timed out: {e}")
 
     except RuntimeError as e:
         logger.error(f"Claude CLI error: {e}")
+        await _save_assistant_content()
         await _persist_accumulated_usage()
         yield error_event(str(e))
 
     except Exception as e:
         logger.exception("Unexpected error in CLI orchestration")
+        await _save_assistant_content()
         await _persist_accumulated_usage()
         yield error_event(f"Unexpected error: {str(e)}")
 

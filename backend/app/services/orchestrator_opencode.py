@@ -32,7 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.core.config import get_settings
 from app.services import engines, llm_broker
-from app.services.ai_cli_client import execute_opencode, parse_opencode_response
+from app.services.ai_cli_client import (
+    ProgressTracker,
+    execute_opencode,
+    parse_opencode_response,
+)
 from app.services.ai_client import resolve_session_model
 from app.services.events import (
     ChatEvent,
@@ -591,6 +595,9 @@ async def orchestrate_chat_opencode(
                 agent_message += f"\n\n(Attached file(s) for this message: {names})"
 
         try:
+            # Bumped only on client-visible events below, so a loud-but-wedged agent still
+            # trips the progress guard (output is not progress).
+            progress = ProgressTracker()
             output_stream = execute_opencode(
                 session_id_str,
                 agent_message,
@@ -601,6 +608,8 @@ async def orchestrate_chat_opencode(
                 extra_env={**connector_env, **broker_env} or None,
                 timeout=settings.claude_cli_timeout,
                 cancel_event=cancel_event,
+                progress=progress,
+                progress_timeout=settings.agent_progress_timeout or None,
             )
             async for event in parse_opencode_response(output_stream):
                 # A terminal event (done/error) already reached the client and closed the
@@ -610,6 +619,8 @@ async def orchestrate_chat_opencode(
                 # persist a trailing assistant message, don't re-fire connector_required.
                 if received_terminal and event.type not in ("done", "error"):
                     continue
+                if event.type in ("text_delta", "tool_start", "tool_result"):
+                    progress.mark()  # real turn advancement, for the stall guard
                 if event.type == "text_delta" and event.content:
                     if pending_results:
                         await _flush()
@@ -667,15 +678,17 @@ async def orchestrate_chat_opencode(
                 yield event
 
             if cancel_event and cancel_event.is_set() and not received_terminal:
-                # Cancel = the in-container opencode was SIGKILLed mid-turn: assistant_blocks
-                # may hold a tool_use whose tool_result never arrived. Persisting that leaves a
-                # dangling tool_use that breaks the NEXT turn's history — so discard the partial
-                # (skip _flush) and emit a single terminal stopped done. (Do NOT move _flush
-                # above this check.) Mirrors orchestrate_chat_inkwest_agent / orchestrate_chat_cli.
-                # Gated on received_terminal: a Stop racing a GENUINE stop must not discard a
+                # Cancel = the in-container opencode was SIGKILLed mid-turn, so
+                # assistant_blocks may hold a tool_use whose tool_result never arrived. Persist
+                # it anyway: the client already saw this content streamed, and dropping it is
+                # what made a stopped turn indistinguishable from one that never ran. The
+                # dangling tool_use is safe because the history read path prunes unpaired tool
+                # blocks before replay (get_session_messages -> prune_orphan_tool_calls).
+                # Gated on received_terminal: a Stop racing a GENUINE stop must not re-persist a
                 # completed turn (its done already reached the client) nor double-terminate.
                 logger.info("opencode chat cancelled by user")
                 abnormal = True  # tear down → reap any opencode-spawned children
+                await _flush()
                 # Persist whatever usage reached us before the kill (no-op when nothing
                 # terminal arrived) — AWS bills the completed calls.
                 await _persist_accumulated_usage()
@@ -694,6 +707,11 @@ async def orchestrate_chat_opencode(
             if not received_terminal:
                 logger.error(f"opencode failed: {e}")
                 yield error_event(str(e))
+                # Keep what already streamed (the `received_terminal` branch below already
+                # does): a killed turn must not read as a turn that never ran. No usage to
+                # persist here — nothing terminal arrived, so done_meta is empty and a
+                # persist would write a zero-token row.
+                await _flush()
                 return
             logger.warning(f"opencode exited abnormally after a terminal event: {e}")
             await _flush()  # persist what streamed before the failure (pairs can't dangle)

@@ -558,9 +558,10 @@ class TestOrchestrateOpencode:
         )
 
     @pytest.mark.asyncio
-    async def test_cancel_drops_partial_and_tears_down(self):
-        # Cancel mid-stream: discard partial blocks (no dangling tool_use persisted), emit a
-        # single stopped done, and TEAR DOWN the container (reap opencode's children).
+    async def test_cancel_persists_partial_and_tears_down(self):
+        # Cancel mid-stream: PERSIST the partial blocks (the client already saw them streamed;
+        # any dangling tool_use is pruned on the history read path), emit a single stopped
+        # done, and TEAR DOWN the container (reap opencode's children).
         import asyncio
 
         cancel = asyncio.Event()
@@ -594,8 +595,10 @@ class TestOrchestrateOpencode:
             sandbox.release.assert_awaited_once()
             sandbox.teardown.assert_awaited_once()  # abnormal → reap children
             assert sandbox.teardown.await_args.kwargs.get("only_if_idle") is True
-            oo.save_message.assert_awaited_once()  # ONLY the user message — no partial flush
-            assert oo.save_message.await_args.args[2] == "user"
+            # user turn + the flushed partial (assistant blocks, then its tool_result pair)
+            roles = [c.args[2] for c in oo.save_message.await_args_list]
+            assert roles[0] == "user"
+            assert "assistant" in roles[1:]
         dones = [e for e in events if e.type == "done"]
         assert len(dones) == 1 and dones[0].metadata.get("stopped") is True
         assert not any(e.type == "done" and e.metadata.get("truncated") for e in events)
@@ -639,6 +642,32 @@ class TestOrchestrateOpencode:
             sandbox.release.assert_awaited_once()
             sandbox.teardown.assert_awaited_once()
         assert any(e.type == "error" and "squid blocked" in (e.content or "") for e in events)
+
+    @pytest.mark.asyncio
+    async def test_silent_crash_persists_partial(self):
+        """A crashed turn keeps what already streamed — same contract as a user Stop."""
+
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"partial"}}\n'
+            raise RuntimeError("opencode failed: squid blocked")
+
+        es, _cap = self._patch(history=[], exec_factory=exec_factory)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=AsyncMock(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                )
+            )
+            calls = [c for c in oo.save_message.await_args_list if c.args[2] == "assistant"]
+            assert len(calls) == 1
+            assert calls[0].args[3] == [{"type": "text", "text": "partial"}]
+        assert any(e.type == "error" for e in events)
 
     @pytest.mark.asyncio
     async def test_error_event_records_usage_and_tears_down(self):

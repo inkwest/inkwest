@@ -32,6 +32,7 @@ def _settings(*, broker_enabled: bool, base: str = "http://gw:8000") -> SimpleNa
         claude_cli_path="claude",
         claude_cli_timeout=120,
         agent_stream_idle_timeout=120,
+        agent_progress_timeout=900,
         sandbox_docker_path="docker",
     )
 

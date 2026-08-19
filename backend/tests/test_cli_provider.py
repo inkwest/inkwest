@@ -811,6 +811,7 @@ class TestOrchestrateChatCliResume:
             claude_cli_path="claude",
             claude_cli_timeout=120,
             agent_stream_idle_timeout=120,
+            agent_progress_timeout=900,
             sandbox_enabled=False,
             sandbox_docker_path="docker",
         )
@@ -853,6 +854,69 @@ class TestOrchestrateChatCliResume:
         assert any(e.type == "done" for e in events)
 
     @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_timeout_persists_partial(self):
+        """A guard-killed turn keeps what it streamed — same contract as a user Stop.
+
+        The progress guard raises TimeoutError mid-turn, so this path is now reachable on
+        every wedged turn; dropping the partial here would recreate the exact defect the
+        stop-path fix closed (a prompt with no reply after reload).
+        """
+        from app.services import orchestrator_cli
+
+        sid = "22222222-2222-2222-2222-222222222222"
+
+        def fake_execute(*args, **kwargs):
+            async def gen():
+                yield (
+                    '{"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}'
+                )
+                raise TimeoutError("agent made no progress for 900s")
+
+            return gen()
+
+        settings = SimpleNamespace(
+            claude_cli_path="claude",
+            claude_cli_timeout=120,
+            agent_stream_idle_timeout=120,
+            agent_progress_timeout=900,
+            sandbox_enabled=False,
+            sandbox_docker_path="docker",
+        )
+        save_mock = AsyncMock()
+        with (
+            patch.object(orchestrator_cli, "get_settings", return_value=settings),
+            patch.object(orchestrator_cli, "execute_claude_cli", side_effect=fake_execute),
+            patch.object(orchestrator_cli, "get_cli_session_id", AsyncMock(return_value=None)),
+            patch.object(orchestrator_cli, "set_cli_session_id", AsyncMock()),
+            patch.object(orchestrator_cli, "save_message", save_mock),
+            patch.object(orchestrator_cli, "ensure_session_title", AsyncMock(return_value=None)),
+            patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+            patch("app.services.turn_usage.record_usage", AsyncMock()),
+            patch.object(orchestrator_cli, "build_connector_env", AsyncMock(return_value=({}, []))),
+            patch.object(
+                orchestrator_cli, "resolve_session_system_prompt", AsyncMock(return_value="")
+            ),
+            patch.object(orchestrator_cli, "get_system_prompt", lambda *a, **k: ""),
+        ):
+            events = [
+                event
+                async for event in orchestrator_cli.orchestrate_chat_cli(
+                    db=AsyncMock(),
+                    session_id=sid,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="hello",
+                    user_id=None,
+                    cancel_event=asyncio.Event(),
+                )
+            ]
+        assert any(e.type == "error" for e in events)
+        assistant = [c for c in save_mock.call_args_list if c.args[2] == "assistant"]
+        assert len(assistant) == 1
+        assert assistant[0].args[3] == [{"type": "text", "text": "partial"}]
+
     async def test_stop_after_stream_ends_emits_stopped_done(self):
         """When a stop kills the agent mid-turn, the CLI stream just ends (no more lines);
         the orchestrator must still emit a `done(stopped=True)` from its post-loop check."""
@@ -876,6 +940,7 @@ class TestOrchestrateChatCliResume:
             claude_cli_path="claude",
             claude_cli_timeout=120,
             agent_stream_idle_timeout=120,
+            agent_progress_timeout=900,
             sandbox_enabled=False,
             sandbox_docker_path="docker",
         )
@@ -915,7 +980,11 @@ class TestOrchestrateChatCliResume:
         assert len(done_events) == 1
         assert done_events[0].metadata.get("stopped") is True
         # A stopped turn does not persist a (partial) assistant message.
-        assert not any(c.args[2] == "assistant" for c in save_mock.call_args_list)
+        # The partial that already streamed is persisted, so a reload shows how far the
+        # stopped turn got instead of a prompt with no reply at all.
+        assistant_calls = [c for c in save_mock.call_args_list if c.args[2] == "assistant"]
+        assert len(assistant_calls) == 1
+        assert assistant_calls[0].args[3] == [{"type": "text", "text": "partial"}]
 
 
 class TestGetOrchestrator:
@@ -964,6 +1033,7 @@ class TestOrchestratorContentOrder:
                     claude_cli_path="claude",
                     claude_cli_timeout=120,
                     agent_stream_idle_timeout=120,
+                    agent_progress_timeout=900,
                     sandbox_docker_path="docker",
                 ),
             ),
