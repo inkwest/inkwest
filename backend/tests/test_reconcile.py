@@ -197,6 +197,35 @@ async def test_only_latest_user_message_is_flagged(db: AsyncSession) -> None:
     assert second.content == "second question" and second.status == "error"
 
 
+async def test_trailing_abort_marker_is_not_flagged(db: AsyncSession) -> None:
+    # An in-process errored turn ends on the 'turn aborted' system row turn_runner
+    # persists (the abort marker), so a later unrelated restart must not re-flag its
+    # user message as interrupted (see the reconcile docstring's false-positives note).
+    sid = await _make_session(
+        db,
+        ("user", "investigate"),
+        (
+            "system",
+            {
+                "type": "session_event",
+                "subject": "turn",
+                "action": "aborted",
+                "targets": [{"reason": "agent made no progress for 900s"}],
+            },
+        ),
+    )
+
+    assert await reconcile_interrupted_turns(db) == 0
+
+    db.expire_all()
+    user_status = (
+        await db.execute(
+            select(Message.status).where(Message.session_id == sid, Message.role == "user")
+        )
+    ).scalar_one()
+    assert user_status == "success"
+
+
 async def test_trailing_tool_result_is_not_flagged(db: AsyncSession) -> None:
     # Documents the known limitation: a multi-iteration turn interrupted after a
     # tool ran ends on a tool_result row, which this sweep does NOT detect.

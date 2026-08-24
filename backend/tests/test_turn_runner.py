@@ -2,11 +2,11 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from unittest.mock import patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
-from app.services.events import done_event, text_event, tool_start_event
+from app.services.events import done_event, error_event, text_event, tool_start_event
 from app.services.turn_runner import TURN_END, TurnRunner
 
 
@@ -163,3 +163,101 @@ async def test_orchestrator_error_emits_error_event(runner):
     events = await _drain(*sub)
     assert events[-1]["type"] == "error"
     assert events[-1]["is_error"] is True
+
+
+async def test_error_event_persists_abort_marker(runner):
+    """A turn ending on a terminal error event leaves a 'turn aborted' session event
+    carrying the error text — otherwise a reloaded/shared view ends on a dangling tool
+    call with no cause and viewers blame the last tool."""
+
+    async def orchestrate(db, cancel_event, **kwargs):
+        yield text_event("partial")
+        yield error_event("Request timed out: agent made no progress for 900s")
+
+    marker = AsyncMock()
+    with patch("app.services.turn_runner.save_session_event", marker):
+        await runner.start("s1", orchestrate, {})
+        sub = await runner.subscribe("s1")
+        assert sub is not None
+        await _drain(*sub)  # TURN_END arrives after the marker persist in the finally
+
+    marker.assert_awaited_once_with(
+        ANY,
+        "s1",
+        "turn",
+        "aborted",
+        [{"reason": "Request timed out: agent made no progress for 900s"}],
+    )
+
+
+async def test_orchestrator_crash_persists_abort_marker(runner):
+    async def orchestrate(db, cancel_event, **kwargs):
+        yield text_event("before boom")
+        raise RuntimeError("boom")
+
+    marker = AsyncMock()
+    with patch("app.services.turn_runner.save_session_event", marker):
+        await runner.start("s1", orchestrate, {})
+        sub = await runner.subscribe("s1")
+        assert sub is not None
+        events = await _drain(*sub)
+
+    assert events[-1]["type"] == "error"
+    marker.assert_awaited_once_with(
+        ANY, "s1", "turn", "aborted", [{"reason": "An unexpected server error occurred"}]
+    )
+
+
+async def test_done_then_error_persists_no_marker(runner):
+    """The CLI orchestrator can yield an error AFTER done (post-stream process.wait()
+    cap): a cleanup failure on a finished answer must not stamp the completed turn
+    with a durable 'Turn aborted' marker."""
+
+    async def orchestrate(db, cancel_event, **kwargs):
+        yield text_event("full answer")
+        yield done_event()
+        yield error_event("Request timed out: process did not exit")
+
+    marker = AsyncMock()
+    with patch("app.services.turn_runner.save_session_event", marker):
+        await runner.start("s1", orchestrate, {})
+        sub = await runner.subscribe("s1")
+        assert sub is not None
+        await _drain(*sub)
+
+    marker.assert_not_awaited()
+
+
+async def test_stopped_done_persists_no_marker(runner):
+    """A user Stop is a deliberate, legible end — no abort marker (same for clean done)."""
+
+    async def orchestrate(db, cancel_event, **kwargs):
+        yield text_event("fine")
+        yield done_event(stopped=True)
+
+    marker = AsyncMock()
+    with patch("app.services.turn_runner.save_session_event", marker):
+        await runner.start("s1", orchestrate, {})
+        sub = await runner.subscribe("s1")
+        assert sub is not None
+        await _drain(*sub)
+
+    marker.assert_not_awaited()
+
+
+async def test_abort_marker_reason_truncated(runner):
+    """The marker is a one-line summary — a stderr-tail-sized error is capped."""
+
+    async def orchestrate(db, cancel_event, **kwargs):
+        yield error_event("x" * 2000)
+
+    marker = AsyncMock()
+    with patch("app.services.turn_runner.save_session_event", marker):
+        await runner.start("s1", orchestrate, {})
+        sub = await runner.subscribe("s1")
+        assert sub is not None
+        await _drain(*sub)
+
+    reason = marker.await_args.args[4][0]["reason"]
+    assert len(reason) == 500
+    assert reason.endswith("…")

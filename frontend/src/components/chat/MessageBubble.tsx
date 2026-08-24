@@ -75,6 +75,12 @@ function sessionEventParts(c: SessionEventContent): { lead: string; items: strin
       const model = targets[0]?.model;
       return { lead: model ? `Model changed to ${model}` : 'Model reset to the default', items: [] };
     }
+    case 'turn': {
+      // Abort marker (turn_runner): why a turn ended without a normal finish, so a
+      // reloaded/shared view doesn't blame the turn's last tool call.
+      const reason = targets[0]?.reason;
+      return { lead: reason ? `Turn aborted — ${reason}` : 'Turn aborted', items: [] };
+    }
     default:
       return { lead: `${SUBJECT_LABELS[c.subject] ?? c.subject} ${c.action}`, items: [] };
   }
@@ -100,12 +106,16 @@ function SessionEventLine({
 }) {
   const [expanded, setExpanded] = useState(false);
 
-  const parts =
-    typeof content === 'object' && !Array.isArray(content) && content.type === 'session_event'
-      ? sessionEventParts(content)
-      : typeof content === 'string'
-        ? { lead: content, items: [] }
-        : null;
+  const isEvent =
+    typeof content === 'object' && !Array.isArray(content) && content.type === 'session_event';
+  // Abort markers read as failures, not housekeeping — tint them so a viewer scanning
+  // a shared transcript can't miss why the turn above ends mid-tool-call.
+  const isAbort = isEvent && content.subject === 'turn';
+  const parts = isEvent
+    ? sessionEventParts(content)
+    : typeof content === 'string'
+      ? { lead: content, items: [] }
+      : null;
   if (!parts || (!parts.lead && parts.items.length === 0)) return null;
 
   const { lead, items } = parts;
@@ -127,7 +137,7 @@ function SessionEventLine({
     <div className="flex justify-center">
       <span
         title={showTimestamps ? formatFullTimestamp(createdAt) : undefined}
-        className={cn('italic text-gray-500', TEXT_SIZE.label(compact))}
+        className={cn('italic', isAbort ? 'text-red-400/90' : 'text-gray-500', TEXT_SIZE.label(compact))}
       >
         {showTimestamps && (
           <>

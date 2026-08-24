@@ -245,6 +245,34 @@ describe('MessageBubble', () => {
     expect(screen.getByText(/MCP disconnected from: sentry/)).toBeInTheDocument();
   });
 
+  it('renders an abort marker with its reason, tinted red', () => {
+    const msg: Message = {
+      ...baseMessage,
+      role: 'system',
+      content: {
+        type: 'session_event',
+        subject: 'turn',
+        action: 'aborted',
+        targets: [{ reason: 'Request timed out: agent made no progress for 900s' }],
+      },
+    };
+    render(<MessageBubble message={msg} />);
+    const line = screen.getByText(/Turn aborted — Request timed out: agent made no progress for 900s/);
+    expect(line).toBeInTheDocument();
+    expect(line.className).toContain('text-red-400');
+    expect(screen.queryByTestId('markdown')).not.toBeInTheDocument(); // a note, not a bubble
+  });
+
+  it('renders an abort marker without a reason as a bare line', () => {
+    const msg: Message = {
+      ...baseMessage,
+      role: 'system',
+      content: { type: 'session_event', subject: 'turn', action: 'aborted' },
+    };
+    render(<MessageBubble message={msg} />);
+    expect(screen.getByText('Turn aborted')).toBeInTheDocument();
+  });
+
   it('renders a model change event', () => {
     const msg: Message = {
       ...baseMessage,
