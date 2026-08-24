@@ -233,9 +233,10 @@ async def reconcile_interrupted_turns(db: AsyncSession) -> int:
     * False positives (currently benign — retry is dormant): the CLI orchestrator
       only persists an assistant row when the turn produced text or tool calls
       (see ``orchestrator_cli``), so a turn that completes *empty* leaves a
-      trailing ``user`` row and is wrongly flagged; likewise a turn that errors
-      in-process (``turn_runner`` except path) persists nothing, so a later
-      unrelated restart re-flags it.
+      trailing ``user`` row and is wrongly flagged. A turn that errors in-process
+      is no longer one of these: ``turn_runner`` persists a trailing ``turn
+      aborted`` system row (the abort marker), so the session doesn't end on the
+      ``user`` row and a later unrelated restart won't re-flag it.
     * False negatives: the streaming API orchestrators persist intermediate
       ``assistant``/``tool_result`` rows, so one of their turns interrupted
       mid-tool ends on an ``assistant`` (unanswered ``tool_use``) or

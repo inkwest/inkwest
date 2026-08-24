@@ -31,11 +31,16 @@ from typing import Any
 from app.core import metrics
 from app.core.database import async_session_maker
 from app.services.events import ChatEvent, error_event
+from app.services.messages import save_session_event
 
 logger = logging.getLogger(__name__)
 
 # Pushed to each subscriber queue when the turn ends, so a pump loop knows to stop.
 TURN_END = object()
+
+# The abort marker is a one-line transcript summary; full error detail lives in the
+# logs. A CLI RuntimeError can embed a stderr tail, so cap what gets persisted.
+_ABORT_REASON_MAX = 500
 
 Orchestrator = Callable[..., AsyncIterator[ChatEvent]]
 
@@ -49,6 +54,29 @@ class _Turn:
     buffer: list[dict[str, Any]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[Any]] = field(default_factory=set)
     done: bool = False
+
+
+async def _persist_abort_marker(session_id: str, reason: str | None) -> None:
+    """Leave a visible trace of WHY a turn ended abnormally.
+
+    An errored or guard-killed turn keeps its partial content (the orchestrators
+    persist it on their error paths), but the terminal error event itself was never
+    stored — after a reload the turn ends on a dangling tool call with no cause, so
+    viewers blame the last tool. Persisted as a ``turn aborted`` session event:
+    UI-only by construction (never replayed to the model, excluded from message
+    counts/search) and best-effort like every session event. Runs here rather than in
+    each orchestrator because the runner is the one place every engine's terminal
+    error passes through — streamed agent errors included — and only after the
+    generator has fully unwound, so the marker row sorts after the partial content.
+    """
+    reason = (reason or "unknown error").strip()
+    if len(reason) > _ABORT_REASON_MAX:
+        reason = reason[: _ABORT_REASON_MAX - 1] + "…"
+    try:
+        async with async_session_maker() as db:
+            await save_session_event(db, session_id, "turn", "aborted", [{"reason": reason}])
+    except Exception:  # noqa: BLE001 — the marker must never mask the turn's outcome
+        logger.warning("abort_marker_persist_failed", extra={"session_id": session_id})
 
 
 class TurnRunner:
@@ -161,13 +189,19 @@ class TurnRunner:
         started_at = time.monotonic()
         # Count both a raised exception and an emitted terminal error event (provider API
         # error, max-iterations) — the orchestrators surface those as events, not raises.
+        # `abort_reason` doubles as the persisted abort marker's text (see the finally).
         errored = False
+        completed = False
+        abort_reason: str | None = None
         try:
             # Own DB session: must outlive the request/WS that triggered the turn.
             async with async_session_maker() as db:
                 async for event in orchestrate(db=db, cancel_event=turn.cancel_event, **kwargs):
                     if event.type == "error":
                         errored = True
+                        abort_reason = event.content or abort_reason
+                    elif event.type == "done":
+                        completed = True
                     # Free the slot atomically with emitting the terminal `done` event
                     # (see _emit): a client that sends its next turn the instant it
                     # receives `done` — e.g. flushing a client-side message queue — would
@@ -175,9 +209,17 @@ class TurnRunner:
                     await self._emit(turn, event.to_dict(), terminal=event.type == "done")
         except Exception:
             errored = True
+            abort_reason = "An unexpected server error occurred"
             logger.exception("Turn failed", extra={"session_id": turn.session_id})
             await self._emit(turn, error_event("An unexpected server error occurred").to_dict())
         finally:
+            if errored and not completed:
+                # `not completed`: the CLI orchestrator can yield an error AFTER done (its
+                # post-stream process.wait() cap) — a cleanup failure on a finished answer,
+                # not an aborted turn. Placed BEFORE eviction/TURN_END so a client that
+                # reloads on turn end already finds the marker row. The orchestrator has
+                # fully unwound by here, so the marker sorts after the partial rows.
+                await _persist_abort_marker(turn.session_id, abort_reason)
             # The dispatcher (same task) has set engine+model by now; default 'unknown' if a
             # turn somehow failed before dispatch.
             engine, model = metrics.turn_engine(), metrics.turn_model()

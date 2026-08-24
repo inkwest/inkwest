@@ -215,6 +215,8 @@ export interface SessionEventTarget {
   role?: string;
   server?: string;
   model?: string | null;
+  /** Abort marker (subject 'turn'): why the turn ended abnormally. */
+  reason?: string;
 }
 
 // Generic session activity event (connector grant/revoke/renew, MCP connect/disconnect,
