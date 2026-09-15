@@ -576,8 +576,11 @@ export async function leaveShare(sessionId: string): Promise<void> {
 }
 
 /** Public, no-auth read-only view of a conversation via a share-link token. */
-export async function getSharedConversation(token: string): Promise<SharedConversation> {
-  return fetchAPI(`/api/shared/${token}`);
+export async function getSharedConversation(
+  token: string,
+  signal?: AbortSignal
+): Promise<SharedConversation> {
+  return fetchAPI(`/api/shared/${token}`, { signal });
 }
 
 // External access connectors

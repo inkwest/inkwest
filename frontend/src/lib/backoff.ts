@@ -1,6 +1,7 @@
 // Capped exponential backoff with ±25% jitter, shared by the HTTP retry loop
-// (services/api.ts) and the three WebSocket reconnect loops (ChatWebSocket,
-// useSyncSocket, useEgressSocket) so the backoff band lives in exactly one place.
+// (services/api.ts) and the four WebSocket reconnect loops (ChatWebSocket,
+// useSyncSocket, useEgressSocket, useSharedSocket) so the backoff band lives in
+// exactly one place.
 //
 // The jitter matters: a deploy drops every client's socket at the same instant,
 // so without it the whole fleet would retry in lockstep and stampede the backend
@@ -16,7 +17,7 @@ export function jitteredBackoff(attempt: number, opts: { baseMs: number; maxMs: 
 // Total wall-clock budget for WS reconnection before giving up: past this the
 // backend looks permanently gone (not just bouncing through a deploy), so
 // reconnecting forever would just burn battery and mask a dead session. Shared by
-// all three WS reconnect loops.
+// all four WS reconnect loops.
 export const RECONNECT_BUDGET_MS = 600_000; // 10 minutes
 
 // Wall-clock give-up budget shared by the WS reconnect loops. `expired()` arms the

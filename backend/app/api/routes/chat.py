@@ -833,6 +833,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             await note_disconnect(user_id)
 
 
+async def _refuse_handshake(websocket: WebSocket, code: int) -> None:
+    """Accept, then close with ``code``. A close before the handshake goes out as HTTP 403,
+    which the browser reports as 1006 — indistinguishable from a dead backend, so the
+    client would retry a refusal that is deliberate."""
+    await websocket.accept(subprotocol="inkwest")
+    await websocket.close(code=code)
+
+
 @router.websocket("/ws/shared/{token}")
 async def websocket_shared(websocket: WebSocket, token: str) -> None:
     """Anonymous, read-only live view of a conversation via a share-link token.
@@ -849,12 +857,12 @@ async def websocket_shared(websocket: WebSocket, token: str) -> None:
             )
         )
         if link is None:
-            await websocket.close(code=4004)  # invalid / revoked
+            await _refuse_handshake(websocket, 4004)  # invalid / revoked
             return
         session_id = str(link.session_id)
         session = await db.get(Session, session_id)
         if session is None:
-            await websocket.close(code=4004)
+            await _refuse_handshake(websocket, 4004)
             return
 
     if not await connect(
@@ -863,7 +871,7 @@ async def websocket_shared(websocket: WebSocket, token: str) -> None:
         owner_key=f"share:{token}",
         max_per_owner=get_settings().max_ws_connections_per_share,
     ):
-        await websocket.close(code=4009)  # too many concurrent guests on this link
+        await _refuse_handshake(websocket, 4009)  # too many concurrent guests on this link
         return
     # Anonymous guests show in the roster as "Guest"; a per-socket id keeps each
     # guest a distinct chip (and is never tied to a real account).
