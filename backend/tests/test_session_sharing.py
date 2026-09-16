@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from fastapi import HTTPException
@@ -865,6 +865,44 @@ async def test_close_share_link_connections() -> None:
     finally:
         shared_link_connections.pop("tok-kill", None)
     ws.close.assert_awaited_once()
+
+
+def _session_cm(db: object) -> MagicMock:
+    """Mock for `async with async_session_maker() as db`."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=db)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["unknown_link", "guest_cap"])
+async def test_websocket_shared_refusals_accept_before_close(refusal: str) -> None:
+    """A close BEFORE accept leaves as HTTP 403 and reaches the browser as 1006, so the
+    client cannot tell a revoked link / full link from a dead backend and keeps retrying.
+    """
+    from app.api.routes import chat
+
+    ws = AsyncMock()
+    db = AsyncMock()
+    if refusal == "unknown_link":
+        db.scalar = AsyncMock(return_value=None)
+        expected = 4004
+    else:
+        link = MagicMock(session_id="sess-1")
+        db.scalar = AsyncMock(return_value=link)
+        db.get = AsyncMock(return_value=MagicMock())
+        expected = 4009
+    with (
+        patch.object(chat, "async_session_maker", _session_cm(db)),
+        patch.object(chat, "connect", AsyncMock(return_value=False)),
+    ):
+        await chat.websocket_shared(ws, "tok")
+
+    assert ws.method_calls == [
+        call.accept(subprotocol="inkwest"),
+        call.close(code=expected),
+    ]
 
 
 # ---------------------------------------------------------------------------
