@@ -71,7 +71,8 @@ repos:
           - pydantic>=2.0
           - pydantic-settings>=2.0
           - types-PyYAML
-          - sqlalchemy[asyncio]>=2.0.25
+          # <2.1: runtime is locked on 2.0 (backend/uv.lock); 2.1 changes the Select typing.
+          - sqlalchemy[asyncio]>=2.0.25,<2.1
 
   # Frontend
   - repo: local
