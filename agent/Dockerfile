@@ -5,7 +5,7 @@
 # `FROM <external toolbox>`, no cross-repo git+token pull of the backend package, no
 # pinned-branch rot. The build context is `backend/`, so the agent code is COPYed
 # locally (the whole reason this is self-contained): the package is not pip-installed —
-# only the carved runtime deps (requirements-agent.txt) go into a venv, and the agent
+# only the carved runtime deps (requirements-agent.txt, via its lock) go into a venv, and the agent
 # runs via a `python -m inkwest_agent` launcher. So the image ships no DB ORM / web
 # stack and no inkwest-backend dep metadata (`uv pip check` stays clean).
 #
@@ -161,10 +161,11 @@ ENV INKWEST_AGENT_HOME=/opt/inkwest-agent
 # Lean deps first (own layer — changes far less often than the code). The package is
 # NOT pip-installed: only requirements-agent.txt (boto3, httpx, pydantic, pydantic-
 # settings, structlog, mcp; ~7) — no DB ORM / web stack, no inkwest-backend metadata.
-COPY requirements-agent.txt ${INKWEST_AGENT_HOME}/requirements-agent.txt
+# Installed from its hashed lock: the unpinned list once shipped mcp 2.x and broke every MCP.
+COPY requirements-agent.lock ${INKWEST_AGENT_HOME}/requirements-agent.lock
 RUN uv venv "${INKWEST_AGENT_HOME}/.venv" && \
     uv pip install --python "${INKWEST_AGENT_HOME}/.venv/bin/python" --no-cache \
-        --requirement "${INKWEST_AGENT_HOME}/requirements-agent.txt"
+        --require-hashes --requirement "${INKWEST_AGENT_HOME}/requirements-agent.lock"
 
 # The code — COPYed from the build context (backend/), not installed.
 COPY app/ ${INKWEST_AGENT_HOME}/app/

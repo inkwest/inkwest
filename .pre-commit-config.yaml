@@ -19,6 +19,11 @@ repos:
       - id: uv-lock
         args: [--check, --project, backend]
         files: ^backend/(uv\.lock|pyproject\.toml)$
+      # The agent image installs this lock, not requirements-agent.txt: an unlocked install
+      # once pulled mcp 2.x into the sandbox. Existing pins are kept; bumps need --upgrade.
+      - id: pip-compile
+        args: [backend/requirements-agent.txt, --universal, --generate-hashes, --python-version, "3.11", -o, backend/requirements-agent.lock]
+        files: ^backend/requirements-agent\.(txt|lock)$
 
   # Standard pre-commit hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -66,7 +71,8 @@ repos:
           - pydantic>=2.0
           - pydantic-settings>=2.0
           - types-PyYAML
-          - sqlalchemy[asyncio]>=2.0.25
+          # <2.1: runtime is locked on 2.0 (backend/uv.lock); 2.1 changes the Select typing.
+          - sqlalchemy[asyncio]>=2.0.25,<2.1
 
   # Frontend
   - repo: local
