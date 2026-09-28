@@ -14,6 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 
 from app.core.config import get_settings
@@ -366,27 +367,60 @@ async def test_concurrent_refreshes_use_distinct_staging():
         cleanup_aws_files(sid)
 
 
-async def test_refresh_and_revoke_do_not_interleave_under_lock():
+@pytest.mark.parametrize("order", ["revoke_first", "staging_first"])
+async def test_refresh_and_revoke_do_not_interleave_under_lock(order: str) -> None:
     """A refresh publishing while a revoke clears in place must serialise on the session
-    lock — the terminal kube set is either fully published or fully cleared, never torn."""
+    lock — the terminal kube set is either fully published or fully cleared, never torn.
+
+    Both sides run in threads, so which reaches the session dir first is timing: both orders
+    are forced. A revoke landing after the refresh staged drops that staging (cleanup_aws_files)
+    and the refresh fails its rename — the revoke wins.
+    """
+    import threading
+
     from app.services import eks_refresh
     from app.tools.connector_exec import cleanup_aws_files as cleanup
 
     sid = uuid.uuid4()
+    kube = session_kube_dir(sid)
+    revoked = threading.Event()
+    real_discover = eks_refresh._discover_all
+
+    def discover_after_revoke(*args, **kwargs):
+        assert revoked.wait(5), "revoke never ran"
+        return real_discover(*args, **kwargs)
+
+    async def revoke_in_place() -> None:
+        # Mirror the real revoke path: cleanup off the loop via to_thread, under lock.
+        async with eks_refresh.session_lock(sid):
+            if order == "staging_first":
+                for _ in range(500):
+                    if glob.glob(f"{kube}.config.*"):
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    pytest.fail("refresh never staged")
+            await asyncio.to_thread(cleanup, sid, keep_dirs=True)
+        revoked.set()
+
+    discover = discover_after_revoke if order == "revoke_first" else real_discover
     try:
         eks = _mock_eks({"c1": _cluster_payload("c1"), "c2": _cluster_payload("c2")})
+        with (
+            patch("boto3.client", return_value=eks),
+            patch.object(eks_refresh, "_discover_all", discover),
+        ):
+            refreshed, revoke_result = await asyncio.gather(
+                refresh_session_eks(sid, _cred()), revoke_in_place(), return_exceptions=True
+            )
 
-        async def revoke_in_place() -> None:
-            # Mirror the real revoke path: cleanup off the loop via to_thread, under lock.
-            async with eks_refresh.session_lock(sid):
-                await asyncio.to_thread(cleanup, sid, keep_dirs=True)
-
-        with patch("boto3.client", return_value=eks):
-            await asyncio.gather(refresh_session_eks(sid, _cred()), revoke_in_place())
-
-        kube = session_kube_dir(sid)
-        names = sorted(os.listdir(kube))
-        assert names == [] or names == ["config"]  # fully published or fully cleared, not torn
+        assert revoke_result is None
+        if order == "revoke_first":
+            assert refreshed == 2
+            assert os.listdir(kube) == ["config"]  # fully published
+        else:
+            assert isinstance(refreshed, FileNotFoundError), refreshed
+            assert os.listdir(kube) == []  # fully cleared
         assert glob.glob(f"{kube}.config.*") == []
     finally:
         cleanup(sid)
