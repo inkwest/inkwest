@@ -19,6 +19,11 @@ repos:
       - id: uv-lock
         args: [--check, --project, backend]
         files: ^backend/(uv\.lock|pyproject\.toml)$
+      # The agent image installs this lock, not requirements-agent.txt: an unlocked install
+      # once pulled mcp 2.x into the sandbox. Existing pins are kept; bumps need --upgrade.
+      - id: pip-compile
+        args: [backend/requirements-agent.txt, --universal, --generate-hashes, --python-version, "3.11", -o, backend/requirements-agent.lock]
+        files: ^backend/requirements-agent\.(txt|lock)$
 
   # Standard pre-commit hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks

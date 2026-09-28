@@ -41,8 +41,8 @@ dependencies = [
     # MCP client SDK — the backend enumerates a server's tools server-side (initialize +
     # tools/list over streamable-HTTP with proxy-injected creds) to drive per-tool
     # permissions. Core (not the optional extra) since enumeration is a first-class feature,
-    # not a sandbox-only concern.
-    "mcp>=1.0.0",
+    # not a sandbox-only concern. <2: v2 is a breaking client API (see requirements-agent.txt).
+    "mcp>=1.0.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +51,7 @@ dependencies = [
 # target this extra keep working. The in-agent client still imports it lazily and degrades
 # to "no MCP tools" when absent.
 mcp = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
 ]
 dev = [
     "pytest>=7.4.0",

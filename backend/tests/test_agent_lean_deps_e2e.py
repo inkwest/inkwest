@@ -4,7 +4,7 @@
 runtime import in the agent could be added to the code but forgotten in the lean list
 — and the image would only break at runtime (the import guard catches *forbidden*
 deps, not *missing-needed* ones). This closes that gap: build a venv with ONLY
-requirements-agent.txt installed, put the COPYed code on PYTHONPATH (mirroring how
+requirements-agent.lock installed, put the COPYed code on PYTHONPATH (mirroring how
 Dockerfile.agent runs it — package not pip-installed), and drive a full tool-using
 turn. A dep the agent imports but the lean list omits surfaces here as an ImportError,
 not in production.
@@ -12,6 +12,7 @@ not in production.
 Marked e2e and skipped when uv is unavailable or the install can't run (offline) — it
 builds a real venv and needs network, so it doesn't belong in the fast unit path's
 critical assertions, but it runs by default wherever the toolchain + network exist.
+Under CI the skips become failures, or the guard would silently never run there.
 """
 
 import json
@@ -25,7 +26,8 @@ import pytest
 pytestmark = pytest.mark.e2e
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
-_REQS = _BACKEND_ROOT / "requirements-agent.txt"
+# The lock, not requirements-agent.txt: it is what agent/Dockerfile installs.
+_REQS = _BACKEND_ROOT / "requirements-agent.lock"
 
 # Same full-turn driver as the runtime guard: one kubectl tool round then end_turn,
 # exercising the dispatch→executor path. Runs under the lean venv with the code on
@@ -63,27 +65,41 @@ print(json.dumps({"events": [e.type for e in asyncio.run(main())]}))
 """
 
 
+def _skip_or_fail(reason: str) -> None:
+    (pytest.fail if os.environ.get("CI") else pytest.skip)(reason)
+
+
 @pytest.fixture(scope="module")
 def lean_python() -> str:
-    """A venv with ONLY requirements-agent.txt installed; returns its python path."""
+    """A venv with ONLY requirements-agent.lock installed; returns its python path."""
     uv = shutil.which("uv")
     if uv is None:
-        pytest.skip("uv not available — cannot build the lean dep venv")
+        _skip_or_fail("uv not available — cannot build the lean dep venv")
     import tempfile
 
     venv = Path(tempfile.mkdtemp(prefix="inkwest-lean-")) / "venv"
     created = subprocess.run([uv, "venv", str(venv)], capture_output=True, text=True)
     if created.returncode != 0:
-        pytest.skip(f"uv venv failed: {created.stderr}")
+        _skip_or_fail(f"uv venv failed: {created.stderr}")
     python = str(venv / "bin" / "python")
     installed = subprocess.run(
-        [uv, "pip", "install", "--python", python, "--no-cache", "-r", str(_REQS)],
+        [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            python,
+            "--no-cache",
+            "--require-hashes",
+            "-r",
+            str(_REQS),
+        ],
         capture_output=True,
         text=True,
     )
     if installed.returncode != 0:
         # Most likely offline / index unreachable — an infra gap, not a code failure.
-        pytest.skip(f"installing lean deps failed (offline?):\n{installed.stderr}")
+        _skip_or_fail(f"installing lean deps failed (offline?):\n{installed.stderr}")
     return python
 
 
@@ -104,3 +120,25 @@ def test_requirements_agent_is_sufficient_for_a_full_turn(lean_python: str) -> N
     )
     events = json.loads(proc.stdout.strip().splitlines()[-1])["events"]
     assert "tool_result" in events and events[-1] == "done", events
+
+
+# The agent imports the MCP SDK lazily, so the full turn above never touches it. mcp v2
+# removed streamablehttp_client and renamed inputSchema/isError — the rename fails silently
+# (getattr default), hence the field check alongside the imports.
+_MCP_PROBE = """
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamablehttp_client
+import mcp.types as t
+assert "inputSchema" in t.Tool.model_fields, "Tool.inputSchema"
+assert "isError" in t.CallToolResult.model_fields, "CallToolResult.isError"
+"""
+
+
+def test_requirements_agent_mcp_matches_agent_client_api(lean_python: str) -> None:
+    """The lean mcp version must expose the transports and field names inkwest_agent.mcp uses."""
+    proc = subprocess.run(
+        [lean_python, "-c", _MCP_PROBE], capture_output=True, text=True, timeout=60
+    )
+    assert proc.returncode == 0, f"mcp SDK API drifted from inkwest_agent.mcp:\n{proc.stderr}"
