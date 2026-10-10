@@ -126,7 +126,7 @@ async def test_chat_validate_session_success() -> None:
 
 @pytest.mark.asyncio
 async def test_chat_validate_session_without_cluster() -> None:
-    """a session with no cluster validates with cluster=None, no error."""
+    """A session with no cluster validates with cluster=None, no error."""
     from app.api.routes.chat import validate_session
 
     mock_session = MagicMock()

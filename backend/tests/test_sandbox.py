@@ -428,7 +428,7 @@ async def test_provision_skips_add_host_for_service_dns_mcp_proxy(tmp_path):
 
 @pytest.mark.asyncio
 async def test_provision_maps_broker_sentinel_when_split_from_mcp_proxy(tmp_path):
-    """the broker can point in-pod while the MCP proxy stays on its externally
+    """The broker can point in-pod while the MCP proxy stays on its externally
     resolvable host (it doubles as the OAuth2 redirect). Only the sentinel gets mapped."""
     settings = _settings(tmp_path)
     settings.mcp_proxy_base_url = "https://inkwest.example.private"

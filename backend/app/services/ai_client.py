@@ -109,8 +109,8 @@ def get_orchestrator():
         db: AsyncSession, session_id: "str | UUID", **kwargs: Any
     ) -> AsyncIterator[Any]:
         model = await resolve_session_model(db, session_id)
-        # Honor the session's explicit engine pin when set (the Engine·Model picker,
-        #) — a Claude model can then run through the sandboxed Converse loop
+        # Honor the session's explicit engine pin when set (the Engine·Model picker)
+        # — a Claude model can then run through the sandboxed Converse loop
         # too, not only the CLI. With no session pin, fall back to the admin's chosen
         # default engine for the default model; otherwise engine_for_turn applies the
         # default rule (non-Claude → agent; Claude → native CLI), reconciled against the

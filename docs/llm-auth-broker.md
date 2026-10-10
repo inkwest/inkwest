@@ -57,7 +57,7 @@ direct-Anthropic-key shape can be added later without touching the route body.
    refused with a clear error (the agent path 403s — see Restriction).
 2. **A broker host must be set** — the broker base URL is `<host>/api/llm-proxy`, where the
    host is `LLM_BROKER_BASE_URL` when set, else the `MCP_PROXY_BASE_URL` host (one host for
-   both, the previous default). Splitting them keeps model traffic pod-local — the MCP
+   both, the historical default). Splitting them keeps model traffic pod-local — the MCP
    host must stay externally resolvable (OAuth2 redirects) and hairpins through the shared
    load balancer, whose 60s idle timeout severs a response the model is still preparing.
    Either way the host must be squid-allowlisted; a sentinel host (see

@@ -14,7 +14,7 @@ from app.core.push_keys import is_p256_public_key, is_vapid_subject, load_vapid
 
 # Captured once at import (≈ process startup). When no build-time VERSION is
 # injected (the "dev" sentinel below), the backend reports this startup-stamped
-# version so every restart looks like a fresh deploy to the update-banner check
+# version so every restart looks like a fresh deploy to the update-banner check,
 # letting the banner be exercised locally without building an image.
 # The leading "v" matches the prod build convention (Dockerfile VERSION=v…, git tags).
 _DEV_VERSION = f"v0.0.0-dev-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -33,8 +33,7 @@ class Settings(BaseSettings):
     # is engine-only — see AGENTIC_ENGINES). Kept only as an accepted-but-unused field
     # so a stale value lingering in a .env file, compose env_file, or k8s manifest does
     # not trip pydantic-settings' extra=forbid and crash startup during migration.
-    # Nothing reads it. Drop once every env (local + the deployed
-    # manifests) has been scrubbed of AI_PROVIDER.
+    # Nothing reads it. Drop once every env has been scrubbed of AI_PROVIDER.
     ai_provider: str | None = None
 
     # Agentic engines enabled in this deployment (CSV). An engine is *which
@@ -130,10 +129,10 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Budget Management
     # ==========================================================================
-    # Off by default: Inkwest targets trusted single-org deployments, so LLM cost abuse is not a
-    # front-line concern. The mechanism is fully available — enable it (admin UI or env) to
-    # get a server-side spend ceiling; when on, the chat gate fails CLOSED on a check error
-    # (see chat._budget_block_reason). Admin-overridable at runtime.
+    # Off by default: this tool is typically deployed for a closed user base, so LLM cost abuse is
+    # not a front-line concern. The mechanism is fully available — enable it (admin UI or env) to
+    # get a server-side spend ceiling; when on, the chat gate fails CLOSED on a check error (see
+    # chat._budget_block_reason). Admin-overridable at runtime.
     budget_enabled: bool = False
     # Per-user default spend cap in USD/month applied to every user without a more
     # specific (user/role/global) budget row. 0 = no default cap. Admin-overridable
@@ -147,11 +146,11 @@ class Settings(BaseSettings):
     # ==========================================================================
     # Rate limiting (in-process; single-replica, like the other in-RAM stores)
     # ==========================================================================
-    # Abuse/DoS/cost control. Per-IP token buckets on HTTP routes (a stricter bucket on
-    # /api/auth to blunt credential brute-force) plus a per-user cap on WS turn starts (the
-    # expensive LLM path). OFF by default for trusted single-org deployments. The
-    # mechanism is fully available — enable it (and tune the limits below) if the tool is
-    # ever exposed more broadly. In-process (single-replica); pair with an ingress/WAF limit.
+    # Abuse/DoS/cost control. Per-IP token buckets on HTTP routes (a stricter bucket on /api/auth to
+    # blunt credential brute-force) plus a per-user cap on WS turn starts (the expensive LLM path).
+    # OFF by default: this tool is typically deployed for a closed user base. The mechanism is fully
+    # available — enable it (and tune the limits below) if the tool is ever exposed more broadly.
+    # In-process (single-replica); pair with an ingress/WAF limit.
     rate_limit_enabled: bool = False
     rate_limit_ip_per_minute: int = 120  # general /api/* requests per client IP
     rate_limit_auth_ip_per_minute: int = 20  # /api/auth/* per client IP (login/callback/ticket)
@@ -220,7 +219,8 @@ class Settings(BaseSettings):
     sandbox_docker_path: str = "docker"
     sandbox_toolbox_image: str = ""  # claude-toolbox image (claude + kubectl + aws)
     # Image the broker spawns the inkwest-agent worker in (P1.3). Empty = reuse
-    # sandbox_toolbox_image (the toolbox bakes the agent in — see backend/Dockerfile.agent); set this to point at a dedicated agent image later (decision #6).
+    # sandbox_toolbox_image (the toolbox bakes the agent in — see backend/Dockerfile.agent);
+    # set this to point at a dedicated agent image later (decision #6).
     sandbox_agent_image: str = ""
     # The sandbox container's HOME. Claude Code state (durable, for --resume) and the creds
     # tmpfs are anchored here, and CLAUDE_CONFIG_DIR is set to <home>/.claude so it works

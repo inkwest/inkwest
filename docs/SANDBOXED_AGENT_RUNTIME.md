@@ -109,28 +109,28 @@ With `AGENTIC_ENGINES=claude-cli`, include-non-anthropic **off**, and an **engin
 - **Phase 1 — sandboxed `inkwest-agent` runtime** (largest; the loop-isolation core): `inkwest-agent` entrypoint + toolbox deps; stdout `ChatEvent` protocol; broker spawn/stream/persist/cancel (reuse sandbox lifecycle); move `save`/`finalize` to broker side; feature-flag per engine, then retire the in-process loop.
 - **Phase 2 — credential isolation** (next lot, gated; NOTIFY-driven): intent table + `pg_notify`; **minting stays centralized in the portal/broker** (which becomes the cred broker) — keep the **SSO user device-auth + runtime account/role selection** (the security keystone; rules out static IAM/IRSA roles); hand creds to the sandbox via a **short-lived crypto handoff**, projected onto node-local tmpfs by a **local injector** (a DaemonSet in that narrowed role only — *not* holding the SSO secret). **Mono-node end-to-end first.** (Superseded: the earlier "per-node DaemonSet holds the SSO secret + the worker mints" framing.)
 
-## Implementation slices
+## Work breakdown
 
-Implementation slices:
+Slices labelled `phase-0|1|2`.
 
-| Ticket | Slice | |
-|---|---|---|
-| — | P0.1 | `AGENTIC_ENGINES` + per-turn engine resolution |
-| — | P0.2 | Whole-Bedrock engine-aware catalog + per-vendor tags |
-| — | P1.1 | `inkwest_agent` package (loop + Converse + tools) standalone |
-| — | P1.2 | Bake `inkwest_agent` into the toolbox image |
-| — | P1.3 | Broker: spawn-in-sandbox + parse + persist + cancel |
-| — | P1.4 | Turn-spec contract: context (resume/replay) + creds + tools |
-| — | P1.5 | Squid egress allowlist for model endpoints |
-| — | P1.6 | Retire the in-process custom loop |
-| — | P2.1 | Provisioning intent table + `pg_notify` |
-| — | P2.2 | Provisioning worker (DaemonSet) skeleton + LISTEN |
-| — | P2.3 | Move device-auth + STS mint into the worker |
-| — | P2.4 | Credential projection to node-local tmpfs |
-| — | P2.5 | Strip SSO/STS creds from the portal |
-| — | P2.6 | Worker infra: DaemonSet manifest, IAM/SA, NetworkPolicy |
+| Slice | Scope |
+|---|---|
+| P0.1 | `AGENTIC_ENGINES` + per-turn engine resolution |
+| P0.2 | Whole-Bedrock engine-aware catalog + per-vendor tags |
+| P1.1 | `inkwest_agent` package (loop + Converse + tools) standalone |
+| P1.2 | Bake `inkwest_agent` into the toolbox image |
+| P1.3 | Broker: spawn-in-sandbox + parse + persist + cancel |
+| P1.4 | Turn-spec contract: context (resume/replay) + creds + tools |
+| P1.5 | Squid egress allowlist for model endpoints |
+| P1.6 | Retire the in-process custom loop |
+| P2.1 | Provisioning intent table + `pg_notify` |
+| P2.2 | Provisioning worker (DaemonSet) skeleton + LISTEN |
+| P2.3 | Move device-auth + STS mint into the worker |
+| P2.4 | Credential projection to node-local tmpfs |
+| P2.5 | Strip SSO/STS creds from the portal |
+| P2.6 | Worker infra: DaemonSet manifest, IAM/SA, NetworkPolicy |
 
-> **Note:** the P2.x rows predate the revised Phase 2 direction (decision #9). Minting stays in the **portal/broker** (not moved into a worker), and the DaemonSet narrows to a **local cred injector**; the SSO user device-auth + runtime role selection is kept. The ticket descriptions (esp. P2.3 "move STS mint into the worker", P2.6 "DaemonSet/IAM/NetworkPolicy") are to be reframed at Phase 2 build.
+> **Note:** the P2.x rows predate the revised Phase 2 direction (decision #9). Minting stays in the **portal/broker** (not moved into a worker), and the DaemonSet narrows to a **local cred injector**; the SSO user device-auth + runtime role selection is kept. The slice descriptions (esp. P2.3 "move STS mint into the worker", P2.6 "DaemonSet/IAM/NetworkPolicy") are to be reframed at Phase 2 build.
 
 ## Open decisions (deferred)
 

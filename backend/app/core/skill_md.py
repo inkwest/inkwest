@@ -5,9 +5,9 @@ for a skill.
 A skill is authored as one ``content`` field holding a full Claude Code SKILL.md:
 
     ---
-    name: mr-helm-review
-    description: Reviews ArgoCD files changed in a GitLab MR …
-    arguments: [mr_url, --publish]
+    name: pod-crash-triage
+    description: Triages a crash-looping pod from its events and logs …
+    arguments: [pod, --namespace]
     ---
     <instructions…>
 

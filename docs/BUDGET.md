@@ -50,8 +50,8 @@
   unlimited). The admin form surfaces this with an inline notice.
 
 > **Cutover 2026-07-04**: usage rows recorded before this date predate
-> cache-aware accounting — they under-count cache-heavy turns (observed ~10×
-> on a real production bill). No backfill;
+> cache-aware accounting — they under-count cache-heavy turns (observed as an
+> order-of-magnitude gap against the provider bill). No backfill;
 > comparisons across the cutover are apples-to-oranges. The cutover ships two
 > schema migrations (`20260704000000_usage_cache_tokens.sql`,
 > `20260704010000_message_session_cache_tokens.sql`) — apply them before

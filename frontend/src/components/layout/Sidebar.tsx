@@ -4,7 +4,7 @@ import { useUpdateStore } from '@/store/update';
 import { formatBuildTime } from '@/lib/utils';
 
 export function Sidebar() {
-  // The build the SPA loaded with (captured from /version on connect — ).
+  // The build the SPA loaded with (captured from /version on connect).
   const version = useUpdateStore((s) => s.loadedVersion);
   const buildTime = formatBuildTime(useUpdateStore((s) => s.loadedBuildTimestamp));
   const versionTitle = buildTime ? `Version ${version}\nBuilt at: ${buildTime}` : `Version ${version}`;

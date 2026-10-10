@@ -182,8 +182,12 @@ Production ships as a **single combined image** built from the root `Dockerfile`
 - FastAPI serves everything on port 8000: SPA (with `index.html` fallback for client-side routes), REST API, WebSockets — plus gzip and the browser security headers nginx used to add
 - Unknown `/api/*`, `/assets/*`, `/ws/*` paths return real 404s (no SPA fallback)
 
-CI builds and pushes one `inkwest` image. Test locally with
-[`gitlab-ci-local`](https://github.com/firecow/gitlab-ci-local) or plain `docker build .`.
+CI (`.github/workflows/ci.yml`) runs pre-commit + backend tests, then builds two images
+with buildx (provenance + SBOM attestations, cosign keyless signatures): the combined
+`ghcr.io/inkwest/inkwest` (root `Dockerfile`) and the sandbox agent
+`ghcr.io/inkwest/inkwest/agent` (`agent/Dockerfile`, context `backend/`). PRs build
+only; semver tags `vX.Y.Z` push, expanded to `vX.Y.Z`, `X.Y`, `X` and `latest`. Test
+locally with [`act`](https://github.com/nektos/act) or plain `docker build .`.
 
 Database migrations run separately (init container / Job pattern):
 

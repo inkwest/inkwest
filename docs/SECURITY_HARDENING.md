@@ -3,7 +3,7 @@
 TL;DR of the security controls added before release and the **deploy-time settings an
 operator must set** — several controls can't live in app code (ingress, uvicorn flags).
 
-Scope note: Inkwest targets **trusted single-organisation deployments**. Cost/DoS controls
+Scope note: Inkwest **assumes a closed user base behind SSO**. Cost/DoS controls
 (rate limiting, budgets) are therefore **available but OFF by default** — enable them if the
 tool is ever exposed more broadly. The auth/egress/input hardening below is always on.
 

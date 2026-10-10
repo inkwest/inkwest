@@ -1,6 +1,6 @@
 # Prompt Templates
 
-> a library of reusable prompt templates, offered as an editable
+> A library of reusable prompt templates, offered as an editable
 > palette in the chat. The user picks a template, its content lands in the chat
 > input, stays fully editable, then is sent like any other message.
 

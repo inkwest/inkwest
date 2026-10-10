@@ -83,7 +83,7 @@ updated_at
     "sidebarWidth": 280
   },
   "skills": {
-    "disabled_admin": ["mr-helm-review", "..."]   // admin skill names the user turned OFF
+    "disabled_admin": ["pod-crash-triage", "..."]   // admin skill names the user turned OFF
   }
 }
 ```
@@ -210,7 +210,7 @@ Import rules:
 - Whether `read_skill` advertising in `inkwest_agent` needs any change (it consumes the
   merged list already — likely none).
 
-## Suggested task breakdown
+## Suggested work breakdown
 
 1. DB migration: `user_skills` + `user_preferences` (+ models).
 2. `user_preferences` service + `get_effective_skills` + orchestrator wiring.

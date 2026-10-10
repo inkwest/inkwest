@@ -4,9 +4,9 @@ TL;DR — when a user selects AWS account/role pairs for a session, Inkwest
 automatically discovers the EKS clusters those credentials can reach and writes a
 **single merged kubeconfig** (one context per cluster) into the session's RAM-only
 tmpfs. No disk persistence, no `aws-sso-util`, no global `~/.kube`. In-process port of
-the `refresh-eks` shell helper, scoped to a session.
+an internal `refresh-eks` shell helper, scoped to a session.
 
-Builds on the AWS connector and the role filter
+Builds on the AWS connector and the role filter.
 See [`CONNECTOR_AWS_SETUP.md`](./CONNECTOR_AWS_SETUP.md) and
 [`CONNECTORS.md`](./CONNECTORS.md).
 

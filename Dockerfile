@@ -1,5 +1,5 @@
 # Combined production image: backend (FastAPI) serving the built frontend SPA.
-# Built by CI from the repo root; dev keeps backend/Dockerfile + frontend/Dockerfile
+# Built by CI (.github/workflows/ci.yml) from the repo root; dev keeps backend/Dockerfile + frontend/Dockerfile
 # via docker compose (hot reload). Last stage = default build target.
 # KEEP IN SYNC with backend/Dockerfile for the tooling layers (kubectl, AWS CLI,
 # docker CLI, Claude CLI) — same versions, same install commands.

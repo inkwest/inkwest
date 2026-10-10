@@ -10,7 +10,6 @@ cd "$(dirname "$0")/.."
 
 # backend/.env is the pydantic env file — the single source of truth for the image ref.
 ENV_FILE="backend/.env"
-AWS_PROFILE="${AWS_PROFILE:-default}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 
 IMAGE="$(grep -E '^SANDBOX_TOOLBOX_IMAGE=' "$ENV_FILE" | tail -n1 | cut -d= -f2-)"
@@ -35,6 +34,8 @@ if [[ "$IMAGE" != */* || ( "$REGISTRY" != *.* && "$REGISTRY" != *:* ) ]]; then
   exit 0
 fi
 
+# Profile able to read the registry hosting the toolbox image; no sensible default.
+: "${AWS_PROFILE:?set AWS_PROFILE to a profile that can pull from the image registry}"
 echo "==> Logging dind into $REGISTRY (AWS profile: $AWS_PROFILE)"
 AWS_PROFILE="$AWS_PROFILE" aws ecr get-login-password --region "$AWS_REGION" \
   | docker compose exec -T dind docker login --username AWS --password-stdin "$REGISTRY"

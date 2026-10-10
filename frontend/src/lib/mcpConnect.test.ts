@@ -22,7 +22,7 @@ describe('openMcpAuthPopup', () => {
 
   it('navigates the popup to the authorize URL on success', async () => {
     mockStart.mockResolvedValue({ authorize_url: 'https://as.example.com/authorize?x=1' });
-    openMcpAuthPopup('atlassian');
+    openMcpAuthPopup('example-server');
     await vi.waitFor(() => expect(popup.location.href).toBe('https://as.example.com/authorize?x=1'));
     expect(popup.close).not.toHaveBeenCalled();
   });
@@ -31,7 +31,7 @@ describe('openMcpAuthPopup', () => {
     // ApiError extends Error; its message is the backend 502 detail (e.g. discovery failure).
     mockStart.mockRejectedValue(new Error('AS metadata issuer mismatch'));
     const onError = vi.fn();
-    openMcpAuthPopup('atlassian', onError);
+    openMcpAuthPopup('example-server', onError);
     await vi.waitFor(() => expect(onError).toHaveBeenCalledWith('AS metadata issuer mismatch'));
     expect(popup.close).toHaveBeenCalled();
   });
@@ -39,7 +39,7 @@ describe('openMcpAuthPopup', () => {
   it('falls back to a generic message for a non-Error throw', async () => {
     mockStart.mockRejectedValue('boom');
     const onError = vi.fn();
-    openMcpAuthPopup('atlassian', onError);
+    openMcpAuthPopup('example-server', onError);
     await vi.waitFor(() =>
       expect(onError).toHaveBeenCalledWith('Failed to start MCP authorization'),
     );

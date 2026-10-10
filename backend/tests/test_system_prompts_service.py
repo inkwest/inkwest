@@ -139,7 +139,7 @@ async def test_ensure_default_no_insert_when_rows_exist() -> None:
 
 @pytest.mark.asyncio
 async def test_ensure_default_reseeds_unmodified_legacy_default() -> None:
-    # Reframe migration: an unmodified, previously-seeded Default gets its body
+    # Migration: an unmodified, previously-seeded Default gets its body
     # refreshed in place to the new connector-agnostic prompt.
     legacy = next(iter(_LEGACY_SEEDED_PROMPTS))
     row = MagicMock()

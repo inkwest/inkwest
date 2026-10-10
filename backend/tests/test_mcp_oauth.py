@@ -401,7 +401,7 @@ async def test_discovery_rejects_issuer_mismatch() -> None:
 
 @pytest.mark.asyncio
 async def test_discovery_split_host_issuer_via_origin_fallback() -> None:
-    """Split-host AS (Atlassian shape): no PRM, the origin serves AS metadata that self-declares
+    """Split-host AS: no PRM, the origin serves AS metadata that self-declares
     a DIFFERENT issuer host; accept it after re-validating at the declared issuer's own well-known.
     """
 

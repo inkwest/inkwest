@@ -247,8 +247,8 @@ async def test_loop_emits_status_when_image_skipped_for_text_only_model(tmp_path
 
 @pytest.mark.asyncio
 async def test_loop_image_blocks_and_cache_marker_coexist_on_last_message(tmp_path):
-    """Image merge and the cachePoint marker both touch the last message (
-    open-point 3): images must stay in front, the marker last — deterministic ordering
+    """Image merge and the cachePoint marker both touch the last message:
+    images must stay in front, the marker last — deterministic ordering
     so the cached prefix isn't silently broken."""
     p = tmp_path / "diagram.png"
     p.write_bytes(_PNG)

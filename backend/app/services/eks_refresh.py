@@ -14,7 +14,8 @@ container bind-mounts it and a mount follows the inode. Revoke clears the conten
 place but keeps the dir (``keep_dirs``); session end cancels any in-flight refresh and
 removes the whole tree.
 
-This is the in-process port of the ``refresh-eks`` shell helper, with the same discovery + one-kubeconfig-per-cluster output, but scoped to a single
+This is the in-process port of the ``refresh-eks`` shell helper,
+with the same discovery + one-kubeconfig-per-cluster output, but scoped to a single
 session's profiles, RAM-only, async and idempotent — no ``aws-sso-util``, no global
 ``~/.kube`` / ``~/.aws``.
 

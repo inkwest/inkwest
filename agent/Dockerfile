@@ -9,32 +9,29 @@
 # runs via a `python -m inkwest_agent` launcher. So the image ships no DB ORM / web
 # stack and no inkwest-backend dep metadata (`uv pip check` stays clean).
 #
-# The toolbox half mirrors the separate toolbox image Dockerfile (kept independent on purpose — this
-# repo owns its sandbox image). The broker spawns the agent per turn:
+# The toolbox half mirrors the separate toolbox image repo (kept independent on purpose —
+# this repo owns its sandbox image). The broker spawns the agent per turn:
 #   inkwest-agent < turn-spec.json     # turn-spec stdin -> NDJSON ChatEvent stdout -> exit=status
 #
-# Lives at the CI image-build variant path (<variant>/Dockerfile at repo root) so CI's
-# `variants: ["agent"]` instance pushes a distinct sub-path image .../inkwest/agent (not a
-# tag-suffixed sibling of the combined image). Context is backend/ (COPY paths are relative
-# to it); the Dockerfile sits outside that context, which kaniko/docker `-f` allow.
+# CI (.github/workflows/ci.yml) publishes it as a distinct sub-path image
+# ghcr.io/inkwest/inkwest/agent (not a tag-suffixed sibling of the combined image).
+# Context is backend/ (COPY paths are relative to it); the Dockerfile sits outside that
+# context, which docker `-f` allows.
 # Build locally:
 #   docker build -f agent/Dockerfile -t inkwest-agent backend/
 
 FROM debian:trixie-slim
 
-# OCI provenance is injected by the CI image-build step as direct
-# --label flags (org.opencontainers.image.{source,created,version,revision}) — NOT
-# declared here. Duplicating them in the Dockerfile is the anti-pattern
-# to avoid: the Dockerfile's VERSION default would stamp `v0.0.0` on branch builds
-# (the component passes the VERSION build-arg only on tag builds) and fight the
-# component's `image.version=$CI_COMMIT_REF_NAME` label. So the component owns them.
+# OCI provenance labels (org.opencontainers.image.{source,created,version,revision}) are
+# injected by CI as direct --label flags — NOT declared here: a Dockerfile default would
+# stamp `v0.0.0` on non-tag builds and fight the CI-owned `image.version` label.
 
 # pipefail so a failed `curl` in a `curl … | sh` installer (helm/uv/claude below) fails
 # the build loudly instead of the shell reading EOF and exiting 0 — a silent toolless
 # image otherwise (hadolint DL4006). bash is in the debian base.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# ── Toolbox: debug/network/k8s/aws tooling (mirrors the toolbox image) ──────────────
+# ── Toolbox: debug/network/k8s/aws tooling (mirrors the toolbox image) ──────────
 # --no-install-recommends + cache cleanup to keep the image lean.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # HTTP / transfer
@@ -131,8 +128,8 @@ RUN groupadd --gid 1000 sandbox && \
     useradd --uid 1000 --gid 1000 --home-dir /home/sandbox --create-home --shell /bin/bash sandbox
 
 # Claude Code CLI — native installer (no Node.js), as the sandbox user (lands in
-# $HOME/.local/bin). HOME set explicitly: kaniko (CI builder) doesn't derive $HOME from
-# the USER's passwd entry the way BuildKit does (kaniko#507), and the installer needs it.
+# $HOME/.local/bin). HOME set explicitly: not every builder derives $HOME from the USER's
+# passwd entry the way BuildKit does (kaniko#507), and the installer needs it.
 USER sandbox
 ENV HOME=/home/sandbox
 WORKDIR /home/sandbox
@@ -154,7 +151,7 @@ ENV PATH="/home/sandbox/.opencode/bin:$PATH"
 # (npm + models.dev are squid-allowlisted, so a cold container just refetches at runtime).
 RUN opencode --version && (opencode models >/dev/null 2>&1 || true)
 
-# ── inkwest_agent — LEAN bake (carved runtime deps only) ─────────────
+# ── inkwest_agent — LEAN bake (carved runtime deps only) ───────────────────────
 USER root
 ENV INKWEST_AGENT_HOME=/opt/inkwest-agent
 

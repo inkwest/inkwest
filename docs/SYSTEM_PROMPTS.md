@@ -1,6 +1,6 @@
 # System Prompts
 
-> the **system** prompt is the instruction prompt loaded *before any
+> The **system** prompt is the instruction prompt loaded *before any
 > user interaction* of a session. It used to be hardcoded; it now lives in the
 > database, managed by admins, with one default and an admin "custom" override.
 
@@ -14,7 +14,7 @@
 - The previously hardcoded prompt is **seeded** into the DB as the default on
   first startup, from `app/services/prompts.py::SYSTEM_PROMPT`.
 
-> Distinct from the (**user** prompt templates, the chat palette — see
+> Distinct from **user** prompt templates (the chat palette — see
 > [PROMPT_TEMPLATES.md](PROMPT_TEMPLATES.md)) and the correction prompt.
 > This is the **system** prompt of the session.
 

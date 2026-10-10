@@ -587,7 +587,7 @@ async def test_fetch_bedrock_models_engine_enabled_and_flag_surfaces_open():
 
 @pytest.mark.asyncio
 async def test_fetch_bedrock_profile_only_model_surfaces_with_arn():
-    """a model invocable only via an inference profile (omitted by
+    """A model invocable only via an inference profile (omitted by
     list-foundation-models) is surfaced, keying vendor/pricing on the route-stripped
     underlying id, with the profile ARN carried as the invoke target."""
     responses = {

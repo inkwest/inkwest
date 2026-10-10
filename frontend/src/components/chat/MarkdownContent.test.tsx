@@ -15,7 +15,7 @@ import { MarkdownContent } from './MarkdownContent';
 // fall through as raw text — the bug this component was fixed for.
 describe('MarkdownContent GFM tables', () => {
   it('renders a pipe table as a real <table> with header and body cells', () => {
-    const md = ['| Group | Examples |', '|---|---|', '| acme | team/project |'].join('\n');
+    const md = ['| Group | Examples |', '|---|---|', '| acme | widgets/app |'].join('\n');
     const { container } = render(<MarkdownContent content={md} />);
 
     expect(container.querySelector('table')).not.toBeNull();

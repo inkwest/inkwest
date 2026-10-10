@@ -337,7 +337,7 @@ async def _fetch_issuer(resource_metadata_urls: list[str], origin: str) -> tuple
     ``authoritative`` is True only when the issuer came from the resource's PRM doc (RFC 9728
     ``authorization_servers``) — a value the resource explicitly vouches for. It is False when we
     fell back to guessing ``issuer == server origin`` (no PRM), which split-host deployments
-    (e.g. Atlassian: resource ``mcp.atlassian.com`` / issuer ``cf.mcp.atlassian.com``) legitimately
+    (e.g. resource ``mcp.example.com`` / issuer ``auth.mcp.example.com``) legitimately
     violate; that case is reconciled in :func:`_fetch_as_metadata`.
     """
     for url in resource_metadata_urls:
@@ -375,7 +375,7 @@ async def _fetch_as_metadata(issuer: str, *, issuer_authoritative: bool) -> Disc
             # RFC 8414 §3.3: when the issuer was authoritatively supplied (PRM), the metadata's
             # `issuer` MUST match it — a PRM-pointed AS handing back a different issuer is an
             # attack, so reject. When we only guessed `issuer == origin` (no PRM), a different
-            # self-declared issuer is the legitimate split-host case (Atlassian): re-discover at
+            # self-declared issuer is the legitimate split-host case: re-discover at
             # the declared issuer's OWN well-known and accept only if that doc is self-consistent,
             # so the declared issuer must actually vouch for the endpoints it serves.
             # SECURITY: this no-PRM path inherently trusts the resource origin — a server the

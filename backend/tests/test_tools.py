@@ -232,7 +232,7 @@ class TestValidation:
 
 
 class TestEnumDriftGuard:
-    """the validator's enum allow-lists must match the tool schema enums.
+    """The validator's enum allow-lists must match the tool schema enums.
 
     The validator keeps its own constants (so validation.py stays a pure leaf module
     with no intra-package import), but a schema enum and its validator allow-list that
@@ -271,7 +271,7 @@ class TestEnumDriftGuard:
 
 
 class TestArgumentInjection:
-    """free-string args must never reach the kubectl argv flag-shaped.
+    """Free-string args must never reach the kubectl argv flag-shaped.
 
     A prompt-injected tool call could otherwise smuggle a flag as a value, e.g. a 'resource'
     of '--kubeconfig=...' (cluster pivot, bypassing check_cluster_access) or '--raw=...'
@@ -745,7 +745,7 @@ class TestResourceValidation:
 
 
 class TestMcpServerArgumentInjection:
-    """the standalone MCP server enforces the same flag-shape guard as the API path."""
+    """The standalone MCP server enforces the same flag-shape guard as the API path."""
 
     def test_mcp_rejects_raw_resource(self):
         """'--raw=...' as a resource never reaches kubectl on the MCP path."""

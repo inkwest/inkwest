@@ -154,7 +154,7 @@ DEFAULT_SYSTEM_PROMPT_NAME = "Default"
 # body here whenever SYSTEM_PROMPT changes, never remove entries.
 _LEGACY_SEEDED_PROMPTS: frozenset[str] = frozenset(
     {
-        # K8s-only framing seeded before the reframe.
+        # K8s-only framing seeded by earlier releases.
         """You are Inkwest, an AI assistant specialized in debugging Kubernetes clusters.
 
 ## Your Role

@@ -211,7 +211,7 @@ def test_merged_entry_modalities_empty_when_unknown():
 
 
 def test_synthesized_entry_carries_profile_arn_as_invoke_target():
-    """a discovered profile-only model (no DB row) gets its inference-profile
+    """A discovered profile-only model (no DB row) gets its inference-profile
     ARN from the catalog as ``arn`` — the invoke target the orchestrator/agent reads."""
     model_catalog._live_models = ["eu.zai.glm5"]
     arn = "arn:aws:bedrock:eu-west-1:123:inference-profile/eu.zai.glm5"

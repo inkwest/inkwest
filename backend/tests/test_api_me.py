@@ -371,7 +371,7 @@ async def test_delete_skill_not_found(
 async def test_override_admin_skill_ok(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
-    admin = _admin_skill(name="mr-helm-review")
+    admin = _admin_skill(name="pod-crash-triage")
     # admin lookup, existing-personal check (None), active-count (0).
     mock_db.execute = AsyncMock(
         side_effect=[
@@ -382,10 +382,10 @@ async def test_override_admin_skill_ok(
     )
     mock_db.flush = AsyncMock()
     mock_db.refresh = _refresh_stamp()
-    resp = await authenticated_client.post("/api/me/skills/override/mr-helm-review")
+    resp = await authenticated_client.post("/api/me/skills/override/pod-crash-triage")
     assert resp.status_code == 201
     body = resp.json()
-    assert body["name"] == "mr-helm-review"
+    assert body["name"] == "pod-crash-triage"
     assert body["is_override"] is True
     assert body["source_admin_skill_id"] == str(admin.id)
 
@@ -395,7 +395,7 @@ async def test_override_resolves_unslugified_name(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
     # Caller passes a human/cased name; the route slugifies before lookup so it resolves.
-    admin = _admin_skill(name="mr-helm-review")
+    admin = _admin_skill(name="pod-crash-triage")
     mock_db.execute = AsyncMock(
         side_effect=[
             _result(scalar_one_or_none=admin),
@@ -413,7 +413,7 @@ async def test_override_resolves_unslugified_name(
 async def test_override_quota_exceeded(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
-    admin = _admin_skill(name="mr-helm-review")
+    admin = _admin_skill(name="pod-crash-triage")
     # admin found, no existing personal copy, but active count at cap → 409.
     mock_db.execute = AsyncMock(
         side_effect=[
@@ -422,7 +422,7 @@ async def test_override_quota_exceeded(
             _result(scalar_one=50),
         ]
     )
-    resp = await authenticated_client.post("/api/me/skills/override/mr-helm-review")
+    resp = await authenticated_client.post("/api/me/skills/override/pod-crash-triage")
     assert resp.status_code == 409
 
 
@@ -439,14 +439,14 @@ async def test_override_admin_skill_not_found(
 async def test_override_when_already_overridden(
     authenticated_client: AsyncClient, mock_db: AsyncMock
 ) -> None:
-    admin = _admin_skill(name="mr-helm-review")
+    admin = _admin_skill(name="pod-crash-triage")
     mock_db.execute = AsyncMock(
         side_effect=[
             _result(scalar_one_or_none=admin),
-            _result(scalar_one_or_none=_user_skill(name="mr-helm-review")),
+            _result(scalar_one_or_none=_user_skill(name="pod-crash-triage")),
         ]
     )
-    resp = await authenticated_client.post("/api/me/skills/override/mr-helm-review")
+    resp = await authenticated_client.post("/api/me/skills/override/pod-crash-triage")
     assert resp.status_code == 409
 
 

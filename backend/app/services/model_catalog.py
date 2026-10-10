@@ -57,7 +57,7 @@ _refresh_lock = asyncio.Lock()
 # TEXT/EMBEDDING/IMAGE/VIDEO. Empty/unknown ⇒ text-only back-compat (no image blocks).
 _modalities: dict[str, dict[str, list[str]]] = {}
 
-# Invoke target (inference-profile ARN) for models reachable only via a profile
+# Invoke target (inference-profile ARN) for models reachable only via a profile,
 # keyed by the catalog model id AND its route-stripped base id — the same
 # dual-key pattern as ``_modalities`` so a registry lookup by either the surfaced
 # (route-prefixed) id or the underlying namespaced id resolves the ARN. Populated from

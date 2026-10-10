@@ -1,7 +1,7 @@
 """
 Tool-call execution — the DB-free half of the shared orchestration loop.
 
-Running a batch of tool calls and yielding their ``ChatEvent``s needs no DB session
+Running a batch of tool calls and yielding their ``ChatEvent``s needs no DB session,
 so it lives here, away from usage/stats persistence (sqlalchemy-bound).
 The sandboxed-agent orchestrator (``orchestrator_inkwest_agent``) and the standalone
 ``inkwest_agent`` loop both share this — a fix in tool dispatch, the connector re-auth

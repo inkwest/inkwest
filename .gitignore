@@ -73,9 +73,6 @@ temp/
 frontend/coverage/
 backend/htmlcov/
 
-# gitlab-ci-local cache
-.gitlab-ci-local/
-
 # Local-only dev scratch (build/proving helpers); never committed.
 /.local/
 

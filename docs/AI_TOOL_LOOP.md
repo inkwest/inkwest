@@ -180,7 +180,7 @@ Build the saved `content` as a **single list appended in stream arrival order**:
 coalesce consecutive text deltas into the trailing text block, push each
 `tool_use` / `tool_result` as it arrives. Do **not** accumulate text and tools in
 two separate lists and concatenate text-first — that flattens interleaving and
-shows the report above the steps on reload.
+shows the report above the steps on reload (a past regression).
 
 ## Parallel Tool Execution
 

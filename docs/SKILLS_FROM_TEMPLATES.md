@@ -1,6 +1,6 @@
 # Skills
 
-> Implémenté — branche `feat/skills` (MR !65).
+> Implémenté.
 > Cette doc décrit l'**état livré**. Les designs intermédiaires (encodage `(...)` du nom,
 > `render_skill_md`, slug calculé du nom) ont été remplacés par le modèle « SKILL.md unique » ci-dessous.
 

@@ -320,7 +320,7 @@ async def test_create_session_without_cluster(
     mock_db: AsyncMock,
     mock_session_obj: MagicMock,
 ) -> None:
-    """a session can be created with no cluster configured."""
+    """A session can be created with no cluster configured."""
     mock_db.flush = AsyncMock()
 
     def fake_refresh(obj: MagicMock) -> None:

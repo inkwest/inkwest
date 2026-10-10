@@ -62,7 +62,8 @@ async def _persist_abort_marker(session_id: str, reason: str | None) -> None:
     An errored or guard-killed turn keeps its partial content (the orchestrators
     persist it on their error paths), but the terminal error event itself was never
     stored — after a reload the turn ends on a dangling tool call with no cause, so
-    viewers blame the last tool. Persisted as a ``turn aborted`` session event:
+    viewers blame the last tool (a wedged turn gets misreported as an MCP server
+    timing out). Persisted as a ``turn aborted`` session event:
     UI-only by construction (never replayed to the model, excluded from message
     counts/search) and best-effort like every session event. Runs here rather than in
     each orchestrator because the runner is the one place every engine's terminal

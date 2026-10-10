@@ -4,8 +4,7 @@ Merge a conversation's selected MCP servers into its ``.claude.json``.
 Claude Code reads its MCP servers from the ``mcpServers`` key of the config file
 in ``CLAUDE_CONFIG_DIR``. In sandbox mode that file is per-conversation
 (``<session_dir>/claude/.claude.json``), so each conversation can enable a
-different set of MCP servers (see app.services.mcp_catalog for the catalog and
-docs/MCP.md for the design).
+different set of MCP servers (see app.services.mcp_catalog for the catalog).
 
 The merge is **catalog-scoped**: it adds/updates the entries the user enabled and
 removes catalog-managed entries that are no longer enabled (deselection), while

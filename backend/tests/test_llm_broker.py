@@ -50,7 +50,7 @@ def test_base_url_strips_trailing_slash() -> None:
 
 
 def test_base_url_prefers_dedicated_broker_host() -> None:
-    """broker traffic is pod-local and skips the load balancer, while
+    """Broker traffic is pod-local and skips the load balancer, while
     mcp_proxy_base_url stays externally resolvable for OAuth2 redirects."""
     settings = _settings(
         enabled=True,

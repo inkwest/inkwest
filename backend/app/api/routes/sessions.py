@@ -1056,7 +1056,7 @@ async def search_global(
     # Perf note: this is an unindexed sequential scan (cast(content)->text ILIKE); the
     # MAX_SEARCH_TOKENS cap bounds per-row predicates but not the scan. Fuzzy/indexed
     # search (pg_trgm + GIN) is intentionally out of scope here — to be handled in a
-    # dedicated follow-up ticket.
+    # dedicated follow-up.
     msg_query = (
         select(Message)
         .join(Session, Message.session_id == Session.id)
