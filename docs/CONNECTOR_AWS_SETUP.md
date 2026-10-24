@@ -1,158 +1,158 @@
-# Mise en place du connecteur AWS (IAM Identity Center)
+# AWS connector setup (IAM Identity Center)
 
-Runbook pour activer l'accès AWS d'Inkwest : **Device Authorization Grant** vers
-**IAM Identity Center** → sélection **multi-comptes/rôles** → **STS temporaire (~1 h)**.
+Runbook to enable Inkwest's AWS access: **Device Authorization Grant** to
+**IAM Identity Center** → **multi-account/role** selection → **temporary STS (~1 h)**.
 
-> Pourquoi le device grant et pas le flux redirect ? Les clients publics
-> d'Identity Center n'acceptent que des redirect URIs **loopback** (et de manière
-> très contrainte). Le device grant ne nécessite **aucun redirect URI** — c'est le
-> flux qu'utilise `aws sso login`, robuste et supporté.
+> Why the device grant and not the redirect flow? Identity Center public
+> clients only accept **loopback** redirect URIs (and in a very
+> constrained way). The device grant requires **no redirect URI** — it is the
+> flow `aws sso login` uses, robust and supported.
 >
-> Le **read-only** est garanti par le **rôle / permission set** choisi (pas par une
-> allowlist en code). Utilise des permission sets en lecture seule.
+> **Read-only** is guaranteed by the chosen **role / permission set** (not by an
+> allowlist in code). Use read-only permission sets.
 
 ---
 
-## 0. Prérequis
+## 0. Prerequisites
 
-- **IAM Identity Center activé** sur l'organisation AWS.
-- Un (ou des) **permission set read-only** **assigné(s) à ton utilisateur** sur les
-  comptes à investiguer (sinon la liste compte/rôle sera vide). Les
-  **users/groupes/permissions existants du SSO sont réutilisés** — rien à créer.
-- Un accès AWS pour enregistrer le client OIDC (compte de gestion / CloudShell).
-- Le binaire `aws` CLI est présent dans l'image backend (fait).
+- **IAM Identity Center enabled** on the AWS organization.
+- One (or more) **read-only permission set(s)** **assigned to your user** on the
+  accounts to investigate (otherwise the account/role list will be empty). The
+  **existing SSO users/groups/permissions are reused** — nothing to create.
+- AWS access to register the OIDC client (management account / CloudShell).
+- The `aws` CLI binary is present in the backend image (done).
 
 ---
 
-## 1. Enregistrer le client OIDC (→ `client_id` + `client_secret`)
+## 1. Register the OIDC client (→ `client_id` + `client_secret`)
 
-Un **client public simple** suffit (le device grant ne prend ni redirect URI ni
-grant-types explicites). Depuis **AWS CloudShell** (compte de gestion) :
+A **simple public client** is enough (the device grant takes neither redirect URI nor
+explicit grant-types). From **AWS CloudShell** (management account):
 
 ```bash
 aws sso-oidc register-client \
   --client-name "inkwest" \
   --client-type public \
-  --region eu-west-1            # région de ton Identity Center
+  --region eu-west-1            # your Identity Center region
 ```
 
-La réponse contient **`clientId`** et **`clientSecret`** → ce sont
-`AWS_SSO_OIDC_CLIENT_ID` et `AWS_SSO_OIDC_CLIENT_SECRET`.
+The response contains **`clientId`** and **`clientSecret`** → these are
+`AWS_SSO_OIDC_CLIENT_ID` and `AWS_SSO_OIDC_CLIENT_SECRET`.
 
-> ⚠️ Le `clientSecret` expire (~90 jours) → il faudra ré-enregistrer un client et
-> mettre à jour le `.env` à ce moment-là (pas d'API de suppression : les vieux
-> clients expirent seuls).
+> ⚠️ The `clientSecret` expires (~90 days) → you will need to re-register a client and
+> update the `.env` at that point (no delete API: old
+> clients expire on their own).
 
-Récupère aussi l'**URL du portail d'accès** : console → **IAM Identity Center →
-Settings → AWS access portal URL** (ex. `https://d-xxxxxxxxxx.awsapps.com/start`).
+Also get the **access portal URL**: console → **IAM Identity Center →
+Settings → AWS access portal URL** (e.g. `https://d-xxxxxxxxxx.awsapps.com/start`).
 
 ---
 
-## 2. Configurer Inkwest (`.env` à la racine du repo)
+## 2. Configure Inkwest (`.env` at the repo root)
 
 ```bash
 CONNECTORS_ENABLED=true
 
 AWS_SSO_ENABLED=true
-AWS_SSO_REGION=eu-west-1                              # région de l'Identity Center
+AWS_SSO_REGION=eu-west-1                              # Identity Center region
 AWS_SSO_START_URL=https://d-xxxxxxxxxx.awsapps.com/start
-AWS_SSO_OIDC_CLIENT_ID=<clientId de l'étape 1>
-AWS_SSO_OIDC_CLIENT_SECRET=<clientSecret de l'étape 1>   # nom exact : ..._OIDC_CLIENT_SECRET
+AWS_SSO_OIDC_CLIENT_ID=<clientId from step 1>
+AWS_SSO_OIDC_CLIENT_SECRET=<clientSecret from step 1>   # exact name: ..._OIDC_CLIENT_SECRET
 
-# Optionnel — filtre regex des rôles proposés (défense en profondeur, cf. §5)
+# Optional — regex filter on offered roles (defense in depth, see §5)
 # AWS_SSO_ROLE_FILTER=read-?only$
 ```
 
-Appliquer (recrée le backend pour relire l'`.env`) :
+Apply (recreates the backend so it re-reads the `.env`):
 
 ```bash
 docker compose up -d backend
 ```
 
-> Pas besoin de `CONNECTOR_REDIRECT_BASE` pour AWS (aucun redirect). Cette variable
-> ne sert qu'aux connecteurs OAuth-redirect comme GitLab.
+> No need for `CONNECTOR_REDIRECT_BASE` for AWS (no redirect). This variable
+> is only used by OAuth-redirect connectors such as GitLab.
 
 ---
 
-## 3. Utilisation (UI)
+## 3. Usage (UI)
 
-1. Session de chat → bandeau **External access** → ligne **AWS** → **Give access**.
-2. Une **petite popup** s'ouvre sur la page de vérification AWS + un **code** est
-   affiché → connecte-toi et **valide le code** (la popup se ferme automatiquement
-   une fois approuvé).
-3. La **modale de sélection** s'ouvre : **cases à cocher**, **groupées par compte**
-   (triées), **recherche** en haut, **tout cocher/décocher**. Choisis **un ou
-   plusieurs** comptes/rôles.
-4. **Donner accès** → statut **connected** (~1 h). Un **profil AWS** est créé par
-   couple sélectionné.
-5. Dans le chat, l'agent peut :
+1. Chat session → **External access** banner → **AWS** row → **Give access**.
+2. A **small popup** opens on the AWS verification page + a **code** is
+   displayed → sign in and **confirm the code** (the popup closes automatically
+   once approved).
+3. The **selection modal** opens: **checkboxes**, **grouped by account**
+   (sorted), **search** at the top, **select/deselect all**. Pick **one or
+   more** accounts/roles.
+4. **Give access** → status **connected** (~1 h). One **AWS profile** is created per
+   selected pair.
+5. In the chat, the agent can:
    ```
    aws configure list-profiles
-   aws --profile <compte>-<rôle> eks list-clusters
-   aws s3 ls                       # profil par défaut = 1er sélectionné
+   aws --profile <account>-<role> eks list-clusters
+   aws s3 ls                       # default profile = 1st selected
    ```
 
 ---
 
-## 4. Comment ça marche (technique)
+## 4. How it works (technical)
 
 ```
 Give access AWS
   → StartDeviceAuthorization (clientId/secret/startUrl) → userCode + verificationUri
-  → l'utilisateur approuve dans le navigateur
-  → polling CreateToken (grant device_code) → access token SSO
-  → ListAccounts + ListAccountRoles → comptes/rôles autorisés (modale multi-select)
-  → GetRoleCredentials × N (un par couple) → N jeux STS (~1 h) stockés EN RAM
-  → à chaque tour : projection RAM → tmpfs ~/.aws/{credentials,config} (un profil
-    par couple + [default]) ; AWS_SHARED_CREDENTIALS_FILE/AWS_CONFIG_FILE injectés
+  → the user approves in the browser
+  → polling CreateToken (grant device_code) → SSO access token
+  → ListAccounts + ListAccountRoles → allowed accounts/roles (multi-select modal)
+  → GetRoleCredentials × N (one per pair) → N STS sets (~1 h) stored IN RAM
+  → each turn: RAM projection → tmpfs ~/.aws/{credentials,config} (one profile
+    per pair + [default]); AWS_SHARED_CREDENTIALS_FILE/AWS_CONFIG_FILE injected
 ```
 
-**Stockage** : les STS vivent dans le **store RAM** Python (source de vérité). À
-l'exécution, ils sont projetés en tmpfs **RAM** — le volume creds partagé
-`<sandbox_creds_root>/<sid>/.aws` (mode `0644`, monté en lecture seule dans le sandbox
-qui tourne sous un autre uid) avec un sandbox, sinon le `/dev/shm` local du backend
-(mode `0600`) — **jamais sur le disque persistant**, et **supprimés à la révocation**.
+**Storage**: the STS creds live in the Python **RAM store** (source of truth). At
+execution time, they are projected into **RAM** tmpfs — the shared creds volume
+`<sandbox_creds_root>/<sid>/.aws` (mode `0644`, mounted read-only in the sandbox,
+which runs under another uid) with a sandbox, otherwise the backend's local `/dev/shm`
+(mode `0600`) — **never on persistent disk**, and **deleted on revocation**.
 
-Fichiers : `backend/app/services/connectors/aws.py` (device grant + multi-select),
+Files: `backend/app/services/connectors/aws.py` (device grant + multi-select),
 `backend/app/tools/connector_exec.py` (`write_aws_profiles` / tmpfs),
 `backend/app/api/routes/connectors.py` (endpoints `aws/device/start`,
 `aws/device/poll`, `aws/options`, `aws/select`).
 
 ---
 
-## 5. Sécurité / moindre privilège
+## 5. Security / least privilege
 
-- **Read-only au niveau IAM** : choisis des permission sets en lecture seule
-  (pas d'allowlist en code côté `aws_call`).
-- **STS ~1 h** : temporaires, en RAM (tmpfs à l'exécution), jamais en
-  log/prompt/navigateur ; argv ne contient jamais le secret (seulement le chemin
-  du fichier tmpfs).
-- **Plafonné par le SSO** de l'utilisateur : pas d'escalade.
-- **Filtre de rôles (`AWS_SSO_ROLE_FILTER`)** : second verrou côté backend. Regex
-  **insensible à la casse**, matchée (`search`, donc non ancrée — l'opérateur place
-  ses propres `^`/`$`) sur **`<nom_du_compte>.<nom_du_rôle>`**
-  (ex. `acme-integration.AWSReadonlyAccess`). Seuls les rôles qui **matchent**
-  apparaissent dans la modale et sont mintables ; un compte sans rôle correspondant
-  **disparaît**. Vide / non défini → **aucun filtre** (tous les rôles).
-  Appliqué à l'énumération SSO (`provisional_from_token` → `available_roles`) ; la
-  sélection (`select_account_roles`) ne mint que ce qui a été proposé, donc un rôle
-  filtré est de facto non sélectionnable. Regex invalide → **échec au démarrage**.
-  Exemple read-only : `AWS_SSO_ROLE_FILTER=read-?only$`.
-- **Cloisonnement par session** : un fichier `~/.aws` tmpfs par session.
-- **Révocation** : bouton Revoke → creds purgés du store + fichiers tmpfs supprimés
-  (les STS expirent de toute façon à ~1 h).
+- **Read-only at the IAM level**: choose read-only permission sets
+  (no allowlist in code on the `aws_call` side).
+- **STS ~1 h**: temporary, in RAM (tmpfs at execution time), never in
+  log/prompt/browser; argv never contains the secret (only the path
+  of the tmpfs file).
+- **Capped by the user's SSO**: no escalation.
+- **Role filter (`AWS_SSO_ROLE_FILTER`)**: second lock on the backend side. **Case-insensitive**
+  regex, matched (`search`, so unanchored — the operator places
+  their own `^`/`$`) against **`<account_name>.<role_name>`**
+  (e.g. `acme-integration.AWSReadonlyAccess`). Only roles that **match**
+  appear in the modal and are mintable; an account with no matching role
+  **disappears**. Empty / unset → **no filter** (all roles).
+  Applied to SSO enumeration (`provisional_from_token` → `available_roles`); the
+  selection (`select_account_roles`) only mints what was offered, so a
+  filtered role is de facto unselectable. Invalid regex → **startup failure**.
+  Read-only example: `AWS_SSO_ROLE_FILTER=read-?only$`.
+- **Per-session partitioning**: one tmpfs `~/.aws` file per session.
+- **Revocation**: Revoke button → creds purged from the store + tmpfs files deleted
+  (the STS creds expire at ~1 h anyway).
 
 ---
 
-## 6. Dépannage
+## 6. Troubleshooting
 
-| Symptôme | Piste |
+| Symptom | Lead |
 |---|---|
-| Connecteur AWS absent de l'UI | `AWS_SSO_ENABLED`/`AWS_SSO_REGION`/`AWS_SSO_START_URL`/`AWS_SSO_OIDC_CLIENT_ID`/`AWS_SSO_OIDC_CLIENT_SECRET` manquants → backend recréé après l'`.env` ? |
-| `register-client` : « unknown options » | CLI trop vieux → utilise **CloudShell** (CLI récent) |
-| `register-client` : « Could not connect to endpoint » | faute de frappe région (ex. `eu-west1` au lieu de `eu-west-1`) |
-| Reste « en attente d'approbation » | tu n'as pas encore validé le code dans la popup AWS |
-| Liste comptes/rôles vide | aucun permission set assigné à ton utilisateur sur les comptes — **ou** `AWS_SSO_ROLE_FILTER` trop strict (ne matche aucun `compte.rôle`) |
-| Backend refuse de démarrer (`AWS_SSO_ROLE_FILTER is not a valid regex`) | regex `AWS_SSO_ROLE_FILTER` malformée → corriger ou retirer la variable |
-| `aws` échoue « no credentials » dans le chat | accès AWS non accordé / expiré → re-cliquer « Give access » |
-| `clientSecret` expiré (~90 j) | ré-enregistrer un client + mettre à jour le `.env` |
+| AWS connector missing from the UI | `AWS_SSO_ENABLED`/`AWS_SSO_REGION`/`AWS_SSO_START_URL`/`AWS_SSO_OIDC_CLIENT_ID`/`AWS_SSO_OIDC_CLIENT_SECRET` missing → backend recreated after the `.env`? |
+| `register-client`: "unknown options" | CLI too old → use **CloudShell** (recent CLI) |
+| `register-client`: "Could not connect to endpoint" | region typo (e.g. `eu-west1` instead of `eu-west-1`) |
+| Stays "awaiting approval" | you have not confirmed the code in the AWS popup yet |
+| Empty account/role list | no permission set assigned to your user on the accounts — **or** `AWS_SSO_ROLE_FILTER` too strict (matches no `account.role`) |
+| Backend refuses to start (`AWS_SSO_ROLE_FILTER is not a valid regex`) | malformed `AWS_SSO_ROLE_FILTER` regex → fix or remove the variable |
+| `aws` fails "no credentials" in the chat | AWS access not granted / expired → click "Give access" again |
+| `clientSecret` expired (~90 d) | re-register a client + update the `.env` |

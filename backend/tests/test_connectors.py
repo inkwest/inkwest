@@ -263,7 +263,7 @@ async def test_execute_aws_writes_profiles_to_ramfile_not_argv():
     uid, sid = uuid.uuid4(), uuid.uuid4()
     cred = MintedCredential(
         connector="aws",
-        scope="2 compte(s)",
+        scope="2 account(s)",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         secret={
             "region": "eu-west-1",

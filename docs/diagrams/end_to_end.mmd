@@ -1,75 +1,75 @@
 sequenceDiagram
     autonumber
-    actor U as Utilisateur
+    actor U as User
     participant FE as Frontend
     participant BE as Backend (chat / connectors / orchestrator_cli)
     participant ST as CredentialStore (RAM)
     participant MGR as sandbox (services/sandbox.py)
-    participant SQ as proxy squid (conv)
+    participant SQ as squid proxy (conv)
     participant RN as toolbox (conv)
-    participant EXT as Cibles externes (K8s / gitlab.com / AWS)
+    participant EXT as External targets (K8s / gitlab.com / AWS)
 
-    Note over U,EXT: 1) OUVERTURE DE SESSION
-    U->>FE: ouvre une session
+    Note over U,EXT: 1) SESSION OPEN
+    U->>FE: opens a session
     FE->>BE: WS connect
-    BE->>MGR: sandbox.ensure(sid)  (provisioning paresseux au 1er message)
-    MGR->>SQ: cree reseau internal + proxy squid (allowlist STATIQUE)
-    MGR->>RN: cree toolbox (HTTP(S)_PROXY=squid, vol .claude/workdir, creds .aws/.kube RAM)
-    BE-->>FE: pret
+    BE->>MGR: sandbox.ensure(sid)  (lazy provisioning on 1st message)
+    MGR->>SQ: creates internal network + squid proxy (STATIC allowlist)
+    MGR->>RN: creates toolbox (HTTP(S)_PROXY=squid, vol .claude/workdir, creds .aws/.kube RAM)
+    BE-->>FE: ready
 
-    Note over U,EXT: 2) MESSAGE #1 (aucun connecteur accorde)
-    U->>FE: "decris l'etat du cluster"
+    Note over U,EXT: 2) MESSAGE #1 (no connector granted)
+    U->>FE: "describe the cluster state"
     FE->>BE: WS message
-    BE->>ST: build_connector_env(sid) -> {} (rien d'accorde)
+    BE->>ST: build_connector_env(sid) -> {} (nothing granted)
     BE->>MGR: docker exec runner claude -p ... stream-json
-    MGR->>RN: lance claude
+    MGR->>RN: launches claude
     RN->>SQ: kubectl ... (via proxy)
-    SQ->>EXT: K8s API (whiteliste) OK
-    EXT-->>RN: reponse
+    SQ->>EXT: K8s API (allowlisted) OK
+    EXT-->>RN: response
     RN-->>BE: stdout -> ChatEvent
-    BE-->>FE: reponse (streaming)
+    BE-->>FE: response (streaming)
 
-    Note over U,EXT: 3) DONNER ACCES A GITLAB
-    U->>FE: clic "Donner acces a GitLab"
+    Note over U,EXT: 3) GIVE ACCESS TO GITLAB
+    U->>FE: click "Give access to GitLab"
     FE->>BE: initiate (PKCE) -> redirect
     U->>EXT: consent gitlab.com (read_api, read_repository)
     EXT-->>BE: callback (code)
     BE->>EXT: exchange_code
     EXT-->>BE: access_token (~2 h)
-    BE->>ST: put(sid, gitlab) - token en RAM
-    Note over BE,SQ: pas de reload squid - gitlab.com deja dans l'allowlist statique
+    BE->>ST: put(sid, gitlab) - token in RAM
+    Note over BE,SQ: no squid reload - gitlab.com already in the static allowlist
     BE-->>FE: GitLab = connected
 
-    Note over U,EXT: 4) DONNER ACCES A AWS
-    U->>FE: clic "Donner acces a AWS"
+    Note over U,EXT: 4) GIVE ACCESS TO AWS
+    U->>FE: click "Give access to AWS"
     FE->>BE: initiate (PKCE) -> redirect Identity Center
     U->>EXT: consent SSO
     EXT-->>BE: callback (code)
-    BE->>EXT: exchange_code -> token SSO + ListAccounts/ListAccountRoles
-    EXT-->>BE: comptes / roles autorises
-    BE-->>FE: needs_selection (liste compte+role)
-    U->>FE: choisit compte + role
+    BE->>EXT: exchange_code -> SSO token + ListAccounts/ListAccountRoles
+    EXT-->>BE: allowed accounts / roles
+    BE-->>FE: needs_selection (account+role list)
+    U->>FE: picks account + role
     FE->>BE: aws/select
     BE->>EXT: GetRoleCredentials -> STS (~1 h)
-    EXT-->>BE: creds STS
-    BE->>ST: put(sid, aws) - STS en RAM (projetes en .aws RAM du toolbox)
-    Note over BE,SQ: pas de reload squid - control-plane AWS deja dans l'allowlist statique
-    BE-->>FE: AWS = connected (compte/role + expiration)
+    EXT-->>BE: STS creds
+    BE->>ST: put(sid, aws) - STS in RAM (projected into the toolbox's RAM .aws)
+    Note over BE,SQ: no squid reload - AWS control plane already in the static allowlist
+    BE-->>FE: AWS = connected (account/role + expiry)
 
-    Note over U,EXT: 5) MESSAGE #2 (GitLab + AWS accordes)
-    U->>FE: "correle le code GitLab et l'infra AWS du cluster"
+    Note over U,EXT: 5) MESSAGE #2 (GitLab + AWS granted)
+    U->>FE: "correlate the GitLab code and the cluster's AWS infra"
     FE->>BE: WS message
     BE->>ST: build_connector_env(sid) -> {GITLAB_TOKEN, AWS_*}
     BE->>MGR: docker exec -e GITLAB_TOKEN -e AWS_* runner claude -p ...
-    MGR->>RN: lance claude (creds dans l'env)
+    MGR->>RN: launches claude (creds in the env)
     RN->>SQ: kubectl / aws / curl gitlab (via proxy)
     SQ->>EXT: K8s OK, *.amazonaws.com OK, gitlab.com OK
-    EXT-->>RN: resultats
+    EXT-->>RN: results
     RN-->>BE: stdout -> ChatEvent
-    BE-->>FE: reponse (streaming)
+    BE-->>FE: response (streaming)
 
-    Note over U,EXT: 6) FERMETURE / INACTIVITE
+    Note over U,EXT: 6) CLOSE / IDLE
     BE->>MGR: teardown(sid)
     MGR->>RN: stop + rm
-    MGR->>SQ: stop + rm + suppression du reseau
-    BE->>ST: revoke_session(sid) - creds purges
+    MGR->>SQ: stop + rm + network deletion
+    BE->>ST: revoke_session(sid) - creds purged

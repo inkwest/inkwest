@@ -1,51 +1,51 @@
-# Inkwest — Flux d'un message (utilisateur → Claude)
+# Inkwest — Message flow (user → Claude)
 
-Diagrammes du parcours d'un message en mode **`claude-cli`** (config actuelle), plus
-les variantes (providers API, sandbox). Le secret ne traverse jamais le frontend ni
-le prompt : il est injecté dans l'environnement du process `claude` côté backend.
+Diagrams of a message's path in **`claude-cli`** mode (current config), plus
+the variants (API providers, sandbox). The secret never crosses the frontend or
+the prompt: it is injected into the `claude` process environment on the backend side.
 
-## 1. Vue composants (flowchart)
+## 1. Component view (flowchart)
 
 ```mermaid
 flowchart TD
-    U["👤 Utilisateur (navigateur)"]
+    U["👤 User (browser)"]
 
     subgraph FE["Frontend — React (port 3000)"]
       WSHOOK["useWebSocket.ts / websocket.ts"]
-      PANEL["ConnectorPanel — boutons Donner accès"]
+      PANEL["ConnectorPanel — Give access buttons"]
     end
 
-    subgraph BE["Backend — conteneur inkwest-backend (port 8000)"]
-      CHAT["api/routes/chat.py<br/>auth + validation session"]
+    subgraph BE["Backend — inkwest-backend container (port 8000)"]
+      CHAT["api/routes/chat.py<br/>auth + session validation"]
       ORCH["services/orchestrator_cli.py<br/>orchestrate_chat_cli()"]
       ENVB["build_connector_env(uid, sid)"]
       CLI["ai_cli_client.execute_claude_cli()<br/>create_subprocess_exec"]
       PARSE["parse_cli_response()<br/>→ ChatEvent"]
-      subgraph SUB["Sous-process claude — cwd /tmp/inkwest-sessions/&lt;sid&gt;"]
+      subgraph SUB["claude subprocess — cwd /tmp/inkwest-sessions/&lt;sid&gt;"]
         CLAUDE["claude -p --output-format stream-json<br/>[--resume cli_session_id]"]
-        SHELL["shell de l'agent : kubectl / aws / curl"]
+        SHELL["agent shell: kubectl / aws / curl"]
       end
     end
 
-    STORE[("CredentialStore RAM<br/>clé (user, session, connector)")]
+    STORE[("CredentialStore RAM<br/>key (user, session, connector)")]
     DB[("PostgreSQL<br/>messages, sessions, cli_session_id")]
-    MODEL["☁️ API du modèle Claude"]
-    K8S["Cluster Kubernetes"]
+    MODEL["☁️ Claude model API"]
+    K8S["Kubernetes cluster"]
     EXT["AWS / GitLab"]
 
     U -->|"message (WebSocket)"| WSHOOK
-    WSHOOK -->|"ws/chat/&lt;sid&gt; + ticket JWT"| CHAT
+    WSHOOK -->|"ws/chat/&lt;sid&gt; + JWT ticket"| CHAT
     CHAT --> ORCH
     ORCH <-->|"save / get cli_session_id"| DB
     ORCH --> ENVB
-    ENVB -->|"lit les creds"| STORE
+    ENVB -->|"reads creds"| STORE
     ENVB -->|"AWS_* / GITLAB_TOKEN (env)"| CLI
     ORCH --> CLI
     CLI --> CLAUDE
     CLAUDE --> SHELL
     SHELL --> K8S
     SHELL --> EXT
-    CLAUDE <-->|"raisonnement"| MODEL
+    CLAUDE <-->|"reasoning"| MODEL
     CLAUDE -->|"stdout stream-json"| PARSE
     PARSE -->|"ChatEvent (streaming)"| WSHOOK
     WSHOOK --> U
@@ -54,12 +54,12 @@ flowchart TD
     CHAT -.->|"mint → put"| STORE
 ```
 
-## 2. Cycle de vie d'un message (séquence)
+## 2. Message lifecycle (sequence)
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as Utilisateur
+    actor U as User
     participant FE as Frontend
     participant WSH as chat.py (WS)
     participant ORCH as orchestrator_cli
@@ -69,78 +69,77 @@ sequenceDiagram
     participant CLA as claude (subprocess)
     participant EXT as kubectl / AWS / GitLab
 
-    U->>FE: tape un message
+    U->>FE: types a message
     FE->>WSH: WebSocket {type: message}
     WSH->>ORCH: orchestrate_chat_cli(...)
     ORCH->>DB: save_message(user) + get_cli_session_id
     ORCH->>STORE: build_connector_env(uid, sid)
     STORE-->>ORCH: env {AWS_*, GITLAB_TOKEN}
     ORCH->>CLI: execute_claude_cli(prompt, env, cwd, --resume)
-    CLI->>CLA: spawn claude -p (env injecté, cwd isolé)
+    CLI->>CLA: spawn claude -p (env injected, isolated cwd)
     CLA->>EXT: kubectl / aws / curl (creds via env)
-    EXT-->>CLA: résultats
+    EXT-->>CLA: results
     CLA-->>CLI: stdout stream-json
     CLI-->>ORCH: ChatEvent (text / tool / done)
     ORCH-->>WSH: yield ChatEvent
     WSH-->>FE: WebSocket ChatEvent (streaming)
-    FE-->>U: rendu progressif
+    FE-->>U: progressive rendering
     ORCH->>DB: save_message(assistant) + set_cli_session_id
 ```
 
-## 3. Variante — providers API (Gemini / GPT / Anthropic…)
+## 3. Variant — API providers (Gemini / GPT / Anthropic…)
 
-Pas de shell : le modèle demande un *tool*, le backend injecte le secret et exécute,
-puis renvoie le résultat au modèle (boucle tool-use). Outils scopés, isolation native.
+No shell: the model requests a *tool*, the backend injects the secret and executes,
+then returns the result to the model (tool-use loop). Scoped tools, native isolation.
 
 ```mermaid
 flowchart LR
-    M["Modèle (API)"] -->|"appel tool<br/>aws_call / gitlab_api"| D["execute_tool() (dispatch)"]
-    D -->|"lit creds (user, session)"| S[("CredentialStore RAM")]
-    D -->|"injecte secret + exécute"| X["AWS CLI / API GitLab"]
-    X -->|"résultat (sans secret)"| M
+    M["Model (API)"] -->|"tool call<br/>aws_call / gitlab_api"| D["execute_tool() (dispatch)"]
+    D -->|"reads creds (user, session)"| S[("CredentialStore RAM")]
+    D -->|"injects secret + executes"| X["AWS CLI / GitLab API"]
+    X -->|"result (no secret)"| M
 ```
 
-## 4. Variante — sandbox (implémentée, `SANDBOX_ENABLED=true`)
+## 4. Variant — sandbox (implemented, `SANDBOX_ENABLED=true`)
 
-Isolation forte : **une paire de conteneurs par conversation** (réutilisée d'un
-message à l'autre, pour `--resume`) au lieu de lancer `claude` dans le conteneur
-backend. Voir `app/services/sandbox.py`.
+Strong isolation: **one container pair per conversation** (reused from one
+message to the next, for `--resume`) instead of running `claude` in the backend
+container. See `app/services/sandbox.py`.
 
 - **toolbox** (`inkwest_conv_<sid>`) — image `SANDBOX_TOOLBOX_IMAGE` (`claude` +
-  `kubectl` + `aws`). Posé sur un réseau `--internal` : **aucun egress direct**. Le
-  backend y exécute `docker exec … claude -p` par message (stdout inchangé →
+  `kubectl` + `aws`). Placed on an `--internal` network: **no direct egress**. The
+  backend runs `docker exec … claude -p` in it per message (stdout unchanged →
   `parse_cli_response`).
-- **proxy squid** (`inkwest_proxy_<sid>`) — bi-réseau (internal + externe). Applique
-  une **allowlist statique** (`sandbox/squid.conf`, montée en lecture seule) qui
-  couvre déjà tous les connecteurs + backends de modèle ; un grant n'ouvre **pas** de
-  domaine (pas de reload). `access.log` est monté côté backend → audit egress durable
-  + onglet UI.
-- Le backend pilote un daemon **dind** dédié ; provisioning paresseux
-  au 1er message, reaper d'inactivité (TTL), balayage des orphelins au démarrage.
+- **squid proxy** (`inkwest_proxy_<sid>`) — dual-network (internal + external). Applies
+  a **static allowlist** (`sandbox/squid.conf`, mounted read-only) that
+  already covers every connector + model backend; a grant does **not** open a
+  domain (no reload). `access.log` is mounted on the backend side → durable egress audit
+  + UI tab.
+- The backend drives a dedicated **dind** daemon; lazy provisioning
+  on the 1st message, idle reaper (TTL), orphan sweep at startup.
 
 ```mermaid
 flowchart TD
-    ORCH["orchestrator_cli<br/>sandbox.ensure(sid)"] -->|"docker exec (par message)"| CONV
-    subgraph PAIR["Paire par conversation — réseau internal (pas de route directe)"]
-      CONV["toolbox inkwest_conv_&lt;sid&gt;<br/>claude -p · HTTP(S)_PROXY=proxy:3128<br/>-v .claude (--resume) · -v /workdir<br/>--tmpfs .aws/.kube (creds RAM)"]
-      PROXY["proxy inkwest_proxy_&lt;sid&gt;<br/>squid.conf : allowlist statique"]
+    ORCH["orchestrator_cli<br/>sandbox.ensure(sid)"] -->|"docker exec (per message)"| CONV
+    subgraph PAIR["Per-conversation pair — internal network (no direct route)"]
+      CONV["toolbox inkwest_conv_&lt;sid&gt;<br/>claude -p · HTTP(S)_PROXY=proxy:3128<br/>-v .claude (--resume) · -v /workdir<br/>--tmpfs .aws/.kube (RAM creds)"]
+      PROXY["proxy inkwest_proxy_&lt;sid&gt;<br/>squid.conf: static allowlist"]
     end
-    EXT["Egress autorisé : API modèle · .eks · *.eu-west-1.amazonaws.com<br/>gitlab.com · .coralogix.com · registries paquets"]
+    EXT["Allowed egress: model API · .eks · *.eu-west-1.amazonaws.com<br/>gitlab.com · .coralogix.com · package registries"]
     CONV -->|"stdout stream-json → parse_cli_response"| ORCH
-    CONV ==>|"tout l'egress via le proxy"| PROXY
+    CONV ==>|"all egress via the proxy"| PROXY
     PROXY --> EXT
-    CONV -. "tentative directe → bloquée (réseau internal)" .-> EXT
+    CONV -. "direct attempt → blocked (internal network)" .-> EXT
 ```
 
 ---
 
 ### Notes
-- **Secret jamais exposé** : navigateur/prompt/logs ne voient jamais les creds ;
-  injection dans l'`env` du process `claude` (ou en-tête HTTP côté tools API).
-- **Historique** : en `claude-cli`, tenu par Claude Code via `--resume <cli_session_id>`
-  (Inkwest mémorise l'ID en DB).
-- **Isolation conversations** : cwd `/tmp/inkwest-sessions/<sid>` distinct par session.
-- **Isolation filesystem/réseau** : par défaut `claude` tourne dans le conteneur
-  backend (accès filesystem, egress libre) ; avec `SANDBOX_ENABLED=true` chaque
-  conversation est isolée dans sa paire toolbox+squid (§4).
-```
+- **Secret never exposed**: browser/prompt/logs never see the creds;
+  injected into the `claude` process `env` (or HTTP header for API tools).
+- **History**: in `claude-cli`, held by Claude Code via `--resume <cli_session_id>`
+  (Inkwest stores the ID in DB).
+- **Conversation isolation**: distinct cwd `/tmp/inkwest-sessions/<sid>` per session.
+- **Filesystem/network isolation**: by default `claude` runs in the backend
+  container (filesystem access, unrestricted egress); with `SANDBOX_ENABLED=true` each
+  conversation is isolated in its toolbox+squid pair (§4).

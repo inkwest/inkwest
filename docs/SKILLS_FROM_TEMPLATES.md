@@ -1,21 +1,21 @@
 # Skills
 
-> Implémenté.
-> Cette doc décrit l'**état livré**. Les designs intermédiaires (encodage `(...)` du nom,
-> `render_skill_md`, slug calculé du nom) ont été remplacés par le modèle « SKILL.md unique » ci-dessous.
+> Implemented.
+> This doc describes the **shipped state**. The intermediate designs (`(...)` name encoding,
+> `render_skill_md`, slug computed from the name) were replaced by the "single SKILL.md" model below.
 
-## 1. Objectif
+## 1. Goal
 
-Chaque **skill** (table `inkwest.skills`, anciennement `prompt_templates`) est matérialisée comme une skill
-Claude dans la sandbox de chaque conversation, déclenchable :
+Each **skill** (table `inkwest.skills`, formerly `prompt_templates`) is materialized as a Claude
+skill in each conversation's sandbox, triggerable:
 
-- **explicitement** : `/<slug>` (avec arguments) tapé dans le chat ;
-- **automatiquement** : le modèle la mobilise quand sa `description` correspond à la tâche.
+- **explicitly**: `/<slug>` (with arguments) typed in the chat;
+- **automatically**: the model uses it when its `description` matches the task.
 
-## 2. Modèle — une skill = un SKILL.md
+## 2. Model — one skill = one SKILL.md
 
-Une skill est éditée comme **un seul champ `content`** = un **SKILL.md complet** (frontmatter + corps), au
-format natif Claude Code :
+A skill is edited as **a single `content` field** = a **complete SKILL.md** (frontmatter + body), in
+native Claude Code format:
 
 ```markdown
 ---
@@ -26,93 +26,93 @@ arguments: [mr_url, --publish]
 <instructions… $ARGUMENTS / $1 / $2>
 ```
 
-- Le backend parse le frontmatter (`app/core/skill_md.py`, `yaml.safe_load`) et en dérive :
-  - `name` → **slug** normalisé (`slugify`, `[a-z0-9-]`) = dossier `skills/<slug>/` = trigger `/<slug>` =
-    `name:` réécrit dans le fichier (dossier / trigger / fichier cohérents — « Option B »).
+- The backend parses the frontmatter (`app/core/skill_md.py`, `yaml.safe_load`) and derives:
+  - `name` → normalized **slug** (`slugify`, `[a-z0-9-]`) = folder `skills/<slug>/` = trigger `/<slug>` =
+    `name:` rewritten in the file (folder / trigger / file consistent — "Option B").
   - `description`, `arguments` → `argument_hint`.
-- **Stockage** (table `skills`, **sans migration de schéma**) : `name` (slug, **unique**) + `description`
-  **dénormalisés** (liste/recherche rapides) ; `content` = le SKILL.md brut (name normalisé). `slug` et
-  `argument_hint` ne sont **pas** stockés → exposés comme **computed fields**.
-- Entité renommée `prompt_template → skill` partout : table, API `/api/skills`, modèle `Skill`, types, store,
-  composants.
+- **Storage** (table `skills`, **no schema migration**): `name` (slug, **unique**) + `description`
+  **denormalized** (fast list/search); `content` = the raw SKILL.md (normalized name). `slug` and
+  `argument_hint` are **not** stored → exposed as **computed fields**.
+- Entity renamed `prompt_template → skill` everywhere: table, API `/api/skills`, model `Skill`, types, store,
+  components.
 
 ## 3. Backend
 
 ### 3.1 Parsing — `app/core/skill_md.py`
-- `parse_skill_md(content) -> (slug, description, argument_hint, content_normalisé)` : normalise CRLF→LF,
-  extrait le frontmatter, `yaml.safe_load`, **valide** (frontmatter + `name` requis → sinon `ValueError`),
-  réécrit le `name:` en slug.
-- `frontmatter_argument_hint(content)` : hint depuis `arguments` / `argument-hint` (None si absent/invalide).
-- `legacy_to_skill_md(name, body, description, slug=None)` : reconstruit un SKILL.md depuis l'ancien format
-  (`name` avec `(...)` + corps), pour la migration ; `slug` explicite pour résoudre une collision.
+- `parse_skill_md(content) -> (slug, description, argument_hint, normalized_content)`: normalizes CRLF→LF,
+  extracts the frontmatter, `yaml.safe_load`, **validates** (frontmatter + `name` required → otherwise `ValueError`),
+  rewrites `name:` as the slug.
+- `frontmatter_argument_hint(content)`: hint from `arguments` / `argument-hint` (None if absent/invalid).
+- `legacy_to_skill_md(name, body, description, slug=None)`: rebuilds a SKILL.md from the old format
+  (`name` with `(...)` + body), for the migration; explicit `slug` to resolve a collision.
 
 ### 3.2 API — `app/api/routes/skills.py`
-- `POST` / `PATCH` reçoivent **`content` seul** → parse → **422** si frontmatter invalide, **409** si le slug
-  entre en collision. `name`(slug) / `description` / `content` sont stockés.
-- `SkillResponse` (`app/models/schemas.py`) : `name`, `content`, `description`, `is_active`, timestamps +
-  **computed** `slug` (= `slugify(name)`) et `argument_hint` (parsé du frontmatter).
+- `POST` / `PATCH` receive **`content` only** → parse → **422** if the frontmatter is invalid, **409** if the slug
+  collides. `name`(slug) / `description` / `content` are stored.
+- `SkillResponse` (`app/models/schemas.py`): `name`, `content`, `description`, `is_active`, timestamps +
+  **computed** `slug` (= `slugify(name)`) and `argument_hint` (parsed from the frontmatter).
 
-### 3.3 Génération — `app/services/session_skills.py`
-- `apply_session_skills(session_id, skills)` : écrit chaque `content` **verbatim** dans
-  `<session_dir>/claude/skills/<slug>/SKILL.md` (monté sur `/home/sandbox/.claude/skills/…` via
-  `CLAUDE_CONFIG_DIR`). Réconciliation desired-state (prune des dossiers orphelins), écriture atomique,
-  idempotente, no-op hors sandbox — calqué sur `mcp_config.py`.
-- Appelé **à chaque tour** par l'orchestrateur (`get_active_skills` → `apply_session_skills`) : le CLI lit sa
-  config au lancement, donc une édition se propage au tour suivant de chaque session ; survit à un rebuild de
-  sandbox.
+### 3.3 Generation — `app/services/session_skills.py`
+- `apply_session_skills(session_id, skills)`: writes each `content` **verbatim** to
+  `<session_dir>/claude/skills/<slug>/SKILL.md` (mounted at `/home/sandbox/.claude/skills/…` via
+  `CLAUDE_CONFIG_DIR`). Desired-state reconciliation (prunes orphan folders), atomic write,
+  idempotent, no-op outside the sandbox — modeled on `mcp_config.py`.
+- Called **on every turn** by the orchestrator (`get_active_skills` → `apply_session_skills`): the CLI reads its
+  config at launch, so an edit propagates to each session's next turn; survives a sandbox
+  rebuild.
 
-### 3.4 Déclenchement — `app/services/orchestrator_cli.py`
-- Le message utilisateur part **verbatim** à `claude -p` → une `/skill` s'expanse **n'importe où** dans le
-  message. Le contexte runtime (accès cluster + connecteurs + consigne d'investigation) est dans
-  `--append-system-prompt`, **pas** dans le tour user (sinon il polluerait `$ARGUMENTS`).
-- ⚠️ `$ARGUMENTS` = **le reste de la ligne** (comportement Claude Code). Un `$` littéral devant un chiffre ou
-  `ARGUMENTS` dans le corps doit être échappé `\$` (ex. un prix `\$5`).
+### 3.4 Triggering — `app/services/orchestrator_cli.py`
+- The user message goes **verbatim** to `claude -p` → a `/skill` expands **anywhere** in the
+  message. The runtime context (cluster access + connectors + investigation instruction) is in
+  `--append-system-prompt`, **not** in the user turn (otherwise it would pollute `$ARGUMENTS`).
+- ⚠️ `$ARGUMENTS` = **the rest of the line** (Claude Code behavior). A literal `$` before a digit or
+  `ARGUMENTS` in the body must be escaped `\$` (e.g. a price `\$5`).
 
-### 3.5 Migration legacy — `ensure_skills_frontmatter(db)` (startup)
-- Idempotente : convertit les lignes dont le `content` ne commence pas par `---` (ancien format body-only)
-  en SKILL.md (frontmatter reconstruit depuis `name (...)` / `description`). **Dédup des slugs** (suffixe
-  `-2`, `-3`…) pour ne jamais violer l'unicité de `name`. Appelée dans le lifespan (`app/main.py`) sous
-  `try/except` + `rollback` → **ne bloque jamais le démarrage**.
+### 3.5 Legacy migration — `ensure_skills_frontmatter(db)` (startup)
+- Idempotent: converts rows whose `content` does not start with `---` (old body-only format)
+  into SKILL.md (frontmatter rebuilt from `name (...)` / `description`). **Slug dedup** (suffix
+  `-2`, `-3`…) so the uniqueness of `name` is never violated. Called in the lifespan (`app/main.py`) under
+  `try/except` + `rollback` → **never blocks startup**.
 
 ## 4. Frontend
 
 ### 4.1 Admin — `pages/admin/SkillsPage.tsx`
-- Formulaire = **un seul textarea « SKILL.md »** (modal `size="xl"`, `rows=22`). `name`/`description`/
-  `arguments` viennent du frontmatter (parsé serveur) ; `adminApi` Create/Update = `{ content }`. Le `detail`
-  d'un 422 (frontmatter invalide) remonte au formulaire (`services/api.ts`).
+- Form = **a single "SKILL.md" textarea** (modal `size="xl"`, `rows=22`). `name`/`description`/
+  `arguments` come from the frontmatter (parsed server-side); `adminApi` Create/Update = `{ content }`. The `detail`
+  of a 422 (invalid frontmatter) is surfaced to the form (`services/api.ts`).
 
 ### 4.2 Chat — `ChatInput.tsx` + `SkillAutocomplete.tsx`
-- Autocomplétion `/` **mid-token** (token sous le curseur, n'importe où) ; source = le store skills
-  (`useSkillsStore`), filtré sur slug/name/description, chargé au montage. Clavier ↑/↓, Enter (sélectionne,
-  **n'envoie pas**), Esc, Tab ; sélection insère `/<slug> `.
-- **Ligne de hint** sous le composer quand un `/<slug>` connu est saisi :
-  `/<slug> [arg1] [arg2] · <description>` (`formatArgs` met les args entre crochets ; fallback
-  « arguments libres » sans hint).
-- `SkillPalette.tsx` (ex-`PromptTemplatePalette`) : sélectionner insère `/<slug> ` au curseur.
+- `/` autocompletion **mid-token** (token under the cursor, anywhere); source = the skills store
+  (`useSkillsStore`), filtered on slug/name/description, loaded on mount. Keyboard ↑/↓, Enter (selects,
+  **does not send**), Esc, Tab; selection inserts `/<slug> `.
+- **Hint line** under the composer when a known `/<slug>` is typed:
+  `/<slug> [arg1] [arg2] · <description>` (`formatArgs` puts the args in brackets; fallback
+  "free arguments" without a hint).
+- `SkillPalette.tsx` (formerly `PromptTemplatePalette`): selecting inserts `/<slug> ` at the cursor.
 
-## 5. Sécurité / robustesse
-- `yaml.safe_load` (jamais `load`) sur du contenu admin.
-- `slug` ∈ `[a-z0-9-]` (`slugify`) → **pas de path traversal** sur le dossier ; `name:` normalisé.
-- Migration : dédup des slugs **+** `try/except`/`rollback` → jamais de crash au boot.
-- CRLF normalisé en entrée du parser.
-- Contenu **admin-curated** (écriture = admin) ; exécuté dans la sandbox isolée (connecteurs read-only).
+## 5. Security / robustness
+- `yaml.safe_load` (never `load`) on admin content.
+- `slug` ∈ `[a-z0-9-]` (`slugify`) → **no path traversal** on the folder; `name:` normalized.
+- Migration: slug dedup **+** `try/except`/`rollback` → never crashes at boot.
+- CRLF normalized at parser input.
+- **Admin-curated** content (write = admin); executed in the isolated sandbox (read-only connectors).
 
 ## 6. Tests
-- `backend/tests/test_session_skills.py` : parse (valide / CRLF / invalide / normalisation / formes de hint),
-  `legacy_to_skill_md`, génération verbatim + prune, migration (conversion + **dédup de collision**),
+- `backend/tests/test_session_skills.py`: parse (valid / CRLF / invalid / normalization / hint shapes),
+  `legacy_to_skill_md`, verbatim generation + prune, migration (conversion + **collision dedup**),
   computed fields.
-- `backend/tests/test_api_skills.py` : create/update (content), 422 frontmatter invalide, 409 collision, RBAC.
-- `frontend/src/components/chat/ChatInput.test.tsx` : autocomplétion (`/`, filtre, clavier, mid-message),
-  ligne de hint (générique + spécifique), insertion.
+- `backend/tests/test_api_skills.py`: create/update (content), 422 invalid frontmatter, 409 collision, RBAC.
+- `frontend/src/components/chat/ChatInput.test.tsx`: autocompletion (`/`, filter, keyboard, mid-message),
+  hint line (generic + specific), insertion.
 
-## 7. Références code
+## 7. Code references
 
-| Sujet | Emplacement |
+| Topic | Location |
 |---|---|
-| Parsing SKILL.md / slug | `backend/app/core/skill_md.py`, `backend/app/core/slug.py` |
-| Modèle / schémas | `backend/app/models/skill.py`, `backend/app/models/schemas.py` |
+| SKILL.md parsing / slug | `backend/app/core/skill_md.py`, `backend/app/core/slug.py` |
+| Model / schemas | `backend/app/models/skill.py`, `backend/app/models/schemas.py` |
 | API | `backend/app/api/routes/skills.py` (`/api/skills`) |
-| Génération + migration | `backend/app/services/session_skills.py` ; startup `backend/app/main.py` |
-| Orchestrateur | `backend/app/services/orchestrator_cli.py` (verbatim + `--append-system-prompt`) |
+| Generation + migration | `backend/app/services/session_skills.py`; startup `backend/app/main.py` |
+| Orchestrator | `backend/app/services/orchestrator_cli.py` (verbatim + `--append-system-prompt`) |
 | Sandbox | `backend/app/services/sandbox.py` (`CLAUDE_CONFIG_DIR`, `session_dir`) |
 | Front | `frontend/src/components/chat/{ChatInput,SkillAutocomplete,SkillPalette}.tsx`, `pages/admin/SkillsPage.tsx`, `store/skills.ts`, `store/admin.ts`, `types/api.ts`, `services/{api,adminApi}.ts` |

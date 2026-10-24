@@ -249,7 +249,7 @@ class AwsConnector(Connector):
         )
         return MintedCredential(
             connector="aws",
-            scope=f"{len(profiles)} compte(s)/rôle(s) (read-only)",
+            scope=f"{len(profiles)} account(s)/role(s) (read-only)",
             expires_at=datetime.fromtimestamp(min_expiration or 0, tz=UTC),
             # Keep the SSO token: it outlives the ~1h STS creds (~8h) and lets
             # remint_profiles() silently re-derive them without a new device flow.
