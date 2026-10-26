@@ -260,8 +260,12 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
 
   const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!canAttach) return;
-    const files = Array.from(e.clipboardData.files);
+    const cd = e.clipboardData;
+    const files = Array.from(cd.files);
     if (files.length === 0) return;
+    // Office copies ship text/plain + text/html + a rendered image; screenshots, "Copy image"
+    // and file-manager copies each lack one of the two text flavours.
+    if (cd.getData('text/plain').trim() && cd.getData('text/html')) return;
     // preventDefault + snapshot the files synchronously: after an await the paste would
     // already have landed in the textarea and clipboardData would be cleared.
     e.preventDefault(); // a pasted file shouldn't also dump a path/text into the box
