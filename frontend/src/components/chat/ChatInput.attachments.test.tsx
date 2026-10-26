@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatInput } from './ChatInput';
 import { useDraftsStore } from '@/store/drafts';
@@ -120,6 +120,37 @@ describe('ChatInput attachments', () => {
       clipboardData: { files: [file], getData: () => '' },
     });
 
+    await waitFor(() => expect(api.uploadAttachments).toHaveBeenCalledWith('s1', [file]));
+  });
+
+  const pasteWith = (file: File, flavors: Record<string, string>) =>
+    fireEvent.paste(screen.getByPlaceholderText(/investigate or analyse/i), {
+      clipboardData: { files: [file], getData: (t: string) => flavors[t] ?? '' },
+    });
+
+  it('pastes a spreadsheet selection as text, not as its rendered image', async () => {
+    render(<ChatInput onSend={onSend} sessionId="s1" />);
+
+    // Excel puts TSV + HTML + a PNG rendering of the selection on the clipboard.
+    const png = new File(['x'], 'image.png', { type: 'image/png' });
+    const notPrevented = pasteWith(png, { 'text/plain': 'a\tb\n1\t2', 'text/html': '<table></table>' });
+
+    expect(notPrevented).toBe(true); // default text paste goes through
+    // The upload sits behind an await: flush it so this negative assertion can fail.
+    await act(async () => {});
+    expect(api.uploadAttachments).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['browser "Copy image" (html, no text)', 'image.png', { 'text/html': '<img src="x">' }],
+    ['file-manager copy (filename, no html)', 'report.pdf', { 'text/plain': 'report.pdf' }],
+    ['blank text alongside html', 'image.png', { 'text/plain': '  \n', 'text/html': '<table></table>' }],
+  ])('still attaches the file for a %s', async (_case, name, flavors) => {
+    vi.mocked(api.uploadAttachments).mockResolvedValue([NOTE]);
+    render(<ChatInput onSend={onSend} sessionId="s1" />);
+
+    const file = new File(['x'], name);
+    expect(pasteWith(file, flavors)).toBe(false);
     await waitFor(() => expect(api.uploadAttachments).toHaveBeenCalledWith('s1', [file]));
   });
 
