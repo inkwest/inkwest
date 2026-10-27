@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.services import engines
@@ -268,6 +269,9 @@ def _validate_settings_stub(**overrides):
         aws_bearer_token_bedrock=None,
         connectors_enabled=False,
         aws_sso_role_filter=None,
+        vapid_public_key="",
+        vapid_private_key=SecretStr(""),
+        vapid_subject="",
     )
     base.update(overrides)
     return SimpleNamespace(**base)

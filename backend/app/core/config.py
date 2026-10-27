@@ -7,8 +7,10 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.push_keys import is_p256_public_key, is_vapid_subject
 
 # Captured once at import (≈ process startup). When no build-time VERSION is
 # injected (the "dev" sentinel below), the backend reports this startup-stamped
@@ -362,6 +364,11 @@ class Settings(BaseSettings):
     # disabled (secrets stored as-is). Generate a key with `openssl rand -base64 32`.
     secretbox_keys: str = ""
 
+    # Web Push (VAPID). All three set = browser notifications on; none = off; partial = boot error.
+    vapid_public_key: str = ""
+    vapid_private_key: SecretStr = SecretStr("")
+    vapid_subject: str = ""  # mailto: or https: contact the push services may reach
+
     # Prometheus metrics exporter on a DEDICATED port (separate from the API). On by default;
     # serves the global registry (process/Python + the inkwest_* app metrics) at /metrics.
     # The endpoint is UNAUTHENTICATED and binds 0.0.0.0 for in-cluster scraping — restrict
@@ -395,6 +402,15 @@ class Settings(BaseSettings):
             if engine:
                 seen.setdefault(engine, None)
         return list(seen)
+
+    @property
+    def push_enabled(self) -> bool:
+        """Web Push is on only when every VAPID setting is present."""
+        return bool(
+            self.vapid_public_key
+            and self.vapid_private_key.get_secret_value()
+            and self.vapid_subject
+        )
 
     @model_validator(mode="after")
     def _stamp_dev_version(self) -> "Settings":
@@ -486,6 +502,27 @@ def validate_settings() -> None:
             re.compile(settings.aws_sso_role_filter)
         except re.error as e:
             raise ValueError(f"AWS_SSO_ROLE_FILTER is not a valid regex: {e}") from e
+
+    # Web Push: a half-configured VAPID set would silently disable notifications.
+    vapid = {
+        "VAPID_PUBLIC_KEY": settings.vapid_public_key,
+        "VAPID_PRIVATE_KEY": settings.vapid_private_key.get_secret_value(),
+        "VAPID_SUBJECT": settings.vapid_subject,
+    }
+    missing = [name for name, value in vapid.items() if not value]
+    if 0 < len(missing) < len(vapid):
+        raise ValueError(f"Web Push needs all VAPID settings; missing: {', '.join(missing)}")
+    if not missing:
+        # Checked at boot: a bad key would only surface as every browser subscribe failing.
+        if not is_p256_public_key(settings.vapid_public_key):
+            raise ValueError(
+                "VAPID_PUBLIC_KEY must be the base64url uncompressed P-256 public key "
+                "(65 bytes, 0x04 prefix, on the curve): no PEM, whitespace or trailing newline"
+            )
+        if not is_vapid_subject(settings.vapid_subject):
+            raise ValueError(
+                "VAPID_SUBJECT must be a 'mailto:<address>' or 'https://<host>' contact"
+            )
 
     # claude-cli provider requires no additional configuration
     # (claude CLI uses its own authentication)

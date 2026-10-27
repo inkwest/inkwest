@@ -54,6 +54,8 @@ class AppConfigResponse(BaseModel):
     # the only runtime with a /workdir + @-file syntax. The UI hides the attach
     # affordances when false.
     attachments_enabled: bool
+    # VAPID public key for PushManager.subscribe; None = Web Push off, the UI hides the toggle.
+    push_public_key: str | None
 
 
 @router.get("", response_model=AppConfigResponse)
@@ -79,4 +81,5 @@ async def get_app_config(user: CurrentUser) -> AppConfigResponse:
             if e.model_id in selectable
         ],
         attachments_enabled=settings.sandbox_enabled,
+        push_public_key=settings.vapid_public_key if settings.push_enabled else None,
     )

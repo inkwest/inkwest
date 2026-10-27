@@ -89,3 +89,6 @@ docs/HANDOFF-*.md
 # backend/tests/fixtures/ after redaction. Repo-level on purpose: relying on a machine-local
 # excludesfile here would let another clone commit raw captures.
 misc/
+
+# Local working files
+.scratchpad/

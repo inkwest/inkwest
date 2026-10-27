@@ -6,8 +6,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
+from app.core.push_keys import b64url_decode, is_https_url, is_p256_public_key
 from app.core.skill_md import frontmatter_argument_hint
 from app.core.slug import slugify
 
@@ -635,6 +636,48 @@ class McpPolicyServerUpdate(BaseModel):
 
     server_key: str
     entries: list[McpToolVerdict]
+
+
+# ---- Web Push subscriptions (/api/me/push-subscriptions) --------------------- //
+class PushSubscriptionKeys(BaseModel):
+    """RFC 8291 keys of a browser PushSubscription."""
+
+    # Bounded before the regex + decode run; real values are 87 and 22 chars.
+    p256dh: str = Field(..., max_length=128)
+    auth: str = Field(..., max_length=128)
+
+    @field_validator("p256dh")
+    @classmethod
+    def _p256dh_is_uncompressed_point(cls, v: str) -> str:
+        if not is_p256_public_key(v):
+            raise ValueError("must be an uncompressed P-256 public key (65 bytes, 0x04 prefix)")
+        return v
+
+    @field_validator("auth")
+    @classmethod
+    def _auth_is_16_bytes(cls, v: str) -> str:
+        if len(b64url_decode(v)) != 16:
+            raise ValueError("must decode to 16 bytes")
+        return v
+
+
+class PushSubscriptionEndpoint(BaseModel):
+    """A push service endpoint URL; RFC 8030 push services are https-only."""
+
+    endpoint: str = Field(..., max_length=2048)
+
+    @field_validator("endpoint")
+    @classmethod
+    def _endpoint_is_https(cls, v: str) -> str:
+        if not is_https_url(v):
+            raise ValueError("must be an https:// URL with a host, no credentials or whitespace")
+        return v
+
+
+class PushSubscriptionUpsert(PushSubscriptionEndpoint):
+    """``PushSubscription.toJSON()`` as sent by the browser (``expirationTime`` ignored)."""
+
+    keys: PushSubscriptionKeys
 
 
 # ---- Usage reports ----------------------------------------------------------- //
