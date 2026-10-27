@@ -13,6 +13,7 @@ import uuid
 import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -76,10 +77,12 @@ def _endpoint(host: str = "fcm.googleapis.com") -> str:
 class _Browser:
     """A subscriber with a real RFC 8291 keypair and auth secret."""
 
-    def __init__(self, endpoint: str) -> None:
+    def __init__(self, endpoint: str, age: timedelta = timedelta(hours=1)) -> None:
         self.endpoint = endpoint
         self.key = ec.generate_private_key(ec.SECP256R1())
         self.auth = os.urandom(16)
+        # Old by default: a young row is exempt from the 404/410 prune.
+        self.created_at = datetime.now(UTC) - age
 
     def row(self) -> PushSubscription:
         return PushSubscription(
@@ -87,6 +90,7 @@ class _Browser:
             endpoint=self.endpoint,
             p256dh=_b64url(_point(self.key)),
             auth=_b64url(self.auth),
+            created_at=self.created_at,
         )
 
 
@@ -313,6 +317,59 @@ async def test_gone_subscriptions_pruned_others_kept(maker, push_on):
     assert send.await_count == 3
     assert await _endpoints(maker) == {alive.endpoint}
     assert _deltas(before) == {"ok": 1, "gone": 2, "failed": 0, "rejected": 0}
+
+
+def _answer(answers: dict[str, WebPushException]) -> AsyncMock:
+    async def fake(info: dict[str, Any], **_: Any) -> None:
+        if info["endpoint"] in answers:
+            raise answers[info["endpoint"]]
+
+    return AsyncMock(side_effect=fake)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [410, 404])
+async def test_young_subscription_gone_answer_kept_as_failed(maker, push_on, status: int):
+    """003-AC7: FCM 410s brand-new subscriptions for a few seconds: a young row is kept."""
+    young = _Browser(_endpoint(), age=timedelta(seconds=5))
+    await _seed(maker, young)
+    before = _snapshot()
+    with (
+        patch.object(web_push, "webpush_async", new=_answer({young.endpoint: _push_error(status)})),
+        capture_logs() as logs,
+    ):
+        await _send()
+    assert await _endpoints(maker) == {young.endpoint}
+    assert _deltas(before) == {"ok": 0, "gone": 0, "failed": 1, "rejected": 0}
+    assert [(e["event"], e["host"], e["status"]) for e in logs] == [
+        ("push_send_failed", "fcm.googleapis.com", status)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("age_s", "kept"), [(55, True), (59, True), (61, False), (65, False)])
+async def test_grace_boundary_at_60s(maker, push_on, age_s: int, kept: bool):
+    """003-AC7: a 410 prunes only once the row is older than 60 s."""
+    browser = _Browser(_endpoint(), age=timedelta(seconds=age_s))
+    await _seed(maker, browser)
+    with patch.object(web_push, "webpush_async", new=_answer({browser.endpoint: _push_error(410)})):
+        await _send()
+    assert (await _endpoints(maker) == {browser.endpoint}) is kept
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_young_old_ok(maker, push_on):
+    """003-AC7: young 410 kept (failed), old 410 pruned (gone), the third sent (ok)."""
+    young = _Browser(_endpoint(), age=timedelta(seconds=3))
+    old = _Browser(_endpoint(), age=timedelta(minutes=5))
+    alive = _Browser(_endpoint(), age=timedelta(seconds=3))
+    await _seed(maker, young, old, alive)
+    answers = {young.endpoint: _push_error(410), old.endpoint: _push_error(410)}
+    before = _snapshot()
+    with patch.object(web_push, "webpush_async", new=_answer(answers)):
+        await _send()
+    assert await _endpoints(maker) == {young.endpoint, alive.endpoint}
+    assert _deltas(before) == {"ok": 1, "gone": 1, "failed": 1, "rejected": 0}
 
 
 # ---- AC8: failures are logged without secrets, counted, rows kept ------------- //

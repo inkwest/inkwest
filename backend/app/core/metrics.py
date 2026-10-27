@@ -186,8 +186,9 @@ mcp_tool_calls_total = Counter(
 auth_logins_total = Counter("inkwest_auth_logins_total", "Login attempts", ["result"])
 
 # --- Web Push --------------------------------------------------------------------------
-# result: ok | gone (404/410, row pruned) | failed | rejected (host not allowlisted)
-# | dropped (pending cap or shutdown, nothing sent). Sends cancelled at shutdown: uncounted.
+# result: ok | gone (404/410 past the 60 s grace, row pruned) | failed
+# | rejected (host not allowlisted) | dropped (pending cap or shutdown, nothing sent).
+# Sends cancelled at shutdown: uncounted.
 push_sent_total = Counter("inkwest_push_sent_total", "Web Push sends", ["result"])
 
 

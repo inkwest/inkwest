@@ -7,6 +7,7 @@ pending, and the in-app popup recovers it on the next page load.
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -26,6 +27,8 @@ logger = get_logger(__name__)
 
 _TTL_SECONDS = 24 * 3600
 _SEND_TIMEOUT_SECONDS = 10.0
+# FCM answers 410 to some brand-new subscriptions for ~10 s: pruning those drops a live browser.
+_FRESH_SUBSCRIPTION_GRACE = timedelta(seconds=60)
 # Bounds sends and DB checkouts: 4 invites x 20 subscriptions per user stays under the
 # connector's default 100 connections. The pending cap bounds task pileup behind it.
 _INVITE_CONCURRENCY = asyncio.Semaphore(4)
@@ -122,7 +125,10 @@ async def send_share_invite(
     session_title: str | None,
     invited_by: str | None,
 ) -> None:
-    """Send a ``share_invite`` push to every subscription of ``user_id``; prune 404/410 rows."""
+    """Push ``share_invite`` to every subscription of ``user_id``.
+
+    A 404/410 prunes the row unless it is younger than ``_FRESH_SUBSCRIPTION_GRACE``.
+    """
     settings = get_settings()
     if not settings.push_enabled:
         return
@@ -140,6 +146,7 @@ async def send_share_invite(
                             PushSubscription.endpoint,
                             PushSubscription.p256dh,
                             PushSubscription.auth,
+                            PushSubscription.created_at,
                         ).where(PushSubscription.user_id == user_id)
                     )
                 ).all()
@@ -160,10 +167,21 @@ async def send_share_invite(
             )
             # RFC 8030 caps Topic at 32 chars; a re-invite replaces an undelivered push.
             headers = {"Urgency": "normal", "Topic": share_id.hex}
+            fresh_since = datetime.now(UTC) - _FRESH_SUBSCRIPTION_GRACE
             results = await asyncio.gather(
                 *(
-                    _send(signer, settings.vapid_subject, endpoint, p256dh, auth, data, headers)
-                    for _, endpoint, p256dh, auth in subs
+                    _send(
+                        signer,
+                        settings.vapid_subject,
+                        endpoint,
+                        p256dh,
+                        auth,
+                        data,
+                        headers,
+                        # SQLite (tests) returns naive UTC; Postgres timestamptz is aware.
+                        fresh=created.replace(tzinfo=created.tzinfo or UTC) > fresh_since,
+                    )
+                    for _, endpoint, p256dh, auth, created in subs
                 )
             )
             gone = [sub.id for sub, res in zip(subs, results, strict=True) if res == "gone"]
@@ -183,6 +201,8 @@ async def _send(
     auth: str,
     data: str,
     headers: dict[str, str],
+    *,
+    fresh: bool,
 ) -> str:
     """One push; returns the metric result. Logs carry the host only: the URL is a capability."""
     host = urlsplit(endpoint).hostname
@@ -205,7 +225,7 @@ async def _send(
             result = "ok"
         except Exception as e:
             status = e.status_code if isinstance(e, WebPushException) else None
-            if status in (404, 410):
+            if status in (404, 410) and not fresh:
                 result = "gone"
             else:
                 # Never str(e): a WebPushException embeds the push service's response body.

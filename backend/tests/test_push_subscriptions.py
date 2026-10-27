@@ -77,7 +77,7 @@ def _body(endpoint: str = _ENDPOINT, p256dh: str = _P256DH, auth: str = _AUTH) -
 def push_on(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "vapid_public_key", _VAPID_PUB)
-    monkeypatch.setattr(settings, "vapid_private_key", SecretStr("private"))
+    monkeypatch.setattr(settings, "vapid_private_key", SecretStr(_VAPID_PRIV))
     monkeypatch.setattr(settings, "vapid_subject", "mailto:ops@example.com")
 
 
@@ -636,3 +636,49 @@ async def test_put_lock_does_not_block_fk_inserts_live(pg_user, push_on):
                 await other.commit()
         finally:
             await holder.rollback()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_fresh_subscription_grace_on_postgres_live(pg_user, push_on):
+    """003-AC7: on timestamptz (aware) rows, a just-created row survives a 410, an old one not."""
+    from unittest.mock import AsyncMock
+
+    from pywebpush import WebPushException
+
+    from app.services import web_push
+
+    maker, uid = pg_user
+    endpoint = f"{_ENDPOINT}/{uid}/grace"
+    async with maker() as db:  # created_at = server-side now()
+        db.add(PushSubscription(user_id=uid, endpoint=endpoint, p256dh=_P256DH, auth=_AUTH))
+        await db.commit()
+    gone = AsyncMock(side_effect=WebPushException("410", SimpleNamespace(status=410)))
+    kwargs = {
+        "user_id": uid,
+        "share_id": uuid.uuid4(),
+        "session_id": uuid.uuid4(),
+        "session_title": "t",
+        "invited_by": "n",
+    }
+    web_push.open_http_session(create_client=False)
+    try:
+        with (
+            patch.object(web_push, "async_session_maker", maker),
+            patch.object(web_push, "webpush_async", new=gone),
+        ):
+            await web_push.send_share_invite(**kwargs)
+            assert [r.endpoint for r in await _rows(maker)] == [endpoint]
+            async with maker() as db:
+                await db.execute(
+                    text(
+                        "UPDATE push_subscriptions SET created_at = now() - interval '2 minutes' "
+                        "WHERE endpoint = :e"
+                    ),
+                    {"e": endpoint},
+                )
+                await db.commit()
+            await web_push.send_share_invite(**kwargs)
+            assert await _rows(maker) == []
+    finally:
+        await web_push.close_http_session()
