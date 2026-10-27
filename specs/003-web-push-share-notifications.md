@@ -1,6 +1,6 @@
 # 003 — Web Push notification on session share
 
-**Status**: in progress
+**Status**: shipped
 **Requested by**: @babs
 **Date**: 2026-10-27
 
@@ -69,41 +69,41 @@ keys.
 
 ## Acceptance criteria
 
-- [ ] **AC1** Given all three `VAPID_*` vars are set, `GET /api/config` returns the public key in
+- [x] **AC1** Given all three `VAPID_*` vars are set, `GET /api/config` returns the public key in
       `push_public_key`; with none set it returns `null`.
-- [ ] **AC2** Given only one or two `VAPID_*` vars are set, the backend refuses to boot with an error
+- [x] **AC2** Given only one or two `VAPID_*` vars are set, the backend refuses to boot with an error
       naming the missing ones; it also refuses to boot when the public key is not an uncompressed
       P-256 point, when `VAPID_PRIVATE_KEY` does not derive `VAPID_PUBLIC_KEY`, or when
       `VAPID_SUBJECT` is not `mailto:<user>@<domain>` / `https://<domain>`.
-- [ ] **AC3** Given a logged-in user, when they `PUT` a subscription, then exactly one row exists for
+- [x] **AC3** Given a logged-in user, when they `PUT` a subscription, then exactly one row exists for
       that endpoint, owned by them; a second `PUT` of the same endpoint updates it, and a `PUT` of the
       same endpoint by another user moves the row to that user.
-- [ ] **AC4** An unauthenticated `PUT`/`DELETE` on `/api/me/push-subscriptions` gets 401; a user's
+- [x] **AC4** An unauthenticated `PUT`/`DELETE` on `/api/me/push-subscriptions` gets 401; a user's
       `DELETE` never removes another user's row (404, row intact).
-- [ ] **AC5** A `PUT` with a non-`https` endpoint, or keys that are not valid base64url of the
+- [x] **AC5** A `PUT` with a non-`https` endpoint, or keys that are not valid base64url of the
       expected length, gets 422 and stores nothing.
-- [ ] **AC6** Given the invitee has two subscriptions, when the owner invites them, then
+- [x] **AC6** Given the invitee has two subscriptions, when the owner invites them, then
       `create_share` returns 201 without waiting on the push service and one push is sent per
       subscription with the `share_invite` payload.
-- [ ] **AC7** Given the push service answers 410 (or 404) for a subscription older than 60 s, then
+- [x] **AC7** Given the push service answers 410 (or 404) for a subscription older than 60 s, then
       that row is deleted and the other subscriptions are unaffected; a younger row is kept and the
       send counts as `failed`.
-- [ ] **AC8** Given the push service times out or answers 5xx, then the share is still created, the
+- [x] **AC8** Given the push service times out or answers 5xx, then the share is still created, the
       failure is logged with no endpoint token or payload in the log, and the metric counts it.
-- [ ] **AC9** Given the feature is off (no VAPID keys), inviting a user sends nothing and raises
+- [x] **AC9** Given the feature is off (no VAPID keys), inviting a user sends nothing and raises
       nothing.
-- [ ] **AC10** Given a real Chromium with notifications granted and no Inkwest tab focused, when a
+- [x] **AC10** Given a real Chromium with notifications granted and no Inkwest tab focused, when a
       session is shared with the user, then an OS notification titled with the session title appears;
       clicking it focuses/opens Inkwest and the invite popup is shown.
-- [ ] **AC11** Given an Inkwest window is focused when the push arrives, then no OS notification is
+- [x] **AC11** Given an Inkwest window is focused when the push arrives, then no OS notification is
       shown.
-- [ ] **AC12** `GET /sw.js` returns the worker as JavaScript with `Cache-Control: no-cache`; a missing
+- [x] **AC12** `GET /sw.js` returns the worker as JavaScript with `Cache-Control: no-cache`; a missing
       `/sw.js` 404s instead of returning `index.html`.
-- [ ] **AC13** The Settings toggle: requests permission only when clicked; on success the row exists;
+- [x] **AC13** The Settings toggle: requests permission only when clicked; on success the row exists;
       off removes it; `denied` permission shows the blocked message; no `PushManager` shows the
       unsupported message; feature off hides the tab.
-- [ ] **AC14** Logging out removes the current browser's subscription row.
-- [ ] **AC15** An endpoint whose host is not a known browser push service (`fcm.googleapis.com`,
+- [x] **AC14** Logging out removes the current browser's subscription row.
+- [x] **AC15** An endpoint whose host is not a known browser push service (`fcm.googleapis.com`,
       `*.push.services.mozilla.com`, `*.notify.windows.com`, `*.push.apple.com`) gets 422 on `PUT`,
       and a stored row with such a host is never sent to.
 
