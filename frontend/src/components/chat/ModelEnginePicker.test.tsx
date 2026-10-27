@@ -32,6 +32,7 @@ const CONFIG: AppConfig = {
     },
   ],
   attachments_enabled: false,
+  push_public_key: null,
 };
 
 describe('ModelEnginePicker', () => {

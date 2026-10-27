@@ -75,3 +75,32 @@ async def test_missing_asset_stays_404(client: AsyncClient) -> None:
 async def test_unknown_ws_path_stays_404(client: AsyncClient) -> None:
     resp = await client.get("/ws/nope")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_service_worker_served_as_js_with_no_cache(
+    client: AsyncClient, static_dir: Path
+) -> None:
+    # 003-AC12: an unhashed worker must revalidate, or browsers keep running a stale one.
+    (static_dir / "sw.js").write_text("self.addEventListener('push', () => {});")
+    resp = await client.get("/sw.js")
+    assert resp.status_code == 200
+    assert "addEventListener" in resp.text
+    assert "javascript" in resp.headers["content-type"]
+    assert resp.headers["cache-control"] == "no-cache"
+
+
+@pytest.mark.asyncio
+async def test_missing_service_worker_stays_404(client: AsyncClient) -> None:
+    # 003-AC12: index.html in its place would fail registration with a MIME error.
+    resp = await client.get("/sw.js")
+    assert resp.status_code == 404
+    assert "text/html" not in resp.headers.get("content-type", "")
+
+
+@pytest.mark.asyncio
+async def test_nested_sw_js_route_still_falls_back(client: AsyncClient) -> None:
+    # Only the root worker path is exempt; a client route ending in sw.js keeps the SPA fallback.
+    resp = await client.get("/sessions/sw.js")
+    assert resp.status_code == 200
+    assert "spa" in resp.text

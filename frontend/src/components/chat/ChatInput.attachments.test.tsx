@@ -26,6 +26,7 @@ function enableAttachments(enabled: boolean) {
       engines: ['claude-cli'],
       available_models: [],
       attachments_enabled: enabled,
+      push_public_key: null,
     },
   });
 }

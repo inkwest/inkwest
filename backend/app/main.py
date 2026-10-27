@@ -323,17 +323,26 @@ class SPAStaticFiles(StaticFiles):
     # skew during rolling deploys would otherwise surface as JSON-parse errors
     # client-side), and a purged hashed asset must not come back as text/html.
     NO_FALLBACK_PREFIXES = ("api/", "assets/", "ws/")
+    # Unhashed name: a cached copy would pin an old worker, and an index.html stand-in fails
+    # registration with a MIME error instead of a clean 404.
+    SERVICE_WORKER = "sw.js"
 
     async def get_response(self, path: str, scope: Scope) -> Response:
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code != 404 or path.startswith(self.NO_FALLBACK_PREFIXES):
+            if (
+                exc.status_code != 404
+                or path == self.SERVICE_WORKER
+                or path.startswith(self.NO_FALLBACK_PREFIXES)
+            ):
                 raise
             response = await super().get_response("index.html", scope)
         # index.html must revalidate on every load: hashed asset names change per
         # deploy, and a heuristically-cached index would reference purged bundles.
-        if isinstance(response, FileResponse) and response.path.endswith("index.html"):
+        if isinstance(response, FileResponse) and (
+            response.path.endswith("index.html") or path == self.SERVICE_WORKER
+        ):
             response.headers["Cache-Control"] = "no-cache"
         return response
 
