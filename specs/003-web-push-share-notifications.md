@@ -36,7 +36,7 @@ keys.
 - **Sender**: `app/services/web_push.py` using `pywebpush.webpush_async`. Called from
   `create_share` after commit, as a background task so the HTTP response never waits on a push
   service. Fans out to every subscription of the invitee. `404`/`410` from the push service deletes
-  the row; other failures are logged (`push_send_failed`, status, push-service host only) and
+  the row (rows older than 60 s); other failures are logged (`push_send_failed`, status, push-service host only) and
   counted (`inkwest_push_sent_total{result}`), never retried, never surfaced to the inviter.
 - **Payload** (encrypted per RFC 8291, opaque to the push service): `{type: "share_invite",
   share_id, session_id, session_title, invited_by}`. TTL 24h, `urgency: normal`, `topic` = share id as 32 hex chars (RFC 8030 caps topics at 32 base64url chars)
@@ -85,8 +85,9 @@ keys.
 - [ ] **AC6** Given the invitee has two subscriptions, when the owner invites them, then
       `create_share` returns 201 without waiting on the push service and one push is sent per
       subscription with the `share_invite` payload.
-- [ ] **AC7** Given the push service answers 410 (or 404) for a subscription, then that row is
-      deleted and the other subscriptions are unaffected.
+- [ ] **AC7** Given the push service answers 410 (or 404) for a subscription older than 60 s, then
+      that row is deleted and the other subscriptions are unaffected; a younger row is kept and the
+      send counts as `failed`.
 - [ ] **AC8** Given the push service times out or answers 5xx, then the share is still created, the
       failure is logged with no endpoint token or payload in the log, and the metric counts it.
 - [ ] **AC9** Given the feature is off (no VAPID keys), inviting a user sends nothing and raises
@@ -120,7 +121,7 @@ keys.
   unique endpoint index; `pre-commit run --all-files` green.
 
 ### Phase 2 — Sender wired to invites
-- Work: `pywebpush` dependency + `uv lock`, `web_push.py` (fan-out, 404/410 prune, log + metric),
+- Work: `pywebpush` dependency + `uv lock`, `web_push.py` (fan-out, 404/410 prune past 60 s, log + metric),
   background call from `create_share`; push-service host allowlist (PUT + send); boot check that
   `VAPID_PRIVATE_KEY` parses and derives `VAPID_PUBLIC_KEY`.
 - **Covers**: AC2, AC6, AC7, AC8, AC9, AC15
@@ -138,13 +139,17 @@ keys.
   path); `pytest` test for the `/sw.js` serving rules green.
 
 ### Phase 4 — End-to-end check + docs
-- Work: run the combined image locally with generated VAPID keys, headless Chromium with
-  notification permission granted, two users, real push service round-trip; write
+- Work: run the combined image locally with generated VAPID keys, headless Google Chrome stable
+  (Playwright's Chromium cannot subscribe to FCM) with notification permission granted, two users, real push service round-trip; write
   `docs/WEB_PUSH.md`, update `DATABASE_SCHEMA.md`, `.env.example`, `CLAUDE.md`.
 - **Covers**: AC10
 - **Data model impact**: none
 - **DoD**: AC10 and AC11 observed in the browser run (notification shown / not shown, captured via
   the service worker's `getNotifications()`); docs merged in the same MR.
+- **Note**: the AC10 click leg (notification click focuses/opens Inkwest) cannot be driven by
+  automation (an OS notification click is not scriptable, a synthetic `notificationclick` is
+  untrusted); it is covered by `frontend/src/services/sw.test.ts`. The notification and popup legs
+  are browser-observed.
 
 ## Data model impact (summary)
 
@@ -172,6 +177,9 @@ None.
 - Send from `create_share` directly, not via pubsub: the route runs once per invite, while pubsub
   fans out per replica and per socket, which would multiply pushes.
 - No retry on failure: the invite stays pending and the in-app popup recovers it on next load.
+- A 404/410 on a subscription created less than 60 s ago counts as `failed` and keeps the row:
+  FCM answers 410 to some brand-new subscriptions for up to ~10 s (measured in the phase 4
+  run), and pruning there would silently drop a just-enabled browser until its next page load.
 - Backend egress needs no change. The deployment adds no NetworkPolicy and no proxy for the
   backend (squid only fronts the sandbox containers), and the backend already calls public hosts directly
   (`pricing.us-east-1.amazonaws.com`, external MCP/OIDC servers). The first invite after
