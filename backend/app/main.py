@@ -46,6 +46,7 @@ from app.core.logging import AccessLogMiddleware, access_log_config, get_logger,
 from app.core.metrics_server import start_metrics_server, stop_metrics_server
 from app.core.rate_limit import RateLimitMiddleware
 from app.core.telemetry import shutdown_telemetry
+from app.services import web_push
 from app.services.app_settings import load_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
@@ -182,9 +183,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "deployment (or sticky routing), or disable LLM_BROKER_ENABLED."
             )
         logger.info("llm_broker_enabled", note="single-replica in-process grant store")
+    web_push.open_http_session(create_client=settings.push_enabled)
     yield
     # Shutdown
     logger.info("shutting_down_api")
+    await web_push.close_http_session()
     if settings.oidc_enabled:
         await stop_state_cleanup()
     if settings.connectors_enabled:

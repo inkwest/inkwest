@@ -8,7 +8,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
-from app.core.push_keys import b64url_decode, is_https_url, is_p256_public_key
+from app.core.push_keys import (
+    b64url_decode,
+    is_https_url,
+    is_p256_public_key,
+    is_push_service_url,
+)
 from app.core.skill_md import frontmatter_argument_hint
 from app.core.slug import slugify
 
@@ -678,6 +683,14 @@ class PushSubscriptionUpsert(PushSubscriptionEndpoint):
     """``PushSubscription.toJSON()`` as sent by the browser (``expirationTime`` ignored)."""
 
     keys: PushSubscriptionKeys
+
+    # PUT only: DELETE must still clear a row stored before the allowlist existed.
+    @field_validator("endpoint")
+    @classmethod
+    def _endpoint_is_push_service(cls, v: str) -> str:
+        if not is_push_service_url(v):
+            raise ValueError("host is not a known browser push service")
+        return v
 
 
 # ---- Usage reports ----------------------------------------------------------- //

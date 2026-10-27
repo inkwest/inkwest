@@ -56,7 +56,12 @@ def _real_point() -> str:
 
 _P256DH = _real_point()
 _AUTH = _b64url(b"\x22" * 16)
-_VAPID_PUB = _real_point()
+_VAPID_KEY = ec.generate_private_key(ec.SECP256R1())
+# Raw 32-byte scalar: the `web-push generate-vapid-keys` format py_vapid reads.
+_VAPID_PRIV = _b64url(_VAPID_KEY.private_numbers().private_value.to_bytes(32, "big"))
+_VAPID_PUB = _b64url(
+    _encoded(_VAPID_KEY.public_key(), serialization.PublicFormat.UncompressedPoint)
+)
 # Right length and 0x04 prefix, but not a point on P-256.
 _OFF_CURVE = _b64url(b"\x04" + b"\x55" * 64)
 # A valid point, but 33 bytes: browsers only send the uncompressed form.
@@ -167,9 +172,9 @@ def _validate(public: str = "", private: str = "", subject: str = "") -> None:
 def test_validate_accepts_all_or_none():
     """003-AC1: all set boots, none set boots."""
     _validate()
-    _validate(_VAPID_PUB, "priv", "mailto:ops@example.com")
-    _validate(_VAPID_PUB, "priv", "https://example.com/contact")
-    _validate(_VAPID_PUB + "=", "priv", "mailto:ops@example.com")  # padded base64url
+    _validate(_VAPID_PUB, _VAPID_PRIV, "mailto:ops@example.com")
+    _validate(_VAPID_PUB, _VAPID_PRIV, "https://example.com")
+    _validate(_VAPID_PUB + "=", _VAPID_PRIV, "mailto:ops@example.com")  # padded base64url
 
 
 @pytest.mark.parametrize(
@@ -206,12 +211,17 @@ def test_validate_rejects_partial_naming_missing(kwargs: dict[str, str], missing
         "https://exämple.com",
         "https://example.com:99999",
         "https://example.com:abc",
+        "mailto:ops@example.com/path",
+        "mailto:ops@example.com,evil@x.org",
+        "mailto:ops@example.com?subject=x",
+        "https://dead:1234",  # py_vapid reads a hex host:port as IPv6
+        "https://cafe:",
     ],
 )
 def test_validate_rejects_bad_subject(subject: str):
-    """003-AC2: VAPID_SUBJECT must be a 'mailto:<address>' or 'https://<host>' contact."""
+    """003-AC2: VAPID_SUBJECT is 'mailto:<user>@<domain>' or 'https://<domain>', nothing after."""
     with pytest.raises(ValueError, match="VAPID_SUBJECT must be"):
-        _validate(_VAPID_PUB, "priv", subject)
+        _validate(_VAPID_PUB, _VAPID_PRIV, subject)
 
 
 _PEM = (
@@ -294,7 +304,7 @@ async def _seed(
 ) -> list[str]:
     """Insert ``n`` rows for ``user_id``; index 0 is the oldest by ``stagger``, the other tied."""
     base = datetime(2020, 1, 1)
-    endpoints = [f"https://push.example/{user_id}/{i}" for i in range(n)]
+    endpoints = [f"{_ENDPOINT}/{user_id}/{i}" for i in range(n)]
     async with maker() as session:
         for i, endpoint in enumerate(endpoints):
             stamps = {
@@ -343,7 +353,7 @@ async def test_put_never_evicts_the_row_it_wrote(client: AsyncClient, maker, pus
             session.add(
                 PushSubscription(
                     user_id=_USER_A,
-                    endpoint=f"https://push.example/future/{i}",
+                    endpoint=f"{_ENDPOINT}/future/{i}",
                     p256dh=_P256DH,
                     auth=_AUTH,
                     last_seen_at=future,
@@ -486,6 +496,64 @@ async def test_padded_base64url_tolerated(client: AsyncClient, maker, push_on):
     resp = await client.put(_URL, json=_body(auth=padded_auth))
     assert resp.status_code == 204
     assert (await _rows(maker))[0].auth == padded_auth
+
+
+# ---- AC15: push-service host allowlist on PUT ---------------------------------- //
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://example.com/x",
+        "https://push.apple.com.evil.com/x",  # allowed suffix, but not at the end
+        "https://xfcm.googleapis.com/x",  # exact host, no dot boundary
+        "https://evilpush.apple.com/x",  # suffix without the leading dot
+        "https://fcm.googleapis.com.evil.com/fcm/send/abc",
+        "https://push.apple.com/x",  # the bare suffix is not a subdomain of itself
+        "https://169.254.169.254/latest/meta-data",
+        "https://127.0.0.1/x",
+    ],
+)
+async def test_put_foreign_push_host_422(client: AsyncClient, maker, endpoint: str, push_on):
+    """003-AC15: an endpoint outside the four browser push services gets 422, nothing stored."""
+    resp = await client.put(_URL, json=_body(endpoint=endpoint))
+    assert resp.status_code == 422
+    assert "push service" in resp.text
+    assert await _rows(maker) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://fcm.googleapis.com/fcm/send/abc",
+        "https://FCM.googleapis.com/fcm/send/abc",  # hosts compare case-insensitively
+        "https://updates.push.services.mozilla.com/wpush/v2/abc",
+        "https://wns2-par02p.notify.windows.com/w/?token=abc",
+        "https://web.push.apple.com/abc",
+    ],
+)
+async def test_put_browser_push_hosts_accepted(client: AsyncClient, maker, endpoint: str, push_on):
+    """003-AC15: Chrome, Firefox, Edge and Safari endpoint shapes are accepted."""
+    resp = await client.put(_URL, json=_body(endpoint=endpoint))
+    assert resp.status_code == 204
+    assert [r.endpoint for r in await _rows(maker)] == [endpoint]
+
+
+@pytest.mark.asyncio
+async def test_delete_foreign_host_row_still_allowed(client: AsyncClient, maker, push_on):
+    """003-AC15: the allowlist is PUT-only, so a row stored before it can still be removed."""
+    async with maker() as session:
+        session.add(
+            PushSubscription(
+                user_id=_USER_A, endpoint="https://example.com/x", p256dh=_P256DH, auth=_AUTH
+            )
+        )
+        await session.commit()
+    resp = await client.request("DELETE", _URL, json={"endpoint": "https://example.com/x"})
+    assert resp.status_code == 204
+    assert await _rows(maker) == []
 
 
 # ---- AC3 on real Postgres: the cap under concurrency -------------------------- //

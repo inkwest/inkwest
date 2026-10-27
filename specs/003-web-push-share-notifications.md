@@ -23,8 +23,8 @@ keys.
 ## Scope
 
 - **Config**: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (`SecretStr`), `VAPID_SUBJECT`
-  (`mailto:` / `https:` contact). All three set ⇒ feature on; none ⇒ off; partial ⇒ fail-fast at
-  boot naming the missing ones. Documented in `.env.example` with the key-generation command.
+  (`mailto:<user>@<domain>` or `https://<domain>`, no path or port). All three set and consistent
+  ⇒ feature on; none ⇒ off; partial, malformed or mismatched ⇒ fail-fast at boot. Documented in `.env.example` with the key-generation command.
 - **Public key exposure**: `GET /api/config` gains `push_public_key: str | null` (null = feature off,
   the UI hides the toggle).
 - **Subscriptions**: new `push_subscriptions` table, one row per browser endpoint (owned by one user).
@@ -72,7 +72,9 @@ keys.
 - [ ] **AC1** Given all three `VAPID_*` vars are set, `GET /api/config` returns the public key in
       `push_public_key`; with none set it returns `null`.
 - [ ] **AC2** Given only one or two `VAPID_*` vars are set, the backend refuses to boot with an error
-      naming the missing ones.
+      naming the missing ones; it also refuses to boot when the public key is not an uncompressed
+      P-256 point, when `VAPID_PRIVATE_KEY` does not derive `VAPID_PUBLIC_KEY`, or when
+      `VAPID_SUBJECT` is not `mailto:<user>@<domain>` / `https://<domain>`.
 - [ ] **AC3** Given a logged-in user, when they `PUT` a subscription, then exactly one row exists for
       that endpoint, owned by them; a second `PUT` of the same endpoint updates it, and a `PUT` of the
       same endpoint by another user moves the row to that user.
@@ -100,6 +102,9 @@ keys.
       off removes it; `denied` permission shows the blocked message; no `PushManager` shows the
       unsupported message; feature off hides the tab.
 - [ ] **AC14** Logging out removes the current browser's subscription row.
+- [ ] **AC15** An endpoint whose host is not a known browser push service (`fcm.googleapis.com`,
+      `*.push.services.mozilla.com`, `*.notify.windows.com`, `*.push.apple.com`) gets 422 on `PUT`,
+      and a stored row with such a host is never sent to.
 
 ## Phases
 
@@ -116,10 +121,11 @@ keys.
 
 ### Phase 2 — Sender wired to invites
 - Work: `pywebpush` dependency + `uv lock`, `web_push.py` (fan-out, 404/410 prune, log + metric),
-  background call from `create_share`.
-- **Covers**: AC6, AC7, AC8, AC9
+  background call from `create_share`; push-service host allowlist (PUT + send); boot check that
+  `VAPID_PRIVATE_KEY` parses and derives `VAPID_PUBLIC_KEY`.
+- **Covers**: AC2, AC6, AC7, AC8, AC9, AC15
 - **Data model impact**: none
-- **DoD**: `pytest tests/test_web_push.py tests/test_api_sharing.py` green, with the push HTTP call
+- **DoD**: `pytest tests/test_web_push.py tests/test_session_sharing.py` green, with the push HTTP call
   mocked at the `pywebpush` boundary and one test asserting the real encrypted request shape
   (`Content-Encoding: aes128gcm`, `Authorization: vapid t=…, k=…`) built from a generated keypair.
 
@@ -170,5 +176,11 @@ None.
   backend (squid only fronts the sandbox containers), and the backend already calls public hosts directly
   (`pricing.us-east-1.amazonaws.com`, external MCP/OIDC servers). The first invite after
   deploy confirms it (`inkwest_push_sent_total{result="ok"}`).
+- Endpoint hosts restricted to the four browser push services (AC15): the backend POSTs to a
+  user-supplied URL, and an allowlist of public push-service domains closes SSRF without IP
+  pinning. A browser on another push service gets no notifications until its suffix is added
+  (module constant).
+- `VAPID_PRIVATE_KEY` must derive `VAPID_PUBLIC_KEY` (boot error otherwise, part of AC2): a
+  mismatched pair would sign JWTs that every push service rejects.
 - Migration follows the develop convention: dbmate `-- migrate:up`, schema-qualified
   `inkwest.push_subscriptions`.

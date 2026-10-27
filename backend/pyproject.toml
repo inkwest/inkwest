@@ -43,6 +43,11 @@ dependencies = [
     # permissions. Core (not the optional extra) since enumeration is a first-class feature,
     # not a sandbox-only concern. <2: v2 is a breaking client API (see requirements-agent.txt).
     "mcp>=1.0.0,<2",
+    # Web Push (RFC 8291 payload encryption + RFC 8292 VAPID) for share-invite notifications
+    "pywebpush>=2.5.0",
+    # Used directly by the push sender (shared client) and VAPID boot check, not only via pywebpush
+    "aiohttp>=3.14",
+    "py-vapid>=1.9",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +63,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
     "aiosqlite>=0.19.0",  # in-memory DB for behavioral query tests
+    "http-ece>=1.2",  # decrypts the real Web Push body in test_web_push
     "mypy>=1.8.0",
     "ruff>=0.1.0",
     "pre-commit>=3.6.0",

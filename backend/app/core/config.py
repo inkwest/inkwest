@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core.push_keys import is_p256_public_key, is_vapid_subject
+from app.core.push_keys import is_p256_public_key, is_vapid_subject, load_vapid
 
 # Captured once at import (≈ process startup). When no build-time VERSION is
 # injected (the "dev" sentinel below), the backend reports this startup-stamped
@@ -519,9 +519,12 @@ def validate_settings() -> None:
                 "VAPID_PUBLIC_KEY must be the base64url uncompressed P-256 public key "
                 "(65 bytes, 0x04 prefix, on the curve): no PEM, whitespace or trailing newline"
             )
+        # A key that does not derive the public one signs JWTs every push service rejects.
+        load_vapid(settings.vapid_private_key.get_secret_value(), settings.vapid_public_key)
         if not is_vapid_subject(settings.vapid_subject):
             raise ValueError(
-                "VAPID_SUBJECT must be a 'mailto:<address>' or 'https://<host>' contact"
+                "VAPID_SUBJECT must be 'mailto:<user>@<domain>' or 'https://<domain>' "
+                "with nothing after the domain (no path, query, port or second address)"
             )
 
     # claude-cli provider requires no additional configuration
