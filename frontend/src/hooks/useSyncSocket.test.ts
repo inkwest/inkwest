@@ -7,6 +7,7 @@ vi.mock('@/services/api', () => ({
   fetchWsTicket: vi.fn(),
   getVersion: vi.fn().mockResolvedValue({ version: 'v1', build_timestamp: 't' }),
   wsBaseUrl: () => 'ws://test',
+  getAnnouncements: vi.fn().mockResolvedValue([]),
 }));
 vi.mock('@/lib/mcpDek', () => ({ dekReply: vi.fn() }));
 vi.mock('@/components/connector/mcpCatalogCache', () => ({ resetMcpCatalogCache: vi.fn() }));
@@ -17,6 +18,7 @@ import { useSyncSocket } from './useSyncSocket';
 import { useBackendStore } from '@/store/backend';
 import { useMcpStore } from '@/store/mcp';
 import { useSessionsStore } from '@/store/sessions';
+import { useAnnouncementsStore } from '@/store/announcements';
 import { resetMcpCatalogCache } from '@/components/connector/mcpCatalogCache';
 
 const mockResetCatalog = resetMcpCatalogCache as unknown as ReturnType<typeof vi.fn>;
@@ -149,6 +151,49 @@ describe('useSyncSocket — reconnect & give-up', () => {
     expect(mockResetCatalog).toHaveBeenCalledTimes(1);
     expect(useMcpStore.getState().catalogVersion).toBe(1);
     // Not a session event — must return before the unconditional fetchSessions().
+    expect(fetchSessionsSpy).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('004-AC3: refreshes announcements on every open (first connect and reconnect)', async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    const refreshSpy = vi.fn(async () => {});
+    useAnnouncementsStore.setState({ refresh: refreshSpy });
+    const { unmount } = renderHook(() => useSyncSocket());
+    await vi.advanceTimersByTimeAsync(0);
+
+    FakeWS.instances[0].readyState = FakeWS.OPEN;
+    FakeWS.instances[0].onopen?.();
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+    FakeWS.instances[0].onclose?.({ code: 1006 });
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(FakeWS.instances).toHaveLength(2);
+    FakeWS.instances[1].readyState = FakeWS.OPEN;
+    FakeWS.instances[1].onopen?.();
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it('004-AC3: on announcements_changed: refreshes announcements, skips fetchSessions', async () => {
+    vi.useFakeTimers();
+    mockTicket.mockResolvedValue('T');
+    const refreshSpy = vi.fn(async () => {});
+    useAnnouncementsStore.setState({ refresh: refreshSpy });
+    const fetchSessionsSpy = vi.fn();
+    useSessionsStore.setState({ fetchSessions: fetchSessionsSpy });
+
+    const { unmount } = renderHook(() => useSyncSocket());
+    await vi.advanceTimersByTimeAsync(0);
+
+    const ws = FakeWS.instances[0];
+    ws.readyState = FakeWS.OPEN;
+    (ws.onmessage as unknown as (e: { data: string }) => void)?.({
+      data: JSON.stringify({ type: 'announcements_changed' }),
+    });
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
     expect(fetchSessionsSpy).not.toHaveBeenCalled();
     unmount();
   });
