@@ -13,7 +13,8 @@ the app, so a "come look at this incident" share can sit unseen for hours.
 
 ## Solution
 
-A user can turn on browser notifications for Inkwest from Settings, per browser/device. Once on,
+A user can turn on browser notifications for Inkwest from a banner, the invite popup or Settings,
+per browser/device. Once on,
 being invited to a conversation raises an OS notification (`<inviter> shared <title> with you`)
 even when no Inkwest tab is open. Clicking it opens (or focuses) Inkwest, where the existing invite
 popup lets them accept or decline. When an Inkwest window is already focused, nothing extra pops:
@@ -49,6 +50,17 @@ keys.
   (only on this click, never on page load), `pushManager.subscribe` with the VAPID key, `PUT`. Off:
   `unsubscribe` + `DELETE`. Shows the blocked state when the browser permission is `denied`, and an
   unsupported message when `PushManager` is missing.
+- **In-app ask before the browser prompt**: a refused browser prompt cannot be raised again, so
+  it only ever follows a click on an Inkwest control. Two in-app asks, hidden unless the feature is
+  on, the browser supports push and the permission was never answered (`default`); once permission
+  is granted, the banner also stays up after a failed "Turn on" to say so (until dismissed, a
+  reload, or another surface acting on notifications):
+  - a one-line banner at the top of the app ("Turn on" / "Not now"); "Not now", close, or a
+    browser prompt closed unanswered from the banner or the popup hide it for 30 days on this
+    browser (localStorage);
+  - a "Notify me on this browser next time" link in the share-invite popup.
+  The Settings toggle stays the manual on/off whatever the permission. Any of the three turning
+  push on clears the other two (shared permission state).
 - **Self-heal**: on app load with permission granted, re-`PUT` the current subscription (covers a
   browser-rotated endpoint and a VAPID key change: a key mismatch triggers unsubscribe + resubscribe).
 - **Logout**: unsubscribes this browser and deletes its row, so a shared machine stops receiving the
@@ -106,6 +118,16 @@ keys.
 - [x] **AC15** An endpoint whose host is not a known browser push service (`fcm.googleapis.com`,
       `*.push.services.mozilla.com`, `*.notify.windows.com`, `*.push.apple.com`) gets 422 on `PUT`,
       and a stored row with such a host is never sent to.
+- [x] **AC16** Given the share-invite popup and a browser whose notification permission was never
+      answered, then the popup offers "Notify me on this browser next time"; clicking it raises the
+      browser prompt and subscribes. The offer is absent when push is off, unsupported, granted or
+      denied, and rendering the popup never raises the prompt.
+- [x] **AC17** Given push is on and the permission was never answered, then a banner offers to turn
+      notifications on without raising the browser prompt; "Turn on" raises it and subscribes;
+      "Not now" or close hides the banner for 30 days on this browser, after which it shows again;
+      a failed "Turn on" after the permission was granted (server refusal or subscribe error) is
+      reported with a fixed message (never the response body) until dismissed, a reload, or
+      another surface acting on notifications.
 
 ## Phases
 
@@ -150,6 +172,15 @@ keys.
   automation (an OS notification click is not scriptable, a synthetic `notificationclick` is
   untrusted); it is covered by `frontend/src/services/sw.test.ts`. The notification and popup legs
   are browser-observed.
+
+### Phase 5 — In-app opt-in (banner + invite popup)
+- Work: `PushOptInBanner` (top of the app shell, 30-day per-browser snooze) and the invite-popup
+  offer; Settings toggle unchanged as the manual trigger. Added after phase 4: the Settings tab
+  alone was not discoverable, and the invite popup alone only reaches users already invited.
+- **Covers**: AC16, AC17
+- **Data model impact**: none
+- **DoD**: `npm test -- --run` + lint + typecheck green; `scripts/web_push_e2e.py` still passes on
+  a fresh stack.
 
 ## Data model impact (summary)
 

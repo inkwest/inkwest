@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Bell } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
+import { usePushOptIn } from '@/hooks/usePushOptIn';
 import { useInvitesStore } from '@/store/invites';
 import { useSessionsStore } from '@/store/sessions';
 
@@ -44,6 +46,7 @@ export function InvitePopup() {
         <strong>{invite.invited_by_display_name || 'Someone'}</strong> shared{' '}
         <strong>{invite.session_title || 'a conversation'}</strong> with you (view-only).
       </p>
+      <PushOffer />
       <div className="mt-5 flex justify-end gap-2">
         <button
           onClick={() => void act(false)}
@@ -61,5 +64,39 @@ export function InvitePopup() {
         </button>
       </div>
     </Modal>
+  );
+}
+
+// Opt-in at the moment it is relevant: the browser prompt only ever follows this click.
+function PushOffer() {
+  const { offer, permission, state, enable } = usePushOptIn();
+  const done = state === 'on';
+  const blocked = state === 'error' && permission === 'denied';
+  // Mounted with the offer, filled later: screen readers announce changes, not insertions.
+  if (!offer && !done && !blocked && state !== 'error') return null;
+
+  return (
+    <div className="mt-3">
+      {!done && !blocked && (
+        <button
+          onClick={() => void enable()}
+          disabled={state === 'busy'}
+          className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50"
+        >
+          <Bell className="h-3.5 w-3.5" />
+          Notify me on this browser next time
+        </button>
+      )}
+      <p role="status" className="text-xs text-gray-400">
+        {done && 'Notifications are on for this browser.'}
+        {blocked && 'Notifications are blocked for this site; allow them in the browser to change that.'}
+        {state === 'dismissed' && 'No choice was made in the browser prompt.'}
+      </p>
+      {state === 'error' && !blocked && (
+        <p role="alert" className="mt-1 text-xs text-red-400">
+          Could not turn on notifications. Try again from Settings, Notifications.
+        </p>
+      )}
+    </div>
   );
 }

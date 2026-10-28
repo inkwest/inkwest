@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SettingsModal } from './SettingsModal';
 import { usePreferencesStore } from '@/store/preferences';
@@ -7,6 +7,8 @@ import { useSettingsStore } from '@/store/settings';
 import { useConfigStore } from '@/store/config';
 import * as api from '@/services/api';
 import type { AppConfig } from '@/services/api';
+import { bumpPushPermission } from '@/hooks/usePushOptIn';
+import type { FakeSub } from '@/test/pushEnv';
 import { ENDPOINT, installPushEnv, stubFetch, uninstallPushEnv, vapidKey } from '@/test/pushEnv';
 
 describe('SettingsModal', () => {
@@ -119,7 +121,9 @@ describe('SettingsModal', () => {
       openOnTab();
       const toggle = await screen.findByRole('button', TOGGLE);
       expect(toggle).toHaveAttribute('aria-disabled', 'true');
-      await user.click(toggle);
+      await act(async () => {
+        await user.click(toggle);
+      });
       expect(env.notification.requestPermission).not.toHaveBeenCalled();
       expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
     });
@@ -139,7 +143,9 @@ describe('SettingsModal', () => {
       const user = userEvent.setup();
       openOnTab();
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'false'));
-      await user.click(screen.getByRole('button', TOGGLE));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'true'));
       expect(env.notification.requestPermission).toHaveBeenCalledOnce();
       expect(calls.map((c) => [c.method, c.body])).toEqual([
@@ -154,7 +160,9 @@ describe('SettingsModal', () => {
       const user = userEvent.setup();
       openOnTab();
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'true'));
-      await user.click(screen.getByRole('button', TOGGLE));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'false'));
       expect(calls.map((c) => [c.method, c.body])).toEqual([['DELETE', { endpoint: ENDPOINT }]]);
       expect(sub.unsubscribe).toHaveBeenCalledOnce();
@@ -166,7 +174,9 @@ describe('SettingsModal', () => {
       const user = userEvent.setup();
       openOnTab();
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'false'));
-      await user.click(screen.getByRole('button', TOGGLE));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
       expect(await screen.findByRole('alert')).toHaveTextContent('Push notifications are disabled');
       expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'false');
     });
@@ -178,7 +188,9 @@ describe('SettingsModal', () => {
       const user = userEvent.setup();
       openOnTab();
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'false'));
-      await user.click(screen.getByRole('button', TOGGLE));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
       const alert = await screen.findByRole('alert');
       expect(alert).toHaveTextContent("This browser's push service isn't supported by Inkwest.");
       expect(document.body).not.toHaveTextContent(ENDPOINT);
@@ -191,14 +203,79 @@ describe('SettingsModal', () => {
       const user = userEvent.setup();
       openOnTab();
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'false'));
-      await user.click(screen.getByRole('button', TOGGLE));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
       await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Updating…'));
       expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'true');
       // Still focusable while busy, so a second click must be ignored, not start a second request.
-      await user.click(screen.getByRole('button', TOGGLE));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
       expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1);
       answer(ok());
       await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(''));
+    });
+
+    it('a bump from another surface mid-toggle does not unlock it (003-AC13)', async () => {
+      const env = installPushEnv();
+      let answer: (r: Response) => void = () => {};
+      const { calls } = stubFetch(() => new Promise<Response>((r) => (answer = r)));
+      const user = userEvent.setup();
+      openOnTab();
+      await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'false'));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
+      await waitFor(() => expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1));
+      // What the banner's Permissions `change` listener does when the prompt is answered.
+      await act(async () => bumpPushPermission());
+      expect(env.notification.permission).toBe('granted');
+      expect(screen.getByRole('status')).toHaveTextContent('Updating…');
+      expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'true');
+      // Not "on" before the server has the subscription.
+      expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'false');
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
+      expect(calls.filter((c) => c.method !== 'PUT')).toHaveLength(0);
+      answer(ok());
+      await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'true'));
+      expect(screen.getByRole('status')).toHaveTextContent('');
+    });
+
+    it('a late answer from an older re-read never overwrites a newer one (003-AC13)', async () => {
+      const env = installPushEnv({ permission: 'granted', subKeyByte: 0xfb });
+      let lateAnswer: (s: null) => void = () => {};
+      // Mount read hangs and later answers "not subscribed"; the re-read after the bump answers first.
+      env.pushManager.getSubscription.mockImplementationOnce(() => new Promise((r) => (lateAnswer = r)));
+      openOnTab();
+      await act(async () => bumpPushPermission());
+      await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'true'));
+      await act(async () => lateAnswer(null));
+      expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('a re-read started before the click cannot show "on" before the PUT answers (003-AC13)', async () => {
+      // Granted but turned off: the case where a stray "subscribed" would flip the toggle on.
+      const env = installPushEnv({ permission: 'granted' });
+      let answer: (r: Response) => void = () => {};
+      const { calls } = stubFetch(() => new Promise<Response>((r) => (answer = r)));
+      const user = userEvent.setup();
+      openOnTab();
+      await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'false'));
+      // A re-read from some bump that hangs until the click is under way, then answers "subscribed".
+      let lateAnswer: (s: FakeSub | null) => void = () => {};
+      env.pushManager.getSubscription.mockImplementationOnce(() => new Promise((r) => (lateAnswer = r)));
+      await act(async () => bumpPushPermission());
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
+      await waitFor(() => expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1));
+      await act(async () => lateAnswer(env.state.sub));
+      expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'false');
+      answer(ok());
+      await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-pressed', 'true'));
     });
 
     it('shows the blocked message when the prompt is answered "Block" (003-AC13)', async () => {
@@ -206,7 +283,9 @@ describe('SettingsModal', () => {
       const user = userEvent.setup();
       openOnTab();
       await waitFor(() => expect(screen.getByRole('button', TOGGLE)).toHaveAttribute('aria-disabled', 'false'));
-      await user.click(screen.getByRole('button', TOGGLE));
+      await act(async () => {
+        await user.click(screen.getByRole('button', TOGGLE));
+      });
       expect(await screen.findByText(/Notifications are blocked for this site/)).toBeInTheDocument();
     });
 

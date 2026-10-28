@@ -9,8 +9,8 @@
   Inkwest tab open. Clicking it focuses an Inkwest window (or opens `/`), where the usual
   accept/decline popup shows the invite.
 - No notification when an Inkwest window is focused: the in-app popup already covers it.
-- Off until an operator sets the three `VAPID_*` vars. Opt-in per browser, from
-  Settings > Notifications.
+- Off until an operator sets the three `VAPID_*` vars. Opt-in per browser, from a banner at the
+  top of the app, the share-invite popup, or Settings > Notifications.
 - Share invites only. Best effort: no retry, a missed push leaves the invite pending and the
   popup picks it up on next load.
 
@@ -40,7 +40,8 @@ Boot checks (`validate_settings`), each one refuses to start:
 - private key unparseable, or it does not derive the public key.
 - subject not exactly `mailto:<user>@<domain>` / `https://<domain>` (no path, query, port).
 
-Feature off: `push_public_key` is `null`, the Settings tab is hidden, `PUT
+Feature off: `push_public_key` is `null`, the Settings tab, the opt-in banner and the
+invite-popup offer are hidden, `PUT
 /api/me/push-subscriptions` answers 404, invites send nothing.
 
 ## Egress
@@ -58,9 +59,14 @@ Feature off: `push_public_key` is `null`, the Settings tab is hidden, `PUT
 
 ## Flow
 
-1. Settings > Notifications toggle (the only place that asks for permission): registers
-   `/sw.js`, `pushManager.subscribe` with the VAPID public key, then
-   `PUT /api/me/push-subscriptions` (`endpoint`, `keys.p256dh`, `keys.auth`).
+1. The browser prompt only follows a click on an Inkwest control (a refused prompt cannot be
+   raised again): the "Turn on" banner, the "Notify me" link in the invite popup, or the
+   Settings > Notifications toggle. The banner shows while the permission was never answered,
+   or, once permission is granted, after a failed "Turn on" (until dismissed, a reload, or
+   another surface acting on notifications);
+   "Not now", close, or a prompt closed unanswered from the banner or the popup hide it 30 days
+   on this browser. Then: registers `/sw.js`, `pushManager.subscribe` with the
+   VAPID public key, `PUT /api/me/push-subscriptions` (`endpoint`, `keys.p256dh`, `keys.auth`).
 2. The backend upserts one row per endpoint. An endpoint already held by another user moves to
    the caller (one browser profile, one current owner).
 3. `POST /api/sessions/{id}/shares` (`create_share`) commits, then calls
@@ -174,3 +180,6 @@ start). The docstring lists every variable.
 | `frontend/public/sw.js` | service worker: `push`, `notificationclick` |
 | `frontend/src/services/push.ts` | subscribe, unsubscribe, self-heal, logout cleanup |
 | `frontend/src/components/settings/SettingsModal.tsx` | Notifications tab |
+| `frontend/src/components/layout/PushOptInBanner.tsx` | opt-in banner, 30-day snooze |
+| `frontend/src/components/chat/InvitePopup.tsx` | opt-in link in the invite popup |
+| `frontend/src/hooks/usePushOptIn.ts` | shared opt-in state (permission refresh across surfaces) |

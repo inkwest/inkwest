@@ -15,6 +15,7 @@ import {
   getPushSubscription,
   isPushSupported,
 } from '@/services/push';
+import { bumpPushPermission, usePushPermissionVersion } from '@/hooks/usePushOptIn';
 import type { ConfigExport, Skill } from '@/types/api';
 
 // Tab keys come from the canonical SETTINGS_TABS in settingsUi.ts; only the
@@ -168,14 +169,25 @@ function NotificationsTab({ publicKey }: { publicKey: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Re-read on mount and whenever another surface (banner, invite popup) may have opted in.
+  const permissionVersion = usePushPermissionVersion();
+  // A bump can land mid-toggle (the prompt answer fires Permissions `change`): the toggle owns
+  // that window, so a re-read answering during it must not overwrite the toggle's state.
+  const toggling = useRef(false);
   useEffect(() => {
     if (!supported) return;
+    let alive = true;
+    setPermission(currentPermission());
     getPushSubscription()
-      .then((s) => setSubscribed(s !== null))
-      .catch(() => setSubscribed(false));
-  }, [supported]);
+      .then((s) => alive && !toggling.current && setSubscribed(s !== null))
+      .catch(() => alive && !toggling.current && setSubscribed(false));
+    return () => {
+      alive = false;
+    };
+  }, [supported, permissionVersion]);
 
   const toggle = async (on: boolean) => {
+    toggling.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -190,7 +202,9 @@ function NotificationsTab({ publicKey }: { publicKey: string }) {
     } finally {
       setPermission(currentPermission());
       setSubscribed((await getPushSubscription().catch(() => null)) !== null);
+      toggling.current = false;
       setBusy(false);
+      bumpPushPermission();
     }
   };
 
