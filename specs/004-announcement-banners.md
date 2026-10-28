@@ -1,6 +1,6 @@
 # 004 — Announcement banners
 
-**Status**: in progress
+**Status**: shipped
 **Requested by**: @babs
 **Date**: 2026-10-28
 
@@ -47,30 +47,30 @@ Admin-managed banners, without a ticker or audience targeting.
 
 ## Acceptance criteria
 
-- [ ] **AC1** Given an enabled banner with no `ends_at`, when a signed-in user loads any page of
+- [x] **AC1** Given an enabled banner with no `ends_at`, when a signed-in user loads any page of
       the app or the admin console, then the banner shows at the top with its message.
-- [ ] **AC2** A disabled banner, or one whose `ends_at` is past, is absent from
+- [x] **AC2** A disabled banner, or one whose `ends_at` is past, is absent from
       `GET /api/announcements` and from the page.
-- [ ] **AC3** Given an open app tab, when an admin creates, edits, disables or deletes a banner,
+- [x] **AC3** Given an open app tab, when an admin creates, edits, disables or deletes a banner,
       then the tab reflects it within 5 s without a reload. An admin-console tab reflects it after
       its own write, or when its tab becomes visible again.
-- [ ] **AC4** Given a dismissible banner, when the user closes it and reloads, then it stays
+- [x] **AC4** Given a dismissible banner, when the user closes it and reloads, then it stays
       hidden; when an admin then edits it, it shows again.
-- [ ] **AC5** A non-dismissible banner has no close button.
-- [ ] **AC6** Given an open tab showing a banner whose `ends_at` is 1 min away, then the banner
+- [x] **AC5** A non-dismissible banner has no close button.
+- [x] **AC6** Given an open tab showing a banner whose `ends_at` is 1 min away, then the banner
       leaves the page at `ends_at` with no refetch.
-- [ ] **AC7** With no custom color, the background is the level's color; with a custom
+- [x] **AC7** With no custom color, the background is the level's color; with a custom
       background and no text color, the text is black or white by luminance; an explicit text
       color always wins; opacity below 100 renders a translucent background.
-- [ ] **AC8** Message markdown renders bold, italic, inline code and links (new tab,
+- [x] **AC8** Message markdown renders bold, italic, inline code and links (new tab,
       `rel="noopener noreferrer"`); raw HTML, images, headings and lists render as plain text or
       are dropped, never as markup.
-- [ ] **AC9** A non-admin gets 403 on every `/api/admin/announcements` route; an unauthenticated
+- [x] **AC9** A non-admin gets 403 on every `/api/admin/announcements` route; an unauthenticated
       caller gets 401 on `GET /api/announcements`.
-- [ ] **AC10** The API rejects with 422: an empty or >500-char message, an unknown level, a color
+- [x] **AC10** The API rejects with 422: an empty or >500-char message, an unknown level, a color
       not `#rrggbb`, opacity outside 10..100, a create with `ends_at` in the past, a naive datetime.
       The DB enforces the same bounds with CHECKs.
-- [ ] **AC11** A failed `GET /api/announcements` keeps the banners already shown (no flicker on a
+- [x] **AC11** A failed `GET /api/announcements` keeps the banners already shown (no flicker on a
       backend blip) and never raises the 5xx strip for a gateway error.
 
 ## Phases
