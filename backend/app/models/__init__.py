@@ -1,4 +1,5 @@
 # Models module
+from app.models.announcement import Announcement
 from app.models.app_setting import AppSetting
 from app.models.base import Base
 from app.models.budget import Budget, BudgetPeriod, BudgetType, UsageRecord
@@ -27,6 +28,7 @@ from app.models.user_preferences import UserPreferences
 from app.models.user_skill import UserSkill
 
 __all__ = [
+    "Announcement",
     "AppSetting",
     "Base",
     "Cluster",

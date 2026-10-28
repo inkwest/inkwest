@@ -425,6 +425,28 @@ CREATE TABLE inkwest.push_subscriptions (
 CREATE INDEX idx_push_subscriptions_user ON inkwest.push_subscriptions(user_id);
 ```
 
+### announcements
+
+Admin-written banners shown at the top of every page for every signed-in user (spec 004). `GET /api/announcements` serves enabled rows whose `ends_at` is NULL or future, oldest first; admin CRUD at `/api/admin/announcements`. Every write broadcasts `announcements_changed` on the sync channel. The CHECKs mirror the API bounds in `app/models/schemas.py`.
+
+```sql
+CREATE TABLE inkwest.announcements (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    message TEXT NOT NULL,                -- inline markdown, 1..500 chars, stored trimmed (str.isspace set)
+    level TEXT NOT NULL,                  -- info | success | warning | danger
+    color VARCHAR(7),                     -- #rrggbb background; NULL = level color
+    text_color VARCHAR(7),                -- #rrggbb; NULL = black/white by luminance
+    opacity SMALLINT NOT NULL DEFAULT 100,  -- background opacity, 10..100
+    dismissible BOOLEAN NOT NULL DEFAULT true,
+    enabled BOOLEAN NOT NULL DEFAULT false,  -- a hand INSERT stays unpublished
+    ends_at TIMESTAMPTZ,                  -- NULL = no expiry
+    created_by UUID REFERENCES inkwest.users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- bumped on every PUT; keys per-browser dismissal
+);
+CREATE INDEX idx_announcements_active ON inkwest.announcements (created_at) WHERE enabled;
+```
+
 ## JSONB Content Examples
 
 ### User Message Content
@@ -502,6 +524,7 @@ docker compose exec backend python db_migrate.py
 | `20260704000000_usage_cache_tokens.sql` | usage_records: prompt-cache columns, source, indexed turn_id (budget accuracy) |
 | `20260704010000_message_session_cache_tokens.sql` | messages/sessions: prompt-cache columns for per-bubble/badge surfacing |
 | `20261027000000_push_subscriptions.sql` | Web Push subscriptions (`push_subscriptions`) |
+| `20261028000000_announcements.sql` | Announcement banners (`announcements`) |
 
 ## Key Indexes
 
@@ -519,3 +542,4 @@ docker compose exec backend python db_migrate.py
 | usage_records | uq_usage_records_engine_turn | Unique engine row per turn (partial; double-persist backstop) |
 | oidc_pending_states | idx_oidc_pending_states_created | TTL cleanup of expired states |
 | push_subscriptions | idx_push_subscriptions_user | Per-invitee fan-out lookup |
+| announcements | idx_announcements_active | Read route over enabled banners (partial) |
