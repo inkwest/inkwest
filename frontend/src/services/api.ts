@@ -329,6 +329,8 @@ export interface AppConfig {
   available_models: ModelInfo[];
   /** File attachments usable (requires the sandbox/claude-cli). Gates the attach UI. */
   attachments_enabled: boolean;
+  /** VAPID public key (base64url) for PushManager.subscribe; null = Web Push off. */
+  push_public_key: string | null;
 }
 
 /** Display name for a model ID; falls back to the raw ID when unknown. */
@@ -881,6 +883,19 @@ export async function deleteMySkill(id: string): Promise<void> {
 export async function overrideAdminSkill(adminName: string): Promise<UserSkill> {
   return fetchAPI<UserSkill>(`/api/me/skills/override/${encodeURIComponent(adminName)}`, {
     method: 'POST',
+  });
+}
+
+// Endpoint only ever travels in a body: it is a capability URL and must stay out of access logs.
+export async function putPushSubscription(sub: PushSubscriptionJSON): Promise<void> {
+  return fetchAPI<void>('/api/me/push-subscriptions', { method: 'PUT', body: JSON.stringify(sub) });
+}
+
+export async function deletePushSubscription(endpoint: string, signal?: AbortSignal): Promise<void> {
+  return fetchAPI<void>('/api/me/push-subscriptions', {
+    method: 'DELETE',
+    body: JSON.stringify({ endpoint }),
+    signal,
   });
 }
 

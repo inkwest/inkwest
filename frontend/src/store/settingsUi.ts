@@ -2,7 +2,7 @@ import { create } from 'zustand';
 
 // Single source of truth for the Settings tab keys: SettingsModal derives its tab list
 // from it and Header validates ?settings= deep-links against it.
-export const SETTINGS_TABS = ['display', 'skills', 'mcp', 'io'] as const;
+export const SETTINGS_TABS = ['display', 'skills', 'mcp', 'notifications', 'io'] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 
 export function isSettingsTab(v: string): v is SettingsTab {

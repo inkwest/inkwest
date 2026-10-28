@@ -346,6 +346,100 @@ async def test_create_share_invites_and_notifies(
     assert mock_notify.await_args.kwargs["user_id"] == str(target_id)
 
 
+def _arrange_new_invite(
+    mock_db: AsyncMock, mock_session_obj: MagicMock, mock_user: MagicMock
+) -> uuid.UUID:
+    """Mock DB for a first invite of an active user to the caller's session; returns its id."""
+    mock_session_obj.user_id = str(mock_user.id)
+    mock_session_obj.title = "Investigating crashes"
+    target = MagicMock(id=uuid.uuid4(), is_active=True, display_name="Invitee", email="i@test.com")
+    session_result = MagicMock()
+    session_result.scalar_one_or_none.return_value = mock_session_obj
+    mock_db.execute = AsyncMock(return_value=session_result)
+    mock_db.scalar = AsyncMock(side_effect=[target, None])
+    mock_db.refresh = AsyncMock(side_effect=_populate_new_share)
+    return target.id
+
+
+@pytest.mark.asyncio
+async def test_create_share_answers_before_push_is_sent(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+    mock_user: MagicMock,
+) -> None:
+    """003-AC6: the 201 does not wait on the push, which gets the invite as plain values."""
+    from app.services import web_push
+
+    web_push.open_http_session(create_client=False)  # the lifespan's startup step
+    target_id = _arrange_new_invite(mock_db, mock_session_obj, mock_user)
+    started, release = asyncio.Event(), asyncio.Event()
+    seen: dict[str, object] = {}
+
+    async def blocked_send(**kwargs: object) -> None:
+        seen.update(kwargs)
+        started.set()
+        await release.wait()
+
+    with (
+        patch("app.api.routes.sharing.notify", new=AsyncMock()),
+        patch.object(web_push, "send_share_invite", new=blocked_send),
+    ):
+        # Bounded: a route that awaited the send would hang here instead of failing.
+        resp = await asyncio.wait_for(
+            authenticated_client.post(
+                f"/api/sessions/{mock_session_obj.id}/shares", json={"user_id": str(target_id)}
+            ),
+            timeout=5,
+        )
+        assert resp.status_code == 201
+        await asyncio.wait_for(started.wait(), timeout=5)
+        in_flight = set(web_push._tasks)
+        assert len(in_flight) == 1 and not release.is_set()
+        release.set()
+        await asyncio.gather(*in_flight)
+
+    assert seen == {
+        "user_id": target_id,
+        "share_id": uuid.UUID(resp.json()["id"]),
+        "session_id": mock_session_obj.id,
+        "session_title": "Investigating crashes",
+        "invited_by": mock_user.display_name,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_share_push_off_sends_nothing(
+    authenticated_client: AsyncClient,
+    mock_db: AsyncMock,
+    mock_session_obj: MagicMock,
+    mock_user: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """003-AC9: with no VAPID keys the invite is created and no push is attempted."""
+    from pydantic import SecretStr
+
+    from app.core.config import get_settings
+    from app.services import web_push
+
+    monkeypatch.setattr(get_settings(), "vapid_private_key", SecretStr(""))
+    web_push.open_http_session(create_client=False)  # the lifespan's startup step
+    target_id = _arrange_new_invite(mock_db, mock_session_obj, mock_user)
+    with (
+        patch("app.api.routes.sharing.notify", new=AsyncMock()),
+        patch.object(web_push, "async_session_maker") as own_db,
+        patch.object(web_push, "webpush_async", new=AsyncMock()) as send,
+    ):
+        resp = await authenticated_client.post(
+            f"/api/sessions/{mock_session_obj.id}/shares", json={"user_id": str(target_id)}
+        )
+        await asyncio.gather(*web_push._tasks)
+
+    assert resp.status_code == 201
+    own_db.assert_not_called()
+    send.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_create_share_non_owner_forbidden(
     authenticated_client: AsyncClient,

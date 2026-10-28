@@ -10,8 +10,9 @@ import json
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,7 @@ from app.api.dependencies import CurrentUser, get_db
 from app.core.config import get_settings
 from app.core.skill_md import ParsedSkill, parse_skill_md
 from app.core.slug import slugify
+from app.models.push_subscription import PushSubscription
 from app.models.schemas import (
     ConfigExport,
     ConfigImport,
@@ -28,6 +30,8 @@ from app.models.schemas import (
     McpPolicyServerUpdate,
     PreferencesResponse,
     PreferencesUpdate,
+    PushSubscriptionEndpoint,
+    PushSubscriptionUpsert,
     SkillList,
     SkillResponse,
     UserSkillCreate,
@@ -35,6 +39,7 @@ from app.models.schemas import (
     UserSkillUpdate,
 )
 from app.models.skill import Skill
+from app.models.user import User
 from app.models.user_skill import UserSkill
 from app.services.user_preferences import (
     CONFIG_SCHEMA_VERSION,
@@ -210,6 +215,86 @@ async def set_my_mcp_policy(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     rows = await mcp_policy.get_user_policies(db, current_user.id)
     return McpPolicyResponse(policies=[McpPolicyEntry(**r) for r in rows])
+
+
+# --------------------------------------------------------------------------- #
+# Web Push subscriptions (one row per browser endpoint)                        #
+# --------------------------------------------------------------------------- #
+
+_USER_AGENT_MAX = 512
+# Bounds the per-invite fan-out and table growth; ample for one user's browsers and devices.
+_MAX_PUSH_SUBSCRIPTIONS_PER_USER = 20
+
+
+@router.put("/push-subscriptions", status_code=status.HTTP_204_NO_CONTENT)
+async def put_my_push_subscription(
+    payload: PushSubscriptionUpsert,
+    current_user: CurrentUser,
+    user_agent: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Register this browser for Web Push; an endpoint held by another user moves to the caller."""
+    if not get_settings().push_enabled:
+        # Without VAPID keys nothing can be sent, so refuse rather than store dead rows.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Push notifications are disabled"
+        )
+    values = {
+        "user_id": current_user.id,
+        "p256dh": payload.keys.p256dh,
+        "auth": payload.keys.auth,
+        "user_agent": user_agent[:_USER_AGENT_MAX] if user_agent else None,
+    }
+    # Serializes one user's PUTs; without it each concurrent writer trims only what it sees,
+    # overshooting the cap by the number in flight.
+    # NO KEY UPDATE: plain FOR UPDATE would also block FK inserts' KEY SHARE on this row.
+    await db.execute(
+        select(User.id).where(User.id == current_user.id).with_for_update(key_share=True)
+    )
+    stmt = pg_insert(PushSubscription).values(endpoint=payload.endpoint, **values)
+    upserted_id = (
+        await db.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[PushSubscription.endpoint],
+                set_={**values, "last_seen_at": func.now()},
+            ).returning(PushSubscription.id)
+        )
+    ).scalar_one()
+    # Evict the caller's least recently seen rows beyond the cap, never the one just written.
+    others = (PushSubscription.user_id == current_user.id, PushSubscription.id != upserted_id)
+    keep = (
+        select(PushSubscription.id)
+        .where(*others)
+        .order_by(
+            PushSubscription.last_seen_at.desc(),
+            PushSubscription.created_at.desc(),
+            PushSubscription.id.desc(),
+        )
+        .limit(_MAX_PUSH_SUBSCRIPTIONS_PER_USER - 1)
+    )
+    await db.execute(delete(PushSubscription).where(*others, PushSubscription.id.not_in(keep)))
+    await db.flush()
+
+
+@router.delete("/push-subscriptions", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_my_push_subscription(
+    payload: PushSubscriptionEndpoint,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Unregister this browser. Endpoint in the body: in a query string it would hit access logs."""
+    result = await db.execute(
+        delete(PushSubscription)
+        .where(
+            PushSubscription.endpoint == payload.endpoint,
+            PushSubscription.user_id == current_user.id,
+        )
+        .returning(PushSubscription.id)
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Push subscription not found"
+        )
 
 
 # --------------------------------------------------------------------------- #

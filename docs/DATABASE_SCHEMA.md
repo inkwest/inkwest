@@ -407,6 +407,24 @@ CREATE TABLE inkwest.mcp_user_keys (
 ALTER TABLE inkwest.connector_audit_log ALTER COLUMN session_id DROP NOT NULL;
 ```
 
+### push_subscriptions
+
+Web Push subscriptions, one row per browser push endpoint (spec 003). The endpoint is UNIQUE, not (user, endpoint): a re-registration by another user moves the row to them. At most 20 rows per user, least recently seen evicted on `PUT` (`app/api/routes/me.py`). Rows older than 60 s are deleted on 404/410 from the push service. See `docs/WEB_PUSH.md`.
+
+```sql
+CREATE TABLE inkwest.push_subscriptions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES inkwest.users(id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL UNIQUE,     -- capability URL issued by the push service: never logged
+    p256dh TEXT NOT NULL,              -- browser's ECDH public key (base64url)
+    auth TEXT NOT NULL,                -- browser's auth secret (base64url)
+    user_agent TEXT,                   -- truncated to 512 chars
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- bumped on every PUT; cap eviction order
+);
+CREATE INDEX idx_push_subscriptions_user ON inkwest.push_subscriptions(user_id);
+```
+
 ## JSONB Content Examples
 
 ### User Message Content
@@ -483,6 +501,7 @@ docker compose exec backend python db_migrate.py
 | `20260619000000_model_registry.sql` | Admin-managed model registry (replaces the model keys in app_settings) |
 | `20260704000000_usage_cache_tokens.sql` | usage_records: prompt-cache columns, source, indexed turn_id (budget accuracy) |
 | `20260704010000_message_session_cache_tokens.sql` | messages/sessions: prompt-cache columns for per-bubble/badge surfacing |
+| `20261027000000_push_subscriptions.sql` | Web Push subscriptions (`push_subscriptions`) |
 
 ## Key Indexes
 
@@ -499,3 +518,4 @@ docker compose exec backend python db_migrate.py
 | usage_records | ix_usage_records_turn_id | Per-turn rollup (GROUP BY turn_id) |
 | usage_records | uq_usage_records_engine_turn | Unique engine row per turn (partial; double-persist backstop) |
 | oidc_pending_states | idx_oidc_pending_states_created | TTL cleanup of expired states |
+| push_subscriptions | idx_push_subscriptions_user | Per-invitee fan-out lookup |

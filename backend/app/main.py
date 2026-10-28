@@ -46,6 +46,7 @@ from app.core.logging import AccessLogMiddleware, access_log_config, get_logger,
 from app.core.metrics_server import start_metrics_server, stop_metrics_server
 from app.core.rate_limit import RateLimitMiddleware
 from app.core.telemetry import shutdown_telemetry
+from app.services import web_push
 from app.services.app_settings import load_settings
 from app.services.auth_cleanup import start_state_cleanup, stop_state_cleanup
 from app.services.connector_cleanup import start_connector_cleanup, stop_connector_cleanup
@@ -182,9 +183,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "deployment (or sticky routing), or disable LLM_BROKER_ENABLED."
             )
         logger.info("llm_broker_enabled", note="single-replica in-process grant store")
+    web_push.open_http_session(create_client=settings.push_enabled)
     yield
     # Shutdown
     logger.info("shutting_down_api")
+    await web_push.close_http_session()
     if settings.oidc_enabled:
         await stop_state_cleanup()
     if settings.connectors_enabled:
@@ -320,17 +323,26 @@ class SPAStaticFiles(StaticFiles):
     # skew during rolling deploys would otherwise surface as JSON-parse errors
     # client-side), and a purged hashed asset must not come back as text/html.
     NO_FALLBACK_PREFIXES = ("api/", "assets/", "ws/")
+    # Unhashed name: a cached copy would pin an old worker, and an index.html stand-in fails
+    # registration with a MIME error instead of a clean 404.
+    SERVICE_WORKER = "sw.js"
 
     async def get_response(self, path: str, scope: Scope) -> Response:
         try:
             response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code != 404 or path.startswith(self.NO_FALLBACK_PREFIXES):
+            if (
+                exc.status_code != 404
+                or path == self.SERVICE_WORKER
+                or path.startswith(self.NO_FALLBACK_PREFIXES)
+            ):
                 raise
             response = await super().get_response("index.html", scope)
         # index.html must revalidate on every load: hashed asset names change per
         # deploy, and a heuristically-cached index would reference purged bundles.
-        if isinstance(response, FileResponse) and response.path.endswith("index.html"):
+        if isinstance(response, FileResponse) and (
+            response.path.endswith("index.html") or path == self.SERVICE_WORKER
+        ):
             response.headers["Cache-Control"] = "no-cache"
         return response
 

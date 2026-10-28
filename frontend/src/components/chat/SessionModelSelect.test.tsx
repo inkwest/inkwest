@@ -29,6 +29,7 @@ const CONFIG_CLI = {
     { ...OPUS, engines: ['claude-cli'] },
   ],
   attachments_enabled: false,
+  push_public_key: null,
 };
 
 // Both engines on: Engine·Model pairs. Claude → both engines, Llama → agent only.
@@ -42,6 +43,7 @@ const CONFIG_BOTH = {
     { ...LLAMA, engines: ['inkwest-agent'] },
   ],
   attachments_enabled: false,
+  push_public_key: null,
 };
 
 function setSession(model: string | null, engine: string | null = null) {

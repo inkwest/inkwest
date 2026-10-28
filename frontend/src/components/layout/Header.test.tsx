@@ -76,6 +76,13 @@ describe('Header', () => {
     expect(useSettingsUi.getState().initialTab).toBe('display');
   });
 
+  it('falls back to the default tab for ?settings=notifications when push is off (003-AC13)', async () => {
+    renderHeader('/?settings=notifications');
+    await waitFor(() => expect(useSettingsUi.getState().isOpen).toBe(true));
+    expect(screen.queryByRole('button', { name: 'Notifications' })).not.toBeInTheDocument();
+    expect(screen.getByText('Wide composer')).toBeInTheDocument();
+  });
+
   it('renders Inkwest branding', () => {
     renderHeader();
     expect(screen.getByText('Inkwest')).toBeInTheDocument();
@@ -170,6 +177,7 @@ describe('Header', () => {
           },
         ],
         attachments_enabled: false,
+        push_public_key: null,
       },
     });
     renderHeader();

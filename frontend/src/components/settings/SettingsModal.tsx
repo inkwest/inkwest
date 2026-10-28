@@ -6,7 +6,16 @@ import { McpPolicySettingsTab } from '@/components/settings/McpPolicySettingsTab
 import { usePreferencesStore } from '@/store/preferences';
 import { SETTINGS_TABS, type SettingsTab } from '@/store/settingsUi';
 import { useSettingsStore } from '@/store/settings';
-import { getSkills } from '@/services/api';
+import { useConfigStore } from '@/store/config';
+import { ApiError, getSkills } from '@/services/api';
+import {
+  currentPermission,
+  disablePush,
+  enablePush,
+  getPushSubscription,
+  isPushSupported,
+} from '@/services/push';
+import { bumpPushPermission, usePushPermissionVersion } from '@/hooks/usePushOptIn';
 import type { ConfigExport, Skill } from '@/types/api';
 
 // Tab keys come from the canonical SETTINGS_TABS in settingsUi.ts; only the
@@ -17,6 +26,7 @@ const TAB_LABELS: Record<SettingsTab, string> = {
   display: 'Display',
   skills: 'Skills',
   mcp: 'MCP tools',
+  notifications: 'Notifications',
   io: 'Import / Export',
 };
 
@@ -31,6 +41,9 @@ export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: Setti
   const [tab, setTab] = useState<Tab>(initialTab);
   const [adminSkills, setAdminSkills] = useState<Skill[]>([]);
   const prefs = usePreferencesStore();
+  const pushKey = useConfigStore((s) => s.config?.push_public_key ?? null);
+  // Derived, not reset: a deep-link opened before /api/config answers lands once the key arrives.
+  const active: Tab = tab === 'notifications' && !pushKey ? 'display' : tab;
 
   // Load DB-backed prefs + the admin skill list when the modal first opens; also select the
   // requested tab (a deep-link may open straight onto 'mcp').
@@ -52,15 +65,15 @@ export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: Setti
       // MCP tab manages its own two-pane scroll; pin tabs + let the panes be the
       // buffer so the tab content never pushes past the viewport. Other tabs keep
       // the default whole-body scroll.
-      bodyClassName={tab === 'mcp' ? 'flex min-h-0 flex-col overflow-hidden' : undefined}
+      bodyClassName={active === 'mcp' ? 'flex min-h-0 flex-col overflow-hidden' : undefined}
     >
       <div className="flex shrink-0 gap-2 border-b border-gray-700 -mt-2 mb-4">
-        {SETTINGS_TABS.map((key) => (
+        {SETTINGS_TABS.filter((key) => key !== 'notifications' || pushKey).map((key) => (
           <button
             key={key}
             onClick={() => setTab(key)}
             className={`px-3 py-2 text-sm border-b-2 -mb-px transition-colors ${
-              tab === key
+              active === key
                 ? 'border-blue-500 text-white'
                 : 'border-transparent text-gray-400 hover:text-gray-200'
             }`}
@@ -78,10 +91,11 @@ export function SettingsModal({ isOpen, onClose, initialTab = 'display' }: Setti
         </div>
       ) : (
         <>
-          {tab === 'display' && <DisplayTab />}
-          {tab === 'skills' && <SkillsTab adminSkills={adminSkills} />}
-          {tab === 'mcp' && <McpPolicySettingsTab />}
-          {tab === 'io' && <ImportExportTab />}
+          {active === 'display' && <DisplayTab />}
+          {active === 'skills' && <SkillsTab adminSkills={adminSkills} />}
+          {active === 'mcp' && <McpPolicySettingsTab />}
+          {active === 'notifications' && pushKey && <NotificationsTab publicKey={pushKey} />}
+          {active === 'io' && <ImportExportTab />}
         </>
       )}
     </Modal>
@@ -92,15 +106,20 @@ function ToggleRow({
   label,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   checked: boolean;
   onChange: (next: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
+    // aria-disabled, not disabled: a disabled button drops keyboard focus mid-update.
     <button
-      onClick={() => onChange(!checked)}
-      className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md"
+      onClick={() => !disabled && onChange(!checked)}
+      aria-disabled={disabled}
+      aria-pressed={checked}
+      className="w-full flex items-center justify-between px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-md aria-disabled:opacity-50 aria-disabled:cursor-not-allowed"
     >
       <span>{label}</span>
       {checked && <Check className="h-4 w-4 text-green-400" />}
@@ -137,6 +156,93 @@ function DisplayTab() {
       {error && <p className="px-3 pt-2 text-xs text-red-400">{error}</p>}
       <p className="px-3 pt-3 text-xs text-gray-500">
         Saved to your account and synced across devices.
+      </p>
+    </div>
+  );
+}
+
+function NotificationsTab({ publicKey }: { publicKey: string }) {
+  const supported = isPushSupported();
+  const [permission, setPermission] = useState(() => (supported ? currentPermission() : 'default'));
+  // null until the browser answers, so the toggle never flashes the wrong state.
+  const [subscribed, setSubscribed] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-read on mount and whenever another surface (banner, invite popup) may have opted in.
+  const permissionVersion = usePushPermissionVersion();
+  // A bump can land mid-toggle (the prompt answer fires Permissions `change`): the toggle owns
+  // that window, so a re-read answering during it must not overwrite the toggle's state.
+  const toggling = useRef(false);
+  useEffect(() => {
+    if (!supported) return;
+    let alive = true;
+    setPermission(currentPermission());
+    getPushSubscription()
+      .then((s) => alive && !toggling.current && setSubscribed(s !== null))
+      .catch(() => alive && !toggling.current && setSubscribed(false));
+    return () => {
+      alive = false;
+    };
+  }, [supported, permissionVersion]);
+
+  const toggle = async (on: boolean) => {
+    toggling.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await (on ? enablePush(publicKey) : disablePush());
+    } catch (e) {
+      // A 422 detail echoes the request, endpoint included: a capability URL, never rendered.
+      setError(
+        e instanceof ApiError && e.status === 422
+          ? "This browser's push service isn't supported by Inkwest."
+          : (e as Error).message,
+      );
+    } finally {
+      setPermission(currentPermission());
+      setSubscribed((await getPushSubscription().catch(() => null)) !== null);
+      toggling.current = false;
+      setBusy(false);
+      bumpPushPermission();
+    }
+  };
+
+  if (!supported) {
+    return (
+      <p className="px-3 text-sm text-gray-400">
+        This browser does not support push notifications.
+      </p>
+    );
+  }
+  if (permission === 'denied') {
+    return (
+      <p className="px-3 text-sm text-yellow-400">
+        Notifications are blocked for this site. Allow them in your browser&apos;s site settings
+        (the icon left of the address bar), then reload the page.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <ToggleRow
+        label="Browser notifications on this device"
+        checked={permission === 'granted' && subscribed === true}
+        disabled={busy || subscribed === null}
+        onChange={(v) => void toggle(v)}
+      />
+      {/* Mounted empty: screen readers announce changes to a live region, not its insertion. */}
+      <p role="status" className={busy ? 'px-3 pt-2 text-xs text-gray-400' : '!mt-0'}>
+        {busy ? 'Updating…' : ''}
+      </p>
+      {error && (
+        <p role="alert" className="px-3 pt-2 text-xs text-red-400">
+          {error}
+        </p>
+      )}
+      <p className="px-3 pt-3 text-xs text-gray-500">
+        Get an OS notification when someone shares a conversation with you and no Inkwest window
+        is focused. Applies to this browser only.
       </p>
     </div>
   );

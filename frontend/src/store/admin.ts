@@ -3,6 +3,7 @@
  */
 
 import { create } from 'zustand';
+import { disablePushForLogout } from '@/services/push';
 import {
   Budget,
   CreateBudgetRequest,
@@ -66,6 +67,9 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: async () => {
+    // Before the session dies: the DELETE needs auth, and a shared machine must stop getting
+    // this user's invites.
+    await disablePushForLogout();
     try {
       await adminApi.logout();
     } finally {

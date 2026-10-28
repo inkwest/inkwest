@@ -8,6 +8,7 @@ render on SQLite so we exercise the actual SQL — not just assert its text.
 per-test marker is needed.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -348,6 +349,7 @@ async def test_lifespan_survives_reconcile_failure(monkeypatch: Any) -> None:
             sandbox_enabled=False,
             llm_broker_enabled=False,
             metrics_enabled=False,
+            push_enabled=False,
             version="test",
             commit_hash="test",
             build_timestamp="test",
@@ -390,6 +392,7 @@ async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
             sandbox_enabled=False,
             llm_broker_enabled=False,
             metrics_enabled=False,
+            push_enabled=False,
             version="test",
             commit_hash="test",
             build_timestamp="test",
@@ -419,13 +422,16 @@ async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
     fake_logger.exception.assert_called_once_with("purge_empty_sessions_failed")
 
 
-def _broker_lifespan_settings(*, llm_broker_enabled: bool) -> SimpleNamespace:
+def _broker_lifespan_settings(
+    *, llm_broker_enabled: bool, push_enabled: bool = False
+) -> SimpleNamespace:
     return SimpleNamespace(
         oidc_enabled=False,
         connectors_enabled=False,
         sandbox_enabled=False,
         llm_broker_enabled=llm_broker_enabled,
         metrics_enabled=False,
+        push_enabled=push_enabled,
         version="test",
         commit_hash="test",
         build_timestamp="test",
@@ -473,6 +479,66 @@ async def test_lifespan_broker_enabled_single_worker_starts(monkeypatch: Any) ->
 
     async with app_main.lifespan(app_main.app):
         pass
+
+
+async def test_lifespan_exit_cancels_in_flight_invite(monkeypatch: Any) -> None:
+    """003: an invite in flight at shutdown is cancelled before the client closes, and a
+    previous lifespan in the same process does not leave invites refused."""
+    from app.services import web_push
+
+    monkeypatch.setattr(app_main, "logger", MagicMock())
+    monkeypatch.setattr(
+        app_main, "settings", _broker_lifespan_settings(llm_broker_enabled=False, push_enabled=True)
+    )
+    _patch_lifespan_startup(monkeypatch)
+    started = asyncio.Event()
+
+    async def in_flight(**_: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(web_push, "send_share_invite", in_flight)
+
+    async def second_lifespan() -> asyncio.Task[None]:
+        async with app_main.lifespan(app_main.app):
+            web_push.schedule_share_invite(
+                user_id=uuid.uuid4(),
+                share_id=uuid.uuid4(),
+                session_id=uuid.uuid4(),
+                session_title="t",
+                invited_by="n",
+            )
+            await started.wait()
+            [task] = web_push._tasks
+        return task
+
+    async with app_main.lifespan(app_main.app):
+        pass
+    # Bounded: a regressed cancel loop must fail here, not hang the suite.
+    task = await asyncio.wait_for(second_lifespan(), timeout=5)
+    assert task.cancelled()
+    assert not web_push._tasks
+    assert web_push._http is None
+
+
+@pytest.mark.parametrize("push_enabled", [True, False])
+async def test_lifespan_owns_the_push_client(monkeypatch: Any, push_enabled: bool) -> None:
+    """003: the shared push client opens at startup only when push is on, closes at shutdown."""
+    from app.services import web_push
+
+    monkeypatch.setattr(app_main, "logger", MagicMock())
+    monkeypatch.setattr(
+        app_main,
+        "settings",
+        _broker_lifespan_settings(llm_broker_enabled=False, push_enabled=push_enabled),
+    )
+    _patch_lifespan_startup(monkeypatch)
+
+    async with app_main.lifespan(app_main.app):
+        client = web_push._http
+        assert (client is not None) is push_enabled
+    assert web_push._http is None
+    assert client is None or client.closed
 
 
 async def _session_ids(db: AsyncSession) -> set[uuid.UUID]:

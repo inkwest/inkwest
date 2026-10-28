@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { Header } from './Header';
 import { UpdateBanner } from './UpdateBanner';
 import { BackendBanner } from './BackendBanner';
+import { PushOptInBanner } from './PushOptInBanner';
 import { useSettingsStore } from '@/store/settings';
 
 const DEFAULT_WIDTH = 256;
@@ -57,6 +58,7 @@ export function ShellLayout({ sidebar, mainClassName = 'flex-1 overflow-hidden m
       {/* Full-width notices pinned to the very top of the window. */}
       <BackendBanner />
       <UpdateBanner />
+      <PushOptInBanner />
       <div className="flex flex-1 min-h-0">
       {sidebarOpen && (
         <div

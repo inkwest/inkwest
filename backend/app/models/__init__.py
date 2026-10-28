@@ -15,6 +15,7 @@ from app.models.mcp_user_token import McpUserToken
 from app.models.message import Message
 from app.models.model_registry import ModelRegistry
 from app.models.oidc_pending_state import OidcPendingState
+from app.models.push_subscription import PushSubscription
 from app.models.role_mapping import RoleKubeconfigMapping
 from app.models.session import ConfirmationMode, Session
 from app.models.session_share import SessionShare, ShareRole, ShareStatus
@@ -37,6 +38,7 @@ __all__ = [
     "SessionShareLink",
     "Message",
     "ModelRegistry",
+    "PushSubscription",
     "User",
     "RoleKubeconfigMapping",
     "Budget",

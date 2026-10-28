@@ -7,6 +7,7 @@ rather than boot green with the default JWT secret or unauthenticated dev-admin 
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from app.core.config import validate_settings
 
@@ -31,6 +32,9 @@ def _settings(**over):
         "aws_sso_role_filter": None,
         "aws_region": "us-east-1",
         "llm_broker_enabled": False,
+        "vapid_public_key": "",
+        "vapid_private_key": SecretStr(""),
+        "vapid_subject": "",
     }
     base.update(over)
     return MagicMock(**base)

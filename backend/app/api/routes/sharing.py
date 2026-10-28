@@ -35,6 +35,7 @@ from app.models.session_share_link import SessionShareLink
 from app.models.user import User
 from app.services.pubsub import notify
 from app.services.session_access import check_real_owner, check_session_owner
+from app.services.web_push import schedule_share_invite
 
 router = APIRouter(tags=["sharing"])
 
@@ -166,6 +167,14 @@ async def create_share(
             "invited_by": current_user.display_name,
         },
         user_id=str(body.user_id),
+    )
+    # OS notification for an invitee with no Inkwest tab open; never delays this response.
+    schedule_share_invite(
+        user_id=body.user_id,
+        share_id=share.id,
+        session_id=session_id,
+        session_title=session.title,
+        invited_by=current_user.display_name,
     )
 
     return ParticipantResponse(
