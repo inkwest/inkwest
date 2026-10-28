@@ -1,5 +1,7 @@
 // Admin types for budget, user, and role management
 
+import type { Announcement } from './api';
+
 // ============================================================================
 // User Types
 // ============================================================================
@@ -289,3 +291,19 @@ export interface UpdateMcpOauthServerRequest {
   client_secret?: string | null;
   enabled?: boolean;
 }
+
+// ============================================================================
+// Announcement Types (spec 004)
+// ============================================================================
+
+export interface AnnouncementAdmin extends Announcement {
+  enabled: boolean;
+  created_by: string | null;
+  created_at: string;
+}
+
+// POST and PUT body; a PUT is a full replace, so every field is sent.
+export type AnnouncementWrite = Pick<
+  AnnouncementAdmin,
+  'message' | 'level' | 'color' | 'text_color' | 'opacity' | 'dismissible' | 'enabled' | 'ends_at'
+>;

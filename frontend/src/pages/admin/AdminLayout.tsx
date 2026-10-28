@@ -11,6 +11,7 @@ import {
   Info,
   Wallet,
   ArrowLeft,
+  Megaphone,
 } from 'lucide-react';
 import { useAuthStore } from '@/store/admin';
 import { ShellLayout } from '@/components/layout/ShellLayout';
@@ -27,6 +28,7 @@ const navGroups: { label?: string; items: { to: string; icon: typeof Cpu; label:
       { to: '/admin/system-prompts', icon: Terminal, label: 'System Prompts' },
       { to: '/admin/skills', icon: FileText, label: 'Skills' },
       { to: '/admin/mcp', icon: Plug, label: 'MCP Servers' },
+      { to: '/admin/announcements', icon: Megaphone, label: 'Announcements' },
     ],
   },
   { label: 'Access', items: [{ to: '/admin/users', icon: Users, label: 'Users' }] },

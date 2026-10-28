@@ -27,6 +27,8 @@ import {
   McpOauthServer,
   CreateMcpOauthServerRequest,
   UpdateMcpOauthServerRequest,
+  AnnouncementAdmin,
+  AnnouncementWrite,
 } from '@/types/admin';
 
 // Re-exported so existing `adminApi.UsageDateRange` / `adminApi.UsageTimeseriesPoint`
@@ -651,4 +653,30 @@ export async function deleteMcpOauthServer(key: string): Promise<McpOauthServer[
   return fetchAPI(`/api/admin/mcp-oauth/${encodeURIComponent(key)}`, {
     method: 'DELETE',
   });
+}
+
+// ============================================================================
+// Announcements API (spec 004)
+// ============================================================================
+
+export async function getAdminAnnouncements(): Promise<AnnouncementAdmin[]> {
+  return fetchAPI('/api/admin/announcements');
+}
+
+export async function createAnnouncement(data: AnnouncementWrite): Promise<AnnouncementAdmin> {
+  return fetchAPI('/api/admin/announcements', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateAnnouncement(id: string, data: AnnouncementWrite): Promise<AnnouncementAdmin> {
+  return fetchAPI(`/api/admin/announcements/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteAnnouncement(id: string): Promise<void> {
+  return fetchAPI(`/api/admin/announcements/${id}`, { method: 'DELETE' });
 }

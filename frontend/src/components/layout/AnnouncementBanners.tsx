@@ -4,46 +4,13 @@ import remarkGfm from 'remark-gfm';
 import { X } from 'lucide-react';
 import type { Components } from 'react-markdown';
 import { useAnnouncementsStore } from '@/store/announcements';
-import type { Announcement, AnnouncementLevel } from '@/types/api';
+import { LEVEL_BG, textColorFor, withOpacity } from '@/lib/announcementColors';
+import type { Announcement } from '@/types/api';
 
 const DISMISSED_STORAGE_KEY = 'inkwest.announcements.dismissed.v1';
 
 // setTimeout treats a delay above 2^31-1 ms as 0: a far expiry must not fire at once.
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
-
-// Tailwind blue-600, green-700, amber-500, red-600 as hex so opacity can go through rgba().
-// green-700, not 600: white on green-600 is 3.3:1, below AA.
-const LEVEL_BG: Record<AnnouncementLevel, string> = {
-  info: '#2563eb',
-  success: '#15803d',
-  warning: '#f59e0b',
-  danger: '#dc2626',
-};
-
-// A translucent bar is seen over ShellLayout's bg-gray-900, so text is picked on the blend.
-const SHELL_BG = [0x11, 0x18, 0x27];
-
-function rgbOf(hex: string): [number, number, number] {
-  const n = parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-// Black or white, whichever contrasts more (WCAG) with the color as drawn: the max of the two
-// is always >= 4.58:1, and at 100% it gives each level its own text (white, black on amber).
-function textColorFor(hex: string, percent: number): 'black' | 'white' {
-  const alpha = percent / 100;
-  const [r, g, b] = rgbOf(hex).map((c, i) => {
-    const s = (c * alpha + SHELL_BG[i] * (1 - alpha)) / 255;
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  });
-  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  return (lum + 0.05) / 0.05 >= 1.05 / (lum + 0.05) ? 'black' : 'white';
-}
-
-function withOpacity(hex: string, percent: number): string {
-  const rgb = rgbOf(hex).join(', ');
-  return percent >= 100 ? `rgb(${rgb})` : `rgba(${rgb}, ${percent / 100})`;
-}
 
 const dismissalKey = (a: Announcement) => `${a.id}:${a.updated_at}`;
 const expiresAt = (a: Announcement) => (a.ends_at ? Date.parse(a.ends_at) : NaN);
@@ -83,6 +50,55 @@ const components: Components = {
   code: ({ children }) => <code className="rounded bg-black/20 px-1 font-mono text-[0.9em]">{children}</code>,
 };
 
+// One banner as users see it; shared with the admin list and preview (004-AC7). `decorative`
+// drops the live region and the close button so console copies neither announce nor dismiss.
+export function AnnouncementBar({
+  announcement: a,
+  onDismiss,
+  decorative = false,
+}: {
+  announcement: Announcement;
+  onDismiss?: () => void;
+  decorative?: boolean;
+}) {
+  const bg = a.color ?? LEVEL_BG[a.level];
+  return (
+    <div
+      role={decorative ? undefined : 'status'}
+      data-level={a.level}
+      className="px-4 py-2 flex items-center gap-2 text-sm"
+      style={{ backgroundColor: withOpacity(bg, a.opacity), color: a.text_color ?? textColorFor(bg, a.opacity) }}
+    >
+      <span className="flex-1 min-w-0 break-words">
+        <ReactMarkdown
+          remarkPlugins={remarkPlugins}
+          allowedElements={ALLOWED_ELEMENTS}
+          unwrapDisallowed
+          urlTransform={safeUrl}
+          components={components}
+        >
+          {a.message}
+        </ReactMarkdown>
+      </span>
+      {a.dismissible &&
+        (decorative ? (
+          <span aria-hidden="true" className="shrink-0 opacity-70">
+            <X className="h-4 w-4" />
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss announcement"
+            className="shrink-0 opacity-70 hover:opacity-100"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        ))}
+    </div>
+  );
+}
+
 // Admin-authored notices (spec 004), oldest first. Renders nothing when there is nothing to show.
 export function AnnouncementBanners() {
   const items = useAnnouncementsStore((s) => s.items);
@@ -92,7 +108,7 @@ export function AnnouncementBanners() {
   // Bumped by the expiry timer to re-render at the nearest ends_at.
   const [tick, setTick] = useState(0);
 
-  // The admin console has no sync socket: regaining focus is its refresh trigger (004-AC3).
+  // The admin console has no sync socket: the tab becoming visible is its refresh trigger (004-AC3).
   useEffect(() => {
     void refresh();
     const onVisible = () => {
@@ -144,40 +160,9 @@ export function AnnouncementBanners() {
 
   return (
     <>
-      {visible.map((a) => {
-        const bg = a.color ?? LEVEL_BG[a.level];
-        return (
-          <div
-            key={a.id}
-            role="status"
-            data-level={a.level}
-            className="px-4 py-2 flex items-center gap-2 text-sm"
-            style={{ backgroundColor: withOpacity(bg, a.opacity), color: a.text_color ?? textColorFor(bg, a.opacity) }}
-          >
-            <span className="flex-1 min-w-0 break-words">
-              <ReactMarkdown
-                remarkPlugins={remarkPlugins}
-                allowedElements={ALLOWED_ELEMENTS}
-                unwrapDisallowed
-                urlTransform={safeUrl}
-                components={components}
-              >
-                {a.message}
-              </ReactMarkdown>
-            </span>
-            {a.dismissible && (
-              <button
-                type="button"
-                onClick={() => dismiss(a)}
-                aria-label="Dismiss announcement"
-                className="shrink-0 opacity-70 hover:opacity-100"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            )}
-          </div>
-        );
-      })}
+      {visible.map((a) => (
+        <AnnouncementBar key={a.id} announcement={a} onDismiss={() => dismiss(a)} />
+      ))}
     </>
   );
 }

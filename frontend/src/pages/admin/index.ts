@@ -10,3 +10,4 @@ export { BudgetsPage } from './BudgetsPage';
 export { ModelSettingsPage } from './ModelSettingsPage';
 export { McpServersPage } from './McpServersPage';
 export { SystemInfoPage } from './SystemInfoPage';
+export { AnnouncementsPage } from './AnnouncementsPage';

@@ -53,7 +53,7 @@ Admin-managed banners, without a ticker or audience targeting.
       `GET /api/announcements` and from the page.
 - [ ] **AC3** Given an open app tab, when an admin creates, edits, disables or deletes a banner,
       then the tab reflects it within 5 s without a reload. An admin-console tab reflects it after
-      its own write, or when it regains focus.
+      its own write, or when its tab becomes visible again.
 - [ ] **AC4** Given a dismissible banner, when the user closes it and reloads, then it stays
       hidden; when an admin then edits it, it shows again.
 - [ ] **AC5** A non-dismissible banner has no close button.
@@ -135,12 +135,12 @@ Partial index on `(created_at) WHERE enabled`.
 - Create refuses a past `ends_at`; update accepts it, as a way to retire a banner.
 - Live refresh reuses the sync socket broadcast (precedent `mcp_catalog_changed`) instead of a poll.
 - Read route uncached: one indexed query per tab on load (two in the app: mount, then sync socket
-  open), on focus, on reconnect and per broadcast; add a short cache if it ever shows in latency.
+  open), when the tab becomes visible, on reconnect and per broadcast; add a short cache if it ever shows in latency.
 - Writes are logged (`announcement_created|updated|deleted`, id, admin id), not written to
   `connector_audit_log`, which records connector access grants.
 - Level colors come from the Tailwind palette already used by the app's banners (blue, green,
   amber, red), in hex so opacity can apply through `rgba()`.
 - The admin console has no sync socket (only the chat layout mounts it), so AC3's live push
-  applies to app tabs; admin tabs refetch after their own writes and when the tab regains focus.
+  applies to app tabs; admin tabs refetch after their own writes and when the tab becomes visible again.
   Mounting the sync socket in the console would also start session sync and the MCP DEK handshake
   there.
