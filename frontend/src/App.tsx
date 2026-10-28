@@ -20,6 +20,7 @@ import {
   ModelSettingsPage,
   McpServersPage,
   SystemInfoPage,
+  AnnouncementsPage,
 } from '@/pages/admin';
 import { useSettingsStore } from '@/store/settings';
 import { useAuthStore } from '@/store/admin';
@@ -118,6 +119,7 @@ function App() {
           <Route path="budgets" element={<BudgetsPage />} />
           <Route path="model" element={<ModelSettingsPage />} />
           <Route path="mcp" element={<McpServersPage />} />
+          <Route path="announcements" element={<AnnouncementsPage />} />
           <Route path="system-info" element={<SystemInfoPage />} />
         </Route>
       </Routes>

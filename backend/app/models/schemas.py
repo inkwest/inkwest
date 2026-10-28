@@ -2,11 +2,20 @@
 Pydantic schemas for API request/response validation.
 """
 
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    computed_field,
+    field_validator,
+)
 
 from app.core.push_keys import (
     b64url_decode,
@@ -691,6 +700,101 @@ class PushSubscriptionUpsert(PushSubscriptionEndpoint):
         if not is_push_service_url(v):
             raise ValueError("host is not a known browser push service")
         return v
+
+
+# ---- Announcement banners (/api/announcements, spec 004) ------------------- //
+# Bounds mirrored by the table CHECKs (migration 20261028000000_announcements.sql).
+ANNOUNCEMENT_MESSAGE_MAX_LENGTH = 500
+ANNOUNCEMENT_OPACITY_MIN = 10
+ANNOUNCEMENT_OPACITY_MAX = 100
+ANNOUNCEMENT_COLOR_PATTERN = r"^#[0-9a-fA-F]{6}$"
+
+AnnouncementLevel = Literal["info", "success", "warning", "danger"]
+
+
+def _strip_isspace(v: object) -> object:
+    return v.strip() if isinstance(v, str) else v
+
+
+AnnouncementMessage = Annotated[
+    str,
+    # str.strip(), not strip_whitespace: pydantic keeps U+001C-001F, which the DB CHECK refuses.
+    BeforeValidator(_strip_isspace),
+    StringConstraints(
+        min_length=1,
+        max_length=ANNOUNCEMENT_MESSAGE_MAX_LENGTH,
+        # Postgres TEXT cannot store NUL: refuse it here rather than 500 on INSERT.
+        pattern=r"^[^\x00]*$",
+    ),
+]
+AnnouncementColor = Annotated[str, StringConstraints(pattern=ANNOUNCEMENT_COLOR_PATTERN)]
+
+
+class AnnouncementWrite(BaseModel):
+    """Admin-editable fields, shared by POST and PUT (a PUT is a full replace)."""
+
+    message: AnnouncementMessage
+    level: AnnouncementLevel
+    color: AnnouncementColor | None = None
+    text_color: AnnouncementColor | None = None
+    opacity: int = Field(
+        ANNOUNCEMENT_OPACITY_MAX, ge=ANNOUNCEMENT_OPACITY_MIN, le=ANNOUNCEMENT_OPACITY_MAX
+    )
+    # Required, not defaulted: a PUT that forgot `enabled` must not silently switch the banner off.
+    dismissible: bool
+    enabled: bool
+    # Aware only: a naive datetime leaves the admin's timezone to a guess.
+    ends_at: AwareDatetime | None = None
+
+    @field_validator("ends_at")
+    @classmethod
+    def _ends_at_in_utc_range(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return v
+        try:
+            # asyncpg converts to UTC on write: an offset can push year 1 or 9999 out of range.
+            return v.astimezone(UTC)
+        except OverflowError:
+            raise ValueError("ends_at is out of range once converted to UTC") from None
+
+
+class AnnouncementCreate(AnnouncementWrite):
+    """Create refuses a past expiry (the row would be born invisible).
+
+    Update does not: a past ``ends_at`` is how an admin retires a banner.
+    """
+
+    @field_validator("ends_at")
+    @classmethod
+    def _ends_in_the_future(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v <= datetime.now(UTC):
+            raise ValueError("ends_at must be in the future")
+        return v
+
+
+class AnnouncementPublic(BaseModel):
+    """What every signed-in user receives: no author, no `enabled` (always true here)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    message: str
+    level: AnnouncementLevel
+    color: str | None
+    text_color: str | None
+    opacity: int
+    dismissible: bool
+    # Served so the front withdraws the banner at the exact minute, not at the next refetch.
+    ends_at: datetime | None
+    updated_at: datetime
+
+
+class AnnouncementAdmin(AnnouncementPublic):
+    """The full row, for the admin console."""
+
+    enabled: bool
+    created_by: UUID | None
+    created_at: datetime
 
 
 # ---- Usage reports ----------------------------------------------------------- //

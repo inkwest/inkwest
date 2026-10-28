@@ -29,14 +29,15 @@ export interface ModalProps extends HTMLAttributes<HTMLDivElement> {
 // What the focus trap counts as tabbable inside the dialog. tabindex="-1" is excluded on
 // every branch (an element removed from the tab order must not become a wrap target —
 // focus() on it would succeed but the user couldn't Tab away from it as an edge).
+// :disabled, not [disabled]: it also covers controls inside a disabled <fieldset>.
 // Known limitation: visibility (display:none etc.) isn't checked; keep dialog edges free
 // of hidden focusables.
 const FOCUSABLE = [
   'a[href]',
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
+  'button:not(:disabled)',
+  'input:not(:disabled)',
+  'select:not(:disabled)',
+  'textarea:not(:disabled)',
   '[tabindex]',
 ]
   .map((s) => `${s}:not([tabindex="-1"])`)

@@ -6,6 +6,7 @@ import { useUpdateStore } from '@/store/update';
 import { useInvitesStore } from '@/store/invites';
 import { useBackendStore } from '@/store/backend';
 import { useMcpStore } from '@/store/mcp';
+import { useAnnouncementsStore } from '@/store/announcements';
 import { fetchWsTicket, getVersion, wsBaseUrl } from '@/services/api';
 import { jitteredBackoff, createReconnectBudget, RECONNECT_BUDGET_MS } from '@/lib/backoff';
 import { dekReply } from '@/lib/mcpDek';
@@ -103,6 +104,8 @@ export function useSyncSocket() {
         reconnectBudget.reset(); // recovered — grant a fresh give-up budget
         // A live socket is proof the backend is reachable — clear the global banner.
         useBackendStore.getState().reachable();
+        // Recovers an announcements_changed broadcast missed while disconnected.
+        void useAnnouncementsStore.getState().refresh();
         // Baseline the build on first connect, compare on every reconnect: a
         // deploy that dropped this socket bumps the backend version, so a
         // differing reading surfaces the reload banner. Best-effort.
@@ -155,6 +158,11 @@ export function useSyncSocket() {
           if (data.type === 'mcp_catalog_changed') {
             resetMcpCatalogCache();
             useMcpStore.getState().bumpCatalogVersion();
+            return;
+          }
+          // Global, not a session event: same early return as mcp_catalog_changed.
+          if (data.type === 'announcements_changed') {
+            void useAnnouncementsStore.getState().refresh();
             return;
           }
           // Access was just revoked — surface a polite notice (with the title).

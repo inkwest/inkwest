@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as adminApi from '@/services/adminApi';
-import { useAuthStore, useSystemInfoStore } from './admin';
+import { useAnnouncementAdminStore, useAuthStore, useSystemInfoStore } from './admin';
+import type { AnnouncementAdmin } from '@/types/admin';
 import { LOGOUT_PUSH_TIMEOUT_MS } from '@/services/push';
 import { hangUntilAborted, installPushEnv, stubFetch, uninstallPushEnv } from '@/test/pushEnv';
 
@@ -131,5 +132,70 @@ describe('useAuthStore.logout push cleanup', () => {
     const { calls } = stubFetch(() => new Response(null, { status: 204 }));
     await useAuthStore.getState().logout();
     expect(calls.map(route)).toEqual([`POST ${LOGOUT}`]);
+  });
+});
+
+describe('useAnnouncementAdminStore.fetchAnnouncements', () => {
+  const row = (message: string): AnnouncementAdmin => ({
+    id: 'a1',
+    message,
+    level: 'info',
+    color: null,
+    text_color: null,
+    opacity: 100,
+    dismissible: true,
+    enabled: true,
+    ends_at: null,
+    updated_at: '2026-10-28T10:00:00Z',
+    created_by: null,
+    created_at: '2026-10-28T09:00:00Z',
+  });
+  const deferred = <T,>() => {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => ((resolve = res), (reject = rej)));
+    return { promise, resolve, reject };
+  };
+
+  beforeEach(() => {
+    useAnnouncementAdminStore.setState({ announcements: [], isLoading: false, error: null });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the newer list when two reloads answer out of order', async () => {
+    const older = deferred<AnnouncementAdmin[]>();
+    const newer = deferred<AnnouncementAdmin[]>();
+    vi.spyOn(adminApi, 'getAdminAnnouncements').mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    const { fetchAnnouncements } = useAnnouncementAdminStore.getState();
+    const first = fetchAnnouncements();
+    const second = fetchAnnouncements();
+    newer.resolve([row('new')]);
+    await second;
+    older.resolve([row('old')]);
+    await first;
+    expect(useAnnouncementAdminStore.getState().announcements.map((a) => a.message)).toEqual(['new']);
+  });
+
+  it('ignores a stale failure once a newer reload has answered', async () => {
+    const older = deferred<AnnouncementAdmin[]>();
+    vi.spyOn(adminApi, 'getAdminAnnouncements').mockReturnValueOnce(older.promise).mockResolvedValueOnce([row('new')]);
+    const { fetchAnnouncements } = useAnnouncementAdminStore.getState();
+    const first = fetchAnnouncements();
+    await fetchAnnouncements();
+    older.reject(new Error('stale boom'));
+    await first;
+    expect(useAnnouncementAdminStore.getState().error).toBeNull();
+  });
+
+  it('shows the spinner on the first load only', async () => {
+    vi.spyOn(adminApi, 'getAdminAnnouncements').mockResolvedValue([row('x')]);
+    const pending = useAnnouncementAdminStore.getState().fetchAnnouncements();
+    expect(useAnnouncementAdminStore.getState().isLoading).toBe(true);
+    await pending;
+    const reload = useAnnouncementAdminStore.getState().fetchAnnouncements();
+    expect(useAnnouncementAdminStore.getState().isLoading).toBe(false);
+    await reload;
   });
 });

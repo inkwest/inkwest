@@ -263,3 +263,21 @@ export interface SearchResponse {
   results: SearchSessionHit[];
   total: number;
 }
+
+// Mirrors backend AnnouncementPublic (spec 004).
+export type AnnouncementLevel = 'info' | 'success' | 'warning' | 'danger';
+
+export interface Announcement {
+  id: string;
+  message: string;
+  level: AnnouncementLevel;
+  // '#rrggbb' or null (null = the level's color / automatic text).
+  color: string | null;
+  text_color: string | null;
+  // Background opacity in percent, 10..100.
+  opacity: number;
+  dismissible: boolean;
+  ends_at: string | null;
+  // Bumped on every edit; dismissal is keyed on it so an edit re-shows the banner.
+  updated_at: string;
+}

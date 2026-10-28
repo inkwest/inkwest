@@ -19,8 +19,11 @@ import {
   McpOauthServer,
   CreateMcpOauthServerRequest,
   UpdateMcpOauthServerRequest,
+  AnnouncementAdmin,
+  AnnouncementWrite,
 } from '@/types/admin';
 import * as adminApi from '@/services/adminApi';
+import { useAnnouncementsStore } from '@/store/announcements';
 
 // ============================================================================
 // Auth Store
@@ -628,3 +631,66 @@ export const useMcpServerStore = create<McpServerState>((set) => ({
 
   clearError: () => set({ error: null }),
 }));
+
+// ============================================================================
+// Announcements Store (spec 004)
+// ============================================================================
+
+interface AnnouncementAdminState {
+  announcements: AnnouncementAdmin[];
+  isLoading: boolean;
+  error: string | null;
+
+  fetchAnnouncements: () => Promise<void>;
+  // Writes throw so the form can show a 422's field messages and stay open.
+  createAnnouncement: (data: AnnouncementWrite) => Promise<void>;
+  updateAnnouncement: (id: string, data: AnnouncementWrite) => Promise<void>;
+  deleteAnnouncement: (id: string) => Promise<void>;
+  clearError: () => void;
+}
+
+// Close writes reload concurrently: only the latest request may land, else a stale row feeds the
+// next full-replace PUT.
+let announcementListSeq = 0;
+
+export const useAnnouncementAdminStore = create<AnnouncementAdminState>((set, get) => {
+  // The console has no sync socket: refresh this tab's banner stack after its own write (004-AC3).
+  const afterWrite = () =>
+    Promise.all([get().fetchAnnouncements(), useAnnouncementsStore.getState().refresh()]).then(() => {});
+  // A failed write reloads the list too: a 404 means another admin removed the row.
+  const write = async (call: () => Promise<unknown>) => {
+    try {
+      await call();
+    } catch (error) {
+      await get().fetchAnnouncements();
+      throw error;
+    }
+    await afterWrite();
+  };
+
+  return {
+    announcements: [],
+    isLoading: false,
+    error: null,
+
+    fetchAnnouncements: async () => {
+      const seq = ++announcementListSeq;
+      // Spinner on the first load only: a reload that swaps the table out drops keyboard focus.
+      set({ isLoading: get().announcements.length === 0, error: null });
+      try {
+        const announcements = await adminApi.getAdminAnnouncements();
+        if (seq !== announcementListSeq) return;
+        set({ announcements: Array.isArray(announcements) ? announcements : [], isLoading: false });
+      } catch (error) {
+        if (seq !== announcementListSeq) return;
+        set({ error: (error as Error).message, isLoading: false });
+      }
+    },
+
+    createAnnouncement: (data) => write(() => adminApi.createAnnouncement(data)),
+    updateAnnouncement: (id, data) => write(() => adminApi.updateAnnouncement(id, data)),
+    deleteAnnouncement: (id) => write(() => adminApi.deleteAnnouncement(id)),
+
+    clearError: () => set({ error: null }),
+  };
+});

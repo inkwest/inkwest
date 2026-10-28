@@ -6,5 +6,6 @@ phase against the DoD of the spec; reviews and tests are checked against its acc
 | # | Feature | Status | Depends on |
 |---|---|---|---|
 | [003](003-web-push-share-notifications.md) | Web Push notification on session share | shipped | — |
+| [004](004-announcement-banners.md) | Announcement banners | shipped | — |
 
 Status flow: `draft` → `approved` (human) → `in progress` → `shipped`.

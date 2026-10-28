@@ -1,4 +1,5 @@
 import {
+  Announcement,
   Cluster,
   ConfigExport,
   Message,
@@ -359,6 +360,10 @@ export interface VersionInfo {
 
 export async function getVersion(): Promise<VersionInfo> {
   return fetchAPI('/version');
+}
+
+export async function getAnnouncements(): Promise<Announcement[]> {
+  return fetchAPI('/api/announcements');
 }
 
 // Clusters

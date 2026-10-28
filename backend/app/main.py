@@ -21,6 +21,7 @@ from starlette.types import Scope
 
 from app.api.routes import (
     admin,
+    announcements,
     auth,
     chat,
     clusters,
@@ -303,6 +304,8 @@ app.include_router(sessions.search_router, prefix="/api")
 app.include_router(sharing.router, prefix="/api")  # Conversation sharing / collaboration
 app.include_router(auth.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(announcements.router, prefix="/api")  # Banners: read (any user) + admin CRUD
+app.include_router(announcements.admin_router, prefix="/api")
 app.include_router(usage.router, prefix="/api")  # Self-service usage reports (/api/me/usage)
 app.include_router(config.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")

@@ -47,6 +47,21 @@ describe('Modal focus trap', () => {
     expect(fireEvent.keyDown(first, { key: 'Tab' })).toBe(true);
   });
 
+  it('skips controls disabled through a <fieldset>', () => {
+    render(
+      <Modal isOpen onClose={vi.fn()}>
+        <fieldset disabled>
+          <input aria-label="locked" />
+        </fieldset>
+        <button>save</button>
+      </Modal>,
+    );
+    const save = screen.getByRole('button', { name: 'save' });
+    (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.keyDown(document.body, { key: 'Tab' });
+    expect(save).toHaveFocus();
+  });
+
   it('Tab is swallowed when the dialog has no focusable element', () => {
     render(
       <Modal isOpen onClose={vi.fn()}>
