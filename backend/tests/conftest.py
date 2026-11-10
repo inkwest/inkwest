@@ -36,6 +36,10 @@ os.environ["AGENTIC_ENGINES"] = "claude-cli,inkwest-agent"
 # auth (OIDC off → auto dev user) and backend-local kubectl paths (no sandbox projection).
 # Force the CI/host defaults; a test needing the sandbox/OIDC path overrides via monkeypatch.
 os.environ["OIDC_ENABLED"] = "false"
+# Pin the code defaults so a local backend/.env (the dev example turns the sandbox off) never
+# changes what the suite runs against.
+os.environ["SANDBOX_ENABLED"] = "true"
+os.environ["LLM_BROKER_ENABLED"] = "true"
 os.environ.pop("SANDBOX_CREDS_ROOT", None)
 
 # Disable the per-IP HTTP rate limiter for the suite: API tests fire many requests from a

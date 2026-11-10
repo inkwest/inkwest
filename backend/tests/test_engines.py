@@ -266,6 +266,10 @@ def _validate_settings_stub(**overrides):
         aws_region=None,
         llm_broker_enabled=False,
         sandbox_enabled=True,
+        sandbox_toolbox_image="toolbox:test",
+        sandbox_squid_image="squid:test",
+        mcp_proxy_base_url="https://inkwest.test",
+        llm_broker_base_url="",
         aws_bearer_token_bedrock=None,
         connectors_enabled=False,
         aws_sso_role_filter=None,
@@ -305,7 +309,7 @@ def test_validate_settings_requires_region_when_broker_on():
             engines, "get_settings", return_value=_engine_settings("claude-cli", "opencode")
         ),
     ):
-        with pytest.raises(ValueError, match="AWS_REGION is required"):
+        with pytest.raises(ValueError, match="AWS_REGION is required.*LLM_BROKER_ENABLED=false"):
             config_mod.validate_settings()
 
 
@@ -319,6 +323,112 @@ def test_validate_settings_broker_on_sandbox_off_needs_no_aws():
         patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
     ):
         config_mod.validate_settings()  # must not raise
+
+
+def test_sandbox_and_broker_default_on():
+    from app.core.config import Settings
+
+    assert Settings.model_fields["sandbox_enabled"].default is True
+    assert Settings.model_fields["llm_broker_enabled"].default is True
+
+
+def test_validate_settings_requires_toolbox_image_when_sandbox_on():
+    # Sandbox on by default: an install that never set an image must fail at boot, naming the
+    # opt-out, not on every turn's `docker image inspect ''`.
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(sandbox_toolbox_image="")
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        match = "^SANDBOX_TOOLBOX_IMAGE required.*SANDBOX_ENABLED=false"
+        with pytest.raises(ValueError, match=match):
+            config_mod.validate_settings()
+
+
+def test_validate_settings_requires_squid_image_when_sandbox_on():
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(sandbox_squid_image="")
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        with pytest.raises(ValueError, match="^SANDBOX_SQUID_IMAGE required"):
+            config_mod.validate_settings()
+
+
+def test_validate_settings_names_both_missing_images():
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(sandbox_toolbox_image="", sandbox_squid_image="")
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        with pytest.raises(
+            ValueError, match="^SANDBOX_TOOLBOX_IMAGE and SANDBOX_SQUID_IMAGE required"
+        ):
+            config_mod.validate_settings()
+
+
+def test_validate_settings_requires_broker_host_when_broker_on():
+    # No host = broker_base_url() falls back to the real bearer in the sandbox every turn.
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(
+        llm_broker_enabled=True,
+        aws_bearer_token_bedrock="tok",
+        aws_region="eu-west-1",
+        mcp_proxy_base_url="",
+    )
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        with pytest.raises(ValueError, match="LLM_BROKER_BASE_URL or MCP_PROXY_BASE_URL"):
+            config_mod.validate_settings()
+
+
+def test_validate_settings_broker_host_from_llm_broker_base_url_alone():
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(
+        llm_broker_enabled=True,
+        aws_bearer_token_bedrock="tok",
+        aws_region="eu-west-1",
+        mcp_proxy_base_url="",
+        llm_broker_base_url="http://inkwest-backend.internal:8000",
+    )
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        config_mod.validate_settings()  # must not raise
+
+
+def test_validate_settings_sandbox_off_needs_no_toolbox_image():
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(sandbox_enabled=False, sandbox_toolbox_image="")
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        config_mod.validate_settings()  # must not raise
+
+
+def test_validate_settings_broker_error_names_opt_out():
+    from app.core import config as config_mod
+
+    stub = _validate_settings_stub(llm_broker_enabled=True, aws_region="eu-west-1")
+    with (
+        patch.object(config_mod, "get_settings", return_value=stub),
+        patch.object(engines, "get_settings", return_value=_engine_settings("claude-cli")),
+    ):
+        with pytest.raises(ValueError, match="LLM_BROKER_ENABLED=false"):
+            config_mod.validate_settings()
 
 
 def test_validate_settings_opencode_broker_off_needs_no_aws():

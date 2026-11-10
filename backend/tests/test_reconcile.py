@@ -423,12 +423,12 @@ async def test_lifespan_survives_purge_failure(monkeypatch: Any) -> None:
 
 
 def _broker_lifespan_settings(
-    *, llm_broker_enabled: bool, push_enabled: bool = False
+    *, llm_broker_enabled: bool, push_enabled: bool = False, sandbox_enabled: bool = False
 ) -> SimpleNamespace:
     return SimpleNamespace(
         oidc_enabled=False,
         connectors_enabled=False,
-        sandbox_enabled=False,
+        sandbox_enabled=sandbox_enabled,
         llm_broker_enabled=llm_broker_enabled,
         metrics_enabled=False,
         push_enabled=push_enabled,
@@ -461,13 +461,31 @@ async def test_lifespan_fails_fast_when_broker_enabled_multi_worker(monkeypatch:
     """The in-process grant store assumes single-worker; enabling the broker under
     WEB_CONCURRENCY>1 must refuse to start rather than 401 every model call at runtime."""
     monkeypatch.setattr(app_main, "logger", MagicMock())
-    monkeypatch.setattr(app_main, "settings", _broker_lifespan_settings(llm_broker_enabled=True))
+    monkeypatch.setattr(
+        app_main,
+        "settings",
+        _broker_lifespan_settings(llm_broker_enabled=True, sandbox_enabled=True),
+    )
     monkeypatch.setenv("WEB_CONCURRENCY", "2")
     _patch_lifespan_startup(monkeypatch)
+    monkeypatch.setattr(app_main, "reap_orphans", AsyncMock())
+    monkeypatch.setattr(app_main, "start_sandbox_reaper", MagicMock())
 
     with pytest.raises(RuntimeError, match="single worker"):
         async with app_main.lifespan(app_main.app):
             pass
+
+
+async def test_lifespan_broker_on_sandbox_off_multi_worker_starts(monkeypatch: Any) -> None:
+    """Broker on by default but inert without the sandbox (no grant is minted), so
+    WEB_CONCURRENCY>1 must not refuse to boot a sandbox-off deployment."""
+    monkeypatch.setattr(app_main, "logger", MagicMock())
+    monkeypatch.setattr(app_main, "settings", _broker_lifespan_settings(llm_broker_enabled=True))
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    _patch_lifespan_startup(monkeypatch)
+
+    async with app_main.lifespan(app_main.app):
+        pass
 
 
 async def test_lifespan_broker_enabled_single_worker_starts(monkeypatch: Any) -> None:

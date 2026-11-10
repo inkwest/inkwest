@@ -16,6 +16,9 @@ cd kubepanion
 
 # Copy example env and configure your AI provider
 cp .env.example .env
+# Backend-only knobs. The app turns the per-conversation sandbox on by default; this
+# example keeps it off until you have a toolbox image (see backend/.env.example).
+cp backend/.env.example backend/.env
 ```
 
 Edit `.env`. There is no AI_PROVIDER: inference runs through the Claude Code CLI

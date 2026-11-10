@@ -175,7 +175,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # that look like a bug at 3 AM. Fail fast on the one multi-process case we can detect here
     # (uvicorn/gunicorn workers); cross-host replicas can't be seen from app code and need
     # single-replica deployment or sticky routing (documented in docs/llm-auth-broker.md).
-    if settings.llm_broker_enabled:
+    # Gated on the sandbox too: without it no grant is ever minted, so workers are harmless.
+    if settings.llm_broker_enabled and settings.sandbox_enabled:
         workers = int(os.environ.get("WEB_CONCURRENCY", "1") or "1")
         if workers > 1:
             raise RuntimeError(

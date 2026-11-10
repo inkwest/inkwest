@@ -74,8 +74,9 @@ It also solves the permissions problem. Instead of handing out broad access "jus
 git clone https://github.com/kubepanion/kubepanion.git
 cd kubepanion
 
-# Copy environment template
+# Copy environment templates
 cp .env.example .env
+cp backend/.env.example backend/.env  # sandbox knobs; the sandbox stays off until you set it up
 # Edit .env with your configuration (Claude CLI works by default!)
 
 # Start all services

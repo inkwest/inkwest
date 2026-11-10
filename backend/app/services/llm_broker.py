@@ -50,8 +50,9 @@ def broker_base_url() -> str | None:
     # OAuth2 redirects. Unset ⇒ inherit that host, which is the previous behavior.
     base = settings.llm_broker_base_url or settings.mcp_proxy_base_url
     if not base:
+        # validate_settings refuses this at boot with the sandbox on; kept as defence in depth.
         # Enabled but unreachable: the sandbox can't egress to a broker that has no host (the
-        # squid allowlist + --add-host both key off mcp_proxy_base_url). Fall back to direct
+        # squid allowlist + --add-host both key off the broker host). Fall back to direct
         # Bedrock rather than break model calls — but this RE-EXPOSES the real bearer in the
         # sandbox env-file (the exact posture the broker removes), so log at ERROR (alertable),
         # not WARNING: a misconfiguration here is a silent security regression, not a hiccup.

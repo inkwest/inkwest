@@ -1,7 +1,7 @@
 # Inkwest — Message flow (user → Claude)
 
 Diagrams of a message's path in **`claude-cli`** mode (current config), plus
-the variants (API providers, sandbox). The secret never crosses the frontend or
+the API-provider variant and the default sandbox flow. The secret never crosses the frontend or
 the prompt: it is injected into the `claude` process environment on the backend side.
 
 ## 1. Component view (flowchart)
@@ -100,7 +100,7 @@ flowchart LR
     X -->|"result (no secret)"| M
 ```
 
-## 4. Variant — sandbox (implemented, `SANDBOX_ENABLED=true`)
+## 4. Default — sandbox (`SANDBOX_ENABLED=true`)
 
 Strong isolation: **one container pair per conversation** (reused from one
 message to the next, for `--resume`) instead of running `claude` in the backend
@@ -140,6 +140,6 @@ flowchart TD
 - **History**: in `claude-cli`, held by Claude Code via `--resume <cli_session_id>`
   (Inkwest stores the ID in DB).
 - **Conversation isolation**: distinct cwd `/tmp/inkwest-sessions/<sid>` per session.
-- **Filesystem/network isolation**: by default `claude` runs in the backend
-  container (filesystem access, unrestricted egress); with `SANDBOX_ENABLED=true` each
-  conversation is isolated in its toolbox+squid pair (§4).
+- **Filesystem/network isolation**: by default (`SANDBOX_ENABLED=true`) each
+  conversation is isolated in its toolbox+squid pair (§4); with `SANDBOX_ENABLED=false`
+  `claude` runs in the backend container (filesystem access, unrestricted egress).

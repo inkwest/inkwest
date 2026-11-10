@@ -214,8 +214,10 @@ class Settings(BaseSettings):
     # squid proxy on an internal-only network; the toolbox's only egress path is the
     # proxy's domain allowlist. The backend drives the host Docker daemon via the
     # `docker` CLI (Docker-out-of-Docker). See app.services.sandbox.
+    # On by default: off runs the engine inside the backend container, with its filesystem and
+    # unrestricted egress. Turning it off is an explicit operator choice (SANDBOX_ENABLED=false).
     # ==========================================================================
-    sandbox_enabled: bool = False
+    sandbox_enabled: bool = True
     sandbox_docker_path: str = "docker"
     sandbox_toolbox_image: str = ""  # claude-toolbox image (claude + kubectl + aws)
     # Image the broker spawns the inkwest-agent worker in (P1.3). Empty = reuse
@@ -343,11 +345,12 @@ class Settings(BaseSettings):
     # minted per turn, swaps it for the backend-held aws_bearer_token_bedrock, and forwards
     # to real Bedrock. The sandbox holds only the grant + the broker base URL (which rides the
     # SAME host as mcp_proxy_base_url, inheriting its squid allowlist + host-gateway --add-host
-    # — no new egress rule). Off (default): today's behavior — the real bearer rides
-    # sandbox_env_file into the sandbox. Rollback = flip this off + restore the bearer in
+    # — no new egress rule). On by default; inert while sandbox_enabled is off. Off: the real
+    # bearer rides sandbox_env_file into the sandbox, which an Anthropic API key backend
+    # needs (the broker is Bedrock-only). Rollback = flip this off + restore the bearer in
     # sandbox_env_file (see docs/llm-auth-broker.md §Rollback).
     # ==========================================================================
-    llm_broker_enabled: bool = False
+    llm_broker_enabled: bool = True
     # Base URL the sandbox uses to reach the broker, when it must differ from
     # mcp_proxy_base_url. Empty = inherit that host (today's behavior, one host for both).
     # Splitting them exists for one reason: mcp_proxy_base_url doubles as the OAuth2 redirect
@@ -466,19 +469,46 @@ def validate_settings() -> None:
     # streams to bedrock-runtime.<region> — serves EVERY sandboxed engine (claude-cli's
     # cli_broker_env included, not just the agent engines), so when it is on the bearer +
     # region must exist or every turn dies on an opaque mid-turn broker 4xx/5xx instead
-    # of failing at boot. Default claude-cli-only/broker-off deployment needs no AWS.
+    # of failing at boot. A sandbox-off deployment needs no AWS (the broker is inert there).
     if inkwest_agent_enabled() and not settings.aws_region:
         raise ValueError("AWS_REGION is required when the 'inkwest-agent' engine is enabled")
+    # Both defaults are on, so an install that never mentions the sandbox lands here: name the
+    # opt-out in the error rather than let every turn die provisioning a container with no image.
+    if settings.sandbox_enabled:
+        missing = [
+            name
+            for name, value in (
+                ("SANDBOX_TOOLBOX_IMAGE", settings.sandbox_toolbox_image),
+                ("SANDBOX_SQUID_IMAGE", settings.sandbox_squid_image),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"{' and '.join(missing)} required when SANDBOX_ENABLED is true (the default); "
+                "set SANDBOX_ENABLED=false to run the engine unsandboxed in the backend container"
+            )
     if settings.llm_broker_enabled and settings.sandbox_enabled:
         if not settings.aws_bearer_token_bedrock:
             raise ValueError(
-                "AWS_BEARER_TOKEN_BEDROCK is required when LLM_BROKER_ENABLED is true "
-                "(the broker swaps it in for the per-turn sandbox grant)"
+                "AWS_BEARER_TOKEN_BEDROCK is required when LLM_BROKER_ENABLED is true (the "
+                "default; the broker swaps it in for the per-turn sandbox grant). Set "
+                "LLM_BROKER_ENABLED=false to keep the model key in SANDBOX_ENV_FILE instead, "
+                "e.g. for an Anthropic API key (the broker is Bedrock-only)"
             )
         if not settings.aws_region:
             raise ValueError(
-                "AWS_REGION is required when LLM_BROKER_ENABLED is true "
-                "(the broker streams to bedrock-runtime.<region>)"
+                "AWS_REGION is required when LLM_BROKER_ENABLED is true (the default; the "
+                "broker streams to bedrock-runtime.<region>); set LLM_BROKER_ENABLED=false to "
+                "keep the model key in SANDBOX_ENV_FILE instead"
+            )
+        # Without a host, llm_broker.broker_base_url() falls back to the real bearer in the
+        # sandbox on every turn: the exposure the broker removes. Refuse that at boot.
+        if not (settings.llm_broker_base_url or settings.mcp_proxy_base_url):
+            raise ValueError(
+                "LLM_BROKER_BASE_URL or MCP_PROXY_BASE_URL is required when LLM_BROKER_ENABLED "
+                "is true (the sandbox reaches the broker through that host); set "
+                "LLM_BROKER_ENABLED=false to keep the model key in SANDBOX_ENV_FILE instead"
             )
 
     # Connectors: validate each enabled connector's required config in production.

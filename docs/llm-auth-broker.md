@@ -1,6 +1,6 @@
 # LLM auth broker
 
-**Status — implemented, pending merge; OFF by default (`LLM_BROKER_ENABLED=false`).** Port of
+**Status — implemented; ON by default (`LLM_BROKER_ENABLED=true`), inert while `SANDBOX_ENABLED=false`.** Port of
 the OAuth2 MCP reverse-proxy pattern (`docs/mcp-oauth2-proxy.md`) to the **model inference call**
 itself.
 
@@ -45,10 +45,10 @@ direct-Anthropic-key shape can be added later without touching the route body.
 ## Enable
 
 0. **Precondition — single worker / single replica.** The grant store is in-process, so with
-   `LLM_BROKER_ENABLED=true` the backend **refuses to start** (`RuntimeError` at lifespan) when
-   `WEB_CONCURRENCY>1`. It cannot detect `uvicorn/gunicorn --workers N` set without that env var,
+   `LLM_BROKER_ENABLED=true` and `SANDBOX_ENABLED=true` the backend **refuses to start**
+   (`RuntimeError` at lifespan) when `WEB_CONCURRENCY>1`. It cannot detect `uvicorn/gunicorn --workers N` set without that env var,
    nor cross-host replicas — those must be single-replica or sticky-routed by deployment. Reconcile
-   topology to single-worker **before** flipping the flag, or the boot fails fast.
+   topology to single-worker **before** enabling the sandbox (the broker rides it), or the boot fails fast.
 1. **Backend process env**: `LLM_BROKER_ENABLED=true`, `AWS_BEARER_TOKEN_BEDROCK=<real key>`,
    `AWS_REGION=<region>`. The bearer lives **only here** now — and the model-catalog discovery
    (`model_catalog`) reads it from the **backend settings** too (never `sandbox.env`), so
@@ -62,8 +62,8 @@ direct-Anthropic-key shape can be added later without touching the route body.
    load balancer, whose 60s idle timeout severs a response the model is still preparing.
    Either way the host must be squid-allowlisted; a sentinel host (see
    `sandbox._SELF_HOST_SENTINELS`) is additionally mapped to the backend's own address via
-   `--add-host`. If neither is set the broker logs at **ERROR** (alertable — the fallback
-   re-exposes the real bearer in the sandbox) and falls back to direct Bedrock.
+   `--add-host`. If neither is set the backend **refuses to boot** (`validate_settings`), since
+   the only fallback is the real bearer in the sandbox.
 3. **Migration — strip the sandbox cred**: remove `AWS_BEARER_TOKEN_BEDROCK` from
    `sandbox_env_file`. `CLAUDE_CODE_USE_BEDROCK` / `ANTHROPIC_BEDROCK_BASE_URL` there are
    harmless (the orchestrator injects them per turn via `docker exec -e`, which overrides the
@@ -123,7 +123,7 @@ Bedrock credential inside the sandbox it is no longer a credentialed Bedrock egr
   model allowlist, or a forgeable-proof session binding) is deferred.
 - **Single-replica — ENFORCED.** The grant store is in-process; a sandbox's broker call must
   reach the **same** backend process that minted its grant. The backend fail-fasts at startup
-  when `LLM_BROKER_ENABLED=true` and `WEB_CONCURRENCY>1` (`app/main.py`); `--workers N` without
+  when `LLM_BROKER_ENABLED=true`, `SANDBOX_ENABLED=true` and `WEB_CONCURRENCY>1` (`app/main.py`); `--workers N` without
   that env var, and cross-host replicas, are undetectable from app code and need single-replica
   deployment or sticky routing.
 - **TTL backstop + store cap + call cap + stream cap.** A 2 h TTL cleans up a grant orphaned
