@@ -9,7 +9,7 @@ import { useAuthStore } from '@/store/admin';
 import { useConfigStore } from '@/store/config';
 import { cn, TEXT_SIZE, formatTimestamp, formatFullTimestamp } from '@/lib/utils';
 import { TokenGlyphs } from '@/components/ui/TokenGlyphs';
-import { AlertCircle, RefreshCw, Loader2, Link2, Check, Copy, MoreHorizontal, PencilLine } from 'lucide-react';
+import { AlertCircle, RefreshCw, Loader2, Check, Copy, MoreHorizontal, PencilLine } from 'lucide-react';
 import { useComposerStore } from '@/store/composer';
 import * as api from '@/services/api';
 import { engineLabel } from '@/lib/engines';
@@ -25,7 +25,6 @@ import {
 
 interface Props {
   message: Message;
-  isFirstUserMessage?: boolean;
   onRetry?: (messageId: string) => void;
   // Transiently emphasized when deep-linked from a search hit (see ChatView).
   highlighted?: boolean;
@@ -185,13 +184,12 @@ function TokenCountsLine({ message, compact }: { message: Message; compact: bool
   );
 }
 
-export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighted, isLatest = true }: Props) {
+export function MessageBubble({ message, onRetry, highlighted, isLatest = true }: Props) {
   const isUser = message.role === 'user';
   const hasError = message.status === 'error';
   // Only the latest failure is replayable; older ones just dim (no retry button).
   const showRetry = hasError && message.is_retryable && isLatest;
   const isPending = message.status === 'pending';
-  const [copied, setCopied] = useState(false);
   const [copiedKind, setCopiedKind] = useState<'rich' | 'teams' | 'md' | null>(null);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
   const copyMenuRef = useRef<HTMLDivElement>(null);
@@ -254,19 +252,6 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
     if (!message.is_retryable) return;
     onRetry?.(message.id);
   };
-
-  const handleShare = () => {
-    const cluster = currentSession?.cluster;
-    if (!cluster || typeof message.content !== 'string') return;
-
-    const params = new URLSearchParams({ cluster: cluster.name, q: message.content });
-    const url = `${window.location.origin}/#${params.toString()}`;
-    navigator.clipboard.writeText(url);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const canShare = isFirstUserMessage && isUser && typeof message.content === 'string' && currentSession?.cluster;
 
   // "Reuse prompt": load a past user prompt back into the composer to edit & resend.
   // String content only; the raw text (including internal newlines) is injected verbatim.
@@ -496,19 +481,6 @@ export function MessageBubble({ message, isFirstUserMessage, onRetry, highlighte
                 {formatTimestamp(message.created_at)}
               </span>
             )}
-          </div>
-        )}
-
-        {canShare && (
-          <div className="flex justify-end mt-1">
-            <button
-              onClick={handleShare}
-              className="flex items-center gap-1 text-xs text-blue-200/60 hover:text-white transition-colors"
-              title="Copy shareable link"
-            >
-              {copied ? <Check className="w-3 h-3" /> : <Link2 className="w-3 h-3" />}
-              {copied ? 'Copied!' : 'Share'}
-            </button>
           </div>
         )}
 

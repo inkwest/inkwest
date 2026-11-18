@@ -1,9 +1,8 @@
 import { useEffect, useRef } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from '@/components/layout/Layout';
 import { ChatPage } from '@/pages/ChatPage';
-import { NewSessionPage } from '@/pages/NewSessionPage';
-import { QuickStartPage } from '@/pages/QuickStartPage';
+import { StartConversation } from '@/components/session/StartConversation';
 import { MyUsagePage } from '@/pages/MyUsagePage';
 import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
 import { SharedSessionPage } from '@/pages/SharedSessionPage';
@@ -102,10 +101,11 @@ function App() {
 
         {/* Main Chat Routes */}
         <Route path="/" element={<AuthGuard><Layout /></AuthGuard>}>
-          <Route index element={<NewSessionPage />} />
+          <Route index element={<StartConversation />} />
           <Route path="session/:sessionId" element={<ChatPage />} />
-          <Route path="start" element={<QuickStartPage />} />
           <Route path="usage" element={<MyUsagePage />} />
+          {/* Old auto-send links in external runbooks land on the start page; their prompt is dropped, never sent. */}
+          <Route path="start" element={<Navigate to="/" replace />} />
         </Route>
 
         {/* Admin Routes */}

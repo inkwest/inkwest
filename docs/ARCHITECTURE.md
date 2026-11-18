@@ -165,15 +165,20 @@ pre-configured cluster to open.
   failing the turn. The system prompt notes that no cluster is configured.
 - Connector tools (AWS, GitLab) are unaffected and fully usable.
 
-### Quick-Start Links
-
-Shareable URLs to create a session on a specific cluster with an optional pre-filled prompt:
+### Prompt prefill links
 
 ```
-/start?cluster=production&prompt=Why are pods crashlooping in namespace monitoring?
+/#prompt=<form-encoded text>
 ```
 
-Matches cluster by name, display name, or UUID. Creates a session and redirects to chat.
+- Opens the new-conversation composer with the text typed in. Never sends: the user reviews, edits
+  and presses send; a "Prefilled from a link" notice shows above the composer.
+- Encoding: `application/x-www-form-urlencoded`, produced by `encodeURIComponent` (JS),
+  `urllib.parse.quote(text, safe='')` (Python), `url.QueryEscape` (Go). A raw `+` is a space; a
+  literal plus is `%2B`.
+- Survives the OIDC login round-trip (same tab, up to 10 minutes). Only on `/`; other fragment keys
+  are kept.
+- The fragment never reaches the server: no server/ALB logs, no request-line size limit.
 
 ### Admin UI
 

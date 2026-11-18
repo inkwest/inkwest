@@ -55,9 +55,9 @@ describe('linkPrefill', () => {
   });
 
   it('leaves a fragment without prompt untouched', () => {
-    go('/#cluster=prod');
+    go('/#view=chat');
     captureLinkPrefill();
-    expect(window.location.hash).toBe('#cluster=prod');
+    expect(window.location.hash).toBe('#view=chat');
     expect(takeLinkPrefill()).toBeNull();
   });
 

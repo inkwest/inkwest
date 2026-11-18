@@ -58,7 +58,8 @@ text came from a link. The old auto-send links are removed.
   sending." shows above it; it disappears on dismiss or on send, and never shows for a normal start.
 - [ ] **AC8** `/start?cluster=…&prompt=…` no longer creates a session or sends anything, `/#cluster=…&q=…`
   no longer auto-sends, the first-message Share button is gone, and
-  `grep -rnE "QuickStart|handleShare|/start\?" frontend/src docs` returns nothing.
+  `grep -rnE --exclude='*.test.ts' --exclude='*.test.tsx' "QuickStart|handleShare|/start\?" frontend/src docs`
+  returns nothing (tests may name the legacy links to prove they are dead).
 - [ ] ~~**AC9** POST route works in dev and prod layouts.~~ Dropped: GET only.
 - [ ] **AC10** A 150 000-character prompt (ASCII) and a 20 000-character prompt mixing accents and emoji
   both prefill exactly through the link.
@@ -77,8 +78,8 @@ text came from a link. The old auto-send links are removed.
   local dev stack passes AC1, AC3, AC4 and AC10 with 0 sessions created.
 
 ### Phase 2 — Legacy removal + docs
-- Work: delete `QuickStartPage` and its route, the hash handling in `NewSessionPage`, the Share button
-  and its tests; replace `Quick-Start Links` in `docs/ARCHITECTURE.md` with the prefill link format.
+- Work: delete `QuickStartPage` and replace its `/start` route with a redirect to `/` (query dropped,
+  nothing sent), delete the hash handling in `NewSessionPage`, the Share button and its tests; replace `Quick-Start Links` in `docs/ARCHITECTURE.md` with the prefill link format.
 - **Covers**: AC8
 - **Data model impact**: none
 - **DoD**: AC8 grep returns nothing; `npm run lint`, `npm test -- --run`, backend pytest and
