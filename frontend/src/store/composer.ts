@@ -6,8 +6,9 @@ import { create } from 'zustand';
 // the consuming effect (a bare `pending` value wouldn't change between two
 // identical injects).
 //
-// Assumes exactly one ChatInput is mounted when `inject` fires (the trigger —
-// MessageBubble — only renders alongside the composer). The consumer clears
+// Assumes exactly one ChatInput is mounted when `inject` fires (both triggers —
+// MessageBubble's "reuse prompt" and StartConversation's link prefill — only
+// render alongside exactly one composer). The consumer clears
 // `pending` immediately, so a later-mounted composer can't pick up stale text;
 // if that single-consumer invariant ever breaks, revisit this design.
 interface ComposerState {

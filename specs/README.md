@@ -7,5 +7,6 @@ phase against the DoD of the spec; reviews and tests are checked against its acc
 |---|---|---|---|
 | [003](003-web-push-share-notifications.md) | Web Push notification on session share | shipped | — |
 | [004](004-announcement-banners.md) | Announcement banners | shipped | — |
+| [005](005-prompt-prefill-link.md) | Prompt prefill from a link | shipped | — |
 
 Status flow: `draft` → `approved` (human) → `in progress` → `shipped`.
