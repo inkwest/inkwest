@@ -31,6 +31,7 @@ function LoginPrompt() {
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white gap-6">
       <div className="flex flex-col items-center gap-1">
+        <img src="/favicon.svg" alt="" className="h-24 w-24 mb-3" />
         <h1 className="text-2xl font-bold">Inkwest</h1>
         <p className="text-sm text-gray-400">Secure infrastructure &amp; code assistant</p>
       </div>
