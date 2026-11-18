@@ -10,6 +10,7 @@ import * as api from '@/services/api';
 import { PUSH_OPT_IN_SNOOZE_KEY } from '@/hooks/usePushOptIn';
 import { useConfigStore } from '@/store/config';
 import { useInvitesStore } from '@/store/invites';
+import { useOnboardingStore } from '@/store/onboarding';
 import type { AppConfig } from '@/services/api';
 import { ENDPOINT, installPushEnv, stubFetch, uninstallPushEnv, vapidKey } from '@/test/pushEnv';
 
@@ -40,6 +41,7 @@ describe('InvitePopup push offer', () => {
       ],
     });
     setKey(KEY);
+    useOnboardingStore.setState({ completed: true });
   });
   afterEach(() => {
     // Unmount before the fake browser APIs go away, not after.
@@ -49,6 +51,14 @@ describe('InvitePopup push offer', () => {
     useConfigStore.setState({ config: null });
     useInvitesStore.setState({ invites: [] });
     localStorage.clear();
+  });
+
+  it('waits for the onboarding tour before showing the invite', () => {
+    useOnboardingStore.setState({ completed: false });
+    renderPopup();
+    expect(screen.queryByText('Conversation shared with you')).not.toBeInTheDocument();
+    act(() => useOnboardingStore.setState({ completed: true }));
+    expect(screen.getByText('Conversation shared with you')).toBeInTheDocument();
   });
 
   it('offers push without prompting when the browser was never asked (003-AC16)', () => {
