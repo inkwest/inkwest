@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Gitlab } from 'lucide-react';
+import { Gitlab, X } from 'lucide-react';
 import { AwsIcon } from '@/components/icons/BrandIcons';
 import { useSessionsStore } from '@/store/sessions';
 import { useAuthStore, useSystemPromptStore } from '@/store/admin';
@@ -15,6 +15,8 @@ import { McpPanel } from '@/components/connector/McpPanel';
 import { ModelEnginePicker } from '@/components/chat/ModelEnginePicker';
 import { OnboardingTour } from '@/components/onboarding/OnboardingTour';
 import { useOnboardingStore } from '@/store/onboarding';
+import { useComposerStore } from '@/store/composer';
+import { captureLinkPrefill, takeLinkPrefill } from '@/lib/linkPrefill';
 
 const CUSTOM = '__custom__';
 
@@ -59,6 +61,7 @@ export function StartConversation() {
   const [autoStart, setAutoStart] = useState<ConnectorName | null>(null);
   const [mcpAutoOpen, setMcpAutoOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [linkPrefilled, setLinkPrefilled] = useState(false);
 
   useEffect(() => {
     if (isAdmin) fetchPrompts(true); // active only
@@ -67,6 +70,24 @@ export function StartConversation() {
   useEffect(() => {
     fetchConfig();
   }, [fetchConfig]);
+
+  // StrictMode re-runs this: the second take is null and must not clear the notice.
+  useEffect(() => {
+    const applyPrefill = () => {
+      const prefill = takeLinkPrefill();
+      if (!prefill) return;
+      useComposerStore.getState().inject(prefill);
+      setLinkPrefilled(true);
+    };
+    applyPrefill();
+    // A link opened in a tab already on `/` only fires hashchange: there is no boot capture.
+    const onHashChange = () => {
+      captureLinkPrefill();
+      applyPrefill();
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   // Preselect the default prompt once loaded (don't clobber a manual pick).
   useEffect(() => {
@@ -116,6 +137,7 @@ export function StartConversation() {
   const handleSend = async (message: string, attachments?: Attachment[]) => {
     if (customInvalid) return;
     setError(null);
+    setLinkPrefilled(false);
     try {
       const id = await ensureSession();
       // The session page seeds + auto-submits this once its WebSocket connects;
@@ -198,6 +220,23 @@ export function StartConversation() {
         {error && (
           <div role="alert" className="rounded-md border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-300">
             {error}
+          </div>
+        )}
+
+        {linkPrefilled && (
+          <div
+            role="status"
+            className="flex items-center justify-between gap-2 rounded-md border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-300"
+          >
+            <span>Prefilled from a link. Review it before sending.</span>
+            <button
+              type="button"
+              onClick={() => setLinkPrefilled(false)}
+              aria-label="Dismiss prefill notice"
+              className="shrink-0 rounded p-0.5 text-amber-400 hover:bg-amber-900/50 hover:text-amber-200"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
         )}
 
