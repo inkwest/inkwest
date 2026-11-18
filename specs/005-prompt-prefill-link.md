@@ -1,6 +1,6 @@
 # 005 — Prompt prefill from a link
 
-**Status**: in progress
+**Status**: shipped
 **Requested by**: Damien Degois
 **Date**: 2026-11-18
 
@@ -43,25 +43,25 @@ text came from a link. The old auto-send links are removed.
 
 ## Acceptance criteria
 
-- [ ] **AC1** Given a signed-in user, when they open `/#prompt=<encoded text>`, then the
+- [x] **AC1** Given a signed-in user, when they open `/#prompt=<encoded text>`, then the
   new-conversation composer contains exactly that text (newlines, `& # + %`, emoji, HTML kept
   verbatim; a literal `+` arrives encoded as `%2B`), the fragment is removed from the address bar,
   and no session is created. This holds for a fresh load and for a tab already on `/`.
 - [ ] ~~**AC2** Cross-origin form `POST /` redirects 303 to the fragment.~~ Dropped: GET only.
-- [ ] **AC3** A prefilled prompt is never sent without a user action: no session is created and no
+- [x] **AC3** A prefilled prompt is never sent without a user action: no session is created and no
   chat message is emitted until the user presses send.
-- [ ] **AC4** Reloading the page after a prefill leaves the composer empty (one-shot).
-- [ ] **AC5** Given a signed-out user under OIDC, when they open a prefill link, then after the login
+- [x] **AC4** Reloading the page after a prefill leaves the composer empty (one-shot).
+- [x] **AC5** Given a signed-out user under OIDC, when they open a prefill link, then after the login
   round-trip completed within 10 minutes the composer contains the prompt (same tab).
 - [ ] ~~**AC6** Over-limit POST gets a readable 413.~~ Dropped: GET only.
-- [ ] **AC7** While a link prefill is in the composer, a notice "Prefilled from a link. Review it before
+- [x] **AC7** While a link prefill is in the composer, a notice "Prefilled from a link. Review it before
   sending." shows above it; it disappears on dismiss or on send, and never shows for a normal start.
-- [ ] **AC8** `/start?cluster=…&prompt=…` no longer creates a session or sends anything, `/#cluster=…&q=…`
+- [x] **AC8** `/start?cluster=…&prompt=…` no longer creates a session or sends anything, `/#cluster=…&q=…`
   no longer auto-sends, the first-message Share button is gone, and
   `grep -rnE --exclude='*.test.ts' --exclude='*.test.tsx' "QuickStart|handleShare|/start\?" frontend/src docs`
   returns nothing (tests may name the legacy links to prove they are dead).
 - [ ] ~~**AC9** POST route works in dev and prod layouts.~~ Dropped: GET only.
-- [ ] **AC10** A 150 000-character prompt (ASCII) and a 20 000-character prompt mixing accents and emoji
+- [x] **AC10** A 150 000-character prompt (ASCII) and a 20 000-character prompt mixing accents and emoji
   both prefill exactly through the link.
 
 ## Phases
