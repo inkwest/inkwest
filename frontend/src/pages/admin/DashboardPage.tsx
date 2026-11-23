@@ -1,19 +1,33 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui';
-import { useUsageStore, useBudgetStore, useUserStore } from '@/store/admin';
+import { useBudgetStore, useUserStore } from '@/store/admin';
+import { getUsageSummary } from '@/services/adminApi';
+import type { UsageSummary } from '@/types/admin';
 import { Users, DollarSign, Cpu, TrendingUp } from 'lucide-react';
 import { formatCostTotal } from '@/lib/usageFormat';
 
+// The backend's daily period starts at midnight UTC, not the viewer's midnight.
+const TODAY_HINT = 'Since 00:00 UTC';
+
 export function DashboardPage() {
-  const { summary, fetchAll: fetchUsage, isLoading: usageLoading } = useUsageStore();
+  // Own daily fetch, not useUsageStore: that store carries the Usage Reports
+  // period selection, which would put e.g. monthly totals under "Today's" tiles.
+  const [summary, setSummary] = useState<UsageSummary | null>(null);
+  const [usageLoading, setUsageLoading] = useState(true);
+  const [usageError, setUsageError] = useState<string | null>(null);
   const { budgets, fetchBudgets, isLoading: budgetLoading } = useBudgetStore();
   const { users, fetchUsers, isLoading: userLoading } = useUserStore();
 
   useEffect(() => {
-    fetchUsage();
+    let cancelled = false;
+    getUsageSummary('daily')
+      .then((s) => { if (!cancelled) setSummary(s); })
+      .catch((e: Error) => { if (!cancelled) setUsageError(e.message); })
+      .finally(() => { if (!cancelled) setUsageLoading(false); });
     fetchBudgets();
     fetchUsers();
-  }, [fetchUsage, fetchBudgets, fetchUsers]);
+    return () => { cancelled = true; };
+  }, [fetchBudgets, fetchUsers]);
 
   const isLoading = usageLoading || budgetLoading || userLoading;
 
@@ -34,6 +48,7 @@ export function DashboardPage() {
     },
     {
       title: 'Today\'s Tokens',
+      hint: TODAY_HINT,
       value: summary ? (summary.total_tokens / 1000).toFixed(1) + 'K' : '-',
       icon: Cpu,
       color: 'text-purple-400',
@@ -41,6 +56,7 @@ export function DashboardPage() {
     },
     {
       title: 'Today\'s Cost',
+      hint: TODAY_HINT,
       value: summary ? formatCostTotal(summary.total_cost_usd) : '-',
       icon: TrendingUp,
       color: 'text-yellow-400',
@@ -70,7 +86,7 @@ export function DashboardPage() {
                     <stat.icon className={`w-6 h-6 ${stat.color}`} />
                   </div>
                   <div>
-                    <p className="text-sm text-gray-400">{stat.title}</p>
+                    <p className="text-sm text-gray-400" title={stat.hint}>{stat.title}</p>
                     <p className="text-2xl font-bold">{stat.value}</p>
                   </div>
                 </CardContent>
@@ -116,6 +132,8 @@ export function DashboardPage() {
                       <span>{formatCostTotal(summary.total_cost_usd)}</span>
                     </div>
                   </div>
+                ) : usageError ? (
+                  <p className="text-red-400" role="alert">Failed to load usage: {usageError}</p>
                 ) : (
                   <p className="text-gray-400">No usage data available</p>
                 )}
