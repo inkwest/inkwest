@@ -16,7 +16,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest_asyncio
 from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.ext.compiler import compiles
 
 import app.models  # noqa: F401  -- registers all tables on Base.metadata
@@ -58,12 +63,17 @@ def _render_uuid_on_sqlite(type_: Any, compiler: Any, **kw: Any) -> str:
 _BASE_TIME = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
-@pytest_asyncio.fixture
-async def db() -> AsyncIterator[AsyncSession]:
-    engine = create_async_engine("sqlite+aiosqlite://")
+async def _schema_engine(url: str) -> AsyncEngine:
+    engine = create_async_engine(url)
     tables = cast("list[Table]", [Session.__table__, Message.__table__])
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=tables)
+    return engine
+
+
+@pytest_asyncio.fixture
+async def db() -> AsyncIterator[AsyncSession]:
+    engine = await _schema_engine("sqlite+aiosqlite://")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     async with maker() as session:
         yield session
@@ -298,6 +308,27 @@ async def test_save_message_persists_and_returns(db: AsyncSession) -> None:
     assert await get_message_count(db, sid) == 1
 
 
+async def test_save_message_failure_leaves_session_usable(db: AsyncSession) -> None:
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    sid = await _make_session(db)
+    with pytest.raises(IntegrityError):
+        await save_message(db, sid, "bogus", "violates the role CHECK")
+    msg = await save_message(db, sid, "assistant", "next save still works")
+    assert msg.id is not None
+    assert await get_message_count(db, sid) == 1
+
+
+async def test_save_message_leaves_no_open_transaction(db: AsyncSession) -> None:
+    # Called mid-stream: an open transaction would sit idle-in-transaction until the next commit.
+    sid = await _make_session(db)
+    msg = await save_message(db, sid, "assistant", "partial")
+    assert not db.in_transaction()
+    assert msg.created_at is not None  # server default loaded without reopening a transaction
+    assert not db.in_transaction()
+
+
 async def test_save_message_persists_engine_and_model_per_turn(db: AsyncSession) -> None:
     # Engine + model are captured at generation time so an exported turn attributes the
     # exact engine/model that ran, even after the session pin changes mid-conversation.
@@ -336,6 +367,32 @@ async def test_message_count_excludes_system_events(db: AsyncSession) -> None:
     await _add_message(db, sid, "assistant", "hello", minute=1)
     await save_session_event(db, sid, "aws", "granted")  # 'system' — must not be counted
     assert await get_message_count(db, sid) == 2
+
+
+async def test_failed_session_event_keeps_caller_rows_loaded(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    session = await db.get(Session, sid)
+    assert session is not None
+    await save_session_event(db, sid, "aws", "granted", targets=[{"bad": object()}])
+    assert await get_message_count(db, sid) == 0
+    assert session.id == sid  # still loaded: no lazy-load (outside a greenlet in prod)
+
+
+async def test_session_event_commits_on_its_own_connection(tmp_path: Any) -> None:
+    # File-backed: unlike the in-memory fixture, each session gets its own connection.
+    engine = await _schema_engine(f"sqlite+aiosqlite:///{tmp_path}/events.db")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with maker() as db:
+            sid = await _make_session(db)
+            await save_session_event(db, sid, "gitlab", "renewed")
+            assert not db.in_transaction()
+        async with maker() as other:
+            assert await get_message_count(other, sid) == 0  # system rows are not counted
+            rows = (await other.execute(Message.__table__.select())).mappings().all()
+            assert [r["role"] for r in rows] == ["system"]
+    finally:
+        await engine.dispose()
 
 
 async def test_save_session_event_omits_targets_when_absent(db: AsyncSession) -> None:

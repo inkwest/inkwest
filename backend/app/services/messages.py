@@ -159,8 +159,13 @@ async def save_message(
         author_user_id=author_user_id,
     )
     db.add(message)
-    await db.commit()
-    await db.refresh(message)
+    # No refresh: a read after commit reopens a transaction left idle for the rest of the stream.
+    # Server defaults come back through the INSERT's RETURNING.
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()  # else the session stays aborted and every later write fails
+        raise
 
     logger.debug(f"Saved {role} message {message.id} to session {session_id}")
     return message
@@ -189,11 +194,10 @@ async def save_session_event(
     if targets:
         content["targets"] = targets
     try:
-        await save_message(db, session_id, "system", content)
+        # Own session: a failed write's rollback must not expire the caller's loaded rows.
+        async with AsyncSession(db.bind, expire_on_commit=False) as own:
+            await save_message(own, session_id, "system", content)
     except Exception:  # noqa: BLE001 — the conversation note is non-critical
-        # Roll back so a failed event write can't leave the session in a
-        # PendingRollback state and break the request's own commit downstream.
-        await db.rollback()
         logger.warning(
             "session_event_persist_failed",
             extra={"subject": subject, "action": action, "session_id": str(session_id)},

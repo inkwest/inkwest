@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.core.config import get_settings
 from app.core.constants import MAX_RESPONSE_TOKENS
+from app.core.database import release_read_txn
 from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import ProgressTracker, execute_agent, parse_agent_response
@@ -361,6 +362,7 @@ async def orchestrate_chat_inkwest_agent(
         )
 
         uid = str(user_id) if user_id else None
+        await release_read_txn(db)  # sandbox.ensure can block up to the provision timeout
         # Reap the user's oldest idle pairs first; refuse if they're at the hard ceiling
         # with every conversation busy (nothing reclaimable). The finally is None-safe.
         try:
@@ -490,6 +492,9 @@ async def orchestrate_chat_inkwest_agent(
                     logger.error(f"Failed to save tool results: {e}")
             assistant_blocks = []
             pending_results = []
+
+        # No transaction across the stream: an idle-in-transaction lock blocks a migration ALTER.
+        await release_read_txn(db)
 
         # Bumped only on client-visible events below, so a loud-but-wedged agent still trips
         # the progress guard (output is not progress).

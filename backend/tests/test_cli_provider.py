@@ -786,7 +786,8 @@ class TestOrchestrateChatCliResume:
     """A stale --resume id self-heals: clear it and retry once from a fresh session."""
 
     @pytest.mark.asyncio
-    async def test_stale_resume_id_clears_and_retries_fresh(self):
+    @pytest.mark.parametrize("clear_fails", [False, True])
+    async def test_stale_resume_id_clears_and_retries_fresh(self, clear_fails):
         from app.services import orchestrator_cli
 
         sid = "11111111-1111-1111-1111-111111111111"
@@ -815,7 +816,8 @@ class TestOrchestrateChatCliResume:
             sandbox_enabled=False,
             sandbox_docker_path="docker",
         )
-        clear_mock = AsyncMock()
+        clear_mock = AsyncMock(side_effect=RuntimeError("db down") if clear_fails else None)
+        db = AsyncMock()
         with (
             patch.object(orchestrator_cli, "get_settings", return_value=settings),
             patch.object(orchestrator_cli, "execute_claude_cli", side_effect=fake_execute),
@@ -837,7 +839,7 @@ class TestOrchestrateChatCliResume:
             events = [
                 event
                 async for event in orchestrator_cli.orchestrate_chat_cli(
-                    db=AsyncMock(),
+                    db=db,
                     session_id=sid,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -850,6 +852,8 @@ class TestOrchestrateChatCliResume:
 
         assert resume_calls == ["stale-id", None]  # retried fresh after the stale failure
         clear_mock.assert_awaited_once()  # the dangling id was cleared
+        # A failed clear rolls back, or the session stays aborted for the retry's writes.
+        assert db.rollback.await_count == (1 if clear_fails else 0)
         assert any(e.type == "text_delta" and "hi" in (e.content or "") for e in events)
         assert any(e.type == "done" for e in events)
 

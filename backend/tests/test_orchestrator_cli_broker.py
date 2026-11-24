@@ -40,7 +40,15 @@ def _settings(*, broker_enabled: bool, base: str = "http://gw:8000") -> SimpleNa
 _ENABLED_ENTRY = SimpleNamespace(model_id="anthropic.claude-x", enabled=True, arn=None)
 
 
-def _patches(settings, capture, *, execute=None, entries=None):
+def _reads_db(result):
+    async def read(db, *a, **kw):
+        await db.execute("SELECT 1")
+        return result
+
+    return read
+
+
+def _patches(settings, capture, *, execute=None, entries=None, ensure=None):
     def fake_execute_claude_cli(*, extra_env=None, model=None, **kw):
         capture["extra_env"] = extra_env
         capture["model"] = model
@@ -71,22 +79,26 @@ def _patches(settings, capture, *, execute=None, entries=None):
         patch.object(oc, "get_system_prompt", MagicMock(return_value="SYS")),
         patch.object(oc, "resolve_session_model_choice", AsyncMock(return_value=None)),
         patch.object(oc, "get_enabled_mcp_servers", AsyncMock(return_value=[])),
-        patch.object(oc, "get_effective_skills", AsyncMock(return_value=[])),
+        # Reads the DB after sandbox.ensure, like the real helper.
+        patch.object(oc, "get_effective_skills", AsyncMock(side_effect=_reads_db([]))),
         patch.object(oc, "apply_session_skills", MagicMock()),
         patch("app.services.turn_usage.update_session_stats", AsyncMock()),
         patch("app.services.turn_usage.record_usage", AsyncMock()),
         patch("app.services.sandbox.enforce_user_sandbox_cap", AsyncMock()),
-        patch("app.services.sandbox.ensure", AsyncMock(return_value="conv")),
+        patch("app.services.sandbox.ensure", ensure or AsyncMock(return_value="conv")),
         patch("app.services.sandbox.release", AsyncMock()),
         patch("app.services.mcp_config.apply_session_mcp_selection", AsyncMock(return_value=[])),
         patch.object(oc, "execute_claude_cli", side_effect=execute or fake_execute_claude_cli),
     ]
 
 
-async def _run(settings, capture, *, execute=None, cancel_event=None, entries=None):
-    db = AsyncMock()
-    db.commit = AsyncMock()
-    ps = _patches(settings, capture, execute=execute, entries=entries)
+async def _run(
+    settings, capture, *, execute=None, cancel_event=None, entries=None, db=None, ensure=None
+):
+    if db is None:
+        db = AsyncMock()
+        db.commit = AsyncMock()
+    ps = _patches(settings, capture, execute=execute, entries=entries, ensure=ensure)
     for p in ps:
         p.start()
     try:
@@ -607,3 +619,25 @@ async def test_1h_ttl_split_threaded_to_record_usage() -> None:
         for p in reversed(ps):
             p.stop()
     assert ru.await_args.kwargs["cache_write_1h_tokens"] == 400
+
+
+@pytest.mark.asyncio
+async def test_read_txn_released_before_stream() -> None:
+    """The last DB call before sandbox.ensure and before the stream is a commit."""
+    db = AsyncMock()
+    last_db_call: dict[str, str | None] = {}
+
+    def snapshot(step: str) -> None:
+        last_db_call[step] = db.method_calls[-1][0] if db.method_calls else None
+
+    async def ensure(*a, **kw):
+        snapshot("ensure")
+        return "conv"
+
+    def execute(*, extra_env=None, model=None, **kw):
+        snapshot("exec")
+        return _aiter([])
+
+    await _run(_settings(broker_enabled=False), {}, execute=execute, db=db, ensure=ensure)
+
+    assert last_db_call == {"ensure": "commit", "exec": "commit"}
