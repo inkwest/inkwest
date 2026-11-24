@@ -993,6 +993,30 @@ async def test_abandoned_compaction_removes_its_partial_output(
     assert replayed[1]["content"] == "a"
 
 
+async def test_abandoned_compaction_removes_its_tool_rows(
+    db: AsyncSession, sandbox_settings: Any
+) -> None:
+    """The summary turn greps the archive: its tool rows are as much its output as the text."""
+    sid = await _session(db)
+    await save_message(db, sid, "user", "q")
+    await save_message(db, sid, "assistant", "a")
+    before = [msg.id for msg in await compaction._rows(db, sid)]
+    cancel = asyncio.Event()
+
+    async def orchestrate(**kwargs: Any) -> AsyncIterator[ChatEvent]:
+        tool_use = {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}}
+        await save_message(db, sid, "assistant", [tool_use])
+        tool_result = {"type": "tool_result", "tool_use_id": "t1", "content": "history-1.md"}
+        await save_message(db, sid, "tool_result", [tool_result])
+        cancel.set()
+        yield done_event()
+
+    with patch("app.services.compaction.get_orchestrator", lambda: orchestrate):
+        [e async for e in orchestrate_compaction(db=db, session_id=str(sid), cancel_event=cancel)]
+
+    assert [msg.id for msg in await compaction._rows(db, sid)] == before
+
+
 def _plant(sandbox_settings: Any, sid: uuid.UUID, plant: str) -> Any:
     """The workdir, with a file at `.inkwest` when ``plant`` says so (archive then goes fresh)."""
     workdir = sandbox_settings / str(sid) / "workdir"

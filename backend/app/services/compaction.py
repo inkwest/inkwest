@@ -654,8 +654,8 @@ async def _abandon(
     async with async_session_maker() as db:
         orphans = [
             msg.id
-            for msg in await _rows(db, session_id)
-            if msg.id not in known_ids and msg.role in ("user", "assistant")
+            for msg in _conversation_rows(await _rows(db, session_id))
+            if msg.id not in known_ids
         ]
         if orphans:
             await delete_messages(db, session_id, orphans)
