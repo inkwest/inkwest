@@ -10,6 +10,8 @@ import re
 import unicodedata
 from typing import TYPE_CHECKING
 
+from app.core.constants import MAX_SUMMARY_CHARS
+
 if TYPE_CHECKING:
     import uuid  # noqa: F401  (used in string annotations)
 
@@ -336,7 +338,8 @@ value). Distinguish verified from assumed.
 
 Rules: no preamble, no "here is the summary". Keep identifiers exact (namespaces, pod and \
 account names, MCP servers, file paths, ticket keys) — an approximated identifier is worse \
-than an omitted one. Be complete over brief: losing a fact costs more than a longer summary."""
+than an omitted one. Stay under {max_chars} characters: anything past that is cut off. Within \
+that budget, be complete over brief; losing a fact costs more than a longer summary."""
 
 # Appended when this conversation was compacted before: that summary is about to be replaced
 # by this one, so anything still relevant has to be carried across or it is lost for good.
@@ -376,30 +379,32 @@ def fence(tag: str, text: str, attrs: str = "") -> str:
     return f"{open_tag}\n{text}\n</{tag}>"
 
 
-# Appended when a sandbox archive exists. Points at the directory, not one file: every
-# compacted segment has its own, and the earlier ones are only reachable by listing.
+# Appended when a sandbox archive exists. The engine may replay only the newest messages of
+# the segment, so the archive is the one place the rest of it can be read from.
 _COMPACTION_RECALL = """
 
-The raw transcript of every compacted segment is on disk in `{archive_dir}/` (one file per \
-segment, newest last). Read or grep it with your file/shell tools when you need detail, and \
-tell the reader it is there."""
+The conversation you were given may start partway through: only the most recent messages fit \
+in it. The raw transcript of the whole segment you are summarizing is on disk in \
+`{archive_path}`; earlier segments, if any, are where your system prompt says. Read or grep \
+that file with your file/shell tools for anything older than what you can see before you \
+write, and tell the reader the archive is there."""
 
 
 def get_compaction_prompt(
-    archive_dir: str | None = None, previous_summary: str | None = None
+    archive_path: str | None = None, previous_summary: str | None = None
 ) -> str:
     """The compaction turn's user prompt.
 
     The recall sentence is dropped without a sandbox — there is no archive to point at — and
     the carry-forward block only appears when an earlier summary would otherwise be lost.
     """
-    prompt = COMPACTION_PROMPT
+    prompt = COMPACTION_PROMPT.format(max_chars=f"{MAX_SUMMARY_CHARS:,}")
     if previous_summary:
         prompt += _COMPACTION_CARRY_FORWARD.format(
             previous_summary=fence("previous_summary", previous_summary)
         )
-    if archive_dir:
-        prompt += _COMPACTION_RECALL.format(archive_dir=archive_dir)
+    if archive_path:
+        prompt += _COMPACTION_RECALL.format(archive_path=archive_path)
     return prompt
 
 

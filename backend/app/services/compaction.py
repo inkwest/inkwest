@@ -11,42 +11,46 @@ so recall needs no new tool.
 """
 
 import asyncio
+import contextlib
 import contextvars
+import itertools
 import logging
+import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.constants import MAX_SUMMARY_CHARS
+from app.core.database import async_session_maker
 from app.models.message import Message
 from app.models.schemas import strip_boundary_summary
+from app.models.session import Session
 from app.services import sandbox
 from app.services.ai_client import get_orchestrator
 from app.services.events import ChatEvent, context_compacted_event, error_event
 from app.services.messages import (
     COMPACTION_ACTION,
     COMPACTION_SUBJECT,
-    clear_cli_session_id,
     delete_messages,
     is_compaction_boundary,
     last_boundary_index,
-    save_session_event,
+    session_event_content,
 )
 from app.services.prompts import fence, get_compaction_prompt
+from app.services.turn_runner import skip_abort_marker
 
 logger = logging.getLogger(__name__)
 
 ARCHIVE_DIR = ".inkwest"
+_ARCHIVE_NAME = re.compile(r"history-(\d+)\.md")
 
 Trigger = Literal["manual", "auto"]
 
-# The summary is replayed in the system prompt of every later turn.
-MAX_SUMMARY_CHARS = 8_000
-# Counted in characters, not bytes: it bounds the string built in memory.
-MAX_ARCHIVE_CHARS = 4 * 1024 * 1024
+# Counted in characters: it bounds the string built in memory for one block.
 MAX_ARCHIVE_BLOCK_CHARS = 200_000
 
 _FENCE_TAG = "compaction_summary"
@@ -59,18 +63,29 @@ _FENCE_TAG = "compaction_summary"
 _replayed_nothing: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "inkwest_engine_replayed_nothing", default=False
 )
+# True while a compaction turn runs, read by an engine about to run blind.
+_compacting: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "inkwest_compacting", default=False
+)
 
 
-def note_empty_replay() -> None:
-    """Record that this turn's engine started with no transcript despite stored history."""
+def note_empty_replay() -> bool:
+    """Record that this turn's engine has no transcript despite stored history.
+
+    Returns True when the turn is a compaction: the engine must then stop before it spawns,
+    because a blind summary turn is billed for a summary that can only be discarded.
+    """
     _replayed_nothing.set(True)
+    return _compacting.get()
 
 
 async def _rows(db: AsyncSession, session_id: str | uuid.UUID) -> list[Message]:
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
     result = await db.execute(
-        select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
+        select(Message)
+        .where(Message.session_id == session_id)
+        .order_by(Message.created_at, Message.id)
     )
     return list(result.scalars().all())
 
@@ -81,7 +96,12 @@ def _split_at_last_boundary(rows: list[Message]) -> tuple[Message | None, list[M
     return (None, rows) if last is None else (rows[last], rows[last + 1 :])
 
 
-async def _last_boundary(db: AsyncSession, session_id: str | uuid.UUID) -> Message | None:
+def _conversation_rows(pending: list[Message]) -> list[Message]:
+    """The rows a compaction would summarize: session events are UI-only notes."""
+    return [msg for msg in pending if msg.role != "system"]
+
+
+async def last_boundary(db: AsyncSession, session_id: str | uuid.UUID) -> Message | None:
     """The session's newest boundary row, fetched without loading the transcript.
 
     Called on every turn of every engine (compacted or not), so it must not scale with the
@@ -99,7 +119,7 @@ async def _last_boundary(db: AsyncSession, session_id: str | uuid.UUID) -> Messa
             Message.content["subject"].as_string() == COMPACTION_SUBJECT,
             Message.content["action"].as_string() == COMPACTION_ACTION,
         )
-        .order_by(Message.created_at.desc())
+        .order_by(Message.created_at.desc(), Message.id.desc())
     )
     # Not LIMIT 1: a summary-less row matches the SQL but is not a boundary.
     for msg in result.scalars():
@@ -117,11 +137,6 @@ def _summary_of(boundary: Message | None) -> str | None:
     return summary if isinstance(summary, str) and summary.strip() else None
 
 
-async def compaction_summary(db: AsyncSession, session_id: str | uuid.UUID) -> str | None:
-    """Summary carried by the session's last boundary, or None when never compacted."""
-    return _summary_of(await _last_boundary(db, session_id))
-
-
 def _archive_hint() -> str:
     """Sentence naming the archive directory, when this deployment has a workdir.
 
@@ -131,8 +146,9 @@ def _archive_hint() -> str:
     if not get_settings().sandbox_enabled:
         return ""
     return (
-        f"\n\nThe full transcript of every compacted segment is on disk in "
-        f"`{sandbox.CONTAINER_WORKDIR}/{ARCHIVE_DIR}/` (one file per segment, newest last). "
+        f"\n\nThe full transcript of every compacted segment is on disk, one file per "
+        f"segment, matching `{sandbox.CONTAINER_WORKDIR}/{ARCHIVE_DIR}*/history-*.md` "
+        "(newest last by modification time). "
         "Read or grep it with your file/shell tools when you need detail this summary dropped."
     )
 
@@ -148,12 +164,16 @@ async def with_compaction_summary(
     The summary is model-authored, so it is delivered as fenced, explicitly untrusted data —
     a tool result that steered the model into writing instructions must not arrive with
     system authority.
+
+    A lookup failure propagates: the engine replays only post-boundary rows, so a prompt
+    without the summary would run the turn on a conversation missing its whole past.
     """
-    try:
-        summary = _summary_of(await _last_boundary(db, session_id))
-    except Exception:
-        logger.exception("compaction_summary_lookup_failed", extra={"session_id": str(session_id)})
-        return system_prompt
+    return append_compaction_summary(system_prompt, await last_boundary(db, session_id))
+
+
+def append_compaction_summary(system_prompt: str, boundary: Message | None) -> str:
+    """:func:`with_compaction_summary` for a caller that already holds the boundary."""
+    summary = _summary_of(boundary)
     if summary is None:
         return system_prompt
 
@@ -167,17 +187,22 @@ async def with_compaction_summary(
     )
 
 
-def _flatten_content(content: Any, block_cap: int | None = None) -> str:
-    """Content of one row as plain text, block types labelled."""
+def _iter_blocks(content: Any, block_cap: int | None = None) -> Iterator[str]:
+    """Content of one row as plain text, one block at a time, block types labelled.
+
+    Every shape is capped: a plain-string row or a bare list item fills the volume as surely
+    as a runaway tool result.
+    """
     if isinstance(content, str):
-        return content
+        yield _capped(content, block_cap)
+        return
     blocks: list[Any] = [content] if isinstance(content, dict) else content
     if not isinstance(blocks, list):
-        return str(content)
-    parts: list[str] = []
+        yield _capped(str(content), block_cap)
+        return
     for block in blocks:
         if not isinstance(block, dict):
-            parts.append(str(block))
+            yield _capped(str(block), block_cap)
             continue
         kind = block.get("type")
         if kind == "text":
@@ -188,10 +213,7 @@ def _flatten_content(content: Any, block_cap: int | None = None) -> str:
             rendered = f"[tool_result] {block.get('content')}"
         else:
             rendered = f"[{kind}] {block}"
-        # Every block kind is capped: a runaway `text` block is as capable of filling the
-        # volume as a runaway tool result.
-        parts.append(_capped(rendered, block_cap))
-    return "\n\n".join(p for p in parts if p)
+        yield _capped(rendered, block_cap)
 
 
 def _capped(text: str, limit: int | None) -> str:
@@ -218,53 +240,57 @@ def _summary_text(msg: Message) -> str | None:
     return text or None
 
 
-def render_archive(rows: list[Message], session_id: str | uuid.UUID) -> str:
-    """Markdown transcript of the rows a compaction is about to summarize.
+def render_archive(rows: list[Message], session_id: str | uuid.UUID) -> Iterator[str]:
+    """Markdown transcript of the rows a compaction is about to summarize, every row in full.
 
-    Written for grep, not for replay. Capped per block and in total: the largest
-    conversations are the only ones compacted, and this runs off the event loop.
+    Written for grep, not for replay, and yielded a block at a time: past the rows already
+    loaded, memory holds one block capped at ``MAX_ARCHIVE_BLOCK_CHARS``, never the
+    transcript. No total cap: the engine's window can drop any row mid-turn, so a row the
+    archive leaves out is a row nobody summarizes.
     """
-    out = [
-        "# Conversation transcript (compacted segment)\n",
-        f"Session: {session_id}\n",
-        f"Rows: {len(rows)}\n",
-    ]
-    remaining = MAX_ARCHIVE_CHARS
-    for index, msg in enumerate(rows):
-        if remaining <= 0:
-            out.append(f"\n… [{len(rows) - index} earlier rows omitted: archive size cap]\n")
-            break
-        # The remaining budget is the per-block cap too, so a row of many large blocks is
-        # bounded as it is built — flattening first would allocate what the cap exists to refuse.
-        header = f"\n## {msg.role} — {msg.created_at.isoformat()}\n"
-        body = _flatten_content(msg.content, min(MAX_ARCHIVE_BLOCK_CHARS, remaining))
-        chunk = f"{header}{_capped(body, remaining)}\n"
-        out.append(chunk)
-        remaining -= len(chunk)
-    return "".join(out)
+    yield "# Conversation transcript (compacted segment)\n"
+    yield f"Session: {session_id}\n"
+    yield f"Rows: {len(rows)}\n"
+    for msg in rows:
+        yield f"\n## {msg.role} — {msg.created_at.isoformat()}\n"
+        separator = ""
+        for part in _iter_blocks(msg.content, MAX_ARCHIVE_BLOCK_CHARS):
+            if part:
+                yield separator
+                yield part
+                separator = "\n\n"
+        yield "\n"
 
 
-def archive_relpath(index: int) -> str:
-    """Path of archive ``index`` relative to the workdir."""
-    return f"{ARCHIVE_DIR}/history-{index}.md"
+def _archive_names(existing: list[str]) -> Iterator[str]:
+    """Archive names past the highest already in the directory: a deleted boundary (undo)
+    leaves its archive, so the boundary count would collide with it."""
+    taken = [int(m.group(1)) for name in existing if (m := _ARCHIVE_NAME.fullmatch(name))]
+    return (f"history-{n}.md" for n in itertools.count(max(taken, default=0) + 1))
 
 
-def _write_archive(session_id: str | uuid.UUID, rows: list[Message], index: int) -> str | None:
-    """Dump the pre-boundary transcript; returns the sandbox path, or None if not written.
+def _write_archive(session_id: str | uuid.UUID, rows: list[Message]) -> sandbox.Published | None:
+    """Stream the pre-boundary transcript to the archive; its relpath and identity, or None.
 
-    No sandbox ⇒ no ``/workdir`` mount ⇒ nowhere the model could read it from. Best-effort:
-    a compaction that cannot write its archive still proceeds (the summary is the
-    load-bearing part), it just loses the recall path.
+    No sandbox ⇒ no ``/workdir`` mount ⇒ nowhere the model could read it from, and the
+    compaction proceeds without one. With a sandbox, None refuses the compaction: the
+    archive is the only place a row the window drops can still be read from.
     """
     if not get_settings().sandbox_enabled:
         return None
-    relpath = archive_relpath(index)
     try:
-        sandbox.publish_workdir_file(str(session_id), relpath, render_archive(rows, session_id))
+        # The path actually written is what the boundary and the prompt record: the name can
+        # move past one taken meanwhile, the directory to a fresh one beside a planted entry.
+        return sandbox.publish_workdir_file(
+            str(session_id), ARCHIVE_DIR, _archive_names, render_archive(rows, session_id)
+        )
     except (OSError, ValueError):
-        logger.warning("compaction_archive_write_failed", extra={"path": relpath}, exc_info=True)
+        logger.warning(
+            "compaction_archive_write_failed",
+            extra={"session_id": str(session_id), "dir": ARCHIVE_DIR},
+            exc_info=True,
+        )
         return None
-    return f"{sandbox.CONTAINER_WORKDIR}/{relpath}"
 
 
 def _reset_engine_state(session_id: str | uuid.UUID) -> None:
@@ -278,11 +304,11 @@ def _reset_engine_state(session_id: str | uuid.UUID) -> None:
     sandbox.reset_opencode_store(str(session_id))
 
 
-def _remove_archive(session_id: str | uuid.UUID, index: int) -> None:
+def _remove_archive(session_id: str | uuid.UUID, published: sandbox.Published | None) -> None:
     """Drop an archive written for a compaction that was then abandoned."""
-    if not get_settings().sandbox_enabled:
+    if published is None or not get_settings().sandbox_enabled:
         return
-    sandbox.remove_workdir_file(str(session_id), archive_relpath(index))
+    sandbox.remove_workdir_file(str(session_id), published)
 
 
 async def write_boundary(
@@ -293,44 +319,78 @@ async def write_boundary(
     message_count: int,
     archive_path: str | None,
     trigger: Trigger,
+    row_id: uuid.UUID | None = None,
 ) -> Message:
-    """Persist the boundary row: from here on, only later rows are replayed.
+    """Persist the boundary row and forget the CLI resume id, in one transaction.
 
     Written AFTER the summary bubble so the summary falls on the compacted side — it is
     delivered through the system prompt, and replaying it as a transcript message too would
-    double it. ``strict``: unlike a connector note, losing this row would leave a summarized
-    conversation that still replays everything.
-    """
-    target: dict[str, Any] = {"message_count": message_count, "trigger": trigger}
-    if archive_path:
-        target["archive_path"] = archive_path
-    row = await save_session_event(
-        db,
-        session_id,
-        COMPACTION_SUBJECT,
-        COMPACTION_ACTION,
-        targets=[target],
-        payload={"summary": _capped(summary, MAX_SUMMARY_CHARS)},
-        strict=True,
-    )
-    if row is None:  # unreachable: strict=True raises instead of returning None
-        raise RuntimeError("compaction boundary was not persisted")
-    return row
+    double it. One commit for both: the CLI never replays the DB transcript, so a cleared id
+    without its boundary loses the CLI's whole conversation, and a boundary without the clear
+    lets ``--resume`` keep replaying what the boundary cut.
 
-
-async def has_compactable_rows(db: AsyncSession, session_id: str | uuid.UUID) -> bool:
-    """Whether anything would be summarized — checked before a billable turn starts.
-
-    Deliberately not a transcript load: this answers a boolean on the WS receive loop, where
-    a full ``SELECT`` of the largest conversations in the deployment would stall ``stop``.
+    The commit is the last step that can fail: the caller undoes the compaction on any raise,
+    and undoing a committed boundary deletes the summary it points at.
     """
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
-    boundary = await _last_boundary(db, session_id)
-    query = select(Message.id).where(Message.session_id == session_id, Message.role != "system")
+    target: dict[str, Any] = {"message_count": message_count, "trigger": trigger}
+    if archive_path:
+        target["archive_path"] = archive_path
+    row = Message(
+        id=row_id or uuid.uuid4(),
+        session_id=session_id,
+        role="system",
+        content=session_event_content(
+            COMPACTION_SUBJECT,
+            COMPACTION_ACTION,
+            targets=[target],
+            payload={"summary": _capped(summary, MAX_SUMMARY_CHARS)},
+        ),
+    )
+    db.add(row)
+    try:
+        await db.execute(
+            update(Session).where(Session.id == session_id).values(cli_session_id=None)
+        )
+        await db.flush()
+        await db.refresh(row)
+        await db.commit()
+    except BaseException:
+        # A failing rollback must not replace the original error (a cancel above all).
+        with contextlib.suppress(Exception):
+            await db.rollback()
+        raise
+    return row
+
+
+NOTHING_TO_COMPACT = "Nothing to compact — no new messages to summarize."
+
+
+async def has_compactable_rows(db: AsyncSession, session_id: str | uuid.UUID) -> bool:
+    """Whether a compaction would summarize anything, checked before a billable turn starts.
+
+    The cut's own boundary predicate and ``(created_at, id)`` order, answered with EXISTS: it
+    runs on the WS receive loop, where loading the transcript would stall ``stop``.
+    """
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+    boundary = await last_boundary(db, session_id)
+    after = select(Message.id).where(Message.session_id == session_id, Message.role != "system")
     if boundary is not None:
-        query = query.where(Message.created_at > boundary.created_at)
-    return await db.scalar(query.limit(1)) is not None
+        after = after.where(
+            or_(
+                Message.created_at > boundary.created_at,
+                and_(Message.created_at == boundary.created_at, Message.id > boundary.id),
+            )
+        )
+    return bool(await db.scalar(select(after.exists())))
+
+
+ARCHIVE_REQUIRED = (
+    "Compaction refused — the transcript archive could not be written. "
+    "The conversation is unchanged."
+)
 
 
 async def orchestrate_compaction(
@@ -352,13 +412,13 @@ async def orchestrate_compaction(
     """
     rows = await _rows(db, session_id)
     boundary, pending = _split_at_last_boundary(rows)
-    replayable = [msg for msg in pending if msg.role != "system"]
+    replayable = _conversation_rows(pending)
     if not replayable:
-        yield error_event(_nothing_to_compact(boundary))
+        # The WS route refuses this before the turn starts; reached only on a race.
+        skip_abort_marker()
+        yield error_event(NOTHING_TO_COMPACT)
         return
 
-    index = sum(1 for msg in rows if is_compaction_boundary(msg)) + 1
-    archive_path = await asyncio.to_thread(_write_archive, session_id, pending, index)
     # Ids that exist BEFORE the turn: the summary must be a row this turn produced, never a
     # previous answer promoted by an empty completion.
     known_ids = {msg.id for msg in rows}
@@ -366,18 +426,29 @@ async def orchestrate_compaction(
     errored = False
     terminal: ChatEvent | None = None
     _replayed_nothing.set(False)
+    compacting = _compacting.set(True)
+    # A task, not a bare thread await: a cancel must not leave a publish running unawaited,
+    # its file then outliving the cleanup that should remove it.
+    archive = asyncio.ensure_future(asyncio.to_thread(_write_archive, session_id, pending))
     try:
+        published = await asyncio.shield(archive)
+        relpath = published[0] if published else None
+        # The engine's window can drop any row mid-turn (the agent loop re-truncates after
+        # each tool round): without the archive those rows would be cut with nobody
+        # summarizing them.
+        if relpath is None and get_settings().sandbox_enabled:
+            skip_abort_marker()
+            yield error_event(ARCHIVE_REQUIRED)
+            return
+        archive_path = f"{sandbox.CONTAINER_WORKDIR}/{relpath}" if relpath else None
+        # Not `replace_last_user`: a trailing user row is part of what gets summarized.
         async for event in get_orchestrator()(
             db=db,
             session_id=session_id,
             user_message=get_compaction_prompt(
-                archive_dir=f"{sandbox.CONTAINER_WORKDIR}/{ARCHIVE_DIR}" if archive_path else None,
-                previous_summary=_summary_of(boundary),
+                archive_path=archive_path, previous_summary=_summary_of(boundary)
             ),
             persist_user_message=False,
-            # The summary must cover the whole segment, so this turn opts out of the rolling
-            # message window; it does NOT replace a trailing user row (that is retry's job).
-            full_history=True,
             cancel_event=cancel_event,
             **turn_kwargs,
         ):
@@ -387,12 +458,16 @@ async def orchestrate_compaction(
                 terminal = event  # held until the boundary is committed
                 continue
             yield event
-    except Exception:
-        # A raise is the same outcome as an error event — a turn that produced no usable
-        # summary — and leaving its partial row behind is the amnesia this rolls back.
-        await _abandon(db, session_id, known_ids, index)
+    except BaseException:
+        # A raise or a cancel is the same outcome as an error event — a turn that produced
+        # no usable summary — and leaving its partial row behind is the amnesia this undoes.
+        await _roll_back(db, session_id, known_ids, archive)
         logger.exception("compaction_turn_raised", extra={"session_id": session_id})
         raise
+    finally:
+        # A generator finalized from another context cannot reset; that context dies with it.
+        with contextlib.suppress(ValueError):
+            _compacting.reset(compacting)
 
     cancelled = cancel_event is not None and cancel_event.is_set()
     blind = _replayed_nothing.get()
@@ -401,7 +476,7 @@ async def orchestrate_compaction(
     )
 
     if summary is None:
-        await _abandon(db, session_id, known_ids, index)
+        await _roll_back(db, session_id, known_ids, archive)
         logger.info(
             "compaction_abandoned",
             extra={
@@ -413,19 +488,20 @@ async def orchestrate_compaction(
         )
         # NOT the buffered `done`: its rows were just deleted, and the client materializes
         # the streamed blocks into a message on `done`. An error leaves the transcript alone.
-        yield error_event(
-            "Compaction did not complete — the conversation is unchanged. You can retry."
-            if not cancelled
-            else "Compaction cancelled — the conversation is unchanged."
-        )
+        if cancelled:
+            reason = "Compaction cancelled — the conversation is unchanged."
+        elif blind and not errored:
+            reason = (
+                "Compaction refused — this engine has no transcript of the conversation to "
+                "summarize. The conversation is unchanged."
+            )
+        else:
+            reason = "Compaction did not complete — the conversation is unchanged. You can retry."
+        yield error_event(reason)
         return
 
+    boundary_id = uuid.uuid4()
     try:
-        # Order matters: a cleared CLI id without a boundary is harmless (the CLI restarts
-        # from the DB transcript), while a boundary without the clear would let --resume keep
-        # replaying the whole pre-boundary conversation forever.
-        await clear_cli_session_id(db, session_id)
-        await asyncio.to_thread(_reset_engine_state, session_id)
         row = await write_boundary(
             db,
             session_id,
@@ -433,14 +509,45 @@ async def orchestrate_compaction(
             message_count=len(replayable),
             archive_path=archive_path,
             trigger=trigger,
+            row_id=boundary_id,
         )
+    except BaseException as exc:
+        # A commit can raise after the server applied it (connection lost on the ack, a
+        # cancel while awaiting it): undoing a committed boundary deletes its summary. A
+        # failing check propagates instead, so nothing is deleted on an unknown outcome.
+        try:
+            committed = await asyncio.shield(
+                _undo_unless_committed(db, session_id, known_ids, archive, boundary_id)
+            )
+        except Exception:
+            if isinstance(exc, Exception):
+                raise
+            # The cancel outranks the check's failure: turn_runner swallows an Exception.
+            logger.exception("compaction_commit_check_failed", extra={"session_id": session_id})
+            raise exc from None
+        if committed is None:
+            skip_abort_marker()
+            if not isinstance(exc, Exception):
+                raise
+            logger.exception("compaction_boundary_failed", extra={"session_id": session_id})
+            yield error_event("Compaction did not complete — the conversation is unchanged.")
+            return
+        logger.warning(
+            "compaction_boundary_commit_raised_after_commit",
+            extra={"session_id": session_id},
+            exc_info=True,
+        )
+        if not isinstance(exc, Exception):
+            raise
+        row = committed
+
+    # Committed from here on: no failure below may reach `_roll_back`.
+    try:
+        await asyncio.to_thread(_reset_engine_state, session_id)
     except Exception:
-        # The engine state is already gone; without the boundary the summary row would be a
-        # stray bubble the model re-reads forever. Roll it back and surface the failure.
-        await _abandon(db, session_id, known_ids, index)
-        logger.exception("compaction_boundary_failed", extra={"session_id": session_id})
-        yield error_event("Compaction did not complete — the conversation is unchanged.")
-        return
+        # Not surfaced: the opencode orchestrator sees the store predates this boundary
+        # (its sidecar names an older one), retries the reset and runs fresh.
+        logger.exception("compaction_engine_reset_failed", extra={"session_id": session_id})
 
     logger.info(
         "compaction_committed",
@@ -461,12 +568,6 @@ async def orchestrate_compaction(
     )
 
 
-def _nothing_to_compact(boundary: Message | None) -> str:
-    if boundary is not None:
-        return "Nothing to compact — no messages since the last summary."
-    return "Nothing to compact — this conversation has no messages yet."
-
-
 async def _new_summary(
     db: AsyncSession, session_id: str | uuid.UUID, known_ids: set[uuid.UUID]
 ) -> str | None:
@@ -482,8 +583,52 @@ async def _new_summary(
     return None
 
 
+async def _committed_row(row_id: uuid.UUID) -> Message | None:
+    """The row as the database holds it, read on a session of its own."""
+    async with async_session_maker() as db:
+        return await db.get(Message, row_id)
+
+
+async def _undo_unless_committed(
+    db: AsyncSession,
+    session_id: str | uuid.UUID,
+    known_ids: set[uuid.UUID],
+    archive: asyncio.Future[sandbox.Published | None],
+    boundary_id: uuid.UUID,
+) -> Message | None:
+    """The committed boundary row, or None after undoing a compaction whose commit failed.
+
+    One coroutine so a single shield covers both: a cancel between the check and the undo
+    would leave the summary bubble without its boundary. Without the boundary that bubble is
+    one the model re-reads forever; engine state is untouched until the commit.
+    """
+    committed = await _committed_row(boundary_id)
+    if committed is None:
+        await _abandon(db, session_id, known_ids, archive)
+    return committed
+
+
+async def _roll_back(
+    db: AsyncSession,
+    session_id: str | uuid.UUID,
+    known_ids: set[uuid.UUID],
+    archive: asyncio.Future[sandbox.Published | None],
+) -> None:
+    """Undo an abandoned compaction, then waive the abort marker it no longer needs.
+
+    Shielded so a cancel landing mid-cleanup cannot leave half the rows behind. The waiver
+    follows the shield, not inside it: the shielded task runs in a copied context, and the
+    turn runner would never see a flag set there.
+    """
+    await asyncio.shield(_abandon(db, session_id, known_ids, archive))
+    skip_abort_marker()
+
+
 async def _abandon(
-    db: AsyncSession, session_id: str | uuid.UUID, known_ids: set[uuid.UUID], index: int
+    turn_db: AsyncSession,
+    session_id: str | uuid.UUID,
+    known_ids: set[uuid.UUID],
+    archive: asyncio.Future[sandbox.Published | None],
 ) -> None:
     """Undo a compaction that produced no usable summary.
 
@@ -493,12 +638,23 @@ async def _abandon(
 
     Only conversation rows: a ``system`` event written meanwhile by another request (an AWS
     grant, an MCP connect, a model switch) is an audit note this turn does not own.
+
+    Its own session: the turn's may sit in a failed flush, or be closed by the runner while
+    this shielded cleanup still runs after a second cancel.
     """
-    orphans = [
-        msg.id
-        for msg in await _rows(db, session_id)
-        if msg.id not in known_ids and msg.role in ("user", "assistant")
-    ]
-    if orphans:
-        await delete_messages(db, session_id, orphans)
-    await asyncio.to_thread(_remove_archive, session_id, index)
+    # Awaited, not peeked, and before the rollback: a cancel can land while the publish
+    # thread still renders the turn session's rows, which the rollback would expire under it.
+    published: sandbox.Published | None = None
+    with contextlib.suppress(Exception):
+        published = await archive
+    with contextlib.suppress(Exception):
+        await turn_db.rollback()  # releases a failed flush's write lock
+    async with async_session_maker() as db:
+        orphans = [
+            msg.id
+            for msg in await _rows(db, session_id)
+            if msg.id not in known_ids and msg.role in ("user", "assistant")
+        ]
+        if orphans:
+            await delete_messages(db, session_id, orphans)
+    await asyncio.to_thread(_remove_archive, session_id, published)

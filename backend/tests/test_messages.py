@@ -13,7 +13,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import pytest_asyncio
 from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -721,21 +720,6 @@ async def test_coalescing_promotes_a_string_next_to_blocks(db: AsyncSession) -> 
         {"type": "text", "text": "prose"},
         {"type": "text", "text": "more"},
     ]
-
-
-async def test_session_event_strict_reraises_after_rollback(db: AsyncSession) -> None:
-    """A connector note is best-effort; a row the replay logic depends on is not."""
-    from unittest.mock import AsyncMock, patch
-
-    from app.services.messages import save_session_event
-
-    sid = await _make_session(db)
-    with patch(
-        "app.services.messages.save_message", AsyncMock(side_effect=RuntimeError("db down"))
-    ):
-        assert await save_session_event(db, sid, "aws", "granted") is None
-        with pytest.raises(RuntimeError, match="db down"):
-            await save_session_event(db, sid, "context", "compacted", strict=True)
 
 
 async def test_delete_messages_is_scoped_to_its_session(db: AsyncSession) -> None:

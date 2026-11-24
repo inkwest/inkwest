@@ -586,12 +586,26 @@ last assistant row — and the frontend renders that against the model's context
 Reclaiming context is **compaction** (`app/services/compaction.py`), not truncation:
 
 1. The pre-boundary transcript is dumped to `/workdir/.inkwest/history-<n>.md` in the
-   conversation's own workdir.
+   conversation's own workdir, or to a fresh `/workdir/.inkwest-<hex>/` when `.inkwest` is a
+   symlink, a file or a directory this process cannot link into.
 2. A normal, billed turn on the session's engine writes a summary
-   (`prompts.get_compaction_prompt`).
+   (`prompts.get_compaction_prompt`). It replays the engine's usual message window, no larger,
+   and the prompt points it at the segment's archive file for anything older.
 3. A `role='system'` boundary row commits, carrying that summary.
 4. `get_session_messages` then replays only the rows after the boundary, and the summary rides
    the assembled system prompt (fenced as untrusted, see `docs/SYSTEM_PROMPTS.md`).
+
+`<n>` is one past the highest archive on disk, so deleting a boundary row to undo a compaction
+never lets the next one overwrite its archive. A compaction with nothing after the last boundary
+is refused by the WS route before any turn starts. With a sandbox, one whose archive could not be written
+(even into a fresh `.inkwest-<hex>/` it creates when `.inkwest` is a plant or unwritable) is refused inside the turn before the engine runs (no tokens, no rows, no abort marker), and an engine with no transcript to summarize
+(claude-cli without a `cli_session_id`, opencode without its store) stops before it spawns. A
+compaction that ends without a boundary rolls back its rows and archive and leaves no "turn
+aborted" marker. Engine state (the CLI resume id, the opencode store) changes only after the
+boundary commits, the resume id in the same transaction. opencode records the boundary each run
+ran under (`<session_dir>/opencode.boundary`, outside the sandbox mounts); a store written under an
+older boundary is reset again and never resumed. A boundary commit that raises after the server
+applied it is detected and kept.
 
 Nothing is deleted: Postgres keeps every row, the UI renders the whole thread with a divider,
 and the model recalls details by grepping the archive with the file tools it already has. See

@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.constants import COMPACTION_MAX_MESSAGES, MAX_CONVERSATION_MESSAGES
 from app.services import llm_broker
 from app.services import llm_proxy_token as token
 from app.services import orchestrator_inkwest_agent as oia
@@ -126,11 +125,16 @@ class TestExecuteAgent:
     @pytest.mark.asyncio
     async def test_timeout_raises(self):
         proc = _proc([b'{"type": "done"}\n'])
+
+        async def times_out(awaitable, timeout):
+            awaitable.close()  # the real wait_for would cancel it; left open, it leaks
+            raise TimeoutError()
+
         # The post-stream wait_for times out (the agent didn't exit); the except path
         # kills it then re-raises with the descriptive message.
         with (
             patch("asyncio.create_subprocess_exec", return_value=proc),
-            patch("asyncio.wait_for", AsyncMock(side_effect=TimeoutError())),
+            patch("asyncio.wait_for", times_out),
         ):
             with pytest.raises(TimeoutError, match="timed out"):
                 async for _ in execute_agent(SESSION_ID, "{}", container="c", timeout=1):
@@ -420,7 +424,7 @@ class TestOrchestrateInkwestAgent:
         lines = [json.dumps({"type": "done", "metadata": {}})]
         patches.append(
             patch(
-                "app.services.compaction._last_boundary",
+                "app.services.compaction.last_boundary",
                 AsyncMock(
                     return_value=SimpleNamespace(
                         role="system",
@@ -446,31 +450,6 @@ class TestOrchestrateInkwestAgent:
         prompt = json.loads(spies.turn_spec)["system_prompt"]
         assert "Earlier conversation (compacted)" in prompt
         assert "FACT: the pod was OOMKilled" in prompt
-
-    @pytest.mark.asyncio
-    async def test_full_history_lifts_the_rolling_message_window(self):
-        """The compaction turn must summarize the WHOLE segment. Accepting the kwarg is not
-        honouring it: silently truncated to 40 rows, the summary drops most of what it is
-        supposed to preserve — and every assertion about the prompt still passes."""
-        lines = [json.dumps({"type": "done", "metadata": {}})]
-        history = [{"role": "user", "content": f"q{i}"} for i in range(200)]
-
-        async def limit_for(**kwargs):
-            patches, spies = _patch_broker(history=history)
-            for p in patches:
-                p.start()
-            try:
-                await _run_broker(spies, lines, **kwargs)
-            finally:
-                for p in reversed(patches):
-                    p.stop()
-            spec = json.loads(spies.turn_spec)
-            return spec["limits"]["max_conversation_messages"]
-
-        # The broker ships the whole segment either way; the cap it sends is what the
-        # in-sandbox loop truncates to (inkwest_agent.loop), so the cap IS the contract.
-        assert await limit_for(full_history=True) == COMPACTION_MAX_MESSAGES
-        assert await limit_for(full_history=False) == MAX_CONVERSATION_MESSAGES
 
     @pytest.mark.asyncio
     async def test_turn_spec_assembly(self):

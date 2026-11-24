@@ -89,7 +89,10 @@ async def get_session_messages(
         session_id = uuid.UUID(session_id)
 
     result = await db.execute(
-        select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
+        select(Message)
+        .where(Message.session_id == session_id)
+        # `id` breaks same-instant ties the way every other query feeding the cut does.
+        .order_by(Message.created_at, Message.id)
     )
     rows = list(result.scalars().all())
 
@@ -227,15 +230,32 @@ async def save_message(
     return message
 
 
+def session_event_content(
+    subject: str,
+    action: str,
+    targets: list[dict[str, Any]] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The ``content`` of a session-event row, the one shape the frontend renders.
+
+    ``payload`` merges extra top-level keys for events that carry more than a target list
+    (the compaction boundary's ``summary``).
+    """
+    content: dict[str, Any] = {"type": "session_event", "subject": subject, "action": action}
+    if targets:
+        content["targets"] = targets
+    if payload:
+        content.update(payload)
+    return content
+
+
 async def save_session_event(
     db: AsyncSession,
     session_id: str | uuid.UUID,
     subject: str,
     action: str,
     targets: list[dict[str, Any]] | None = None,
-    payload: dict[str, Any] | None = None,
-    strict: bool = False,
-) -> Message | None:
+) -> None:
     """Record a session activity event as a fully-structured 'system' message.
 
     Stores subject-agnostic, machine-readable data — ``{type, subject, action, targets}``
@@ -245,29 +265,20 @@ async def save_session_event(
     conversation export is a plain ``SELECT`` with no string parsing.
 
     Surfaced inline in the conversation as a faded note. Excluded from the model's
-    context (see :func:`get_session_messages`).
-
-    ``payload`` merges extra top-level keys for events that carry more than a target list
-    (the compaction boundary's ``summary``). ``strict`` re-raises instead of swallowing:
-    a note about a change is best-effort, but an event the replay logic depends on is not.
+    context (see :func:`get_session_messages`). Best-effort — a failure here must never
+    break the change it accompanies.
     """
-    content: dict[str, Any] = {"type": "session_event", "subject": subject, "action": action}
-    if targets:
-        content["targets"] = targets
-    if payload:
-        content.update(payload)
     try:
         # Own session: a failed write's rollback must not expire the caller's loaded rows.
         async with AsyncSession(db.bind, expire_on_commit=False) as own:
-            return await save_message(own, session_id, "system", content)
+            await save_message(
+                own, session_id, "system", session_event_content(subject, action, targets)
+            )
     except Exception:  # noqa: BLE001 — the conversation note is non-critical
         logger.warning(
             "session_event_persist_failed",
             extra={"subject": subject, "action": action, "session_id": str(session_id)},
         )
-        if strict:
-            raise
-        return None
 
 
 # Shown on turns that never produced a reply — killed mid-flight by a server

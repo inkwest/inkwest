@@ -129,7 +129,7 @@ async def test_compaction_summary_reaches_the_cli_system_prompt() -> None:
         return _aiter([])
 
     with patch(
-        "app.services.compaction._last_boundary",
+        "app.services.compaction.last_boundary",
         AsyncMock(
             return_value=SimpleNamespace(
                 role="system",
@@ -264,7 +264,7 @@ async def test_broker_on_skips_engine_usage_row_keeps_stats() -> None:
     for p in ps:
         p.start()
     try:
-        db = AsyncMock()
+        db = mock_session()
         await _collect(
             oc.orchestrate_chat_cli(
                 db=db,
@@ -298,7 +298,7 @@ async def test_broker_off_engine_usage_row_carries_turn_id() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -345,7 +345,7 @@ async def test_errored_turn_persists_accumulated_usage() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -395,7 +395,7 @@ async def test_done_turn_persists_cache_tokens() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -444,7 +444,7 @@ async def test_timeout_turn_persists_accumulated_usage() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -494,7 +494,7 @@ async def test_unexpected_error_persists_accumulated_usage() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -545,7 +545,7 @@ async def test_stop_persists_usage_surfaced_on_clean_stream_end() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -592,7 +592,7 @@ async def test_cache_only_turn_is_persisted() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -636,7 +636,7 @@ async def test_1h_ttl_split_threaded_to_record_usage() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -654,7 +654,7 @@ async def test_1h_ttl_split_threaded_to_record_usage() -> None:
 @pytest.mark.asyncio
 async def test_read_txn_released_before_stream() -> None:
     """The last DB call before sandbox.ensure and before the stream is a commit."""
-    db = AsyncMock()
+    db = mock_session()
     last_db_call: dict[str, str | None] = {}
 
     def snapshot(step: str) -> None:
@@ -671,3 +671,66 @@ async def test_read_txn_released_before_stream() -> None:
     await _run(_settings(broker_enabled=False), {}, execute=execute, db=db, ensure=ensure)
 
     assert last_db_call == {"ensure": "commit", "exec": "commit"}
+
+
+async def _compacting_turn(execute, *, cli_session_id=None):
+    """Run a CLI turn the way a compaction does, returning (events, record_usage mock)."""
+    from app.services import compaction
+
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), {}, execute=execute) + [
+        patch.object(oc, "get_cli_session_id", AsyncMock(return_value=cli_session_id)),
+        patch("app.services.turn_usage.record_usage", ru),
+    ]
+    flag = compaction._compacting.set(True)
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=mock_session(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="summarize",
+                user_id=USER_ID,
+                persist_user_message=False,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+        compaction._compacting.reset(flag)
+    return events, ru
+
+
+@pytest.mark.asyncio
+async def test_compaction_without_a_cli_session_never_spawns() -> None:
+    """No --resume target means the CLI has nothing to summarize: a spawn is a billed turn
+    whose summary can only be discarded."""
+    execute = MagicMock(side_effect=AssertionError("spawned a blind compaction"))
+    events, ru = await _compacting_turn(execute)
+    assert events == []
+    execute.assert_not_called()
+    ru.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compaction_on_a_stale_cli_session_never_respawns() -> None:
+    """The stale --resume self-heal retries fresh, i.e. blind: fine for a question, a billed
+    no-op for a compaction."""
+    resumes: list[str | None] = []
+
+    async def fail(**kw):
+        raise RuntimeError("Claude CLI failed: No conversation found with session ID: stale-id")
+        yield  # pragma: no cover
+
+    def execute(*, resume_session_id=None, **kw):
+        resumes.append(resume_session_id)
+        return fail()
+
+    events, ru = await _compacting_turn(execute, cli_session_id="stale-id")
+    assert resumes == ["stale-id"]
+    assert events == []
+    ru.assert_not_awaited()

@@ -64,30 +64,85 @@ deleting one marker row.
   computation from the last assistant row + the resolved model. The "Compact context" action sits in
   the **composer toolbar**, not the header (see phase 2 for why).
 - WS `compact` message type (**owner only** — an editor can drive a turn but not rewrite what the
-  session remembers; rejected while a turn is active), running one turn through the session's
-  resolved engine with a new `COMPACTION_PROMPT`.
+  session remembers; rejected while a turn is active, and by the WS route itself when nothing
+  follows the last boundary, before any turn starts: that check is an EXISTS query run after the
+  rate gate and the active-turn check, so a burst of frames never loads the transcript), running one turn through the session's
+  resolved engine with a new `COMPACTION_PROMPT`. The summary turn replays the engine's normal
+  message window (no lifted cap: the turn must still fit the model when the conversation is at its
+  largest); the prompt points it at this segment's archive file for whatever the window left out,
+  and states the summary budget (`MAX_SUMMARY_CHARS`).
 - Boundary row: `role='system'`, `content = {type: 'session_event', subject: 'context', action:
   'compacted', summary, targets: [{message_count, trigger, archive_path?}]}` — the existing
-  `save_session_event` shape, so the transcript divider reuses the session-event rendering. The
+  session-event shape (`messages.session_event_content`, shared with `save_session_event`), so the
+  transcript divider reuses the session-event rendering. It is
+  committed in ONE transaction with `sessions.cli_session_id = NULL`: the CLI never replays the DB
+  transcript, so either write without the other loses or replays the conversation. The
   `summary` is server-only: it is stripped before the row reaches any client (authenticated or
   public share link). A boundary row whose summary is missing or blank is **not** treated as a
   boundary — it would cut the transcript while injecting nothing, i.e. silent amnesia.
-- `get_session_messages` returns only rows **after** the last boundary (sliced by row index, then
-  `merge_consecutive_roles()` so the post-slice head can't break Converse's alternation); new
-  `with_compaction_summary()` appended to the assembled system prompt of all three orchestrators.
-- Engine resume handles reset on compaction: `sessions.cli_session_id = NULL`, and opencode's own
-  on-disk session store is deleted (`sandbox.reset_opencode_store`) — `--continue` resolves against
-  THAT store, not the DB, so a surviving store replays the transcript the boundary just cut.
+- `get_session_messages` returns only rows **after** the last boundary (rows ordered by
+  `(created_at, id)` in every query that feeds the cut, sliced by row index, then
+  `merge_consecutive_roles()` so the post-slice head can't break Converse's alternation); the
+  summary block appended to the assembled system prompt of all three orchestrators
+  (`with_compaction_summary()` for claude-cli and inkwest-agent; opencode fetches the boundary once
+  with `last_boundary()` for its store check too and passes it to `append_compaction_summary()`).
+- Engine resume handles reset on compaction, only once the boundary is committed (an abandoned
+  compaction never touches engine state): `sessions.cli_session_id = NULL` in the boundary's own
+  transaction, then opencode's on-disk session store is emptied in place
+  (`sandbox.reset_opencode_store`) — `--continue` resolves against THAT store, not the DB, so a
+  surviving store replays the transcript the boundary just cut. If `opencode.db` survives the reset
+  it raises; the compaction stays committed and the failure is logged. Every opencode run that produced output records the boundary it ran under in
+  `<session_dir>/opencode.boundary` (the session root, which is never bind-mounted, so the sandbox
+  cannot forge it; written atomically). A turn whose current boundary differs from that record (a
+  missing record matches only a never-compacted session) retries the reset and runs without
+  `--continue`, whichever engine ran the turns in between.
+- A boundary commit that raises is checked on a session of its own before anything is undone,
+  the check and the undo under one shield. A commit the server applied is kept: after a lost ack
+  the compaction finishes as a success (engine reset, `done`, divider); after a cancel the row and
+  the cleared `cli_session_id` stay, the cancel is re-raised, no `done` or divider is sent, and the
+  opencode reset is left to the sidecar check of the next opencode turn. A failing check deletes
+  nothing and propagates.
   `inkwest-agent` has no handle. An engine that nonetheless starts a turn with an empty transcript
   (stale CLI `--resume`, missing store) reports it (`compaction.note_empty_replay`) and the
-  compaction is abandoned rather than committing a "nothing to summarize" boundary.
+  compaction is abandoned rather than committing a "nothing to summarize" boundary. During a
+  compaction the engine stops right there, before it spawns: a CLI session with no `cli_session_id`
+  and an opencode conversation whose store is gone are refused at no cost.
+- An abandoned compaction (engine error, blind engine, cancel, raise, boundary write failure)
+  rolls back its rows and archive on its own DB session (the turn's may be in a failed flush, or
+  closed by the runner after a second cancel), shielded from cancellation, then waives the runner's
+  "turn aborted" marker (`turn_runner.skip_abort_marker`), so the conversation is left exactly as it
+  was. A rollback that itself fails keeps the marker.
+- When the sandbox is enabled but the archive could not be written even into a fresh directory
+  this process creates (see below), the compaction is refused inside the turn before the engine runs (no tokens, no rows, no abort marker), whatever
+  the segment's length: the agent loop re-truncates its message window after every tool round,
+  which the compaction prompt invites, so any row can drop out of view mid-turn and the archive is
+  the only place left to read it. Applied to every engine: predicting the dispatched engine would
+  duplicate the dispatcher, and without the archive the recall path is gone for every engine.
+  Without a sandbox there is no archive to write or read, and the compaction proceeds.
 - Archive dump to `/workdir/.inkwest/history-<n>.md` (markdown, one section per message) + the
-  system prompt naming the path. Written through `sandbox.publish_workdir_file` — staged outside the
-  mount and `os.replace`d relative to a directory fd opened `O_NOFOLLOW` per segment, because the
-  sandbox can write to that volume: a planted symlink would otherwise redirect the dump anywhere the
-  backend can write, and a name-based check would still lose the race against a mid-write swap.
-  Capped (~4 Mi characters per archive, ~200k per content block, every block kind) so one runaway
-  tool output can't fill the volume; the boundary is written whether or not the dump succeeded.
+  system prompt naming the glob `/workdir/.inkwest*/history-*.md` (`_archive_hint()`: always true,
+  whichever directories past segments landed in; the compaction prompt itself names this segment's
+  file, and the boundary records it). `<n>` is one past the highest archive already in the chosen
+  directory,
+  not the boundary count: undoing a compaction (deleting its boundary row) keeps its archive, and
+  the next one must not overwrite it. Written through `sandbox.publish_workdir_file` — staged outside the
+  mount and hard-linked into place relative to a directory fd opened `O_NOFOLLOW` per segment,
+  because the sandbox can write to that volume: a planted symlink would otherwise redirect the dump
+  anywhere the backend can write, and a name-based check would still lose the race against a
+  mid-write swap. `link` refuses an existing name, so an archive is never overwritten: a name taken
+  after the index was read is skipped for the next one (bounded), and the boundary and the prompt
+  record the path actually used. Nothing the sandbox may own is moved, renamed, chmod'ed or
+  deleted: `.inkwest` is used whenever this process can link into it, whoever owns it (a root
+  backend uses a sandbox-owned one); only a symlink, a file or a directory it cannot link into
+  sends the archive to a fresh `.inkwest-<12 hex>` directory, built in the session root outside the
+  mount and renamed into the workdir whole, so the sandbox never sees it empty (a taken name tries
+  another, a few times; an empty directory raced in at that name may be replaced). A mode is
+  forced only on a directory this call created. Removing an abandoned archive checks its inode, so
+  a file the sandbox renamed over it survives.
+  Every row is written in full, streamed block by block into the staging file; each content block
+  is capped at ~200k characters (every block kind), which bounds memory to one block past the rows
+  already loaded. No total cap: a row left out is a row nobody summarizes, and a total cap would
+  make the largest segments uncompactable for good.
 - Auto-compaction before a user turn past the trigger, with a visible notice naming which signal
   fired; admin settings `context_autocompact_enabled` (default true), `context_warn_percent`
   (default 75), and the trigger set — `context_compact_percent` (default 90),
@@ -143,14 +198,24 @@ deleting one marker row.
       `message`/`retry`/`stop`, which an editor may send.
 - [x] Given a `compact` while a turn is active, then it is refused (one turn per session) and the
       running turn is untouched.
-- [x] Given a `compact` on a session with nothing after the last boundary, then the orchestrator
-      refuses it before reaching the engine, so no tokens are spent.
+- [x] Given a `compact` on a session with nothing after the last boundary, then the WS route
+      refuses it before starting a turn: no tokens are spent and no row is written.
+- [x] Given the boundary write fails, then `cli_session_id` and the opencode store are untouched,
+      the summary row is rolled back, and no "turn aborted" marker is written.
+- [x] Given the sandbox is enabled and the archive cannot be written, then the compaction is
+      refused inside the turn before the engine runs (no tokens, no rows, no abort marker) and the conversation is unchanged.
+- [x] Given a segment far larger than any former archive cap, then it compacts and its archive holds
+      every row.
 - [x] Given a compaction on a session with N messages, then: a summary assistant bubble is persisted,
       a `subject='context'`/`action='compacted'` system row follows it carrying that summary,
       `get_session_messages` returns `[]` for that session, and `sessions.cli_session_id` is `NULL`.
 - [x] Given the summary turn errors, is cancelled, or produces no text, then no boundary is written,
-      the rows the failed turn created are deleted, the archive is removed, and the conversation is
-      exactly as it was — a blank summary must never become an amnesia boundary.
+      the rows the failed turn created are deleted, the archive is removed, no "turn aborted"
+      marker is written, and the conversation is exactly as it was — a blank summary must never
+      become an amnesia boundary.
+- [x] Given a compaction on an engine with no transcript to summarize (claude-cli without a
+      `cli_session_id`, opencode without its store), then the engine is never spawned and no usage
+      is recorded.
 - [x] Given a compaction, then the summary is the text of the rows **that turn** created (ids not
       present before it started) — never a stale assistant row from earlier in the conversation.
 - [x] Given a compacted session, when the next turn runs, then the system prompt contains the summary
@@ -158,9 +223,14 @@ deleting one marker row.
       rows.
 - [x] Given a compacted session, then `/workdir/.inkwest/history-1.md` exists in that conversation's
       workdir and contains the pre-boundary messages; a second compaction writes `history-2.md` and
-      leaves the first intact.
-- [x] Given `.inkwest` (or any segment of the archive path) is a symlink planted from inside the
-      sandbox, then the dump is refused and nothing is written outside the session's workdir.
+      leaves the first intact, including after the first boundary row was deleted (undo).
+- [x] Given `.inkwest` is a file, a symlink (to a directory, to a file, dangling) or a directory
+      this process cannot open or write, then it and any link target are left untouched (no link,
+      move or chmod), the archive lands in a fresh `.inkwest-<hex>/`, and the compaction runs.
+- [x] Given more taken names than the bounded search tries, then the archive still lands in a
+      fresh directory; given every fresh directory name taken too, then the compaction is refused.
+- [x] Given an archive name is taken after the index was read, then that file is never
+      overwritten and the archive, the boundary and the prompt use the next free name.
 - [x] Given two compactions, then only the **last** boundary is applied when building the transcript
       (the summary of the second supersedes the first).
 - [x] Given a compacted session, when the UI reloads, then the full history renders with a divider at
@@ -266,7 +336,7 @@ its own diff.
       `ListFoundationModels` nor Anthropic `/v1/models` returns a context length). Any model we
       cannot source stays `None`.
 - [ ] Archive retention: the workdir is per-conversation and durable, so archives accumulate. Phase 2
-      ships per-file caps (~4 Mi characters, ~200k per block) but **no** count cap — the existing workdir
+      ships a per-block cap (~200k characters) but no per-file or count cap — the existing workdir
       lifecycle owns deletion. Revisit if a conversation ever fills its volume.
 
 ## Decisions
@@ -307,7 +377,8 @@ its own diff.
   will remember, and it lands in exports. It is copied onto the boundary row so the replay logic has
   one row to read, and stripped from `MessageResponse` so the API doesn't ship it twice.
 - **The summary is model-authored, therefore untrusted.** It is injected into the next turns' system
-  prompt inside a `<compaction_summary untrusted="true">` fence and capped at 8000 chars: without the
+  prompt inside a `<compaction_summary untrusted="true">` fence and capped at 8000 chars (a budget
+  the compaction prompt states, derived from the same constant): without the
   fence, anything a tool result talked the model into writing would be promoted to system-prompt
   authority for the rest of the conversation.
 - **Compaction is owner-only**, though an editor can run turns. Compaction rewrites what the session

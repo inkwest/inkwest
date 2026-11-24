@@ -61,10 +61,9 @@ async def orchestrate_chat_cli(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict] | None = None,
     persist_user_message: bool = True,
-    # Both are part of the shared turn signature; this engine resumes its OWN transcript
-    # (--resume) and never replays DB history, so neither can be honoured here.
+    # Part of the shared turn signature; this engine resumes its OWN transcript (--resume)
+    # and never replays DB history, so it cannot be honoured here.
     replace_last_user: bool = False,
-    full_history: bool = False,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """
@@ -134,7 +133,8 @@ async def orchestrate_chat_cli(
         # No --resume target: this engine never replays the DB transcript, so the turn runs
         # blind. Only reported for a turn that isn't the user's own question (compaction,
         # retry), where answering without the history silently produces a wrong result.
-        note_empty_replay()
+        if note_empty_replay():
+            return
 
     # Expose this session's connected connector credentials as standard env vars
     # (AWS_*, GITLAB_TOKEN, KUBECONFIG, …) so the agent can use `aws`/`kubectl`/`curl`
@@ -570,7 +570,8 @@ required.
                         await db.rollback()
                         logger.warning(f"Failed to clear stale CLI session ID: {ce}")
                     resume_id = None
-                    note_empty_replay()
+                    if note_empty_replay():
+                        return
                     continue
                 raise
 

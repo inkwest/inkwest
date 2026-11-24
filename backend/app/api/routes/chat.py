@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -36,7 +36,11 @@ from app.models.session_share_link import SessionShareLink
 from app.models.user import User
 from app.services.ai_client import Orchestrator, get_orchestrator
 from app.services.budget_service import check_budget, is_budget_enabled
-from app.services.compaction import orchestrate_compaction
+from app.services.compaction import (
+    NOTHING_TO_COMPACT,
+    has_compactable_rows,
+    orchestrate_compaction,
+)
 from app.services.mcp_dek_handshake import handle_dek_message, note_connect, note_disconnect
 from app.services.messages import clear_retry_state, get_retryable_message
 from app.services.session_access import get_session_role, turn_refusal
@@ -532,27 +536,71 @@ async def start_gated_turn(
     user_roles: list[str],
     orchestrate: Orchestrator,
     turn_kwargs: dict[str, Any],
+    precheck: Callable[[], Awaitable[str | None]] | None = None,
 ) -> bool:
     """Rate gate → budget gate → one-turn-per-session slot. Returns whether the turn started.
 
     Every refusal is reported on the socket, so a caller only needs the boolean. Shared by
     `message`, `retry` and `compact`: a fourth turn-driving branch that skipped one of these
     would let a user bypass their own cap.
+
+    ``precheck`` returns a refusal or None. It runs after the rate gate and only while no turn
+    is active, so a burst of requests cannot turn it into a DB load on the receive loop.
     """
+    busy = {"type": "error", "content": "A response is already in progress."}
     rate_reason = _turn_rate_block_reason(user_id)
     if rate_reason:
         await websocket.send_json({"type": "error", "content": rate_reason})
         return False
+    if precheck is not None:
+        if await turn_runner.is_active(session_id):
+            await websocket.send_json(busy)
+            return False
+        refusal = await precheck()
+        if refusal:
+            await websocket.send_json({"type": "error", "content": refusal})
+            return False
     block_reason = await _budget_block_reason(user_id, user_roles)
     if block_reason:
         await websocket.send_json({"type": "error", "content": block_reason})
         return False
     if not await turn_runner.start(session_id, orchestrate, turn_kwargs):
-        await websocket.send_json(
-            {"type": "error", "content": "A response is already in progress."}
-        )
+        await websocket.send_json(busy)
         return False
     return True
+
+
+async def start_compaction(
+    websocket: WebSocket,
+    session_id: str,
+    user_id: UUID,
+    user_roles: list[str],
+    turn_kwargs: dict[str, Any],
+) -> bool:
+    """Run a compaction through the shared turn gate, refusing an empty one before it starts.
+
+    Before, not inside the turn: a turn that ends on an error leaves an abort marker in the
+    transcript, and a no-op must leave the conversation exactly as it was.
+    """
+
+    async def nothing_to_compact() -> str | None:
+        try:
+            async with async_session_maker() as db:
+                compactable = await has_compactable_rows(db, session_id)
+        except Exception:
+            logger.exception("Compaction lookup failed", extra={"session_id": session_id})
+            return "Could not start compaction, please try again."
+        return None if compactable else NOTHING_TO_COMPACT
+
+    return await start_gated_turn(
+        websocket,
+        session_id,
+        user_id,
+        user_roles,
+        orchestrate_compaction,
+        turn_kwargs,
+        precheck=nothing_to_compact,
+    )
 
 
 @router.websocket("/ws/chat/{session_id}")
@@ -782,16 +830,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 except Exception:
                     logger.exception("Clear retry state failed", extra={"session_id": session_id})
             elif msg_type == "compact":
-                # A billable turn like any other, hence the shared gate. "Nothing to compact"
-                # is left to the orchestrator, which refuses before reaching the engine.
                 logger.info("Compaction requested", extra={"session_id": session_id})
-                await start_gated_turn(
-                    websocket,
-                    session_id,
-                    user_id,
-                    user_roles,
-                    orchestrate_compaction,
-                    {**base_kwargs, "trigger": "manual"},
+                await start_compaction(
+                    websocket, session_id, user_id, user_roles, {**base_kwargs, "trigger": "manual"}
                 )
             else:
                 await websocket.send_json(

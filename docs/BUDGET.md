@@ -121,7 +121,9 @@ Managed via `PUT /api/admin/settings/budget` (and the Budgets admin page).
   **invalidates the prompt cache**: the boundary changes the prefix, so the turn
   right after a compaction re-pays full input and reads ~0 cache tokens. That is
   the trade — one expensive turn now against every later turn re-paying a prompt
-  that only grows.
+  that only grows. A refused compaction costs nothing: nothing to summarize is
+  refused before the turn starts, and an engine with no transcript to summarize
+  stops before it spawns.
 - **Concurrency**: the pre-turn check is one active turn *per session*, not per
   user. A user driving two sessions concurrently can have both pass the check and
   both spend — consistent with the single-replica caveats elsewhere; overshoot

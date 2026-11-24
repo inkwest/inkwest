@@ -29,11 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
-from app.core.constants import (
-    COMPACTION_MAX_MESSAGES,
-    MAX_CONVERSATION_MESSAGES,
-    MAX_RESPONSE_TOKENS,
-)
+from app.core.constants import MAX_CONVERSATION_MESSAGES, MAX_RESPONSE_TOKENS
 from app.core.database import release_read_txn
 from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
@@ -132,9 +128,6 @@ async def orchestrate_chat_inkwest_agent(
     # engine doesn't see it twice. Distinct from persist_user_message: a compaction also
     # skips the write, but its prompt is new and must not eat the real last user turn.
     replace_last_user: bool = False,
-    # The compaction turn summarizes the whole segment, so it opts out of the rolling
-    # message window (honoured by the agent, which is the only engine that replays history).
-    full_history: bool = False,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Broker one turn through the sandboxed ``inkwest-agent``. Mirrors orchestrate_chat_cli.
@@ -451,9 +444,7 @@ async def orchestrate_chat_inkwest_agent(
             limits=TurnLimits(
                 max_tokens=max_tokens,
                 bash_timeout_seconds=settings.claude_cli_timeout,
-                max_conversation_messages=(
-                    COMPACTION_MAX_MESSAGES if full_history else MAX_CONVERSATION_MESSAGES
-                ),
+                max_conversation_messages=MAX_CONVERSATION_MESSAGES,
             ),
             tools=[ToolSpec(name=t["name"]) for t in get_tool_definitions()],
             skills=[SkillSpec(name=s.name, description=s.description or "") for s in active_skills],

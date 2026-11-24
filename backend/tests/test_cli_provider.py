@@ -18,6 +18,7 @@ from app.services.ai_cli_client import (
     parse_cli_stream_line,
 )
 from app.services.events import ChatEvent
+from tests.conftest import mock_session
 
 
 class TestParseCliStreamLine:
@@ -817,7 +818,7 @@ class TestOrchestrateChatCliResume:
             sandbox_docker_path="docker",
         )
         clear_mock = AsyncMock(side_effect=RuntimeError("db down") if clear_fails else None)
-        db = AsyncMock()
+        db = mock_session()
         with (
             patch.object(orchestrator_cli, "get_settings", return_value=settings),
             patch.object(orchestrator_cli, "execute_claude_cli", side_effect=fake_execute),
@@ -906,7 +907,7 @@ class TestOrchestrateChatCliResume:
             events = [
                 event
                 async for event in orchestrator_cli.orchestrate_chat_cli(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=sid,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -967,7 +968,7 @@ class TestOrchestrateChatCliResume:
             events = [
                 event
                 async for event in orchestrator_cli.orchestrate_chat_cli(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=sid,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1060,7 +1061,7 @@ class TestOrchestratorContentOrder:
             patch("app.services.turn_usage.record_usage", new=AsyncMock()),
             patch.object(orchestrator_cli.os, "makedirs"),
         ):
-            db = AsyncMock()
+            db = mock_session()
             async for _ in orchestrator_cli.orchestrate_chat_cli(
                 db=db,
                 session_id=uuid4(),

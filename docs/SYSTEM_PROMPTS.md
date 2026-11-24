@@ -123,10 +123,14 @@ containing stray braces (e.g. JSON `{"k": "v"}`) never raises.
 ### Compaction summary block
 
 On a session that has been compacted, every orchestrator appends one last block
-to the **assembled** prompt via
-`compaction.with_compaction_summary(db, session_id, system_prompt)`: the summary
-of everything before the boundary, plus the path of the `/workdir` archive the
-model can grep for the details the summary dropped.
+to the **assembled** prompt: claude-cli and inkwest-agent via
+`compaction.with_compaction_summary(db, session_id, system_prompt)`, opencode via
+`compaction.append_compaction_summary(system_prompt, boundary)` with the boundary
+it already fetched for its store check. The block holds the summary of everything
+before the boundary, plus the glob `/workdir/.inkwest*/history-*.md` the model can
+grep for the details the summary dropped (an archive lands in a fresh
+`.inkwest-<hex>/` when `.inkwest` itself is unusable, so no single directory is
+always right).
 
 - It goes on the assembled prompt, never into the base persona — it is runtime
   state, and admins manage the persona.
@@ -138,6 +142,8 @@ model can grep for the details the summary dropped.
   closing its own fence promotes the rest of itself to system authority.
 - It is byte-stable for the life of a boundary, so the agent loop's prompt cache
   does not churn between turns.
+- A failure to read the boundary fails the turn: the replayed transcript is
+  already cut there, so a prompt without the summary would lose the whole past.
 - Because the CLI freezes its system prompt at the first turn of a CLI session,
   compaction clears `sessions.cli_session_id` — the next turn starts a fresh CLI
   session that actually sees the new block.
