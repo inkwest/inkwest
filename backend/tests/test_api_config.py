@@ -76,6 +76,9 @@ async def test_app_config_reflects_model_settings(
             "legacy": True,
             "engines": both,
             "input_modalities": [],
+            # Older Claude generations have no published context window, so the gauge
+            # stays off for them rather than assuming one (see context_window.py).
+            "context_window": None,
         },
         {
             "id": "claude-sonnet-4-20250514",
@@ -83,5 +86,51 @@ async def test_app_config_reflects_model_settings(
             "legacy": True,
             "engines": both,
             "input_modalities": [],
+            # Older Claude generations have no published context window, so the gauge
+            # stays off for them rather than assuming one (see context_window.py).
+            "context_window": None,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_app_config_ships_the_resolved_context_window(
+    authenticated_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gauge and the compact offer are both driven by this field: a deployment where it
+    is null everywhere silently loses the whole feature, with every other test still green."""
+    from app.services import model_catalog, model_registry
+
+    def _row(model_id: str, **over):
+        base = {
+            "model_id": model_id,
+            "provider": "anthropic",
+            "display_name": None,
+            "endpoint": None,
+            "arn": None,
+            "options": {},
+            "input_price": None,
+            "output_price": None,
+            "enabled": True,
+            "is_default": False,
+            "source": "discovered",
+            "legacy": False,
+        }
+        base.update(over)
+        return base
+
+    monkeypatch.setattr(model_catalog, "_live_models", ["claude-sonnet-5", "custom-model"])
+    monkeypatch.setattr(
+        model_registry,
+        "_rows",
+        {
+            "claude-sonnet-5": _row("claude-sonnet-5", is_default=True),
+            # The registry override is the escape hatch for anything the table can't source.
+            "custom-model": _row("custom-model", options={"context_window": 500_000}),
+        },
+    )
+
+    data = (await authenticated_client.get("/api/config")).json()
+    windows = {m["id"]: m["context_window"] for m in data["available_models"]}
+    assert windows["claude-sonnet-5"] == 1_000_000  # from the sourced static table
+    assert windows["custom-model"] == 500_000  # registry options win

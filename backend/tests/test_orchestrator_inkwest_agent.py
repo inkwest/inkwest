@@ -18,6 +18,7 @@ from app.services import llm_broker
 from app.services import llm_proxy_token as token
 from app.services import orchestrator_inkwest_agent as oia
 from app.services.ai_cli_client import execute_agent, parse_agent_response
+from tests.conftest import mock_session
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -124,11 +125,16 @@ class TestExecuteAgent:
     @pytest.mark.asyncio
     async def test_timeout_raises(self):
         proc = _proc([b'{"type": "done"}\n'])
+
+        async def times_out(awaitable, timeout):
+            awaitable.close()  # the real wait_for would cancel it; left open, it leaks
+            raise TimeoutError()
+
         # The post-stream wait_for times out (the agent didn't exit); the except path
         # kills it then re-raises with the descriptive message.
         with (
             patch("asyncio.create_subprocess_exec", return_value=proc),
-            patch("asyncio.wait_for", AsyncMock(side_effect=TimeoutError())),
+            patch("asyncio.wait_for", times_out),
         ):
             with pytest.raises(TimeoutError, match="timed out"):
                 async for _ in execute_agent(SESSION_ID, "{}", container="c", timeout=1):
@@ -257,8 +263,7 @@ def _patch_broker(
     OFF so these tests are hermetic against the developer's ``.env`` (which may set
     ``LLM_BROKER_ENABLED``). The broker-on tests pass an enabled SimpleNamespace.
     """
-    db = AsyncMock()
-    db.commit = AsyncMock()
+    db = mock_session()
     spies = SimpleNamespace(
         save_message=AsyncMock(),
         ensure_title=AsyncMock(),
@@ -411,6 +416,40 @@ class TestOrchestrateInkwestAgent:
             )
             or 0
         ) >= 1
+
+    @pytest.mark.asyncio
+    async def test_compaction_summary_reaches_the_turn_spec(self):
+        """A compacted session's summary must ride the system prompt on every later turn."""
+        patches, spies = _patch_broker(history=[{"role": "user", "content": "after boundary"}])
+        lines = [json.dumps({"type": "done", "metadata": {}})]
+        patches.append(
+            patch(
+                "app.services.compaction.last_boundary",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        role="system",
+                        content={
+                            "type": "session_event",
+                            "subject": "context",
+                            "action": "compacted",
+                            "targets": [{"archive_path": "/workdir/.inkwest/history-1.md"}],
+                            "summary": "FACT: the pod was OOMKilled",
+                        },
+                    )
+                ),
+            )
+        )
+        for p in patches:
+            p.start()
+        try:
+            await _run_broker(spies, lines)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        prompt = json.loads(spies.turn_spec)["system_prompt"]
+        assert "Earlier conversation (compacted)" in prompt
+        assert "FACT: the pod was OOMKilled" in prompt
 
     @pytest.mark.asyncio
     async def test_turn_spec_assembly(self):
@@ -921,7 +960,12 @@ class TestOrchestrateInkwestAgent:
         for p in patches:
             p.start()
         try:
-            await _run_broker(spies, [json.dumps({"type": "done"})], persist_user_message=False)
+            await _run_broker(
+                spies,
+                [json.dumps({"type": "done"})],
+                persist_user_message=False,
+                replace_last_user=True,
+            )
         finally:
             for p in reversed(patches):
                 p.stop()
@@ -1075,6 +1119,47 @@ class TestOrchestrateInkwestAgent:
         # no usage persisted on a cancelled turn
         spies.record_usage.assert_not_awaited()
         spies.release.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "terminal",
+        [
+            {"type": "done", "metadata": {"input_tokens": 8, "context_tokens": 51_003}},
+            {
+                "type": "error",
+                "content": "AI service error: throttled",
+                "is_error": True,
+                "metadata": {"input_tokens": 8, "context_tokens": 51_003},
+            },
+        ],
+        ids=["done", "error"],
+    )
+    @pytest.mark.asyncio
+    async def test_stop_after_terminal_reports_usage_once(self, terminal: dict):
+        """A Stop after the terminal reached the client must not add a second, usage-
+        carrying done (the live badges would count the turn twice)."""
+        patches, spies = _patch_broker()
+        spies.save_message.side_effect = [
+            SimpleNamespace(id=uuid.uuid4()),  # user turn
+            SimpleNamespace(id=uuid.uuid4()),  # assistant flush
+        ]
+        stamp = AsyncMock()
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+        lines = [json.dumps({"type": "text_delta", "content": "answer"}), json.dumps(terminal)]
+        for p in patches:
+            p.start()
+        try:
+            with patch("app.services.turn_usage.stamp_message_usage", stamp):
+                events = await _run_broker(spies, lines, cancel_event=cancel_event)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        terminals = [e for e in events if e.type in ("done", "error")]
+        assert len(terminals) == 1
+        assert terminals[0].type == terminal["type"]
+        assert not terminals[0].metadata.get("stopped")
+        assert terminals[0].metadata["context_tokens"] == 51_003
+        assert stamp.await_args.kwargs["context_tokens"] == 51_003
 
     @pytest.mark.asyncio
     async def test_cancel_persists_partial_with_dangling_tool_use(self):
@@ -1618,6 +1703,7 @@ async def test_turn_totals_stamped_on_first_assistant_row():
                     "output_tokens": 16,
                     "cache_read_tokens": 12608,
                     "cache_write_tokens": 0,
+                    "context_tokens": 6_400,
                 },
             }
         ),
@@ -1635,9 +1721,35 @@ async def test_turn_totals_stamped_on_first_assistant_row():
     assert args[1] == first_row.id  # FIRST assistant row, not the trailing flush's
     assert kwargs["input_tokens"] == 7
     assert kwargs["cache_read_tokens"] == 12608
+    assert kwargs["context_tokens"] == 6_400
     # session stats carry the cache splits too
     assert spies.update_stats.await_args.kwargs["cache_read_tokens"] == 12608
     assert spies.update_stats.await_args.kwargs["cache_write_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_done_without_context_tokens_stamps_none():
+    """An agent image older than the key sends no context_tokens: the row stays NULL."""
+    patches, spies = _patch_broker()
+    spies.save_message.side_effect = [
+        SimpleNamespace(id=uuid.uuid4()),  # user turn
+        SimpleNamespace(id=uuid.uuid4()),  # assistant flush
+    ]
+    stamp = AsyncMock()
+    lines = [
+        json.dumps({"type": "text_delta", "content": "hi"}),
+        json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}}),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with patch("app.services.turn_usage.stamp_message_usage", stamp):
+            await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    stamp.assert_awaited_once()
+    assert stamp.await_args.kwargs["context_tokens"] is None
 
 
 @pytest.mark.asyncio

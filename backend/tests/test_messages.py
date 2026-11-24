@@ -89,17 +89,17 @@ async def _make_session(db: AsyncSession, **fields: Any) -> uuid.UUID:
 
 async def _add_message(
     db: AsyncSession, session_id: uuid.UUID, role: str, content: Any, minute: int = 0
-) -> None:
-    db.add(
-        Message(
-            id=uuid.uuid4(),
-            session_id=session_id,
-            role=role,
-            content=content,
-            created_at=_BASE_TIME + timedelta(minutes=minute),
-        )
+) -> Message:
+    msg = Message(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role=role,
+        content=content,
+        created_at=_BASE_TIME + timedelta(minutes=minute),
     )
+    db.add(msg)
     await db.commit()
+    return msg
 
 
 # --- truncate_messages (pure) ---------------------------------------------------
@@ -237,7 +237,7 @@ async def test_get_messages_tool_result_role_mapped_to_user(db: AsyncSession) ->
 
 async def test_get_messages_ordered_by_created_at(db: AsyncSession) -> None:
     sid = await _make_session(db)
-    await _add_message(db, sid, "user", "second", minute=2)
+    await _add_message(db, sid, "assistant", "second", minute=2)
     await _add_message(db, sid, "user", "first", minute=1)
     out = await get_session_messages(db, sid)
     assert [m["content"] for m in out] == ["first", "second"]
@@ -660,6 +660,35 @@ async def test_stamp_message_usage_backfills_saved_row(db: AsyncSession) -> None
     assert msg.cache_write_tokens == 0
 
 
+async def test_context_tokens_persist_via_save_and_stamp(db: AsyncSession) -> None:
+    """The last call's prompt rides its own column, apart from the cumulative counts."""
+    sid = await _make_session(db)
+    saved = await save_message(
+        db, sid, "assistant", "cli turn", input_tokens=15, context_tokens=53_107
+    )
+    assert saved.context_tokens == 53_107
+
+    streamed = await save_message(db, sid, "assistant", "streamed early")
+    assert streamed.context_tokens is None
+    await stamp_message_usage(
+        db, streamed.id, input_tokens=15, output_tokens=90, context_tokens=53_107
+    )
+    await db.refresh(streamed)
+    assert streamed.context_tokens == 53_107
+    assert streamed.input_tokens == 15
+
+    older = await save_message(db, sid, "assistant", "older agent image")
+    await stamp_message_usage(db, older.id, input_tokens=15, output_tokens=90)
+    await db.refresh(older)
+    assert older.context_tokens is None  # unknown stays unknown, never derived
+
+    from app.models.schemas import MessageResponse, SharedMessage
+
+    assert MessageResponse.model_validate(saved).context_tokens == 53_107
+    # The anonymous share view exposes no token counts, this one included.
+    assert "context_tokens" not in SharedMessage.model_fields
+
+
 async def test_update_session_stats_no_commit_joins_caller_txn(db: AsyncSession) -> None:
     """commit=False leaves the increment uncommitted — turn_usage folds it into the
     budget-row transaction so the two land (or roll back) together."""
@@ -684,3 +713,51 @@ async def test_update_session_stats_clamps_negative_inputs(db: AsyncSession) -> 
     assert stats["total_input_tokens"] == 10
     assert stats["total_output_tokens"] == 5
     assert stats["total_cache_read_tokens"] == 0
+
+
+async def test_consecutive_same_role_rows_are_coalesced(db: AsyncSession) -> None:
+    """Both APIs want alternating roles; two plain strings stay a plain string."""
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "first", minute=1)
+    await _add_message(db, sid, "user", "second", minute=2)
+    out = await get_session_messages(db, sid)
+    assert out == [{"role": "user", "content": "first\n\nsecond"}]
+
+
+async def test_coalescing_concatenates_block_lists(db: AsyncSession) -> None:
+    """The block branch: a tool_use row followed by more blocks must merge into ONE message
+    with both blocks, not a string — Converse rejects a mixed/repeated-role transcript."""
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "q", minute=1)
+    await _add_message(db, sid, "assistant", [{"type": "text", "text": "looking"}], minute=2)
+    await _add_message(db, sid, "assistant", [{"type": "text", "text": "found it"}], minute=3)
+    out = await get_session_messages(db, sid)
+    assert [m["role"] for m in out] == ["user", "assistant"]
+    assert out[1]["content"] == [
+        {"type": "text", "text": "looking"},
+        {"type": "text", "text": "found it"},
+    ]
+
+
+async def test_coalescing_promotes_a_string_next_to_blocks(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "q", minute=1)
+    await _add_message(db, sid, "assistant", "prose", minute=2)
+    await _add_message(db, sid, "assistant", [{"type": "text", "text": "more"}], minute=3)
+    out = await get_session_messages(db, sid)
+    assert out[1]["content"] == [
+        {"type": "text", "text": "prose"},
+        {"type": "text", "text": "more"},
+    ]
+
+
+async def test_delete_messages_is_scoped_to_its_session(db: AsyncSession) -> None:
+    """A bare id list would let one conversation's cleanup delete another's rows."""
+    from app.services.messages import delete_messages
+
+    mine = await _make_session(db)
+    theirs = await _make_session(db)
+    kept = await _add_message(db, theirs, "user", "not yours", minute=1)
+
+    await delete_messages(db, mine, [kept.id])
+    assert len(await get_session_messages(db, theirs)) == 1

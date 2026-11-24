@@ -6,13 +6,14 @@ import pytest
 from httpx import AsyncClient
 
 from app.core.config import get_settings
-from app.services import attachments
+from app.services import attachments, sandbox
 
 
 @pytest.fixture
 def workdir_root(tmp_path, monkeypatch):
     """Point the attachment workdir resolver at a throwaway directory."""
-    monkeypatch.setattr(attachments, "session_dir", lambda sid: str(tmp_path / sid))
+    # sandbox owns the layout; attachments resolves through sandbox.workdir_path.
+    monkeypatch.setattr(sandbox, "session_dir", lambda sid: str(tmp_path / sid))
     return tmp_path
 
 

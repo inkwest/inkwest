@@ -29,10 +29,15 @@ backend are swept by label on startup.
 """
 
 import asyncio
+import contextlib
+import errno
+import itertools
 import os
 import shutil
 import socket
+import uuid
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -121,6 +126,304 @@ def session_dir(session_id: str) -> str:
 def squid_log_path(session_id: str) -> str:
     """Absolute host path of a conversation's durable squid access log."""
     return os.path.join(session_dir(session_id), "logs", "squid", "access.log")
+
+
+# Where the conversation's workdir is mounted inside every sandbox container.
+CONTAINER_WORKDIR = "/workdir"
+
+
+def workdir_path(session_id: str) -> str:
+    """Absolute host path of a conversation's workdir (mounted at ``/workdir``)."""
+    return os.path.join(session_dir(session_id), "workdir")
+
+
+# The opencode session store's SQLite file, under the per-conversation ``opencode`` dir.
+OPENCODE_STORE_DB = "opencode.db"
+
+
+def reset_opencode_store(session_id: str) -> None:
+    """Empty the conversation's opencode session store, keeping the directory itself.
+
+    opencode resumes with ``--continue``, which resolves to the newest session in ITS OWN
+    store — nothing the DB says. After a compaction boundary that store still holds the
+    pre-boundary session, so it has to go or the engine keeps replaying the transcript the
+    boundary just cut. Only the contents go: the directory is a bind-mount source, and a
+    running container keeps the inode it mounted, so a recreated directory is one it never sees.
+
+    Raises ``OSError`` when ``opencode.db`` (the store ``--continue`` resolves against)
+    survives; any other leftover is logged and left.
+    """
+    store = os.path.join(session_dir(session_id), "opencode")
+    try:
+        entries = list(os.scandir(store))
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        # Unlistable is not empty: the store file check below still decides.
+        logger.warning("opencode_store_unlistable", session_id=session_id, error=str(exc))
+        entries = []
+    for entry in entries:
+        # Per entry: one undeletable file must not keep the rest of the session.
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+            else:
+                os.unlink(entry.path)
+        except OSError as exc:
+            logger.warning(
+                "opencode_store_entry_not_removed",
+                session_id=session_id,
+                entry=entry.name,
+                error=str(exc),
+            )
+    if os.path.lexists(os.path.join(store, OPENCODE_STORE_DB)):
+        raise OSError(f"opencode store not reset: {OPENCODE_STORE_DB} survived")
+
+
+STAGING_PREFIX = ".publish."
+
+
+# In the session root, which is never bind-mounted (only its subdirectories are), so the
+# sandbox cannot forge which boundary the opencode store was last written under.
+OPENCODE_BOUNDARY_FILE = "opencode.boundary"
+_NO_BOUNDARY = "none"
+
+
+def opencode_store_is_stale(session_id: str, boundary_id: str | None) -> bool:
+    """Whether the opencode store was last written under another boundary than this one.
+
+    A missing record matches only a never-compacted session.
+    """
+    path = os.path.join(session_dir(session_id), OPENCODE_BOUNDARY_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            recorded = fh.read().strip()
+    except FileNotFoundError:
+        recorded = _NO_BOUNDARY
+    return recorded != (boundary_id or _NO_BOUNDARY)
+
+
+def record_opencode_boundary(session_id: str, boundary_id: str | None) -> None:
+    """Atomically record the boundary the opencode store's newest session ran under."""
+    root = session_dir(session_id)
+    staging = os.path.join(root, f"{STAGING_PREFIX}{uuid.uuid4().hex}")
+    try:
+        with open(staging, "w", encoding="utf-8") as fh:
+            fh.write(boundary_id or _NO_BOUNDARY)
+        os.replace(staging, os.path.join(root, OPENCODE_BOUNDARY_FILE))
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(staging)
+
+
+def _workdir_parts(relpath: str) -> list[str]:
+    parts = relpath.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"unsafe workdir relpath: {relpath!r}")
+    return parts
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# Bounds every first-free-name search, so a sandbox flooding the names cannot spin us.
+_MAX_NAME_TRIES = 100
+_FRESH_DIR_TRIES = 5
+
+
+def _file_name(name: str) -> str:
+    """``name`` if it is one plain path segment, else ValueError."""
+    if _workdir_parts(name) != [name]:
+        raise ValueError(f"unsafe workdir file name: {name!r}")
+    return name
+
+
+def _link_no_clobber(src: str, dst_dir_fd: int, names: Iterable[str]) -> str:
+    """Hard-link ``src`` under the first of ``names`` that does not exist; returns it.
+
+    ``link`` fails on an existing name where ``rename`` would replace it, so nothing already
+    there is ever overwritten.
+    """
+    for name in itertools.islice(map(_file_name, names), _MAX_NAME_TRIES):
+        try:
+            os.link(src, name, dst_dir_fd=dst_dir_fd, follow_symlinks=False)
+        except FileExistsError:
+            continue
+        return name
+    raise FileExistsError(errno.EEXIST, "no free name to publish under")
+
+
+# A published file: its workdir relpath and (st_dev, st_ino), so removal hits only this file.
+Published = tuple[str, tuple[int, int]]
+
+
+def _open_workdir_dir(session_id: str, segments: list[str]) -> int:
+    """Open ``<workdir>/<segments…>`` as a directory fd, refusing symlinked segments.
+
+    Returns an fd the caller must close. ``O_NOFOLLOW`` makes the *kernel* refuse a
+    symlinked segment as it opens it, and every subsequent operation is performed
+    relative to that fd — so unlike an ``lstat`` check followed by a path-based write,
+    swapping a directory for a symlink after the check cannot re-point the operation
+    (CWE-367: the check and the use are the same object, not the same name).
+    """
+    fd = os.open(workdir_path(session_id), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for segment in segments:
+            child = os.open(segment, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _publish_into(
+    workdir_fd: int, dir_name: str, staging: str, names_for: Callable[[list[str]], Iterable[str]]
+) -> str:
+    """Link ``staging`` into ``dir_name``, created if absent; any OSError means unusable."""
+    try:
+        os.mkdir(dir_name, 0o755, dir_fd=workdir_fd)
+        created = True
+    except FileExistsError:
+        created = False
+    fd = os.open(dir_name, _DIR_FLAGS, dir_fd=workdir_fd)
+    try:
+        if created:
+            # The toolbox runs as another uid: a hardened umask would hide the dir from it.
+            os.fchmod(fd, 0o755)
+        return _link_no_clobber(staging, fd, names_for(os.listdir(fd)))
+    finally:
+        os.close(fd)
+
+
+def _publish_into_fresh(
+    root_fd: int,
+    workdir_fd: int,
+    dir_name: str,
+    staging: str,
+    names_for: Callable[[list[str]], Iterable[str]],
+) -> str:
+    """Link ``staging`` into a new ``<dir_name>-<hex>`` directory, built outside the mount.
+
+    Filled in the session root, then renamed into the workdir whole: the sandbox never sees
+    it empty. Same filesystem: the workdir is a plain subdirectory of the session root.
+    """
+    stage = f"{STAGING_PREFIX}{uuid.uuid4().hex}"
+    os.mkdir(stage, 0o755, dir_fd=root_fd)
+    fd = os.open(stage, _DIR_FLAGS, dir_fd=root_fd)
+    try:
+        os.fchmod(fd, 0o755)
+        name = _link_no_clobber(staging, fd, names_for([]))
+        for _ in range(_FRESH_DIR_TRIES):
+            fresh = f"{dir_name}-{uuid.uuid4().hex[:12]}"
+            try:
+                os.stat(fresh, dir_fd=workdir_fd, follow_symlinks=False)
+                continue
+            except FileNotFoundError:
+                pass
+            # Accepted: an empty directory the sandbox races in at this name is replaced.
+            try:
+                os.rename(stage, fresh, src_dir_fd=root_fd, dst_dir_fd=workdir_fd)
+            except OSError:
+                continue
+            return f"{fresh}/{name}"
+        os.unlink(name, dir_fd=fd)
+        os.rmdir(stage, dir_fd=root_fd)
+        raise FileExistsError(errno.EEXIST, "no free directory name to publish under")
+    finally:
+        os.close(fd)
+
+
+def publish_workdir_file(
+    session_id: str,
+    dir_name: str,
+    names_for: Callable[[list[str]], Iterable[str]],
+    content: Iterable[str],
+) -> Published:
+    """Symlink-safe, no-clobber write of ``content`` under ``<workdir>/<dir_name>``.
+
+    Returns the workdir relpath written and the file's identity. The file name is the first
+    free one of ``names_for(<entries already in the directory>)``. ``content`` is written
+    chunk by chunk, so a caller can stream a file larger than it wants to hold in memory.
+
+    The workdir is world-writable and bind-mounted into the sandbox, so a prior turn's
+    (untrusted) agent can plant anything under it. Nothing it may own is ever moved,
+    renamed, chmod'ed or deleted:
+
+    - The directory is opened ``O_NOFOLLOW`` and the file linked relative to that fd, so no
+      path segment can be re-pointed, even mid-write.
+    - The content is staged OUTSIDE the mount and hard-linked into place: a link never
+      follows a symlink at the destination, and refuses an existing name, so nothing
+      already there is overwritten.
+    - ``dir_name`` is used whenever this process can link into it, whoever owns it; only a
+      symlink, a file or an unwritable directory there sends the file to a fresh
+      ``<dir_name>-<hex>`` directory, built outside the mount and renamed in whole.
+    """
+    _file_name(dir_name)
+    os.makedirs(workdir_path(session_id), exist_ok=True)
+    workdir_fd = os.open(workdir_path(session_id), os.O_RDONLY | os.O_DIRECTORY)
+    root_fd = os.open(session_dir(session_id), os.O_RDONLY | os.O_DIRECTORY)
+    # Staged in the session root, i.e. one level ABOVE the bind mount, so the agent cannot
+    # reach the staging file either.
+    staging = os.path.join(session_dir(session_id), f"{STAGING_PREFIX}{uuid.uuid4().hex}")
+    try:
+        with open(staging, "w", encoding="utf-8") as fh:
+            fh.writelines(content)
+        os.chmod(staging, 0o644)
+        st = os.stat(staging)
+        identity = (st.st_dev, st.st_ino)
+        try:
+            name = _publish_into(workdir_fd, dir_name, staging, names_for)
+            return f"{dir_name}/{name}", identity
+        except OSError as exc:
+            logger.warning(
+                "workdir_dir_unusable_fallback",
+                session_id=session_id,
+                dir=dir_name,
+                error=str(exc),
+            )
+            relpath = _publish_into_fresh(root_fd, workdir_fd, dir_name, staging, names_for)
+            return relpath, identity
+    finally:
+        os.close(root_fd)
+        os.close(workdir_fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(staging)
+
+
+def remove_workdir_file(session_id: str, published: Published) -> None:
+    """Symlink-safe delete of a file :func:`publish_workdir_file` wrote, and only that file.
+
+    Deleting through a joined path would follow a planted symlink and unlink a file outside
+    the mount; deleting by name alone would take whatever the sandbox renamed over it since.
+    A missing or replaced file is left alone.
+    """
+    relpath, identity = published
+    parts = _workdir_parts(relpath)
+    try:
+        dir_fd = _open_workdir_dir(session_id, parts[:-1])
+    except (OSError, ValueError):
+        return
+    try:
+        st = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+        if (st.st_dev, st.st_ino) == identity:
+            os.unlink(parts[-1], dir_fd=dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def sweep_staging_files(session_id: str) -> None:
+    """Drop staging files and directories orphaned by a crash before the rename."""
+    root = session_dir(session_id)
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(root):
+            if entry.name.startswith(STAGING_PREFIX):
+                with contextlib.suppress(OSError):
+                    if entry.is_dir(follow_symlinks=False):
+                        shutil.rmtree(entry.path)
+                    else:
+                        os.remove(entry.path)
 
 
 async def _docker(*args: str, timeout: float = 30.0, check: bool = True) -> tuple[int, str, str]:
@@ -238,7 +541,7 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
     claude_dir = os.path.join(
         root, "claude"
     )  # CLAUDE_CONFIG_DIR -> durable Claude state (--resume)
-    work_dir = os.path.join(root, "workdir")
+    work_dir = workdir_path(session_id)
     # opencode engine: its per-conversation session store (SQLite opencode.db + storage/)
     # lives at $HOME/.local/share/opencode in-container; bind-mount it durably so a turn's
     # `--continue` resumes THIS conversation's session across turns + sandbox rebuilds.
@@ -248,6 +551,7 @@ async def provision(session_id: str, user_id: str | None = None) -> Sandbox:
         # World-writable so the proxy (squid's uid) and the toolbox (its own uid, which may
         # differ from the backend's) can write their state. Per-conversation -> not a leak.
         os.chmod(path, 0o777)  # noqa: S103 — intentional, per-conversation dir
+    sweep_staging_files(session_id)
 
     # Pre-create the squid access log owned by the backend and world-writable. squid (a
     # different uid in the proxy) then appends to it (O_APPEND keeps the existing mode),

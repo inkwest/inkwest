@@ -39,7 +39,8 @@ interface Props {
   // Optional model/engine control rendered inline in the toolbar (left of send).
   // Supplied by the caller (SessionModelSelect in chat, ModelEnginePicker on the
   // start screen) so ChatInput stays presentational and store-agnostic.
-  modelControl?: ReactNode;
+  // Session-level controls rendered inline in the toolbar (model picker, compaction).
+  toolbarControls?: ReactNode;
   // Optional external-access controls (the per-connector icon buttons) rendered in
   // the left toolbar cluster, after attach/skills. Caller-supplied for the same reason.
   connectorControls?: ReactNode;
@@ -95,7 +96,7 @@ function insertAtCursor(
   };
 }
 
-export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, initialAttachments, autoSubmit, sessionId, large, placeholder, modelControl, connectorControls, onBeforeAttach, onTyping, tourAnchor }: Props) {
+export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt, initialAttachments, autoSubmit, sessionId, large, placeholder, toolbarControls, connectorControls, onBeforeAttach, onTyping, tourAnchor }: Props) {
   const compact = useSettingsStore((s) => s.compactToolCards);
   // Debounced typing signal: emit `true` on edit, then `false` after a short idle
   // (also cleared on send/unmount) so other participants see "X is typing…".
@@ -889,7 +890,7 @@ export function ChatInput({ onSend, onStop, disabled, isStreaming, initialPrompt
             )}
           </div>
           <div className="flex items-center gap-2">
-            {modelControl}
+            {toolbarControls}
             {/* No-connector warning: sits between the model picker and send, shown once
                 there's something to send but the conversation has no AWS/GitLab/MCP access. */}
             {noConnector && hasContent && (

@@ -317,6 +317,8 @@ export interface ModelInfo {
   /** Input modalities from the live catalog (TEXT/IMAGE/VIDEO/SPEECH). "IMAGE" ⇒ the
    *  picker shows the image icon and uploads are accepted. Empty = text-only/unknown. */
   input_modalities: string[];
+  /** Context window in tokens; null/absent when unsourced ⇒ no pressure gauge. */
+  context_window?: number | null;
 }
 
 export interface AppConfig {
@@ -343,6 +345,12 @@ export function modelLabel(models: ModelInfo[], id: string): string {
  *  capability icons. `id` may be null so callers can pass `pin ?? default` directly. */
 export function modelModalities(models: ModelInfo[], id: string | null): string[] | undefined {
   return models.find((m) => m.id === id)?.input_modalities;
+}
+
+/** Context window (tokens) for a model ID; null when unknown — `id` may be null so
+ *  callers can pass `sessionPin ?? defaultModel` directly. */
+export function modelContextWindow(models: ModelInfo[], id: string | null): number | null {
+  return models.find((m) => m.id === id)?.context_window ?? null;
 }
 
 export async function getAppConfig(): Promise<AppConfig> {

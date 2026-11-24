@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -34,11 +34,16 @@ from app.models.cluster import Cluster
 from app.models.session import Session
 from app.models.session_share_link import SessionShareLink
 from app.models.user import User
-from app.services.ai_client import get_orchestrator
+from app.services.ai_client import Orchestrator, get_orchestrator
 from app.services.budget_service import check_budget, is_budget_enabled
+from app.services.compaction import (
+    NOTHING_TO_COMPACT,
+    has_compactable_rows,
+    orchestrate_compaction,
+)
 from app.services.mcp_dek_handshake import handle_dek_message, note_connect, note_disconnect
 from app.services.messages import clear_retry_state, get_retryable_message
-from app.services.session_access import get_session_role
+from app.services.session_access import get_session_role, turn_refusal
 from app.services.turn_runner import TURN_END, turn_runner
 
 logger = logging.getLogger(__name__)
@@ -524,6 +529,80 @@ async def _budget_block_reason(user_id: UUID | None, user_roles: list[str]) -> s
     return None
 
 
+async def start_gated_turn(
+    websocket: WebSocket,
+    session_id: str,
+    user_id: UUID,
+    user_roles: list[str],
+    orchestrate: Orchestrator,
+    turn_kwargs: dict[str, Any],
+    precheck: Callable[[], Awaitable[str | None]] | None = None,
+) -> bool:
+    """Rate gate → budget gate → one-turn-per-session slot. Returns whether the turn started.
+
+    Every refusal is reported on the socket, so a caller only needs the boolean. Shared by
+    `message`, `retry` and `compact`: a fourth turn-driving branch that skipped one of these
+    would let a user bypass their own cap.
+
+    ``precheck`` returns a refusal or None. It runs after the rate gate and only while no turn
+    is active, so a burst of requests cannot turn it into a DB load on the receive loop.
+    """
+    busy = {"type": "error", "content": "A response is already in progress."}
+    rate_reason = _turn_rate_block_reason(user_id)
+    if rate_reason:
+        await websocket.send_json({"type": "error", "content": rate_reason})
+        return False
+    if precheck is not None:
+        if await turn_runner.is_active(session_id):
+            await websocket.send_json(busy)
+            return False
+        refusal = await precheck()
+        if refusal:
+            await websocket.send_json({"type": "error", "content": refusal})
+            return False
+    block_reason = await _budget_block_reason(user_id, user_roles)
+    if block_reason:
+        await websocket.send_json({"type": "error", "content": block_reason})
+        return False
+    if not await turn_runner.start(session_id, orchestrate, turn_kwargs):
+        await websocket.send_json(busy)
+        return False
+    return True
+
+
+async def start_compaction(
+    websocket: WebSocket,
+    session_id: str,
+    user_id: UUID,
+    user_roles: list[str],
+    turn_kwargs: dict[str, Any],
+) -> bool:
+    """Run a compaction through the shared turn gate, refusing an empty one before it starts.
+
+    Before, not inside the turn: a turn that ends on an error leaves an abort marker in the
+    transcript, and a no-op must leave the conversation exactly as it was.
+    """
+
+    async def nothing_to_compact() -> str | None:
+        try:
+            async with async_session_maker() as db:
+                compactable = await has_compactable_rows(db, session_id)
+        except Exception:
+            logger.exception("Compaction lookup failed", extra={"session_id": session_id})
+            return "Could not start compaction, please try again."
+        return None if compactable else NOTHING_TO_COMPACT
+
+    return await start_gated_turn(
+        websocket,
+        session_id,
+        user_id,
+        user_roles,
+        orchestrate_compaction,
+        turn_kwargs,
+        precheck=nothing_to_compact,
+    )
+
+
 @router.websocket("/ws/chat/{session_id}")
 async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
     """
@@ -618,10 +697,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
             msg_type = data.get("type")
 
             # Viewers watch only: reject anything that drives or interrupts the turn.
-            if session_role == "viewer" and msg_type in ("message", "retry", "stop"):
-                await websocket.send_json(
-                    {"type": "error", "content": "You have view-only access to this conversation"}
-                )
+            refusal = turn_refusal(session_role, msg_type)
+            if refusal is not None:
+                await websocket.send_json({"type": "error", "content": refusal})
                 continue
 
             if msg_type == "stop":
@@ -687,19 +765,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                 # P1.8). Without a sandbox there is no /workdir to land them in.
                 if attachments and get_settings().sandbox_enabled:
                     turn_kwargs["attachments"] = attachments
-                rate_reason = _turn_rate_block_reason(user_id)
-                if rate_reason:
-                    await websocket.send_json({"type": "error", "content": rate_reason})
-                    continue
-                block_reason = await _budget_block_reason(user_id, user_roles)
-                if block_reason:
-                    await websocket.send_json({"type": "error", "content": block_reason})
-                    continue
-                started = await turn_runner.start(session_id, get_orchestrator(), turn_kwargs)
-                if not started:
-                    await websocket.send_json(
-                        {"type": "error", "content": "A response is already in progress."}
-                    )
+                if not await start_gated_turn(
+                    websocket, session_id, user_id, user_roles, get_orchestrator(), turn_kwargs
+                ):
                     continue
                 # Show the question to the other participants in real time (the sender
                 # already rendered it optimistically). On reload it comes from history
@@ -737,26 +805,21 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
 
                 logger.info("Retry requested", extra={"session_id": session_id})
 
-                rate_reason = _turn_rate_block_reason(user_id)
-                if rate_reason:
-                    await websocket.send_json({"type": "error", "content": rate_reason})
-                    continue
-                block_reason = await _budget_block_reason(user_id, user_roles)
-                if block_reason:
-                    await websocket.send_json({"type": "error", "content": block_reason})
-                    continue
-
-                started = await turn_runner.start(
+                # A refused start leaves the message retryable so the user can retry once
+                # the slot frees up — the error flag is cleared only below, once running.
+                if not await start_gated_turn(
+                    websocket,
                     session_id,
+                    user_id,
+                    user_roles,
                     get_orchestrator(),
-                    {**base_kwargs, "user_message": content, "persist_user_message": False},
-                )
-                if not started:
-                    # Turn already running: leave the message retryable so the user
-                    # can retry once it frees up — do NOT clear the flag here.
-                    await websocket.send_json(
-                        {"type": "error", "content": "A response is already in progress."}
-                    )
+                    {
+                        **base_kwargs,
+                        "user_message": content,
+                        "persist_user_message": False,
+                        "replace_last_user": True,
+                    },
+                ):
                     continue
                 # Turn started: now safe to clear the error flag (best-effort — a
                 # failure here only leaves a stale error bubble on reload, not lost
@@ -766,6 +829,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str) -> None:
                         await clear_retry_state(db, session_id)
                 except Exception:
                     logger.exception("Clear retry state failed", extra={"session_id": session_id})
+            elif msg_type == "compact":
+                logger.info("Compaction requested", extra={"session_id": session_id})
+                await start_compaction(
+                    websocket, session_id, user_id, user_roles, {**base_kwargs, "trigger": "manual"}
+                )
             else:
                 await websocket.send_json(
                     {"type": "error", "content": f"Unknown message type: {msg_type}"}

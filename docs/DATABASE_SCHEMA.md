@@ -52,11 +52,11 @@ Inkwest uses PostgreSQL for persistent storage. All tables reside in the `inkwes
 │ total_output_tokens │       │ output_tokens       │
 │ total_cache_read_…  │       │ cache_read_tokens   │
 │ total_cache_write_… │       │ cache_write_tokens  │
-│ total_tool_calls    │       │ is_retryable        │
-│ total_iterations    │       │ retry_count         │
-│ cli_session_id      │       │ created_at          │
-│ confirmation_mode   │       └─────────────────────┘
-│ created_at          │
+│ total_tool_calls    │       │ context_tokens      │
+│ total_iterations    │       │ is_retryable        │
+│ cli_session_id      │       │ retry_count         │
+│ confirmation_mode   │       │ created_at          │
+│ created_at          │       └─────────────────────┘
 │ updated_at          │
 └─────────────────────┘
          │
@@ -193,6 +193,7 @@ CREATE TABLE inkwest.messages (
     output_tokens INTEGER,
     cache_read_tokens INTEGER,   -- prompt-cache reads (NULL on rows predating the column)
     cache_write_tokens INTEGER,  -- prompt-cache writes (NULL on rows predating the column)
+    context_tokens INTEGER,      -- last model call's prompt (fresh + cache read + write); NULL when unknown
     thinking_content TEXT,
     latency_ms INTEGER,
     status VARCHAR(20) NOT NULL DEFAULT 'success',

@@ -3,6 +3,8 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ChatView } from './ChatView';
 import { useChatStore } from '@/store/chat';
+import { useConfigStore } from '@/store/config';
+import { useSessionsStore } from '@/store/sessions';
 import type { EgressEvent } from '@/hooks/useEgressSocket';
 
 // Drive the egress socket state per test. The mock reads `egress.state` fresh on every
@@ -24,7 +26,13 @@ vi.mock('@/hooks/useEgressSocket', () => {
 
 // Stub heavy children so the test isolates ChatView's own markup (the tab bar).
 vi.mock('./MessageList', () => ({ MessageList: () => <div data-testid="message-list" /> }));
-vi.mock('./ChatInput', () => ({ ChatInput: () => <div data-testid="chat-input" /> }));
+// Renders toolbarControls so the composer-toolbar wiring (the Compact button) is testable.
+vi.mock('./ChatInput', () => ({
+  ChatInput: ({ toolbarControls }: { toolbarControls?: React.ReactNode }) => (
+    <div data-testid="chat-input">{toolbarControls}</div>
+  ),
+}));
+vi.mock('./SessionModelSelect', () => ({ SessionModelSelect: () => null }));
 vi.mock('./StreamingMessage', () => ({ StreamingMessage: () => null }));
 vi.mock('./ErrorBanner', () => ({ ErrorBanner: () => null }));
 vi.mock('./EgressPanel', () => ({ EgressLog: () => <div data-testid="egress-log" /> }));
@@ -96,5 +104,69 @@ describe('ChatView tab bar', () => {
     egress.state = { events: [], connected: true, disabled: false };
     renderView();
     expect(screen.getByRole('button', { name: /network/i })).toBeEnabled();
+  });
+});
+
+describe('ChatView composer toolbar', () => {
+  const pressured = [
+    { id: 'u', session_id: 's1', role: 'user', content: 'q', created_at: '2026-01-01T00:00:00Z' },
+    {
+      id: 'a',
+      session_id: 's1',
+      role: 'assistant',
+      content: 'a',
+      context_tokens: 190_000,
+      created_at: '2026-01-01T00:00:01Z',
+    },
+  ];
+
+  beforeEach(() => {
+    egress.state = { events: [], connected: false, disabled: false };
+    useChatStore.setState({
+      messages: pressured,
+      streamingMessage: '',
+      isStreaming: false,
+      isConnected: true,
+    } as never);
+    useConfigStore.setState({
+      config: {
+        model: 'claude-sonnet-5',
+        default_engine: 'claude-cli',
+        engines: ['claude-cli'],
+        attachments_enabled: false,
+        available_models: [
+          {
+            id: 'claude-sonnet-5',
+            label: 'Sonnet 5',
+            legacy: false,
+            engines: ['claude-cli'],
+            input_modalities: [],
+            context_window: 200_000,
+          },
+        ],
+      },
+      fetchConfig: vi.fn(),
+    } as never);
+    useSessionsStore.setState({
+      currentSession: { id: 's1', model: 'claude-sonnet-5' },
+    } as never);
+  });
+
+  it('mounts the Compact button in the toolbar when a compaction handler is supplied', () => {
+    render(
+      <MemoryRouter>
+        <ChatView onSendMessage={vi.fn()} sessionId="s1" onCompact={vi.fn()} />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('button', { name: /compact/i })).toBeInTheDocument();
+  });
+
+  it('omits it on a read-only conversation (no handler)', () => {
+    render(
+      <MemoryRouter>
+        <ChatView onSendMessage={vi.fn()} sessionId="s1" />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('button', { name: /compact/i })).not.toBeInTheDocument();
   });
 });

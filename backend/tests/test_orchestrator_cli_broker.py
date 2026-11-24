@@ -9,6 +9,7 @@ import pytest
 from app.services import llm_broker
 from app.services import llm_proxy_token as token
 from app.services import orchestrator_cli as oc
+from tests.conftest import mock_session
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -96,8 +97,7 @@ async def _run(
     settings, capture, *, execute=None, cancel_event=None, entries=None, db=None, ensure=None
 ):
     if db is None:
-        db = AsyncMock()
-        db.commit = AsyncMock()
+        db = mock_session()
     ps = _patches(settings, capture, execute=execute, entries=entries, ensure=ensure)
     for p in ps:
         p.start()
@@ -117,6 +117,36 @@ async def _run(
     finally:
         for p in ps:
             p.stop()
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_reaches_the_cli_system_prompt() -> None:
+    """A compacted session's summary must ride --append-system-prompt on every later turn."""
+    capture: dict = {}
+
+    def fake_execute(*, system_prompt=None, **kw):
+        capture["system_prompt"] = system_prompt
+        return _aiter([])
+
+    with patch(
+        "app.services.compaction.last_boundary",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                role="system",
+                content={
+                    "type": "session_event",
+                    "subject": "context",
+                    "action": "compacted",
+                    "targets": [{"archive_path": "/workdir/.inkwest/history-1.md"}],
+                    "summary": "FACT: the pod was OOMKilled",
+                },
+            )
+        ),
+    ):
+        await _run(_settings(broker_enabled=False), capture, execute=fake_execute)
+
+    assert "Earlier conversation (compacted)" in capture["system_prompt"]
+    assert "FACT: the pod was OOMKilled" in capture["system_prompt"]
 
 
 @pytest.mark.asyncio
@@ -234,7 +264,7 @@ async def test_broker_on_skips_engine_usage_row_keeps_stats() -> None:
     for p in ps:
         p.start()
     try:
-        db = AsyncMock()
+        db = mock_session()
         await _collect(
             oc.orchestrate_chat_cli(
                 db=db,
@@ -268,7 +298,7 @@ async def test_broker_off_engine_usage_row_carries_turn_id() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -315,7 +345,7 @@ async def test_errored_turn_persists_accumulated_usage() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -365,7 +395,7 @@ async def test_done_turn_persists_cache_tokens() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -381,6 +411,204 @@ async def test_done_turn_persists_cache_tokens() -> None:
     assert ru.await_args.kwargs["cache_write_tokens"] == 26797
     assert uss.await_args.kwargs["cache_write_tokens"] == 26797
     assert uss.await_args.kwargs["cache_read_tokens"] == 0
+
+
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    [
+        ({"type": "done", "metadata": {"input_tokens": 15, "context_tokens": 53_107}}, 53_107),
+        ({"type": "done", "metadata": {"input_tokens": 15}}, None),
+        (
+            {"type": "usage_stats", "metadata": {"input_tokens": 8, "context_tokens": 52_205}},
+            52_205,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_assistant_row_gets_context_tokens(terminal: dict, expected: int | None) -> None:
+    """The saved assistant row carries the last call's prompt, from done or a cut stream."""
+    from app.services.events import ChatEvent
+
+    async def parse(_stream):
+        yield ChatEvent(type="text_delta", content="hi")
+        yield ChatEvent(**terminal)
+        if terminal["type"] == "usage_stats":
+            raise RuntimeError("Claude CLI failed with exit code 1")
+
+    capture: dict = {}
+    save = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch("app.services.turn_usage.record_usage", AsyncMock()),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse),
+        patch.object(oc, "save_message", save),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        await _collect(
+            oc.orchestrate_chat_cli(
+                db=mock_session(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    assistant = [c for c in save.await_args_list if c.args[2] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0].kwargs["context_tokens"] == expected
+
+
+@pytest.mark.asyncio
+async def test_stopped_done_carries_the_usage_the_row_gets() -> None:
+    """A user Stop: the live done must carry what the DB row is stamped with."""
+    import asyncio
+
+    from app.services.events import ChatEvent
+
+    async def parse_stopped(_stream):
+        yield ChatEvent(type="text_delta", content="partial")
+        # Clean stream end after the kill: the parser surfaces the usage on usage_stats.
+        yield ChatEvent(type="usage_stats", metadata={"input_tokens": 8, "context_tokens": 52_205})
+
+    cancel = asyncio.Event()
+    cancel.set()
+    capture: dict = {}
+    save = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), capture) + [
+        patch("app.services.turn_usage.record_usage", AsyncMock()),
+        patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+        patch.object(oc, "parse_cli_response", parse_stopped),
+        patch.object(oc, "save_message", save),
+    ]
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=mock_session(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+                cancel_event=cancel,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    done = events[-1]
+    assert done.type == "done" and done.metadata["stopped"] is True
+    assert done.metadata["context_tokens"] == 52_205
+    assert done.metadata["input_tokens"] == 8
+    assistant = [c for c in save.await_args_list if c.args[2] == "assistant"]
+    assert assistant[0].kwargs["context_tokens"] == 52_205
+
+
+async def _run_cli_turn(parse, *, cancel=None, extra: list | None = None):
+    """Run one CLI turn with the parser and save_message replaced; returns (events, save)."""
+    capture: dict = {}
+    save = AsyncMock()
+    ps = (
+        _patches(_settings(broker_enabled=False), capture)
+        + [
+            patch("app.services.turn_usage.record_usage", AsyncMock()),
+            patch("app.services.turn_usage.update_session_stats", AsyncMock()),
+            patch.object(oc, "parse_cli_response", parse),
+            patch.object(oc, "save_message", save),
+        ]
+        + (extra or [])
+    )
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=mock_session(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="q",
+                user_id=USER_ID,
+                cancel_event=cancel,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+    return events, save
+
+
+@pytest.mark.parametrize("terminal", ["done", "error"])
+@pytest.mark.asyncio
+async def test_stop_after_terminal_reports_usage_once(terminal: str) -> None:
+    """A Stop after the terminal reached the client: one usage-carrying terminal only."""
+    import asyncio
+
+    from app.services.events import ChatEvent
+
+    usage = {"input_tokens": 8, "context_tokens": 52_205}
+
+    async def parse(_stream):
+        yield ChatEvent(type="text_delta", content="answer")
+        if terminal == "done":
+            yield ChatEvent(type="done", metadata=dict(usage))
+        else:
+            # The CLI's error event carries no usage; the parser surfaces it on stream end.
+            yield ChatEvent(type="error", content="API error", is_error=True)
+            yield ChatEvent(type="usage_stats", metadata=dict(usage))
+
+    cancel = asyncio.Event()
+    cancel.set()
+    events, _save = await _run_cli_turn(parse, cancel=cancel)
+    with_usage = [
+        e for e in events if e.type in ("done", "error") and e.metadata.get("context_tokens")
+    ]
+    assert len(with_usage) == 1
+    assert with_usage[0].metadata["context_tokens"] == 52_205
+    assert len([e for e in events if e.type == "done"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_resume_retry_drops_the_first_attempt_reading() -> None:
+    """Attempt 1 died on a stale --resume after reporting usage; attempt 2 is stopped."""
+    import asyncio
+
+    from app.services.events import ChatEvent
+
+    attempts = {"n": 0}
+
+    async def parse(_stream):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            yield ChatEvent(
+                type="usage_stats", metadata={"input_tokens": 8, "context_tokens": 52_205}
+            )
+            raise RuntimeError("No conversation found with session ID: old-cli-id")
+        yield ChatEvent(type="text_delta", content="partial")
+
+    cancel = asyncio.Event()
+    cancel.set()
+    events, save = await _run_cli_turn(
+        parse,
+        cancel=cancel,
+        extra=[patch.object(oc, "get_cli_session_id", AsyncMock(return_value="old-cli-id"))],
+    )
+    assert attempts["n"] == 2
+    done = events[-1]
+    assert done.type == "done" and done.metadata["stopped"] is True
+    assert "context_tokens" not in done.metadata
+    assistant = [c for c in save.await_args_list if c.args[2] == "assistant"]
+    assert assistant[0].kwargs["context_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -414,7 +642,7 @@ async def test_timeout_turn_persists_accumulated_usage() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -464,7 +692,7 @@ async def test_unexpected_error_persists_accumulated_usage() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -515,7 +743,7 @@ async def test_stop_persists_usage_surfaced_on_clean_stream_end() -> None:
     try:
         events = await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -562,7 +790,7 @@ async def test_cache_only_turn_is_persisted() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -606,7 +834,7 @@ async def test_1h_ttl_split_threaded_to_record_usage() -> None:
     try:
         await _collect(
             oc.orchestrate_chat_cli(
-                db=AsyncMock(),
+                db=mock_session(),
                 session_id=SESSION_ID,
                 cluster_name=None,
                 kubeconfig_path=None,
@@ -624,7 +852,7 @@ async def test_1h_ttl_split_threaded_to_record_usage() -> None:
 @pytest.mark.asyncio
 async def test_read_txn_released_before_stream() -> None:
     """The last DB call before sandbox.ensure and before the stream is a commit."""
-    db = AsyncMock()
+    db = mock_session()
     last_db_call: dict[str, str | None] = {}
 
     def snapshot(step: str) -> None:
@@ -641,3 +869,66 @@ async def test_read_txn_released_before_stream() -> None:
     await _run(_settings(broker_enabled=False), {}, execute=execute, db=db, ensure=ensure)
 
     assert last_db_call == {"ensure": "commit", "exec": "commit"}
+
+
+async def _compacting_turn(execute, *, cli_session_id=None):
+    """Run a CLI turn the way a compaction does, returning (events, record_usage mock)."""
+    from app.services import compaction
+
+    ru = AsyncMock()
+    ps = _patches(_settings(broker_enabled=False), {}, execute=execute) + [
+        patch.object(oc, "get_cli_session_id", AsyncMock(return_value=cli_session_id)),
+        patch("app.services.turn_usage.record_usage", ru),
+    ]
+    flag = compaction._compacting.set(True)
+    for p in ps:
+        p.start()
+    try:
+        events = await _collect(
+            oc.orchestrate_chat_cli(
+                db=mock_session(),
+                session_id=SESSION_ID,
+                cluster_name=None,
+                kubeconfig_path=None,
+                context_name=None,
+                user_message="summarize",
+                user_id=USER_ID,
+                persist_user_message=False,
+            )
+        )
+    finally:
+        for p in reversed(ps):
+            p.stop()
+        compaction._compacting.reset(flag)
+    return events, ru
+
+
+@pytest.mark.asyncio
+async def test_compaction_without_a_cli_session_never_spawns() -> None:
+    """No --resume target means the CLI has nothing to summarize: a spawn is a billed turn
+    whose summary can only be discarded."""
+    execute = MagicMock(side_effect=AssertionError("spawned a blind compaction"))
+    events, ru = await _compacting_turn(execute)
+    assert events == []
+    execute.assert_not_called()
+    ru.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compaction_on_a_stale_cli_session_never_respawns() -> None:
+    """The stale --resume self-heal retries fresh, i.e. blind: fine for a question, a billed
+    no-op for a compaction."""
+    resumes: list[str | None] = []
+
+    async def fail(**kw):
+        raise RuntimeError("Claude CLI failed: No conversation found with session ID: stale-id")
+        yield  # pragma: no cover
+
+    def execute(*, resume_session_id=None, **kw):
+        resumes.append(resume_session_id)
+        return fail()
+
+    events, ru = await _compacting_turn(execute, cli_session_id="stale-id")
+    assert resumes == ["stale-id"]
+    assert events == []
+    ru.assert_not_awaited()

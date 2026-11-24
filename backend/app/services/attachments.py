@@ -13,16 +13,11 @@ import os
 import re
 
 from app.core.config import get_settings
-from app.services.sandbox import session_dir
+from app.services.sandbox import workdir_path
 
 
 class AttachmentError(Exception):
     """Validation failure (size/type/name). The route maps it to a 4xx."""
-
-
-def _workdir(session_id: str) -> str:
-    """Host path of the conversation's workdir (mounted at /workdir in the toolbox)."""
-    return os.path.join(session_dir(session_id), "workdir")
 
 
 def allowed_extensions() -> set[str]:
@@ -75,7 +70,7 @@ def resolve_existing(session_id: str, filename: str) -> str:
     # Attachments are flat basenames; reject separators and dot segments outright.
     if filename != os.path.basename(filename) or filename in ("", ".", ".."):
         raise AttachmentError("Invalid attachment name")
-    work_dir = _workdir(session_id)
+    work_dir = workdir_path(session_id)
     root = os.path.realpath(work_dir)
     path = os.path.realpath(os.path.join(work_dir, filename))
     if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
@@ -99,7 +94,7 @@ def write_attachment(
     name = safe_basename(original_name)
     validate_extension(name)
 
-    work_dir = _workdir(session_id)
+    work_dir = workdir_path(session_id)
     # Mirror sandbox.provision: world-writable dir so the toolbox (a different uid) can
     # read, and so uploads work even before the first turn provisions the sandbox.
     os.makedirs(work_dir, exist_ok=True)

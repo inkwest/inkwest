@@ -42,7 +42,7 @@ _LAZY_REEXPORTS: dict[str, str] = {
     "update_session_title": "messages",
     # prompts
     "ensure_default_system_prompt": "prompts",
-    "get_summary_prompt": "prompts",
+    "get_compaction_prompt": "prompts",
     "get_system_prompt": "prompts",
     "get_title_prompt": "prompts",
     "resolve_session_system_prompt": "prompts",
@@ -62,7 +62,7 @@ if TYPE_CHECKING:  # static analysers still see the full surface
     )
     from app.services.prompts import (
         ensure_default_system_prompt,
-        get_summary_prompt,
+        get_compaction_prompt,
         get_system_prompt,
         get_title_prompt,
         resolve_session_system_prompt,
@@ -88,7 +88,7 @@ __all__ = [
     "get_model_name",
     # Prompts
     "get_system_prompt",
-    "get_summary_prompt",
+    "get_compaction_prompt",
     "get_title_prompt",
     "ensure_default_system_prompt",
     "resolve_session_system_prompt",

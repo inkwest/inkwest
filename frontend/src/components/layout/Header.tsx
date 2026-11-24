@@ -13,6 +13,8 @@ import { SettingsModal } from '@/components/settings/SettingsModal';
 import { useSettingsUi, isSettingsTab } from '@/store/settingsUi';
 import { devSwitchUser } from '@/services/api';
 import { TokenGlyphs } from '@/components/ui/TokenGlyphs';
+import { ContextGauge } from '@/components/ui/ContextGauge';
+import { useContextUsage } from '@/hooks/useContextUsage';
 
 export function Header() {
   const navigate = useNavigate();
@@ -30,6 +32,9 @@ export function Header() {
   // fetchConfig still primes the shared config (model picker, attachments gate) once
   // the user is authenticated, even though the header no longer renders a model badge.
   const { fetchConfig } = useConfigStore();
+  // Rendered only alongside a session below: inside the admin panel currentSession is
+  // nulled, and the hook on its own would fall back to the global default model.
+  const contextGauge = useContextUsage(currentSession?.model ?? null);
   const version = useUpdateStore((s) => s.loadedVersion);
   const [showMenu, setShowMenu] = useState(false);
   // Settings modal open-state lives in a store so deep components (e.g. the MCP panel) can open
@@ -130,6 +135,9 @@ export function Header() {
             cacheWrite={currentSession.total_cache_write_tokens || 0}
           />
         ) : null}
+        {currentSession && contextGauge && (
+          <ContextGauge usage={contextGauge} className="text-xs hidden sm:inline-flex" />
+        )}
         {currentSession && <ConnectionStatus />}
 
         <div className="relative" ref={menuRef}>

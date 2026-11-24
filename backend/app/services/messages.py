@@ -17,10 +17,56 @@ from sqlalchemy.orm import aliased
 
 from app.models.message import Message
 from app.models.session import Session
-from app.services.message_window import prune_orphan_tool_calls
+from app.services.message_window import merge_consecutive_roles, prune_orphan_tool_calls
 from app.services.pubsub import notify
 
 logger = logging.getLogger(__name__)
+
+
+# Subject/action of the session-event row that marks where the replayed transcript starts.
+COMPACTION_SUBJECT = "context"
+COMPACTION_ACTION = "compacted"
+
+
+def is_compaction_boundary(msg: Message) -> bool:
+    """Whether a row is a compaction boundary that may cut the replayed transcript.
+
+    A row with no usable summary is not one: cutting there would replay nothing, restore nothing.
+    """
+    content = msg.content
+    if not (
+        msg.role == "system"
+        and isinstance(content, dict)
+        and content.get("type") == "session_event"
+        and content.get("subject") == COMPACTION_SUBJECT
+        and content.get("action") == COMPACTION_ACTION
+    ):
+        return False
+    summary = content.get("summary")
+    return isinstance(summary, str) and bool(summary.strip())
+
+
+def last_boundary_index(rows: list[Message]) -> int | None:
+    """Index of the last compaction boundary in a chronological row list, or None."""
+    return max((i for i, msg in enumerate(rows) if is_compaction_boundary(msg)), default=None)
+
+
+async def delete_messages(
+    db: AsyncSession, session_id: str | uuid.UUID, message_ids: list[uuid.UUID]
+) -> None:
+    """Hard-delete rows by id within one session (undoes an abandoned compaction).
+
+    ``session_id`` is not redundant: a bare id list makes the helper able to delete across
+    conversations, which is one careless caller away from an IDOR-shaped data loss.
+    """
+    if not message_ids:
+        return
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+    await db.execute(
+        delete(Message).where(Message.session_id == session_id, Message.id.in_(message_ids))
+    )
+    await db.commit()
 
 
 async def get_session_messages(
@@ -43,9 +89,19 @@ async def get_session_messages(
         session_id = uuid.UUID(session_id)
 
     result = await db.execute(
-        select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
+        select(Message)
+        .where(Message.session_id == session_id)
+        # `id` breaks same-instant ties the way every other query feeding the cut does.
+        .order_by(Message.created_at, Message.id)
     )
-    messages = result.scalars().all()
+    rows = list(result.scalars().all())
+
+    # Compaction boundary: only the rows AFTER the last one are replayed to the model —
+    # everything before it is represented by the summary the boundary carries, injected
+    # into the system prompt (see app.services.compaction). Sliced by INDEX, not by
+    # timestamp, so rows written in the same instant can't land on the wrong side.
+    last_boundary = last_boundary_index(rows)
+    messages = rows if last_boundary is None else rows[last_boundary + 1 :]
 
     formatted_messages = []
     for msg in messages:
@@ -76,6 +132,9 @@ async def get_session_messages(
     # Strip dangling tool_use / orphan tool_result left by a turn interrupted
     # mid-tool — replaying them would make the AI API reject the whole request.
     formatted_messages = prune_orphan_tool_calls(formatted_messages)
+    # Pruning can leave two same-role neighbours (and a compaction/retry can create them
+    # directly); both APIs reject a non-alternating transcript, so normalize last.
+    formatted_messages = merge_consecutive_roles(formatted_messages)
 
     logger.debug(f"Loaded {len(formatted_messages)} messages for session {session_id}")
     return formatted_messages
@@ -93,6 +152,7 @@ async def save_message(
     output_tokens: int | None = None,
     cache_read_tokens: int | None = None,
     cache_write_tokens: int | None = None,
+    context_tokens: int | None = None,
     thinking_content: str | None = None,
     latency_ms: int | None = None,
     model: str | None = None,
@@ -117,6 +177,7 @@ async def save_message(
         output_tokens: Number of output tokens for this API call
         cache_read_tokens: Prompt-cache tokens read for this turn (input-side)
         cache_write_tokens: Prompt-cache tokens written for this turn (input-side)
+        context_tokens: Prompt size of the turn's last model call (context occupancy)
         thinking_content: AI reasoning/thinking content if extended thinking enabled
         latency_ms: API call latency in milliseconds
         model: Model that produced this turn (assistant messages) for cost attribution
@@ -151,6 +212,7 @@ async def save_message(
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        context_tokens=context_tokens,
         thinking_content=thinking_content,
         latency_ms=latency_ms,
         model=model,
@@ -169,6 +231,25 @@ async def save_message(
 
     logger.debug(f"Saved {role} message {message.id} to session {session_id}")
     return message
+
+
+def session_event_content(
+    subject: str,
+    action: str,
+    targets: list[dict[str, Any]] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The ``content`` of a session-event row, the one shape the frontend renders.
+
+    ``payload`` merges extra top-level keys for events that carry more than a target list
+    (the compaction boundary's ``summary``).
+    """
+    content: dict[str, Any] = {"type": "session_event", "subject": subject, "action": action}
+    if targets:
+        content["targets"] = targets
+    if payload:
+        content.update(payload)
+    return content
 
 
 async def save_session_event(
@@ -190,13 +271,12 @@ async def save_session_event(
     context (see :func:`get_session_messages`). Best-effort — a failure here must never
     break the change it accompanies.
     """
-    content: dict[str, Any] = {"type": "session_event", "subject": subject, "action": action}
-    if targets:
-        content["targets"] = targets
     try:
         # Own session: a failed write's rollback must not expire the caller's loaded rows.
         async with AsyncSession(db.bind, expire_on_commit=False) as own:
-            await save_message(own, session_id, "system", content)
+            await save_message(
+                own, session_id, "system", session_event_content(subject, action, targets)
+            )
     except Exception:  # noqa: BLE001 — the conversation note is non-critical
         logger.warning(
             "session_event_persist_failed",
@@ -517,6 +597,7 @@ async def stamp_message_usage(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    context_tokens: int | None = None,
 ) -> None:
     """Stamp a turn's token totals onto an already-saved assistant message.
 
@@ -533,6 +614,8 @@ async def stamp_message_usage(
     output_tokens = max(0, int(output_tokens))
     cache_read_tokens = max(0, int(cache_read_tokens))
     cache_write_tokens = max(0, int(cache_write_tokens))
+    if context_tokens is not None:
+        context_tokens = max(0, int(context_tokens))
 
     await db.execute(
         update(Message)
@@ -544,6 +627,7 @@ async def stamp_message_usage(
             token_count=output_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
+            context_tokens=context_tokens,
         )
     )
     await db.commit()

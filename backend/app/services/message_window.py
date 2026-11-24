@@ -97,3 +97,35 @@ def prune_orphan_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, An
             continue  # whole message was orphaned tool blocks
         pruned.append(msg if len(kept) == len(content) else {**msg, "content": kept})
     return pruned
+
+
+def merge_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Coalesce adjacent same-role messages into one.
+
+    The Messages/Converse APIs require alternating roles, and a transcript can legitimately
+    end up with two neighbours of the same role: a turn that persists an assistant row with
+    no user row before it (a compaction, a retry replayed in place) leaves one behind. A
+    single such pair makes every later turn on that conversation fail at the API boundary,
+    so the transcript is normalized once, here, rather than guarded at each call site.
+    """
+    merged: list[dict[str, Any]] = []
+    for msg in messages:
+        if not merged or merged[-1].get("role") != msg.get("role"):
+            merged.append(msg)
+            continue
+        previous = merged[-1]
+        # Two plain strings stay a plain string: the common case (a user's queued messages)
+        # keeps the shape every engine already sees.
+        if isinstance(previous.get("content"), str) and isinstance(msg.get("content"), str):
+            content: Any = f"{previous['content']}\n\n{msg['content']}"
+        else:
+            content = _as_blocks(previous) + _as_blocks(msg)
+        merged[-1] = {**previous, "content": content}
+    return merged
+
+
+def _as_blocks(msg: dict[str, Any]) -> list[Any]:
+    content = msg.get("content")
+    if isinstance(content, list):
+        return content
+    return [{"type": "text", "text": content if isinstance(content, str) else str(content)}]

@@ -5,6 +5,7 @@ The fixtures in tests/fixtures/opencode_stream_*.jsonl were captured from a real
 tests pin the actual wire schema, not an assumed one.
 """
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -315,3 +316,68 @@ async def test_crashed_tool_surfaces_state_error_as_content() -> None:
     assert events[1].type == "tool_result"
     assert events[1].is_error is True
     assert events[1].content is not None and "ExpiredToken" in events[1].content
+
+
+# --- context_tokens: the LAST step's prompt, not the turn's sum --------------------------
+#
+# step_finish shape (tokens.input / tokens.cache.read / tokens.cache.write) as captured in
+# fixtures/opencode_stream_tool.jsonl; the 3-step stream below reuses it with new numbers.
+
+
+@pytest.mark.asyncio
+async def test_captured_tool_turn_reports_last_step_prompt_as_context() -> None:
+    meta = (await _collect("opencode_stream_tool.jsonl"))[-1].metadata
+    # Step 1 prompt 3 + 0 + 7949 = 7952; step 2 prompt 6 + 7949 + 72 = 8027.
+    assert meta["context_tokens"] == 8027
+    assert meta["cache_read_tokens"] == 7949  # the sums stay sums
+    assert meta["cache_write_tokens"] == 8021
+
+
+def _step(reason: str, fresh: int, read: int, write: int) -> str:
+    tokens = {
+        "input": fresh,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {"write": write, "read": read},
+    }
+    part = {"type": "step-finish", "reason": reason, "tokens": tokens}
+    return json.dumps({"type": "step_finish", "part": part})
+
+
+@pytest.mark.asyncio
+async def test_multi_step_turn_context_is_last_step_while_counts_accumulate() -> None:
+    lines = [
+        _step("tool-calls", 3, 0, 51_000),
+        _step("tool-calls", 5, 51_000, 1_200),
+        _step("stop", 7, 52_200, 900),
+    ]
+
+    async def _gen():
+        for line in lines:
+            yield line
+
+    meta = [e async for e in parse_opencode_response(_gen())][-1].metadata
+    assert meta["context_tokens"] == 7 + 52_200 + 900
+    assert meta["input_tokens"] == 15
+    assert meta["cache_read_tokens"] == 103_200
+    assert meta["cache_write_tokens"] == 53_100
+
+
+@pytest.mark.asyncio
+async def test_no_step_finish_reports_no_context() -> None:
+    async def _gen():
+        yield '{"type":"text","part":{"type":"text","text":"hi"}}'
+
+    meta = [e async for e in parse_opencode_response(_gen())][-1].metadata
+    assert meta["context_tokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_step_without_tokens_keeps_the_last_real_reading() -> None:
+    async def _gen():
+        yield _step("tool-calls", 3, 0, 51_000)
+        yield '{"type":"step_finish","part":{"reason":"stop"}}'  # tokens absent
+        yield _step("stop", 0, 0, 0)  # all-zero tokens
+
+    meta = [e async for e in parse_opencode_response(_gen())][-1].metadata
+    assert meta["context_tokens"] == 51_003

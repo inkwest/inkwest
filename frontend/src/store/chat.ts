@@ -258,8 +258,14 @@ export const useChatStore = create<ChatState>((set) => ({
   setIsConnected: (connected) => set({ isConnected: connected }),
   setIsReconnecting: (reconnecting) => set({ isReconnecting: reconnecting }),
   setError: (error) => set({ error }),
+  // Deduped on id: a server-authored row (the compaction divider) can arrive both live and
+  // from a history fetch that lands mid-turn, which would duplicate the row and its React key.
   addMessage: (message) =>
-    set((state) => ({ messages: [...state.messages, message] })),
+    set((state) =>
+      state.messages.some((m) => m.id === message.id)
+        ? state
+        : { messages: [...state.messages, message] }
+    ),
   addPeerMessage: (message) =>
     set((state) =>
       state.messages.some((m) => m.id === message.id)

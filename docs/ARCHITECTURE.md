@@ -81,6 +81,9 @@ backend/app/
     ai_client.py                    # get_orchestrator(): per-turn engine dispatcher
     orchestrator_cli.py             # Claude CLI subprocess engine
     orchestrator_inkwest_agent.py   # Sandboxed Bedrock Converse engine
+    orchestrator_opencode.py        # Sandboxed opencode CLI engine
+    compaction.py        # Context compaction: archive, summary turn, boundary row
+    context_window.py    # Per-model context-window table (the gauge's denominator)
     auth_cleanup.py      # Background cleanup of expired OIDC states
     prompts.py           # System prompt generation
     web_search.py        # Brave/SerpAPI with source trust classification
@@ -114,13 +117,19 @@ backend/app/
 | Event | Direction | Description |
 |---|---|---|
 | `message` | client -> server | User chat message |
+| `retry` | client -> server | Re-run the last user message (replaces its failed answer) |
+| `compact` | client -> server | Summarize the conversation so far and start a new context boundary (**owner only**) |
 | `stop` | client -> server | Cancel current AI processing |
+| `typing` | client -> server | Typing indicator, fanned out to the other participants |
 | `ping` / `pong` | bidirectional | Keepalive |
 | `text_delta` | server -> client | AI text chunk |
 | `tool_start` | server -> client | Tool execution starting |
 | `tool_result` | server -> client | Tool output |
-| `done` | server -> client | Response complete (metadata includes `stopped: true` if cancelled) |
+| `context_compacted` | server -> client | A compaction boundary was written (row id, timestamp, and the persisted row content) |
+| `done` | server -> client | Response complete (metadata carries the turn's cumulative token counts and `context_tokens`, the last model call's prompt for the context gauge, when the engine reported any (a stopped inkwest-agent turn and the no-terminal fallback carry only `stopped`); `stopped: true` if cancelled) |
 | `error` | server -> client | Error occurred |
+
+`message`, `retry` and `compact` share one gate (`start_gated_turn`): turn-rate limit → budget check → one-turn-per-session slot. Role gating (`session_access.turn_refusal` — viewers may not drive a turn, and only the owner may compact) happens earlier, in the receive loop. Compaction (`services/compaction.py`) runs a normal billed turn through the session's resolved engine, dumps the pre-boundary transcript to `/workdir/.inkwest/history-<n>.md`, and commits a `role='system'` boundary row; from there `get_session_messages` replays only what follows it, and the summary rides the system prompt. The UI still renders the whole history, with a divider at the boundary.
 
 The WS handler uses a dual-task pattern: a receive loop (always listening for `stop`/`ping`/messages) and a process loop (orchestrating AI responses). This allows `stop` messages to arrive during streaming. Each orchestration gets a fresh `asyncio.Event` that the receive loop can set to signal cancellation.
 

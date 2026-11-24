@@ -787,3 +787,82 @@ async def test_cap_noop_for_anonymous_user():
     ):
         await sandbox.enforce_user_sandbox_cap(None, "a2")
     td.assert_not_awaited()
+
+
+# --- reset_opencode_store ---------------------------------------------------------
+
+
+def test_reset_opencode_store_keeps_the_mounted_directory(tmp_path):
+    """The store is a bind-mount source: a running container keeps the inode it mounted, so
+    a recreated directory is one it can never write its store into again."""
+    store = tmp_path / "sid" / "opencode"
+    (store / "storage" / "session").mkdir(parents=True)
+    (store / "opencode.db").write_text("pre-boundary session")
+    (store / "storage" / "session" / "s1.json").write_text("{}")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not ours")
+    (store / "link-dir").symlink_to(outside)
+    (store / "link-file").symlink_to(outside / "keep.txt")
+    inode = store.stat().st_ino
+
+    with patch.object(sandbox, "get_settings", return_value=_settings(tmp_path)):
+        sandbox.reset_opencode_store("sid")
+
+    assert store.stat().st_ino == inode
+    assert list(store.iterdir()) == []
+    assert (outside / "keep.txt").read_text() == "not ours"  # links removed, not followed
+
+
+def test_reset_opencode_store_without_a_store_is_a_no_op(tmp_path):
+    with patch.object(sandbox, "get_settings", return_value=_settings(tmp_path)):
+        sandbox.reset_opencode_store("sid")
+    assert not (tmp_path / "sid").exists()
+
+
+def test_reset_opencode_store_raises_when_the_db_survives(tmp_path):
+    """A surviving opencode.db is the session `--continue` would resume: never silent."""
+    store = tmp_path / "sid" / "opencode"
+    store.mkdir(parents=True)
+    (store / "opencode.db").write_text("pre-boundary session")
+    # Mocked, not chmod: CI runs as root, which ignores directory modes.
+    denied = PermissionError(1, "Operation not permitted")
+    with (
+        patch.object(sandbox, "get_settings", return_value=_settings(tmp_path)),
+        patch.object(sandbox, "logger") as log,
+        patch.object(sandbox.os, "unlink", side_effect=denied),
+        pytest.raises(OSError, match="opencode.db"),
+    ):
+        sandbox.reset_opencode_store("sid")
+    log.warning.assert_called_once()
+    assert log.warning.call_args.args == ("opencode_store_entry_not_removed",)
+    assert log.warning.call_args.kwargs["entry"] == "opencode.db"
+
+
+def test_reset_opencode_store_raises_on_an_unlistable_store(tmp_path):
+    """Unlistable is not empty: an opencode.db behind it is still the session --continue resumes."""
+    store = tmp_path / "sid" / "opencode"
+    store.mkdir(parents=True)
+    (store / "opencode.db").write_text("pre-boundary session")
+    with (
+        patch.object(sandbox, "get_settings", return_value=_settings(tmp_path)),
+        patch.object(sandbox.os, "scandir", side_effect=PermissionError(13, "denied")),
+        pytest.raises(OSError, match="opencode.db"),
+    ):
+        sandbox.reset_opencode_store("sid")
+
+
+def test_opencode_boundary_sidecar_round_trip(tmp_path):
+    """Missing matches only a never-compacted session; a write is atomic and backend-side."""
+    (tmp_path / "sid").mkdir()
+    with patch.object(sandbox, "get_settings", return_value=_settings(tmp_path)):
+        assert sandbox.opencode_store_is_stale("sid", None) is False
+        assert sandbox.opencode_store_is_stale("sid", "b1") is True
+        sandbox.record_opencode_boundary("sid", "b1")
+        assert sandbox.opencode_store_is_stale("sid", "b1") is False
+        assert sandbox.opencode_store_is_stale("sid", "b2") is True
+        assert sandbox.opencode_store_is_stale("sid", None) is True
+        sandbox.record_opencode_boundary("sid", None)
+        assert sandbox.opencode_store_is_stale("sid", None) is False
+    # Beside the mounts, never inside one of them.
+    assert sorted(p.name for p in (tmp_path / "sid").iterdir()) == ["opencode.boundary"]

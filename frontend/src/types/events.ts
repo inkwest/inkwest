@@ -16,6 +16,8 @@ export interface ChatEvent {
     // Targeted frames (only the asking user's sockets), not session broadcasts.
     | 'mcp_tool_ask'
     | 'mcp_tool_ask_resolved'
+    // A compaction boundary was just committed: render the divider without a reload.
+    | 'context_compacted'
     // Local lifecycle frames the service synthesizes for the store:
     | 'connected'
     | 'disconnected'
@@ -50,7 +52,7 @@ export interface ChatEvent {
 }
 
 export interface SendMessage {
-  type: 'message' | 'ping' | 'stop' | 'retry' | 'typing';
+  type: 'message' | 'ping' | 'stop' | 'retry' | 'typing' | 'compact';
   content?: string;
   // Descriptors from a prior /attachments upload, persisted on the user turn and
   // referenced to the agent as @/workdir/<file> (claude-cli only).

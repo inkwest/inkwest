@@ -3,7 +3,7 @@ import { useChatStore } from '@/store/chat';
 import { useSessionsStore } from '@/store/sessions';
 import { ChatWebSocket } from '@/services/websocket';
 import { ChatEvent } from '@/types/events';
-import { Attachment } from '@/types/api';
+import { Attachment, Message } from '@/types/api';
 import { useConnectorsStore } from '@/store/connectors';
 import { useMcpStore } from '@/store/mcp';
 import { ConnectorName } from '@/types/connectors';
@@ -166,6 +166,7 @@ export function useWebSocket(sessionId: string) {
             output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
             cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
             cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
+            context_tokens: (event.metadata?.context_tokens as number | undefined) ?? null,
           });
         } else if (wasStopped) {
           addMessage({
@@ -178,6 +179,8 @@ export function useWebSocket(sessionId: string) {
             output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
             cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
             cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
+            // The backend saves no row for a contentless stop, so a reload has no reading.
+            context_tokens: null,
           });
         }
 
@@ -238,6 +241,22 @@ export function useWebSocket(sessionId: string) {
         if (mcpKey) useMcpStore.getState().flagAuthRequired(mcpKey);
         break;
       }
+
+      case 'context_compacted':
+        // The boundary row was just committed server-side. Append it now so the divider
+        // (and the fact that the model's memory restarts here) is visible without a
+        // reload; on reload the same row arrives from history under the same id, which is
+        // why addMessage dedupes on it. The content is the persisted row, shipped verbatim.
+        if (event.metadata?.id && event.metadata.content) {
+          useChatStore.getState().addMessage({
+            id: String(event.metadata.id),
+            session_id: sessionId,
+            role: 'system',
+            content: event.metadata.content as Message['content'],
+            created_at: String(event.metadata.created_at ?? new Date().toISOString()),
+          });
+        }
+        break;
 
       case 'mcp_tool_ask':
         // The proxy is holding a tool call on this user's decision — stack an ask banner.
@@ -376,11 +395,19 @@ export function useWebSocket(sessionId: string) {
     setIsStreaming(true);
   }, [clearMessageError, setIsStreaming]);
 
+  // Compaction streams like any other turn (the summary renders as an assistant bubble),
+  // so the streaming flag flips exactly as it does for a user message.
+  const compactContext = useCallback(() => {
+    if (!wsRef.current?.sendCompact()) return;
+    setIsStreaming(true);
+  }, [setIsStreaming]);
+
   return {
     sendMessage,
     stopStreaming,
     sendTyping,
     retryMessage,
+    compactContext,
     isConnected: useChatStore((s) => s.isConnected),
     isStreaming: useChatStore((s) => s.isStreaming),
     error: useChatStore((s) => s.error),

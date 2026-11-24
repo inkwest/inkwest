@@ -103,3 +103,21 @@ def check_real_owner(session: Session, user: User) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the session owner can share this conversation",
         )
+
+
+# WS message types a read-only viewer may not send: anything that starts, replaces or
+# interrupts a turn. A new turn-driving type that forgets to land here would let viewers
+# drive someone else's conversation.
+VIEWER_BLOCKED_TYPES = frozenset({"message", "retry", "stop"})
+
+# Compaction changes what the model sees for every participant; value = the refusal shown.
+OWNER_ONLY_TYPES = {"compact": "Only the conversation owner can compact it"}
+
+
+def turn_refusal(session_role: str | None, msg_type: str | None) -> str | None:
+    """Why this socket's role may not send ``msg_type``, or None when it may."""
+    if msg_type in OWNER_ONLY_TYPES and session_role != "owner":
+        return OWNER_ONLY_TYPES[str(msg_type)]
+    if session_role == "viewer" and msg_type in VIEWER_BLOCKED_TYPES:
+        return "You have view-only access to this conversation"
+    return None

@@ -9,6 +9,7 @@ import { useSessionMetrics } from '@/hooks/useSessionMetrics';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { SessionModelSelect } from './SessionModelSelect';
+import { CompactContextButton } from './CompactContextButton';
 import { PresenceBar } from './PresenceBar';
 import { ShareModal } from './ShareModal';
 import { StreamingMessage } from './StreamingMessage';
@@ -26,6 +27,9 @@ interface Props {
   onSendMessage: (content: string, attachments?: Attachment[]) => void;
   onStopStreaming?: () => void;
   onRetryMessage?: (messageId: string) => void;
+  // Compact the conversation (context pressure). ChatPage omits it for a read-only
+  // participant, so the affordance can never appear for someone the server would refuse.
+  onCompact?: () => void;
   initialPrompt?: string | null;
   // Attachments handed off from the start screen, seeded into the composer alongside
   // initialPrompt so the auto-submit carries them.
@@ -39,7 +43,7 @@ interface Props {
   onTyping?: (state: boolean) => void;
 }
 
-export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initialPrompt, initialAttachments, autoSubmit, sessionId, isReadOnly, onTyping }: Props) {
+export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, onCompact, initialPrompt, initialAttachments, autoSubmit, sessionId, isReadOnly, onTyping }: Props) {
   const { messages, streamingMessage, isStreaming, isConnected, streamingBlocks } = useChatStore();
   const compact = useSettingsStore((s) => s.compactToolCards);
   const wideComposer = useSettingsStore((s) => s.wideComposer);
@@ -48,6 +52,11 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
   // selectors so ChatView doesn't re-render on unrelated currentSession changes
   // (e.g. token counts updating every turn).
   const [showShare, setShowShare] = useState(false);
+  // Primitive selector, like the ones around it: subscribing to the whole session object
+  // would re-render the transcript on every per-turn token-count update.
+  const sessionModel = useSessionsStore((s) =>
+    s.currentSession?.id === sessionId ? (s.currentSession?.model ?? null) : null
+  );
   const canShare = useSessionsStore(
     (s) => !!sessionId && s.currentSession?.id === sessionId && s.currentSession?.is_owner !== false
   );
@@ -309,7 +318,14 @@ export function ChatView({ onSendMessage, onStopStreaming, onRetryMessage, initi
                   autoSubmit={autoSubmit}
                   initialAttachments={initialAttachments}
                   sessionId={sessionId}
-                  modelControl={<SessionModelSelect />}
+                  toolbarControls={
+                    <>
+                      <SessionModelSelect />
+                      {onCompact && (
+                        <CompactContextButton model={sessionModel} onCompact={onCompact} />
+                      )}
+                    </>
+                  }
                   connectorControls={sessionId ? <ConnectorPanel sessionId={sessionId} layout="icons" /> : undefined}
                   onTyping={onTyping}
                 />

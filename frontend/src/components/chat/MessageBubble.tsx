@@ -80,6 +80,15 @@ function sessionEventParts(c: SessionEventContent): { lead: string; items: strin
       const reason = targets[0]?.reason;
       return { lead: reason ? `Turn aborted — ${reason}` : 'Turn aborted', items: [] };
     }
+    case 'context': {
+      // The divider for a compaction boundary: everything above it is summarized, and the
+      // transcript sent to the model restarts here. The summary itself is not shown — the
+      // assistant bubble right above this line IS the summary.
+      const { message_count: count, trigger } = targets[0] ?? {};
+      const how = trigger === 'auto' ? ' automatically' : '';
+      const scope = count ? ` — ${count} earlier message${count === 1 ? '' : 's'} summarized` : '';
+      return { lead: `Context compacted${how}${scope}`, items: [] };
+    }
     default:
       return { lead: `${SUBJECT_LABELS[c.subject] ?? c.subject} ${c.action}`, items: [] };
   }

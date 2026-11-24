@@ -201,3 +201,11 @@ async def test_stamp_failure_never_costs_the_budget_row() -> None:
     db.rollback.assert_awaited_once()  # stamp hygiene rollback
     # The budget commit landed BEFORE the stamp attempt.
     assert _call_order(manager) == ["stats", "record", "db.commit", "stamp", "db.rollback"]
+
+
+@pytest.mark.asyncio
+async def test_context_tokens_reach_the_stamp() -> None:
+    db = _db()
+    with _patched(db) as (_stats, _record, stamp, _manager):
+        await _persist(db, stamp_message_id=uuid.uuid4(), context_tokens=53_107)
+    assert stamp.await_args.kwargs["context_tokens"] == 53_107

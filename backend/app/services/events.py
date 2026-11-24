@@ -33,6 +33,8 @@ EventType = Literal[
     # Connector events
     "connector_required",  # A tool needs a connector that is not connected/expired
     "mcp_auth_required",  # An enabled OAuth2 MCP server has no active grant (reconnect)
+    # Context events
+    "context_compacted",  # A compaction boundary was just written (live divider)
 ]
 
 
@@ -139,6 +141,22 @@ def tool_result_event(
         content=content,
         tool_use_id=tool_use_id,
         is_error=is_error,
+    )
+
+
+def context_compacted_event(
+    boundary_id: str, created_at: str, content: dict[str, Any]
+) -> ChatEvent:
+    """The divider for a freshly written compaction boundary.
+
+    Ships the persisted row's own ``content`` (already stripped of the server-only summary)
+    so the client appends it verbatim instead of re-encoding the row shape a fourth time.
+    Carries the row's id so a client that later reloads the history renders one divider,
+    not two.
+    """
+    return ChatEvent(
+        type="context_compacted",
+        metadata={"id": boundary_id, "created_at": created_at, "content": content},
     )
 
 
