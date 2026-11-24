@@ -8,20 +8,27 @@ import {
   TableHeader,
   TableBody,
   TableRow,
-  TableHead,
   TableCell,
 } from '@/components/ui';
 import type { ModelUsage } from '@/types/admin';
-import { cycleSort, sortArrow, ariaSort, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost } from '@/lib/usageFormat';
+import { cycleSort, type SortState } from '@/lib/tableSort';
+import {
+  formatTokens,
+  formatTokenPair,
+  formatCost,
+  CACHE_LABEL,
+  CACHE_TOOLTIP,
+  IN_OUT_TOOLTIP,
+} from '@/lib/usageFormat';
+import { SortableHead } from './SortableHead';
 
 type ModelSortKey =
   | 'model'
   | 'engine'
   | 'request_count'
+  | 'input_tokens'
   | 'total_tokens'
   | 'cache_read_tokens'
-  | 'cache_write_tokens'
   | 'cost_usd';
 
 /**
@@ -53,37 +60,13 @@ export function ModelUsageTable({ data }: { data: ModelUsage[] }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="cursor-pointer select-none" aria-sort={ariaSort(sort, 'model')} onClick={() => toggle('model')}>
-                Model{sortArrow(sort, 'model')}
-              </TableHead>
-              <TableHead className="cursor-pointer select-none" aria-sort={ariaSort(sort, 'engine')} onClick={() => toggle('engine')}>
-                Engine{sortArrow(sort, 'engine')}
-              </TableHead>
-              <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sort, 'request_count')} onClick={() => toggle('request_count')}>
-                Requests{sortArrow(sort, 'request_count')}
-              </TableHead>
-              <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sort, 'total_tokens')} onClick={() => toggle('total_tokens')}>
-                Tokens{sortArrow(sort, 'total_tokens')}
-              </TableHead>
-              <TableHead
-                className="text-right cursor-pointer select-none"
-                aria-sort={ariaSort(sort, 'cache_read_tokens')}
-                onClick={() => toggle('cache_read_tokens')}
-                title="Prompt-cache reads (billed ~0.1x input rate)"
-              >
-                Cache R{sortArrow(sort, 'cache_read_tokens')}
-              </TableHead>
-              <TableHead
-                className="text-right cursor-pointer select-none"
-                aria-sort={ariaSort(sort, 'cache_write_tokens')}
-                onClick={() => toggle('cache_write_tokens')}
-                title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)"
-              >
-                Cache W{sortArrow(sort, 'cache_write_tokens')}
-              </TableHead>
-              <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sort, 'cost_usd')} onClick={() => toggle('cost_usd')}>
-                Cost{sortArrow(sort, 'cost_usd')}
-              </TableHead>
+              <SortableHead label="Model" sortKey="model" sort={sort} onSort={toggle} />
+              <SortableHead label="Engine" sortKey="engine" sort={sort} onSort={toggle} />
+              <SortableHead label="Requests" sortKey="request_count" sort={sort} onSort={toggle} numeric />
+              <SortableHead label="In / Out" sortKey="input_tokens" sort={sort} onSort={toggle} numeric title={IN_OUT_TOOLTIP} />
+              <SortableHead label="Tokens" sortKey="total_tokens" sort={sort} onSort={toggle} numeric />
+              <SortableHead label={CACHE_LABEL} sortKey="cache_read_tokens" sort={sort} onSort={toggle} numeric title={CACHE_TOOLTIP} />
+              <SortableHead label="Cost" sortKey="cost_usd" sort={sort} onSort={toggle} numeric />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -92,9 +75,13 @@ export function ModelUsageTable({ data }: { data: ModelUsage[] }) {
                 <TableCell className="font-medium">{usage.model}</TableCell>
                 <TableCell className="text-gray-400">{usage.engine}</TableCell>
                 <TableCell className="text-right">{usage.request_count}</TableCell>
+                <TableCell className="text-right text-gray-400">
+                  {formatTokenPair(usage.input_tokens, usage.output_tokens)}
+                </TableCell>
                 <TableCell className="text-right">{formatTokens(usage.total_tokens)}</TableCell>
-                <TableCell className="text-right text-gray-400">{formatTokens(usage.cache_read_tokens || 0)}</TableCell>
-                <TableCell className="text-right text-gray-400">{formatTokens(usage.cache_write_tokens || 0)}</TableCell>
+                <TableCell className="text-right text-gray-400">
+                  {formatTokenPair(usage.cache_read_tokens, usage.cache_write_tokens)}
+                </TableCell>
                 <TableCell className="text-right">{formatCost(usage.cost_usd)}</TableCell>
               </TableRow>
             ))}
