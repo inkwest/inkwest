@@ -63,6 +63,8 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/dock
 # Note: Claude CLI runs with --dangerously-skip-permissions for non-interactive use.
 # This is safe in container context as the container provides isolation.
 USER app
+# Redistribution of Claude Code is allowed only as published by Anthropic: never patch,
+# repackage or strip its auth methods (README "Claude Code terms").
 RUN curl -fsSL https://claude.ai/install.sh | bash
 USER root
 ENV PATH="/home/app/.local/bin:${PATH}"

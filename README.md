@@ -135,14 +135,15 @@ KUBECONFIG_DIR=/path/to/kubeconfigs
 | Anthropic     | Pay-per-use | API key          | Production, high volume   |
 | AWS Bedrock   | Pay-per-use | AWS credentials  | AWS environments          |
 
-*Claude CLI uses your existing Claude subscription
+*Claude CLI uses your existing Claude subscription: single-user local use only, a shared
+deployment must use an API key or Bedrock (see [Claude Code terms](#claude-code-terms))
 
 ### Claude CLI Features
 
 When using Claude CLI as the AI provider:
 - **Session resumption**: Conversations persist across messages using `--resume`
 - **Built-in tool execution**: Uses Claude's native tool calling via MCP
-- **No API key needed**: Works with your existing Claude subscription
+- **No API key needed**: Works with your existing Claude subscription (single-user only)
 
 ## Project Structure
 
@@ -279,6 +280,33 @@ Access the admin panel at `/admin` (requires admin role):
 ## Contributing
 
 Contributions welcome! Please read the contributing guidelines first.
+
+## Claude Code terms
+
+The images built here (`Dockerfile`, `backend/Dockerfile`, `agent/Dockerfile`) ship the
+Claude Code CLI, installed with Anthropic's official installer.
+Claude Code is Anthropic's software, not covered by this repository's license.
+
+Source: [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance),
+sections "Can customers offer Claude Code in their products?" and "Authentication and
+credential use", checked 2026-11-24 (the page shows no revision date). Preinstalling Claude
+Code in a product or hosted sandbox is allowed under Anthropic's Commercial Terms of Service
+when:
+
+- the binary is unmodified, installed and run as published by Anthropic, with no built-in
+  authentication method removed, disabled or restricted;
+- Claude usage is not paid for, resold or intermediated on end users' behalf: each deployment
+  authenticates with its own Anthropic API key or inference provider credentials (Amazon
+  Bedrock here), billed to that key owner. The LLM auth broker only swaps the deployment's own
+  Bedrock credential for its own authorized users: the "own API keys for your own authorized
+  users" case of the Authentication section (the page does not define "intermediate");
+- Claude subscription credentials (Free, Pro, Max, Ultra) are never used to serve other users: the
+  subscription login is for a single person's local use;
+- the Claude Code and Anthropic names and logos stay out of this project's name and logo
+  (stating that it runs Claude Code is fine).
+
+Changing how the image installs or wraps Claude Code, or how deployments authenticate to
+Claude, needs a new check against that page.
 
 ## License
 
