@@ -33,6 +33,7 @@ from app.models.session import Session
 from app.models.session_share import SessionShare, ShareRole, ShareStatus
 from app.models.session_share_link import SessionShareLink
 from app.models.user import User
+from app.services.messages import is_compaction_boundary
 from app.services.pubsub import notify
 from app.services.session_access import check_real_owner, check_session_owner
 from app.services.web_push import schedule_share_invite
@@ -497,10 +498,13 @@ async def get_shared_conversation(
         title=session.title,
         owner_display_name=session.user.display_name if session.user else None,
         # Minimal projection only (see SharedMessage): never serialize internal fields
-        # to the unauthenticated viewer. 'system' event lines are excluded too.
+        # to the unauthenticated viewer. 'system' event lines are excluded too — except
+        # the compaction divider, without which the shared transcript shows the assistant
+        # abruptly recapping itself with nothing explaining why. Its server-only summary
+        # is stripped by the same validator as the authenticated response.
         messages=[
             SharedMessage(id=m.id, role=m.role, content=m.content, created_at=m.created_at)
             for m in session.messages
-            if m.role != "system"
+            if m.role != "system" or is_compaction_boundary(m)
         ],
     )

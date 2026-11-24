@@ -315,10 +315,31 @@ class MessageCreate(MessageBase):
     pass
 
 
+def strip_boundary_summary(value: Any) -> Any:
+    """Drop the compaction boundary's ``summary`` from what any client receives.
+
+    It reaches the model through the system prompt and the user through the assistant
+    bubble above the divider, so shipping it on the row too would send the same text
+    twice on every history load — and would hand it to an anonymous share-link viewer,
+    who is not meant to receive server-side state at all.
+    """
+    from app.services.messages import COMPACTION_ACTION, COMPACTION_SUBJECT
+
+    if (
+        isinstance(value, dict)
+        and value.get("subject") == COMPACTION_SUBJECT
+        and value.get("action") == COMPACTION_ACTION
+    ):
+        return {k: v for k, v in value.items() if k != "summary"}
+    return value
+
+
 class MessageResponse(MessageBase):
     """Schema for message response."""
 
     model_config = ConfigDict(from_attributes=True)
+
+    _strip_summary = field_validator("content", mode="before")(strip_boundary_summary)
 
     id: UUID
     session_id: UUID
@@ -336,6 +357,8 @@ class MessageResponse(MessageBase):
     # Prompt-cache splits for the turn (per-bubble token line); NULL for older rows.
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
+    # Last model call's prompt size (context gauge); NULL for older rows / older agent images.
+    context_tokens: int | None = None
     thinking_content: str | None = None
     latency_ms: int | None = None
     status: str = "success"  # pending, success, error
@@ -537,6 +560,8 @@ class SharedMessage(BaseModel):
     counts, model/engine, author_user_id, error/retry state) are intentionally NOT
     exposed on the unauthenticated endpoint.
     """
+
+    _strip_summary = field_validator("content", mode="before")(strip_boundary_summary)
 
     id: UUID
     role: str

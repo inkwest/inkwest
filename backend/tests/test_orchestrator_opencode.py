@@ -16,6 +16,7 @@ import pytest
 from app.services import orchestrator_opencode as oo
 from app.services import turn_usage as tu
 from app.services.ai_cli_client import execute_opencode
+from tests.conftest import mock_session
 
 SESSION_ID = "11111111-1111-1111-1111-111111111111"
 USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -287,7 +288,58 @@ class TestOrchestrateOpencode:
         cap["os_remove"] = es.enter_context(patch.object(oo.os, "remove", MagicMock()))
         # F1 resume guard probes opencode.db presence in the durable dir.
         es.enter_context(patch.object(oo.os.path, "isfile", MagicMock(return_value=store_exists)))
+        # The boundary sidecar: current unless a test says otherwise.
+        cap["stale"] = es.enter_context(
+            patch("app.services.sandbox.opencode_store_is_stale", MagicMock(return_value=False))
+        )
+        cap["reset"] = es.enter_context(patch("app.services.sandbox.reset_opencode_store"))
+        cap["record"] = es.enter_context(patch("app.services.sandbox.record_opencode_boundary"))
         return es, cap
+
+    @pytest.mark.asyncio
+    async def test_compaction_summary_reaches_the_published_prompt(self):
+        """A compacted session's summary must ride the AGENTS.md prompt on every later turn."""
+        published: dict = {}
+        es, cap = self._patch(history=[{"role": "user", "content": "after boundary"}])
+        with es:
+            with (
+                patch(
+                    "app.services.orchestrator_opencode.last_boundary",
+                    AsyncMock(
+                        return_value=SimpleNamespace(
+                            id=uuid.uuid4(),
+                            role="system",
+                            content={
+                                "type": "session_event",
+                                "subject": "context",
+                                "action": "compacted",
+                                "targets": [{"archive_path": "/workdir/.inkwest/history-1.md"}],
+                                "summary": "FACT: the pod was OOMKilled",
+                            },
+                        )
+                    ),
+                ),
+                patch.object(
+                    oo,
+                    "_publish_workdir_file",
+                    lambda wd, name, content: published.update({name: content}),
+                ),
+            ):
+                await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=mock_session(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                    )
+                )
+
+        prompt = published["AGENTS.md"]
+        assert "Earlier conversation (compacted)" in prompt
+        assert "FACT: the pod was OOMKilled" in prompt
 
     @pytest.mark.asyncio
     async def test_sandbox_disabled_errors(self):
@@ -296,7 +348,7 @@ class TestOrchestrateOpencode:
             with patch.object(oo, "get_session_messages", AsyncMock(return_value=[])):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -312,7 +364,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -332,7 +384,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -350,7 +402,7 @@ class TestOrchestrateOpencode:
         with es2:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -359,6 +411,43 @@ class TestOrchestrateOpencode:
                 )
             )
         assert cap2["resume"] is True
+
+    @pytest.mark.asyncio
+    async def test_read_txn_released_before_stream(self):
+        """The last DB call before sandbox.ensure and before the stream is a commit."""
+        db = mock_session()
+        last_db_call: dict[str, str | None] = {}
+
+        def snapshot(step: str) -> None:
+            last_db_call[step] = db.method_calls[-1][0] if db.method_calls else None
+
+        async def fake_exec(session_id, user_message, **kwargs):
+            snapshot("exec")
+            yield b'{"type":"step_finish","part":{"reason":"stop"}}\n'
+
+        es, _cap = self._patch(history=[], exec_factory=fake_exec)
+        with es:
+            from app.services import sandbox
+
+            sandbox.ensure.side_effect = lambda *a, **kw: snapshot("ensure") or "inkwest_conv_x"
+
+            async def mcp_block(*a, db, **kw):  # reads the DB after ensure, like the real one
+                await db.execute("SELECT 1")
+                return {}, []
+
+            es.enter_context(patch.object(oo, "_opencode_mcp_block", side_effect=mcp_block))
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=db,
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                )
+            )
+
+        assert last_db_call == {"ensure": "commit", "exec": "commit"}
 
     @pytest.mark.asyncio
     async def test_resume_guarded_when_store_missing(self):
@@ -372,7 +461,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -381,6 +470,149 @@ class TestOrchestrateOpencode:
                 )
             )
         assert cap["resume"] is False
+
+    async def _turn_under_boundary(
+        self, *, stale: bool, exec_lines: list[bytes] | None = None, **turn_kwargs
+    ):
+        es, cap = self._patch(
+            history=[{"role": "user", "content": "a turn another engine ran"}],
+            exec_lines=exec_lines
+            if exec_lines is not None
+            else [b'{"type":"step_finish","part":{"reason":"stop"}}\n'],
+        )
+        boundary = SimpleNamespace(
+            id=uuid.UUID("33333333-3333-3333-3333-333333333333"),
+            role="system",
+            content={
+                "type": "session_event",
+                "subject": "context",
+                "action": "compacted",
+                "summary": "FACT",
+            },
+        )
+        with es:
+            cap["stale"].return_value = stale
+            fetch = AsyncMock(return_value=boundary)
+            # Both names: a second lookup through the compaction module counts too.
+            with (
+                patch.object(oo, "last_boundary", fetch),
+                patch("app.services.compaction.last_boundary", fetch),
+            ):
+                cap["events"] = await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=mock_session(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="follow-up",
+                        **turn_kwargs,
+                    )
+                )
+        cap["fetch"] = fetch
+        return cap, str(boundary.id)
+
+    @pytest.mark.asyncio
+    async def test_store_from_before_the_boundary_is_reset_and_never_resumed(self):
+        """A failed post-compaction reset leaves the pre-boundary session newest in the store;
+        a later turn must not `--continue` it, whichever engine ran in between."""
+        cap, boundary_id = await self._turn_under_boundary(stale=True)
+        cap["stale"].assert_called_once_with(SESSION_ID, boundary_id)
+        cap["reset"].assert_called_once_with(SESSION_ID)
+        assert cap["resume"] is False
+
+    @pytest.mark.asyncio
+    async def test_compaction_on_a_stale_store_never_spawns(self):
+        """The store holds no post-boundary turn: a fresh run would summarize nothing."""
+        from app.services import compaction
+
+        flag = compaction._compacting.set(True)
+        try:
+            cap, _ = await self._turn_under_boundary(stale=True, persist_user_message=False)
+        finally:
+            compaction._compacting.reset(flag)
+        assert cap["events"] == []
+        assert "message" not in cap  # execute_opencode never ran
+
+    @pytest.mark.asyncio
+    async def test_sidecar_failures_are_logged_with_their_session(self):
+        es, cap = self._patch(
+            history=[{"role": "user", "content": "x"}],
+            exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n'],
+        )
+        with es, patch.object(oo, "logger") as log:
+            cap["stale"].return_value = True
+            cap["reset"].side_effect = OSError("opencode.db survived")
+            cap["record"].side_effect = OSError("disk full")
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=mock_session(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="follow-up",
+                )
+            )
+        logged = {c.args[0]: c.kwargs.get("extra") for c in log.exception.call_args_list}
+        assert logged["opencode_store_reset_retry_failed"] == {"session_id": SESSION_ID}
+        assert logged["opencode_boundary_record_failed"] == {"session_id": SESSION_ID}
+
+    @pytest.mark.asyncio
+    async def test_the_boundary_is_looked_up_once_per_turn(self):
+        cap, _ = await self._turn_under_boundary(stale=False)
+        assert cap["fetch"].await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_store_written_under_the_boundary_keeps_continue(self):
+        cap, _ = await self._turn_under_boundary(stale=False)
+        cap["reset"].assert_not_called()
+        assert cap["resume"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_spawned_run_records_its_boundary(self):
+        cap, boundary_id = await self._turn_under_boundary(stale=True)
+        cap["record"].assert_called_once_with(SESSION_ID, boundary_id)
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_never_produced_output_records_nothing(self):
+        """No output, no new session: recording the boundary would vouch for the old one."""
+        cap, _ = await self._turn_under_boundary(stale=True, exec_lines=[])
+        cap["record"].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_compaction_with_a_missing_store_never_spawns(self):
+        """A fresh run has no transcript to summarize: spawning it bills a summary that can
+        only be discarded."""
+        from app.services import compaction
+
+        es, cap = self._patch(
+            history=[{"role": "user", "content": "earlier"}],
+            exec_lines=[b'{"type":"step_finish","part":{"reason":"stop"}}\n'],
+            store_exists=False,
+        )
+        flag = compaction._compacting.set(True)
+        try:
+            with es:
+                record_usage = es.enter_context(
+                    patch("app.services.turn_usage.record_usage", AsyncMock())
+                )
+                events = await _collect(
+                    oo.orchestrate_chat_opencode(
+                        db=mock_session(),
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="summarize",
+                        persist_user_message=False,
+                    )
+                )
+        finally:
+            compaction._compacting.reset(flag)
+        assert events == []
+        assert "message" not in cap  # execute_opencode never ran
+        record_usage.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_authoritative_cost_threaded_to_record_usage(self):
@@ -395,7 +627,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -439,7 +671,7 @@ class TestOrchestrateOpencode:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -480,7 +712,7 @@ class TestOrchestrateOpencode:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -513,7 +745,7 @@ class TestOrchestrateOpencode:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -541,7 +773,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -579,7 +811,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -602,6 +834,41 @@ class TestOrchestrateOpencode:
         dones = [e for e in events if e.type == "done"]
         assert len(dones) == 1 and dones[0].metadata.get("stopped") is True
         assert not any(e.type == "done" and e.metadata.get("truncated") for e in events)
+
+    @pytest.mark.asyncio
+    async def test_cancel_stopped_done_carries_the_usage_the_row_gets(self):
+        import asyncio
+
+        cancel = asyncio.Event()
+
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"partial"}}\n'
+            yield (
+                b'{"type":"step_finish","part":{"reason":"tool-calls",'
+                b'"tokens":{"input":3,"output":57,"cache":{"write":7949,"read":0}}}}\n'
+            )
+            cancel.set()
+
+        es, _cap = self._patch(history=[], exec_factory=exec_factory)
+        stamp = AsyncMock()
+        with es, patch("app.services.turn_usage.stamp_message_usage", stamp):
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=mock_session(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                    cancel_event=cancel,
+                )
+            )
+        done = events[-1]
+        assert done.type == "done" and done.metadata["stopped"] is True
+        assert done.metadata["context_tokens"] == 7952
+        assert "truncated" not in done.metadata
+        assert stamp.await_args.kwargs["context_tokens"] == 7952
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("exc", [RuntimeError, TimeoutError])
@@ -627,7 +894,7 @@ class TestOrchestrateOpencode:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -655,7 +922,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -683,7 +950,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -725,7 +992,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -761,7 +1028,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -796,7 +1063,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -818,7 +1085,7 @@ class TestOrchestrateOpencode:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -842,7 +1109,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -864,7 +1131,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -897,7 +1164,7 @@ class TestOrchestrateOpencode:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -932,7 +1199,7 @@ class TestOrchestrateOpencode:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -953,7 +1220,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -980,7 +1247,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1006,7 +1273,7 @@ class TestOrchestrateOpencode:
         with es:
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1043,7 +1310,7 @@ class TestOrchestrateOpencode:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -1070,7 +1337,7 @@ class TestOrchestrateOpencode:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1149,7 +1416,7 @@ class TestOpencodeMcp:
             ):
                 events = await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -1209,7 +1476,7 @@ class TestOpencodeDispatch:
             gs.return_value.ai_provider = "claude-cli"
             gs.return_value.sandbox_enabled = sandbox_enabled
             orchestrator = get_orchestrator()
-            async for _ in orchestrator(db=AsyncMock(), session_id=SESSION_ID, user_message="x"):
+            async for _ in orchestrator(db=mock_session(), session_id=SESSION_ID, user_message="x"):
                 pass
         return seen.get("engine")
 
@@ -1267,7 +1534,9 @@ class TestOpencodeDispatch:
             gs.return_value.ai_provider = "claude-cli"
             gs.return_value.sandbox_enabled = sandbox_enabled
             orchestrator = get_orchestrator()
-            async for ev in orchestrator(db=AsyncMock(), session_id=SESSION_ID, user_message="x"):
+            async for ev in orchestrator(
+                db=mock_session(), session_id=SESSION_ID, user_message="x"
+            ):
                 events.append(ev)
         return seen.get("engine"), events
 
@@ -1344,7 +1613,7 @@ class TestOpencodeHardening:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1372,7 +1641,7 @@ class TestOpencodeHardening:
             ):
                 await _collect(
                     oo.orchestrate_chat_opencode(
-                        db=AsyncMock(),
+                        db=mock_session(),
                         session_id=SESSION_ID,
                         cluster_name=None,
                         kubeconfig_path=None,
@@ -1402,7 +1671,7 @@ class TestOpencodeHardening:
         with es:
             events = await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1420,6 +1689,47 @@ class TestOpencodeHardening:
         dones = [e for e in events if e.type == "done"]
         assert len(dones) == 1 and not dones[0].metadata.get("stopped")  # genuine done, not stopped
         assert "assistant" in saved_roles  # the completed answer was persisted
+
+    @pytest.mark.parametrize(
+        "terminal",
+        [
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":3,"output":2,"cache":{"write":7949,"read":0}}}}\n',
+            b'{"type":"step_finish","part":{"reason":"tool-calls",'
+            b'"tokens":{"input":3,"output":2,"cache":{"write":7949,"read":0}}}}\n'
+            b'{"type":"error","error":{"name":"APIError","data":{"message":"throttled"}}}\n',
+        ],
+        ids=["done", "error"],
+    )
+    @pytest.mark.asyncio
+    async def test_stop_after_terminal_reports_usage_once(self, terminal: bytes):
+        import asyncio
+
+        cancel = asyncio.Event()
+
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"answer"}}\n'
+            for line in terminal.splitlines(keepends=True):
+                yield line
+            cancel.set()  # user hits Stop just after the terminal reached the client
+
+        es, _cap = TestOrchestrateOpencode()._patch(history=[], exec_factory=exec_factory)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=mock_session(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                    cancel_event=cancel,
+                )
+            )
+        terminals = [e for e in events if e.type in ("done", "error")]
+        assert len(terminals) == 1
+        assert terminals[0].metadata["context_tokens"] == 7952
 
 
 class TestBrokerAuthoritySwitch:
@@ -1451,7 +1761,7 @@ class TestBrokerAuthoritySwitch:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1477,7 +1787,7 @@ class TestBrokerAuthoritySwitch:
         ):
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1523,7 +1833,7 @@ class TestStampFirstAssistantRow:
             ]
             await _collect(
                 oo.orchestrate_chat_opencode(
-                    db=AsyncMock(),
+                    db=mock_session(),
                     session_id=SESSION_ID,
                     cluster_name=None,
                     kubeconfig_path=None,
@@ -1537,6 +1847,7 @@ class TestStampFirstAssistantRow:
             assert args[1] == first_row.id
             assert kwargs["input_tokens"] == 7  # FRESH input — cache not folded in
             assert kwargs["cache_read_tokens"] == 12608
+            assert kwargs["context_tokens"] == 7 + 12608  # the single step's prompt
             # session stats carry the splits too
             assert tu.update_session_stats.await_args.kwargs["input_tokens"] == 7
             assert tu.update_session_stats.await_args.kwargs["cache_read_tokens"] == 12608

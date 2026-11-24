@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
+from app.core.database import release_read_txn
 from app.services import engines, llm_broker
 from app.services.ai_cli_client import (
     ProgressTracker,
@@ -38,6 +39,7 @@ from app.services.ai_cli_client import (
     parse_opencode_response,
 )
 from app.services.ai_client import resolve_session_model
+from app.services.compaction import append_compaction_summary, last_boundary, note_empty_replay
 from app.services.events import (
     ChatEvent,
     connector_required_event,
@@ -169,6 +171,10 @@ async def orchestrate_chat_opencode(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict[str, Any]] | None = None,
     persist_user_message: bool = True,
+    # Retry replays a user row that is ALREADY the last message in history; drop it so the
+    # engine doesn't see it twice. Distinct from persist_user_message: a compaction also
+    # skips the write, but its prompt is new and must not eat the real last user turn.
+    replace_last_user: bool = False,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """Broker one turn through the sandboxed ``opencode`` engine. Mirrors orchestrate_chat_cli."""
@@ -200,7 +206,7 @@ async def orchestrate_chat_opencode(
         logger.error(f"Failed to load messages: {e}")
         yield error_event(f"Failed to load conversation history: {str(e)}")
         return
-    if not persist_user_message and history and history[-1]["role"] == "user":
+    if replace_last_user and history and history[-1]["role"] == "user":
         history = history[:-1]
     resume = bool(history)
 
@@ -344,6 +350,13 @@ async def orchestrate_chat_opencode(
             # agent's tool defs) — env alone leaves it claiming it has no AWS/GitLab.
             system_prompt += connector_prompt_hint(injected)
 
+    # Last block, as in the other two engines: the compaction summary is a document the
+    # model reads, and interleaving `##` sections after it would split it in two.
+    # Fetched once: the summary block and the store's staleness check read the same boundary.
+    boundary = await last_boundary(db, session_id)
+    boundary_id = None if boundary is None else str(boundary.id)
+    system_prompt = append_compaction_summary(system_prompt, boundary)
+
     container: str | None = None
     # Path to the cred-bearing config; declared here so the finally can remove it even if the
     # turn throws between ensure() and the write (None ⇒ nothing was published yet).
@@ -358,6 +371,8 @@ async def orchestrate_chat_opencode(
     # whole tree; durable state (workdir, opencode.db, .claude) lives on bind-mounts and
     # survives, so the next turn simply re-provisions. A normal turn keeps the container warm.
     abnormal = False
+    # Set once opencode produced real output: its store now holds a session from this turn.
+    spawned = False
     # Accounting state, bound BEFORE the try so the outer error handler can persist
     # whatever accumulated (an errored turn's completed Bedrock calls are still billed).
     received_terminal = False
@@ -405,6 +420,7 @@ async def orchestrate_chat_opencode(
             # the 1h portion is unknowable here — the fallback estimate prices all cache
             # writes at the 5m rate. Moot whenever opencode reports its authoritative
             # cache-aware cost_usd (the normal case, passed through below).
+            context_tokens=done_meta.get("context_tokens"),
             tool_calls=done_meta.get("tool_calls", 0),
             iterations=done_meta.get("iterations", 1),
             skip_budget_row=bool(broker_env),
@@ -417,6 +433,7 @@ async def orchestrate_chat_opencode(
         from app.services import sandbox
 
         uid = str(user_id) if user_id else None
+        await release_read_txn(db)  # sandbox.ensure can block up to the provision timeout
         # Per-user admission control before provisioning, same as the cli/inkwest-agent
         # engines: reap the user's oldest idle pairs, refuse if at the hard ceiling with
         # nothing reclaimable. Without this opencode turns could provision past the cap.
@@ -432,13 +449,35 @@ async def orchestrate_chat_opencode(
         # gone (replica without the volume / wiped dir / sandbox rebuilt before a turn ran),
         # `--continue` would resume an EMPTY session and silently drop all prior context. The
         # agent is never handed the history otherwise, so fall back to a fresh run instead.
-        store_db = os.path.join(sandbox.session_dir(session_id_str), "opencode", "opencode.db")
+        store_db = os.path.join(
+            sandbox.session_dir(session_id_str), "opencode", sandbox.OPENCODE_STORE_DB
+        )
         if resume and not os.path.isfile(store_db):
             logger.warning(
                 "opencode session store missing; starting fresh despite DB history",
                 extra={"session_id": session_id_str},
             )
             resume = False
+            if note_empty_replay():
+                return
+
+        # A compaction whose store reset failed leaves the pre-boundary session as the newest
+        # one, and `--continue` would replay it on any later turn: retry, then run fresh.
+        if sandbox.opencode_store_is_stale(session_id_str, boundary_id):
+            logger.warning(
+                "opencode session store predates the last boundary; starting fresh",
+                extra={"session_id": session_id_str},
+            )
+            try:
+                await asyncio.to_thread(sandbox.reset_opencode_store, session_id_str)
+            except OSError:
+                logger.exception(
+                    "opencode_store_reset_retry_failed", extra={"session_id": session_id_str}
+                )
+            if resume:
+                resume = False
+                if note_empty_replay():
+                    return
 
         # LLM auth broker (llm_broker_enabled): route opencode's model call through the backend
         # proxy. The provider gets the broker base as `baseURL` (it appends /model/{id}/{op},
@@ -594,6 +633,9 @@ async def orchestrate_chat_opencode(
             elif names:
                 agent_message += f"\n\n(Attached file(s) for this message: {names})"
 
+        # No transaction across the stream: an idle-in-transaction lock blocks a migration ALTER.
+        await release_read_txn(db)
+
         try:
             # Bumped only on client-visible events below, so a loud-but-wedged agent still
             # trips the progress guard (output is not progress).
@@ -612,6 +654,11 @@ async def orchestrate_chat_opencode(
                 progress_timeout=settings.agent_progress_timeout or None,
             )
             async for event in parse_opencode_response(output_stream):
+                # Errors and a truncated done can be the parser's own, with no session behind.
+                if event.type in ("text_delta", "tool_start", "tool_result") or (
+                    event.type == "done" and not event.metadata.get("truncated")
+                ):
+                    spawned = True
                 # A terminal event (done/error) already reached the client and closed the
                 # turn's persisted state. The parser keeps DRAINING the stream after an error
                 # (so execute_opencode's cleanup runs deterministically), which can surface
@@ -692,7 +739,9 @@ async def orchestrate_chat_opencode(
                 # Persist whatever usage reached us before the kill (no-op when nothing
                 # terminal arrived) — AWS bills the completed calls.
                 await _persist_accumulated_usage()
-                yield done_event(stopped=True)
+                # The client stamps the live bubble from this usage, as the DB row has it.
+                stopped_meta = {k: v for k, v in done_meta.items() if k != "truncated"}
+                yield done_event(stopped_meta, stopped=True)
                 return
 
             await _flush()
@@ -730,6 +779,13 @@ async def orchestrate_chat_opencode(
     finally:
         from app.services import sandbox
 
+        if spawned:
+            try:
+                sandbox.record_opencode_boundary(session_id_str, boundary_id)
+            except OSError:
+                logger.exception(
+                    "opencode_boundary_record_failed", extra={"session_id": session_id_str}
+                )
         # Burn this turn's broker grant: the injected AWS_BEARER_TOKEN_BEDROCK is dead the moment
         # the turn ends, bounding a leaked grant to the turn. No-op when the broker was off.
         llm_broker.burn_env(broker_env)

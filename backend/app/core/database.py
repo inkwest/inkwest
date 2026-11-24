@@ -50,6 +50,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+async def release_read_txn(db: AsyncSession) -> None:
+    """End the open transaction so it holds no lock across a long model stream."""
+    # Commit, not rollback: rollback expires ORM rows, lazy-load outside greenlet.
+    await db.commit()
+
+
 async def init_db() -> None:
     """Initialize database connection on startup."""
     # Import models to ensure they are registered with the Base

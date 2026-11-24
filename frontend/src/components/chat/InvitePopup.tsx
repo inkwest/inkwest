@@ -4,6 +4,7 @@ import { Bell } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { usePushOptIn } from '@/hooks/usePushOptIn';
 import { useInvitesStore } from '@/store/invites';
+import { useOnboardingStore } from '@/store/onboarding';
 import { useSessionsStore } from '@/store/sessions';
 
 // Surfaces pending conversation-share invitations one at a time. Accept joins the
@@ -17,8 +18,11 @@ export function InvitePopup() {
   const [busy, setBusy] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
 
+  const tourDone = useOnboardingStore((s) => s.completed);
+
   const invite = invites.find((i) => !dismissed.has(i.share_id));
-  if (!invite) return null;
+  // Wait for the onboarding tour: its spotlight would expose this modal over its targets.
+  if (!invite || !tourDone) return null;
 
   const act = async (accept: boolean) => {
     setBusy(true);
@@ -43,9 +47,15 @@ export function InvitePopup() {
       size="sm"
     >
       <p className="text-sm text-gray-300">
-        <strong>{invite.invited_by_display_name || 'Someone'}</strong> shared{' '}
-        <strong>{invite.session_title || 'a conversation'}</strong> with you (view-only).
+        <strong>{invite.invited_by_display_name || 'Someone'}</strong> shared a conversation
+        with you (view-only).
       </p>
+      {/* Title is user content in any language: kept out of the English sentence. */}
+      {invite.session_title && (
+        <p className="mt-2 text-sm text-gray-200 border-l-2 border-gray-600 pl-2 break-words">
+          {invite.session_title}
+        </p>
+      )}
       <PushOffer />
       <div className="mt-5 flex justify-end gap-2">
         <button

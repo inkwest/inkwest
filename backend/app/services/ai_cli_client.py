@@ -598,15 +598,19 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
     # The CLI emits one `assistant` event per content block, all repeating the SAME
     # message usage — accumulate once per message id or a cut stream persists ~2x.
     last_usage_message_id = None
+    # The last top-level model call's prompt: what occupies the context. The totals above
+    # (and the `result` block) sum every call of the turn, subagents included.
+    context_tokens: int | None = None
     done_emitted = False
 
-    def _usage_meta() -> dict[str, int]:
+    def _usage_meta() -> dict[str, int | None]:
         return {
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
             "cache_read_tokens": total_cache_read_tokens,
             "cache_write_tokens": total_cache_write_tokens,
             "cache_write_1h_tokens": total_cache_write_1h_tokens,
+            "context_tokens": context_tokens,
         }
 
     # Manual aiter/anext (not `async for`) ON PURPOSE: the except below must cover ONLY
@@ -667,10 +671,18 @@ async def parse_cli_response(output_stream: AsyncIterator[str]) -> AsyncIterator
                 else:
                     last_usage_message_id = message_id
             if usage:
-                total_input_tokens += usage.get("input_tokens", 0)
+                call_input = usage.get("input_tokens", 0) or 0
+                call_cache_read = usage.get("cache_read_input_tokens", 0) or 0
+                call_cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+                total_input_tokens += call_input
                 total_output_tokens += usage.get("output_tokens", 0)
-                total_cache_read_tokens += usage.get("cache_read_input_tokens", 0) or 0
-                total_cache_write_tokens += usage.get("cache_creation_input_tokens", 0) or 0
+                total_cache_read_tokens += call_cache_read
+                total_cache_write_tokens += call_cache_write
+                prompt = call_input + call_cache_read + call_cache_write
+                # A subagent (Task tool) runs in its own context window; a synthetic message
+                # (API error, limit) reports all zeros and must not wipe the real reading.
+                if parsed.get("parent_tool_use_id") is None and prompt > 0:
+                    context_tokens = prompt
                 cache_creation = usage.get("cache_creation") or {}
                 total_cache_write_1h_tokens += (
                     cache_creation.get("ephemeral_1h_input_tokens", 0) or 0
@@ -1007,6 +1019,8 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
     """
     in_tokens = out_tokens = tool_calls = iterations = 0
     cache_read = cache_write = 0
+    # The last step's prompt: what occupies the context (the counters above sum every step).
+    context_tokens: int | None = None
     cost_usd = 0.0
     emitted_done = False
     emitted_error = False
@@ -1018,6 +1032,7 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
             "output_tokens": out_tokens,
             "cache_read_tokens": cache_read,
             "cache_write_tokens": cache_write,
+            "context_tokens": context_tokens,
             "tool_calls": tool_calls,
             "cost_usd": cost_usd,
         }
@@ -1076,9 +1091,15 @@ async def parse_opencode_response(output_stream: AsyncIterator[str]) -> AsyncIte
             # They used to be folded into in_tokens "so stats reflect real prompt size";
             # now that every surface shows the cache splits explicitly, folding would
             # double-count them (once in the input figure, again in the cache columns).
-            in_tokens += int(tokens.get("input") or 0)
-            cache_read += int(cache.get("read") or 0)
-            cache_write += int(cache.get("write") or 0)
+            step_input = int(tokens.get("input") or 0)
+            step_cache_read = int(cache.get("read") or 0)
+            step_cache_write = int(cache.get("write") or 0)
+            in_tokens += step_input
+            cache_read += step_cache_read
+            cache_write += step_cache_write
+            # A step that reports no prompt must not wipe the last real reading.
+            if step_prompt := step_input + step_cache_read + step_cache_write:
+                context_tokens = step_prompt
             out_tokens += int(tokens.get("output") or 0)
             cost = part.get("cost")
             if isinstance(cost, (int, float)):

@@ -22,6 +22,7 @@ sockets to the replica running its turn, or move the buffer to shared storage.
 """
 
 import asyncio
+import contextvars
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
@@ -43,6 +44,19 @@ TURN_END = object()
 _ABORT_REASON_MAX = 500
 
 Orchestrator = Callable[..., AsyncIterator[ChatEvent]]
+
+# Per task: each turn runs in its own task, so the waiver cannot leak to the next turn.
+_no_abort_marker: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "inkwest_turn_no_abort_marker", default=False
+)
+
+
+def skip_abort_marker() -> None:
+    """Waive the abort marker for the running turn: its error left the transcript as it was.
+
+    Called from inside the orchestrator, which the runner drives in its own task context.
+    """
+    _no_abort_marker.set(True)
 
 
 @dataclass
@@ -214,7 +228,7 @@ class TurnRunner:
             logger.exception("Turn failed", extra={"session_id": turn.session_id})
             await self._emit(turn, error_event("An unexpected server error occurred").to_dict())
         finally:
-            if errored and not completed:
+            if errored and not completed and not _no_abort_marker.get():
                 # `not completed`: the CLI orchestrator can yield an error AFTER done (its
                 # post-stream process.wait() cap) — a cleanup failure on a finished answer,
                 # not an aborted turn. Placed BEFORE eviction/TURN_END so a client that

@@ -580,4 +580,49 @@ describe('per-bubble token line', () => {
     render(<MessageBubble message={assistantWithTokens} />);
     expect(screen.queryByTitle(/fresh input tokens/i)).not.toBeInTheDocument();
   });
+
+  it('renders a compaction boundary as a divider naming how much was summarized', () => {
+    const msg: Message = {
+      ...baseMessage,
+      role: 'system',
+      content: {
+        type: 'session_event',
+        subject: 'context',
+        action: 'compacted',
+        targets: [
+          { message_count: 42, trigger: 'manual', archive_path: '/workdir/.inkwest/history-1.md' },
+        ],
+      },
+    };
+    render(<MessageBubble message={msg} />);
+    expect(screen.getByText(/Context compacted — 42 earlier messages summarized/)).toBeInTheDocument();
+    // The summary never reaches the client at all (the API strips it); the assistant bubble
+    // above the divider is where the user reads it.
+    expect(screen.queryByText(/GOAL: find the crash/)).not.toBeInTheDocument();
+  });
+
+  it('says so when the compaction was automatic, and copes with a missing count', () => {
+    const msg: Message = {
+      ...baseMessage,
+      role: 'system',
+      content: { type: 'session_event', subject: 'context', action: 'compacted', targets: [{ trigger: 'auto' }] },
+    };
+    render(<MessageBubble message={msg} />);
+    expect(screen.getByText(/Context compacted automatically/)).toBeInTheDocument();
+  });
+
+  it('keeps the divider grammatical for a single message', () => {
+    const msg: Message = {
+      ...baseMessage,
+      role: 'system',
+      content: {
+        type: 'session_event',
+        subject: 'context',
+        action: 'compacted',
+        targets: [{ message_count: 1, trigger: 'manual' }],
+      },
+    };
+    render(<MessageBubble message={msg} />);
+    expect(screen.getByText(/Context compacted — 1 earlier message summarized/)).toBeInTheDocument();
+  });
 });

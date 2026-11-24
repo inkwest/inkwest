@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
+from app.core.database import release_read_txn
 from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import (
@@ -24,6 +25,7 @@ from app.services.ai_cli_client import (
     parse_cli_response,
 )
 from app.services.ai_client import resolve_session_model_choice
+from app.services.compaction import note_empty_replay, with_compaction_summary
 from app.services.events import (
     ChatEvent,
     done_event,
@@ -59,6 +61,9 @@ async def orchestrate_chat_cli(
     cancel_event: asyncio.Event | None = None,
     attachments: list[dict] | None = None,
     persist_user_message: bool = True,
+    # Part of the shared turn signature; this engine resumes its OWN transcript (--resume)
+    # and never replays DB history, so it cannot be honoured here.
+    replace_last_user: bool = False,
     engine: str | None = None,
 ) -> AsyncIterator[ChatEvent]:
     """
@@ -124,6 +129,12 @@ async def orchestrate_chat_cli(
     cli_session_id = await get_cli_session_id(db, session_id)
     if cli_session_id:
         logger.info(f"Found existing CLI session: {cli_session_id}")
+    elif not persist_user_message:
+        # No --resume target: this engine never replays the DB transcript, so the turn runs
+        # blind. Only reported for a turn that isn't the user's own question (compaction,
+        # retry), where answering without the history silently produces a wrong result.
+        if note_empty_replay():
+            return
 
     # Expose this session's connected connector credentials as standard env vars
     # (AWS_*, GITLAB_TOKEN, KUBECONFIG, …) so the agent can use `aws`/`kubectl`/`curl`
@@ -209,6 +220,8 @@ required.
         runtime_context += connector_prompt_hint(injected)
     system_prompt = f"{system_prompt}\n\n{runtime_context}"
 
+    system_prompt = await with_compaction_summary(db, session_id, system_prompt)
+
     prompt = user_message
     # Attached files live in this conversation's /workdir; append @/workdir/<file>
     # references so Claude Code opens them. Sandbox only — that's the only mode with a
@@ -250,6 +263,8 @@ required.
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
     total_cache_write_1h_tokens = 0
+    context_tokens: int | None = None
+    usage_meta: dict = {}
     turn_id = uuid.uuid4()
     usage_persisted = False
     message_saved = False
@@ -258,12 +273,15 @@ required.
         """One unpacker for the terminal `done` and the crash-path `usage_stats` events
         (same keys) — two inline copies could drift on a future cache field."""
         nonlocal total_input_tokens, total_output_tokens, total_cache_read_tokens
-        nonlocal total_cache_write_tokens, total_cache_write_1h_tokens
+        nonlocal total_cache_write_tokens, total_cache_write_1h_tokens, context_tokens
+        nonlocal usage_meta
+        usage_meta = dict(meta)
         total_input_tokens = meta.get("input_tokens", 0)
         total_output_tokens = meta.get("output_tokens", 0)
         total_cache_read_tokens = meta.get("cache_read_tokens", 0)
         total_cache_write_tokens = meta.get("cache_write_tokens", 0)
         total_cache_write_1h_tokens = meta.get("cache_write_1h_tokens", 0)
+        context_tokens = meta.get("context_tokens")
 
     async def _persist_accumulated_usage() -> None:
         """Idempotent per-turn handoff to the shared persist_turn_usage (see its module
@@ -324,6 +342,7 @@ required.
                 output_tokens=total_output_tokens,
                 cache_read_tokens=total_cache_read_tokens,
                 cache_write_tokens=total_cache_write_tokens,
+                context_tokens=context_tokens,
             )
         except Exception as e:
             logger.error(f"Failed to save assistant message: {e}")
@@ -342,6 +361,7 @@ required.
             from app.services.mcp_config import apply_session_mcp_selection
 
             uid = str(user_id) if user_id else None
+            await release_read_txn(db)  # sandbox.ensure can block up to the provision timeout
             # Reap the user's oldest idle pairs first; refuse if they're at the hard ceiling
             # with every conversation busy. Caught here (not the generic handler below) so the
             # user gets the plain "too many conversations" message, not "Unexpected error".
@@ -416,6 +436,9 @@ required.
                 return
             model_choice = model_registry.default_model()
 
+        # No transaction across the stream: an idle-in-transaction lock blocks a migration ALTER.
+        await release_read_txn(db)
+
         for attempt in (1, 2):
             content = []
             received_done = False
@@ -425,6 +448,8 @@ required.
             total_cache_read_tokens = 0
             total_cache_write_tokens = 0
             total_cache_write_1h_tokens = 0
+            context_tokens = None
+            usage_meta = {}
             emitted = False
             # Only client-visible events bump this (see `emitted` below), so a stream that
             # stays loud while the turn advances nothing still trips the progress guard.
@@ -524,8 +549,10 @@ required.
                         yield event
 
                 # The stream ends naturally once execute_claude_cli has stopped the agent
-                # on an explicit cancel; surface that to the client as a stopped turn.
-                if cancel_event and cancel_event.is_set():
+                # on an explicit cancel; surface that to the client as a stopped turn. A Stop
+                # after the done already reached the client is a completed turn: a second
+                # usage-carrying done would count the turn twice in the live badges.
+                if cancel_event and cancel_event.is_set() and not received_done:
                     logger.info("CLI chat cancelled by user")
                     # Keep the partial answer: the client saw it streamed, so dropping it
                     # here is what made a stopped turn look like a turn that never ran.
@@ -533,7 +560,8 @@ required.
                     # A Stop kills the CLI mid-turn but AWS bills the completed calls —
                     # persist whatever the parser surfaced (usage_stats on stream end).
                     await _persist_accumulated_usage()
-                    yield done_event(stopped=True)
+                    # The client stamps the live bubble from this usage, as the DB row has it.
+                    yield done_event(dict(usage_meta), stopped=True)
                     return
                 break  # turn completed
             except RuntimeError as e:
@@ -550,8 +578,11 @@ required.
                     try:
                         await clear_cli_session_id(db, session_id)
                     except Exception as ce:
+                        await db.rollback()
                         logger.warning(f"Failed to clear stale CLI session ID: {ce}")
                     resume_id = None
+                    if note_empty_replay():
+                        return
                     continue
                 raise
 

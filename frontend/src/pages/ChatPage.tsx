@@ -43,7 +43,7 @@ export function ChatPage() {
     }
   }, [serverMessages, applyServerMessages]);
 
-  const { sendMessage, stopStreaming, retryMessage, sendTyping } = useWebSocket(sessionId!);
+  const { sendMessage, stopStreaming, retryMessage, sendTyping, compactContext } = useWebSocket(sessionId!);
 
   const handleSend = (content: string, attachments?: Attachment[]) => {
     sendMessage(content, attachments);
@@ -67,6 +67,7 @@ export function ChatPage() {
       onSendMessage={handleSend}
       onStopStreaming={stopStreaming}
       onRetryMessage={retryMessage}
+      onCompact={isReadOnly ? undefined : compactContext}
       onTyping={sendTyping}
       isReadOnly={isReadOnly}
       initialPrompt={initialPrompt}

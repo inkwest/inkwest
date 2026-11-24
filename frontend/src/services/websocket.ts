@@ -233,6 +233,11 @@ export class ChatWebSocket {
     return this.send({ type: 'retry' });
   }
 
+  /** Ask the server to compact the conversation (runs as a normal, billable turn). */
+  sendCompact(): boolean {
+    return this.send({ type: 'compact' });
+  }
+
   subscribe(handler: EventHandler): () => void {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);

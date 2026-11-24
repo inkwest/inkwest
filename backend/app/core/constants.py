@@ -17,6 +17,8 @@ MAX_RESPONSE_TOKENS = 4096
 
 # Truncate conversations beyond this many messages (~20 user-assistant exchanges)
 MAX_CONVERSATION_MESSAGES = 40
+# A compaction summary is replayed in the system prompt of every later turn.
+MAX_SUMMARY_CHARS = 8_000
 
 # Retry configuration for API calls
 MAX_API_RETRIES = 3

@@ -1,26 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import {
   Card,
   CardHeader,
   CardTitle,
   CardContent,
-  Table,
-  TableHeader,
-  TableBody,
-  TableRow,
-  TableHead,
-  TableCell,
   Select,
 } from '@/components/ui';
 import { useMyUsageStore, MY_USAGE_SESSIONS_LIMIT } from '@/store/usage';
 import { TrendingUp, MessageSquare, Cpu, DollarSign } from 'lucide-react';
 import type { UsageDateRange } from '@/services/usageApi';
-import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost, formatCostTotal } from '@/lib/usageFormat';
+import { cycleSort, pageWindow, type SortState } from '@/lib/tableSort';
+import { formatTokens, formatCostTotal } from '@/lib/usageFormat';
 import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
 import { TokenBreakdownCard } from '@/components/usage/TokenBreakdownCard';
 import { UsageOverTimeChart } from '@/components/usage/UsageOverTimeChart';
+import { SessionUsageTable } from '@/components/usage/SessionUsageTable';
+import { sortSessions, type SessionSortKey } from '@/components/usage/sessionUsage';
 
 const periodOptions = [
   { value: 'hourly', label: 'Last Hour' },
@@ -40,14 +35,6 @@ function lastMonthRange(): UsageDateRange {
     endDate: end.toISOString().slice(0, 10),
   };
 }
-
-type SessionSortKey =
-  | 'title'
-  | 'request_count'
-  | 'total_tokens'
-  | 'cache_read_tokens'
-  | 'cache_write_tokens'
-  | 'cost_usd';
 
 const SESSIONS_PAGE_SIZE = 10;
 
@@ -71,17 +58,7 @@ export function MyUsagePage() {
 
   // Client-side tristate sort over the (server-capped, costliest-first) conversation rows.
   const [sessionSort, setSessionSort] = useState<SortState<SessionSortKey>>({ key: 'cost_usd', dir: 'desc' });
-  const sessionKey = sessionSort.key;
-  const sortedSessions =
-    sessionKey === null
-      ? sessions
-      : [...sessions].sort((a, b) => {
-          const dir = sessionSort.dir === 'asc' ? 1 : -1;
-          if (sessionKey === 'title') {
-            return dir * (a.title || '').localeCompare(b.title || '');
-          }
-          return dir * (((a[sessionKey] as number) || 0) - ((b[sessionKey] as number) || 0));
-        });
+  const sortedSessions = sortSessions(sessions, sessionSort);
 
   // Front-only pager over the conversation rows.
   const [sessionPage, setSessionPage] = useState(0);
@@ -284,56 +261,11 @@ export function MyUsagePage() {
                 </div>
               </CardHeader>
               <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'title')} onClick={() => toggleSessionSort('title')}>
-                        Conversation{sortArrow(sessionSort, 'title')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'request_count')} onClick={() => toggleSessionSort('request_count')}>
-                        Requests{sortArrow(sessionSort, 'request_count')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'total_tokens')} onClick={() => toggleSessionSort('total_tokens')}>
-                        Tokens{sortArrow(sessionSort, 'total_tokens')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cache_read_tokens')} onClick={() => toggleSessionSort('cache_read_tokens')} title="Prompt-cache reads (billed ~0.1x input rate)">
-                        Cache R{sortArrow(sessionSort, 'cache_read_tokens')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cache_write_tokens')} onClick={() => toggleSessionSort('cache_write_tokens')} title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)">
-                        Cache W{sortArrow(sessionSort, 'cache_write_tokens')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(sessionSort, 'cost_usd')} onClick={() => toggleSessionSort('cost_usd')}>
-                        Cost{sortArrow(sessionSort, 'cost_usd')}
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {pagedSessions.map((s) => (
-                      <TableRow key={s.session_id}>
-                        <TableCell>
-                          <Link
-                            to={`/session/${s.session_id}`}
-                            className="text-blue-400 hover:text-blue-300 hover:underline"
-                          >
-                            {s.title}
-                          </Link>
-                        </TableCell>
-                        <TableCell className="text-right text-gray-400">{s.request_count}</TableCell>
-                        <TableCell className="text-right">{formatTokens(s.total_tokens)}</TableCell>
-                        <TableCell className="text-right text-gray-400">{formatTokens(s.cache_read_tokens || 0)}</TableCell>
-                        <TableCell className="text-right text-gray-400">{formatTokens(s.cache_write_tokens || 0)}</TableCell>
-                        <TableCell className="text-right">{formatCost(s.cost_usd)}</TableCell>
-                      </TableRow>
-                    ))}
-                    {sessions.length === 0 && (
-                      <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8 text-gray-400">
-                          No usage data for this period
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
+                <SessionUsageTable
+                  sessions={pagedSessions}
+                  sort={sessionSort}
+                  onToggleSort={toggleSessionSort}
+                />
               </CardContent>
             </Card>
 

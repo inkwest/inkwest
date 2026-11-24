@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.api.dependencies import CurrentUser
 from app.core.config import get_settings
+from app.services.context_window import resolve_context_window
 from app.services.engines import (
     configured_default_engine,
     enabled_engines,
@@ -35,6 +36,9 @@ class ModelInfo(BaseModel):
     # text is accepted) plus an IMAGE icon (and enables uploads) when "IMAGE" is present.
     # Empty = text-only/unknown (TEXT icon only, no uploads).
     input_modalities: list[str]
+    # Context window in tokens; null when unsourced — the UI then renders no pressure
+    # gauge rather than a percentage of a guessed capacity.
+    context_window: int | None
 
 
 class AppConfigResponse(BaseModel):
@@ -76,6 +80,7 @@ async def get_app_config(user: CurrentUser) -> AppConfigResponse:
                 legacy=e.legacy,
                 engines=runnable_engines(e.model_id),
                 input_modalities=e.input_modalities,
+                context_window=resolve_context_window(e.model_id, e.options),
             )
             for e in merged_entries()
             if e.model_id in selectable

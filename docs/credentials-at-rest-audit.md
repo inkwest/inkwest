@@ -125,3 +125,6 @@ the turn. The exception is the MCP proxy JWTs in `.claude.json`, valid up to 6 h
 - In-use exposure in the sandbox while a turn runs.
 - Secrets the agent prints during a turn persist in durable transcripts (`<sid>/claude/`,
   `<sid>/opencode/`, `messages`).
+- Compaction archives (`<sid>/workdir/.inkwest*/history-<n>.md`, 0644) are a verbatim dump of the
+  pre-boundary transcript, tool output included, durable like the transcripts. Written via the
+  symlink-safe `sandbox.publish_workdir_file`; nothing caps their size or number.

@@ -9,7 +9,7 @@ provider setting.
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 from uuid import UUID
 
@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.core.config import get_settings
 from app.models.session import Session
+from app.services.events import ChatEvent
 from app.services.model_registry import (
     configured_default_id,
     default_model,
@@ -76,7 +77,12 @@ async def resolve_session_engine(db: AsyncSession, session_id: "str | UUID") -> 
     return await db.scalar(select(Session.engine).where(Session.id == session_id))
 
 
-def get_orchestrator():
+# A turn's entry point: every orchestrator (and `orchestrate_compaction`, which wraps one)
+# streams ChatEvents and is handed to `turn_runner` through the same call.
+Orchestrator = Callable[..., AsyncIterator[ChatEvent]]
+
+
+def get_orchestrator() -> Orchestrator:
     """
     Return the engine-dispatched orchestrator.
 

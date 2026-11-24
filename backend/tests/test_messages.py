@@ -16,7 +16,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest_asyncio
 from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.ext.compiler import compiles
 
 import app.models  # noqa: F401  -- registers all tables on Base.metadata
@@ -58,12 +63,17 @@ def _render_uuid_on_sqlite(type_: Any, compiler: Any, **kw: Any) -> str:
 _BASE_TIME = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 
 
-@pytest_asyncio.fixture
-async def db() -> AsyncIterator[AsyncSession]:
-    engine = create_async_engine("sqlite+aiosqlite://")
+async def _schema_engine(url: str) -> AsyncEngine:
+    engine = create_async_engine(url)
     tables = cast("list[Table]", [Session.__table__, Message.__table__])
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=tables)
+    return engine
+
+
+@pytest_asyncio.fixture
+async def db() -> AsyncIterator[AsyncSession]:
+    engine = await _schema_engine("sqlite+aiosqlite://")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     async with maker() as session:
         yield session
@@ -79,17 +89,17 @@ async def _make_session(db: AsyncSession, **fields: Any) -> uuid.UUID:
 
 async def _add_message(
     db: AsyncSession, session_id: uuid.UUID, role: str, content: Any, minute: int = 0
-) -> None:
-    db.add(
-        Message(
-            id=uuid.uuid4(),
-            session_id=session_id,
-            role=role,
-            content=content,
-            created_at=_BASE_TIME + timedelta(minutes=minute),
-        )
+) -> Message:
+    msg = Message(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        role=role,
+        content=content,
+        created_at=_BASE_TIME + timedelta(minutes=minute),
     )
+    db.add(msg)
     await db.commit()
+    return msg
 
 
 # --- truncate_messages (pure) ---------------------------------------------------
@@ -227,7 +237,7 @@ async def test_get_messages_tool_result_role_mapped_to_user(db: AsyncSession) ->
 
 async def test_get_messages_ordered_by_created_at(db: AsyncSession) -> None:
     sid = await _make_session(db)
-    await _add_message(db, sid, "user", "second", minute=2)
+    await _add_message(db, sid, "assistant", "second", minute=2)
     await _add_message(db, sid, "user", "first", minute=1)
     out = await get_session_messages(db, sid)
     assert [m["content"] for m in out] == ["first", "second"]
@@ -298,6 +308,27 @@ async def test_save_message_persists_and_returns(db: AsyncSession) -> None:
     assert await get_message_count(db, sid) == 1
 
 
+async def test_save_message_failure_leaves_session_usable(db: AsyncSession) -> None:
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    sid = await _make_session(db)
+    with pytest.raises(IntegrityError):
+        await save_message(db, sid, "bogus", "violates the role CHECK")
+    msg = await save_message(db, sid, "assistant", "next save still works")
+    assert msg.id is not None
+    assert await get_message_count(db, sid) == 1
+
+
+async def test_save_message_leaves_no_open_transaction(db: AsyncSession) -> None:
+    # Called mid-stream: an open transaction would sit idle-in-transaction until the next commit.
+    sid = await _make_session(db)
+    msg = await save_message(db, sid, "assistant", "partial")
+    assert not db.in_transaction()
+    assert msg.created_at is not None  # server default loaded without reopening a transaction
+    assert not db.in_transaction()
+
+
 async def test_save_message_persists_engine_and_model_per_turn(db: AsyncSession) -> None:
     # Engine + model are captured at generation time so an exported turn attributes the
     # exact engine/model that ran, even after the session pin changes mid-conversation.
@@ -336,6 +367,32 @@ async def test_message_count_excludes_system_events(db: AsyncSession) -> None:
     await _add_message(db, sid, "assistant", "hello", minute=1)
     await save_session_event(db, sid, "aws", "granted")  # 'system' — must not be counted
     assert await get_message_count(db, sid) == 2
+
+
+async def test_failed_session_event_keeps_caller_rows_loaded(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    session = await db.get(Session, sid)
+    assert session is not None
+    await save_session_event(db, sid, "aws", "granted", targets=[{"bad": object()}])
+    assert await get_message_count(db, sid) == 0
+    assert session.id == sid  # still loaded: no lazy-load (outside a greenlet in prod)
+
+
+async def test_session_event_commits_on_its_own_connection(tmp_path: Any) -> None:
+    # File-backed: unlike the in-memory fixture, each session gets its own connection.
+    engine = await _schema_engine(f"sqlite+aiosqlite:///{tmp_path}/events.db")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with maker() as db:
+            sid = await _make_session(db)
+            await save_session_event(db, sid, "gitlab", "renewed")
+            assert not db.in_transaction()
+        async with maker() as other:
+            assert await get_message_count(other, sid) == 0  # system rows are not counted
+            rows = (await other.execute(Message.__table__.select())).mappings().all()
+            assert [r["role"] for r in rows] == ["system"]
+    finally:
+        await engine.dispose()
 
 
 async def test_save_session_event_omits_targets_when_absent(db: AsyncSession) -> None:
@@ -603,6 +660,35 @@ async def test_stamp_message_usage_backfills_saved_row(db: AsyncSession) -> None
     assert msg.cache_write_tokens == 0
 
 
+async def test_context_tokens_persist_via_save_and_stamp(db: AsyncSession) -> None:
+    """The last call's prompt rides its own column, apart from the cumulative counts."""
+    sid = await _make_session(db)
+    saved = await save_message(
+        db, sid, "assistant", "cli turn", input_tokens=15, context_tokens=53_107
+    )
+    assert saved.context_tokens == 53_107
+
+    streamed = await save_message(db, sid, "assistant", "streamed early")
+    assert streamed.context_tokens is None
+    await stamp_message_usage(
+        db, streamed.id, input_tokens=15, output_tokens=90, context_tokens=53_107
+    )
+    await db.refresh(streamed)
+    assert streamed.context_tokens == 53_107
+    assert streamed.input_tokens == 15
+
+    older = await save_message(db, sid, "assistant", "older agent image")
+    await stamp_message_usage(db, older.id, input_tokens=15, output_tokens=90)
+    await db.refresh(older)
+    assert older.context_tokens is None  # unknown stays unknown, never derived
+
+    from app.models.schemas import MessageResponse, SharedMessage
+
+    assert MessageResponse.model_validate(saved).context_tokens == 53_107
+    # The anonymous share view exposes no token counts, this one included.
+    assert "context_tokens" not in SharedMessage.model_fields
+
+
 async def test_update_session_stats_no_commit_joins_caller_txn(db: AsyncSession) -> None:
     """commit=False leaves the increment uncommitted — turn_usage folds it into the
     budget-row transaction so the two land (or roll back) together."""
@@ -627,3 +713,51 @@ async def test_update_session_stats_clamps_negative_inputs(db: AsyncSession) -> 
     assert stats["total_input_tokens"] == 10
     assert stats["total_output_tokens"] == 5
     assert stats["total_cache_read_tokens"] == 0
+
+
+async def test_consecutive_same_role_rows_are_coalesced(db: AsyncSession) -> None:
+    """Both APIs want alternating roles; two plain strings stay a plain string."""
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "first", minute=1)
+    await _add_message(db, sid, "user", "second", minute=2)
+    out = await get_session_messages(db, sid)
+    assert out == [{"role": "user", "content": "first\n\nsecond"}]
+
+
+async def test_coalescing_concatenates_block_lists(db: AsyncSession) -> None:
+    """The block branch: a tool_use row followed by more blocks must merge into ONE message
+    with both blocks, not a string — Converse rejects a mixed/repeated-role transcript."""
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "q", minute=1)
+    await _add_message(db, sid, "assistant", [{"type": "text", "text": "looking"}], minute=2)
+    await _add_message(db, sid, "assistant", [{"type": "text", "text": "found it"}], minute=3)
+    out = await get_session_messages(db, sid)
+    assert [m["role"] for m in out] == ["user", "assistant"]
+    assert out[1]["content"] == [
+        {"type": "text", "text": "looking"},
+        {"type": "text", "text": "found it"},
+    ]
+
+
+async def test_coalescing_promotes_a_string_next_to_blocks(db: AsyncSession) -> None:
+    sid = await _make_session(db)
+    await _add_message(db, sid, "user", "q", minute=1)
+    await _add_message(db, sid, "assistant", "prose", minute=2)
+    await _add_message(db, sid, "assistant", [{"type": "text", "text": "more"}], minute=3)
+    out = await get_session_messages(db, sid)
+    assert out[1]["content"] == [
+        {"type": "text", "text": "prose"},
+        {"type": "text", "text": "more"},
+    ]
+
+
+async def test_delete_messages_is_scoped_to_its_session(db: AsyncSession) -> None:
+    """A bare id list would let one conversation's cleanup delete another's rows."""
+    from app.services.messages import delete_messages
+
+    mine = await _make_session(db)
+    theirs = await _make_session(db)
+    kept = await _add_message(db, theirs, "user", "not yours", minute=1)
+
+    await delete_messages(db, mine, [kept.id])
+    assert len(await get_session_messages(db, theirs)) == 1
