@@ -88,19 +88,30 @@ describe('MyUsagePage', () => {
     expect(screen.getByText('7.8k')).toBeInTheDocument(); // 7777 cache read
   });
 
-  it('renders cache columns in the conversations table, 0 for legacy rows', () => {
+  it('renders the combined cache column in the conversations table, 0 for legacy rows', () => {
     renderPage();
     const legacyRow = screen.getByText('Legacy conv').closest('tr')!;
     const cells = within(legacyRow).getAllByRole('cell').map((c) => c.textContent);
-    // title, requests, tokens, cache R, cache W, cost
-    expect(cells).toEqual(['Legacy conv', '3', '1.5k', '0', '0', '$0.20']);
+    // title, requests, in/out, tokens, cache (read / write), cost
+    expect(cells).toEqual(['Legacy conv', '3', '1.0k / 500', '1.5k', '0 / 0', '$0.20']);
   });
 
-  it('sorts by a cache column with legacy-undefined rows coerced to 0', () => {
+  it('sorts by the Tokens column ascending on first click', () => {
     renderPage();
-    // Two tables carry a Cache R column (conversations + by-model); the conversations
+    // Conversations table renders before the by-model table in the DOM.
+    fireEvent.click(screen.getAllByRole('button', { name: /^Tokens/ })[0]);
+    const rows = screen.getAllByRole('row');
+    const titles = rows
+      .map((r) => within(r).queryAllByRole('cell')[0]?.textContent)
+      .filter((t) => t === 'Costly conv' || t === 'Legacy conv');
+    expect(titles).toEqual(['Legacy conv', 'Costly conv']); // asc: 1.5k before 6.5k
+  });
+
+  it('sorts by the cache column (reads) with legacy-undefined rows coerced to 0', () => {
+    renderPage();
+    // Two tables carry a Cache column (conversations + by-model); the conversations
     // table renders first in the DOM.
-    fireEvent.click(screen.getAllByRole('columnheader', { name: /^Cache R/ })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /^Cache/ })[0]);
     const rows = screen.getAllByRole('row');
     const titles = rows
       .map((r) => within(r).queryAllByRole('cell')[0]?.textContent)

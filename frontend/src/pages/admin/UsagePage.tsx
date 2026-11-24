@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   Card,
   CardHeader,
@@ -17,11 +17,22 @@ import { useUsageStore } from '@/store/admin';
 import { TrendingUp, Users, Cpu, DollarSign, ChevronRight, ChevronDown, Wallet } from 'lucide-react';
 import { UserSessionsUsage } from '@/types/admin';
 import * as adminApi from '@/services/adminApi';
-import { cycleSort, sortArrow, ariaSort, pageWindow, type SortState } from '@/lib/tableSort';
-import { formatTokens, formatCost, formatCostTotal } from '@/lib/usageFormat';
+import { cycleSort, pageWindow, type SortState } from '@/lib/tableSort';
+import {
+  formatTokens,
+  formatTokenPair,
+  formatCost,
+  formatCostTotal,
+  CACHE_LABEL,
+  CACHE_TOOLTIP,
+  IN_OUT_TOOLTIP,
+} from '@/lib/usageFormat';
 import { ModelUsageTable } from '@/components/usage/ModelUsageTable';
 import { TokenBreakdownCard } from '@/components/usage/TokenBreakdownCard';
 import { UsageOverTimeChart } from '@/components/usage/UsageOverTimeChart';
+import { SessionUsageTable } from '@/components/usage/SessionUsageTable';
+import { SortableHead } from '@/components/usage/SortableHead';
+import { sortSessions, type SessionSortKey } from '@/components/usage/sessionUsage';
 
 const periodOptions = [
   { value: 'hourly', label: 'Last Hour' },
@@ -46,9 +57,9 @@ type UserSortKey =
   | 'display_name'
   | 'conversation_count'
   | 'mean_req'
-  | 'cache_read_tokens'
-  | 'cache_write_tokens'
+  | 'input_tokens'
   | 'total_tokens'
+  | 'cache_read_tokens'
   | 'cost_usd';
 
 // Average requests (turns) per conversation; 0 conversations ⇒ 0 (avoid divide-by-zero).
@@ -76,6 +87,9 @@ export function UsagePage() {
   const [expandedUser, setExpandedUser] = useState<string | null>(null);
   const [sessionsData, setSessionsData] = useState<UserSessionsUsage | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  // Client-side tristate sort for the expanded per-user session drilldown.
+  const [sessionSort, setSessionSort] = useState<SortState<SessionSortKey>>({ key: 'cost_usd', dir: 'desc' });
+  const toggleSessionSort = (key: SessionSortKey) => setSessionSort((s) => cycleSort(s, key));
   const [customStart, setCustomStart] = useState(dateRange.startDate || '');
   const [customEnd, setCustomEnd] = useState(dateRange.endDate || '');
   // Right-click "create budget" menu, positioned at the cursor.
@@ -165,6 +179,8 @@ export function UsagePage() {
       return;
     }
     setExpandedUser(userId);
+    // Fresh drilldown, fresh default order — don't carry the previous user's sort.
+    setSessionSort({ key: 'cost_usd', dir: 'desc' });
     setSessionsLoading(true);
     const apiPeriod = period === 'last_month' || period === 'custom' ? 'daily' : period;
     try {
@@ -340,27 +356,13 @@ export function UsagePage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead></TableHead>
-                      <TableHead className="cursor-pointer select-none" aria-sort={ariaSort(userSort, 'display_name')} onClick={() => toggleUserSort('display_name')}>
-                        User{sortArrow(userSort, 'display_name')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'conversation_count')} onClick={() => toggleUserSort('conversation_count')}>
-                        Convs{sortArrow(userSort, 'conversation_count')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'mean_req')} onClick={() => toggleUserSort('mean_req')}>
-                        Req/conv{sortArrow(userSort, 'mean_req')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'total_tokens')} onClick={() => toggleUserSort('total_tokens')}>
-                        Tokens{sortArrow(userSort, 'total_tokens')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cache_read_tokens')} onClick={() => toggleUserSort('cache_read_tokens')} title="Prompt-cache reads (billed ~0.1x input rate)">
-                        Cache R{sortArrow(userSort, 'cache_read_tokens')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cache_write_tokens')} onClick={() => toggleUserSort('cache_write_tokens')} title="Prompt-cache writes (billed ~1.25x input rate; 2x for 1h TTL)">
-                        Cache W{sortArrow(userSort, 'cache_write_tokens')}
-                      </TableHead>
-                      <TableHead className="text-right cursor-pointer select-none" aria-sort={ariaSort(userSort, 'cost_usd')} onClick={() => toggleUserSort('cost_usd')}>
-                        Cost{sortArrow(userSort, 'cost_usd')}
-                      </TableHead>
+                      <SortableHead label="User" sortKey="display_name" sort={userSort} onSort={toggleUserSort} />
+                      <SortableHead label="Convs" sortKey="conversation_count" sort={userSort} onSort={toggleUserSort} numeric />
+                      <SortableHead label="Req/conv" sortKey="mean_req" sort={userSort} onSort={toggleUserSort} numeric />
+                      <SortableHead label="In / Out" sortKey="input_tokens" sort={userSort} onSort={toggleUserSort} numeric title={IN_OUT_TOOLTIP} />
+                      <SortableHead label="Tokens" sortKey="total_tokens" sort={userSort} onSort={toggleUserSort} numeric />
+                      <SortableHead label={CACHE_LABEL} sortKey="cache_read_tokens" sort={userSort} onSort={toggleUserSort} numeric title={CACHE_TOOLTIP} />
+                      <SortableHead label="Cost" sortKey="cost_usd" sort={userSort} onSort={toggleUserSort} numeric />
                       <TableHead className="w-8"></TableHead>
                     </TableRow>
                   </TableHeader>
@@ -398,14 +400,14 @@ export function UsagePage() {
                           <TableCell className="text-right">
                             {meanRequestsPerConv(usage).toFixed(1)}
                           </TableCell>
+                          <TableCell className="text-right text-gray-400">
+                            {formatTokenPair(usage.input_tokens, usage.output_tokens)}
+                          </TableCell>
                           <TableCell className="text-right">
                             {formatTokens(usage.total_tokens)}
                           </TableCell>
                           <TableCell className="text-right text-gray-400">
-                            {formatTokens(usage.cache_read_tokens || 0)}
-                          </TableCell>
-                          <TableCell className="text-right text-gray-400">
-                            {formatTokens(usage.cache_write_tokens || 0)}
+                            {formatTokenPair(usage.cache_read_tokens, usage.cache_write_tokens)}
                           </TableCell>
                           <TableCell className="text-right">
                             {formatCost(usage.cost_usd)}
@@ -432,34 +434,12 @@ export function UsagePage() {
                                   <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500" />
                                 </div>
                               ) : sessionsData?.sessions.length ? (
-                                <table className="w-full text-sm">
-                                  <thead>
-                                    <tr className="text-gray-500 text-xs">
-                                      <th className="text-left pl-12 py-2">Session</th>
-                                      <th className="text-right py-2">Requests</th>
-                                      <th className="text-right py-2">In / Out</th>
-                                      <th className="text-right py-2 pr-4">Cost</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {sessionsData.sessions.map((s) => (
-                                      <tr key={s.session_id} className="border-t border-gray-800">
-                                        <td className="pl-12 py-2">
-                                          <Link to={`/session/${s.session_id}`} className="text-blue-400 hover:text-blue-300 hover:underline">
-                                            {s.title}
-                                          </Link>
-                                        </td>
-                                        <td className="text-right py-2 text-gray-400">{s.request_count}</td>
-                                        <td className="text-right py-2 text-gray-400">
-                                          {formatTokens(s.input_tokens)} / {formatTokens(s.output_tokens)}
-                                        </td>
-                                        <td className="text-right py-2 pr-4 text-gray-300">
-                                          {formatCost(s.cost_usd)}
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                                <SessionUsageTable
+                                  sessions={sortSessions(sessionsData.sessions, sessionSort)}
+                                  sort={sessionSort}
+                                  onToggleSort={toggleSessionSort}
+                                  indent
+                                />
                               ) : (
                                 <p className="text-center text-gray-500 py-4">No session data</p>
                               )}
