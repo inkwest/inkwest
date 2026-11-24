@@ -315,4 +315,4 @@ Claude, needs a new check against that page.
 
 ## License
 
-MIT
+Apache License 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
