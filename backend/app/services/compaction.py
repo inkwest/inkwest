@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.constants import MAX_SUMMARY_CHARS
-from app.core.database import async_session_maker
+from app.core.database import async_session_maker, release_read_txn
 from app.models.message import Message
 from app.models.schemas import strip_boundary_summary
 from app.models.session import Session
@@ -422,6 +422,8 @@ async def orchestrate_compaction(
     # Ids that exist BEFORE the turn: the summary must be a row this turn produced, never a
     # previous answer promoted by an empty completion.
     known_ids = {msg.id for msg in rows}
+    # The archive write and the summary stream are long: hold no read transaction across them.
+    await release_read_txn(db)
 
     errored = False
     terminal: ChatEvent | None = None

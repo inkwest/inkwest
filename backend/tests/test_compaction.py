@@ -827,6 +827,29 @@ async def test_compaction_writes_the_boundary_and_drops_engine_state(
     assert session is not None and session.cli_session_id is None
 
 
+async def test_no_read_transaction_is_held_into_the_summary_turn(
+    db: AsyncSession, sandbox_settings: Any
+) -> None:
+    """An idle-in-transaction read across the archive write blocks a migration's ALTER."""
+    sid = await _session(db)
+    await save_message(db, sid, "user", "q")
+    await save_message(db, sid, "assistant", "a")
+    in_txn: list[bool] = []
+    write_archive = compaction._write_archive
+
+    def recording_write(*args: Any) -> Any:
+        in_txn.append(db.in_transaction())
+        return write_archive(*args)
+
+    with (
+        patch("app.services.compaction._write_archive", recording_write),
+        patch("app.services.compaction.get_orchestrator", _engine(db, sid, rows=["summary"])),
+    ):
+        [e async for e in orchestrate_compaction(db=db, session_id=str(sid))]
+
+    assert in_txn == [False]
+
+
 async def test_opencode_store_is_dropped_with_the_boundary(
     db: AsyncSession, sandbox_settings: Any
 ) -> None:
