@@ -104,7 +104,7 @@ describe('AwsAccountRoleModal refresh', () => {
 
     // Cached list shown first — no portal hit.
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith('s1'));
-    expect(screen.getByText('ReadOnly')).toBeInTheDocument();
+    expect(await screen.findByText('ReadOnly')).toBeInTheDocument();
     expect(screen.queryByText('Admin')).not.toBeInTheDocument();
     expect(mockRefresh).not.toHaveBeenCalled();
 

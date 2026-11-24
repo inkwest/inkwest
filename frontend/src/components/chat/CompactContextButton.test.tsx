@@ -46,6 +46,7 @@ function primeConfig(contextWindow: number | null) {
           context_window: contextWindow,
         },
       ],
+      push_public_key: null,
     },
     fetchConfig: vi.fn(),
   });
