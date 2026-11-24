@@ -470,6 +470,52 @@ class TestOrchestrateInkwestAgent:
         assert spies.remove_agent_mcp_config.call_count == 2
         assert all(c.args == (SESSION_ID,) for c in spies.remove_agent_mcp_config.call_args_list)
 
+    @pytest.mark.asyncio
+    async def test_read_txn_released_before_stream(self):
+        """The last DB call before sandbox.ensure and before the stream is a commit."""
+        patches, spies = _patch_broker(history=[], entry=None)
+        last_db_call: dict[str, str | None] = {}
+
+        def snapshot(step: str) -> None:
+            calls = spies.db.method_calls
+            last_db_call[step] = calls[-1][0] if calls else None
+
+        spies.ensure.side_effect = lambda *a, **kw: snapshot("ensure") or "inkwest_conv_x"
+        mcp_result = spies.write_agent_mcp_config_with_oauth.return_value
+
+        async def write_mcp_config(*a, db, **kw):  # reads the DB after ensure, like the real one
+            await db.execute("SELECT 1")
+            return mcp_result
+
+        spies.write_agent_mcp_config_with_oauth.side_effect = write_mcp_config
+        lines = [json.dumps({"type": "done", "metadata": {}})]
+
+        def fake_execute_agent(session_id, turn_spec, **kw):
+            snapshot("exec")
+            return _aiter(lines)
+
+        for p in patches:
+            p.start()
+        try:
+            with patch.object(oia, "execute_agent", side_effect=fake_execute_agent):
+                await _collect(
+                    oia.orchestrate_chat_inkwest_agent(
+                        db=spies.db,
+                        session_id=SESSION_ID,
+                        cluster_name=None,
+                        kubeconfig_path=None,
+                        context_name=None,
+                        user_message="x",
+                        user_id=USER_ID,
+                        cancel_event=None,
+                    )
+                )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert last_db_call == {"ensure": "commit", "exec": "commit"}
+
     async def test_refuses_turn_at_hard_cap(self):
         """When enforce_user_sandbox_cap raises, the turn is refused with a user-facing
         error and no sandbox is provisioned."""

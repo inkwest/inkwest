@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
+from app.core.database import release_read_txn
 from app.services import attachments as attachments_svc
 from app.services import engines, llm_broker, model_registry
 from app.services.ai_cli_client import (
@@ -342,6 +343,7 @@ required.
             from app.services.mcp_config import apply_session_mcp_selection
 
             uid = str(user_id) if user_id else None
+            await release_read_txn(db)  # sandbox.ensure can block up to the provision timeout
             # Reap the user's oldest idle pairs first; refuse if they're at the hard ceiling
             # with every conversation busy. Caught here (not the generic handler below) so the
             # user gets the plain "too many conversations" message, not "Unexpected error".
@@ -415,6 +417,9 @@ required.
                 )
                 return
             model_choice = model_registry.default_model()
+
+        # No transaction across the stream: an idle-in-transaction lock blocks a migration ALTER.
+        await release_read_txn(db)
 
         for attempt in (1, 2):
             content = []
@@ -550,6 +555,7 @@ required.
                     try:
                         await clear_cli_session_id(db, session_id)
                     except Exception as ce:
+                        await db.rollback()
                         logger.warning(f"Failed to clear stale CLI session ID: {ce}")
                     resume_id = None
                     continue

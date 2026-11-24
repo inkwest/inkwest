@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
 from app.core.config import get_settings
+from app.core.database import release_read_txn
 from app.services import engines, llm_broker
 from app.services.ai_cli_client import (
     ProgressTracker,
@@ -417,6 +418,7 @@ async def orchestrate_chat_opencode(
         from app.services import sandbox
 
         uid = str(user_id) if user_id else None
+        await release_read_txn(db)  # sandbox.ensure can block up to the provision timeout
         # Per-user admission control before provisioning, same as the cli/inkwest-agent
         # engines: reap the user's oldest idle pairs, refuse if at the hard ceiling with
         # nothing reclaimable. Without this opencode turns could provision past the cap.
@@ -593,6 +595,9 @@ async def orchestrate_chat_opencode(
                 )
             elif names:
                 agent_message += f"\n\n(Attached file(s) for this message: {names})"
+
+        # No transaction across the stream: an idle-in-transaction lock blocks a migration ALTER.
+        await release_read_txn(db)
 
         try:
             # Bumped only on client-visible events below, so a loud-but-wedged agent still

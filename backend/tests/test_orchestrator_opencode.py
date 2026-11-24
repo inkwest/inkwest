@@ -361,6 +361,43 @@ class TestOrchestrateOpencode:
         assert cap2["resume"] is True
 
     @pytest.mark.asyncio
+    async def test_read_txn_released_before_stream(self):
+        """The last DB call before sandbox.ensure and before the stream is a commit."""
+        db = AsyncMock()
+        last_db_call: dict[str, str | None] = {}
+
+        def snapshot(step: str) -> None:
+            last_db_call[step] = db.method_calls[-1][0] if db.method_calls else None
+
+        async def fake_exec(session_id, user_message, **kwargs):
+            snapshot("exec")
+            yield b'{"type":"step_finish","part":{"reason":"stop"}}\n'
+
+        es, _cap = self._patch(history=[], exec_factory=fake_exec)
+        with es:
+            from app.services import sandbox
+
+            sandbox.ensure.side_effect = lambda *a, **kw: snapshot("ensure") or "inkwest_conv_x"
+
+            async def mcp_block(*a, db, **kw):  # reads the DB after ensure, like the real one
+                await db.execute("SELECT 1")
+                return {}, []
+
+            es.enter_context(patch.object(oo, "_opencode_mcp_block", side_effect=mcp_block))
+            await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=db,
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                )
+            )
+
+        assert last_db_call == {"ensure": "commit", "exec": "commit"}
+
+    @pytest.mark.asyncio
     async def test_resume_guarded_when_store_missing(self):
         # F1: DB has history but opencode's own store is gone → don't pass --continue
         # (resuming an empty session would silently drop context).
