@@ -578,10 +578,15 @@ def truncate_kubectl_output(output: str, resource_type: str) -> str:
 ## Token Management
 
 Long conversations walk into the model's context window. Inkwest does not estimate tokens
-locally (no tokenizer, no `count_tokens` call): the prompt size of a turn is what the engine
-already reported on the wire — `input_tokens + cache_read_tokens + cache_write_tokens` on the
-last assistant row — and the frontend renders that against the model's context window
-(`app/services/context_window.py`, `frontend/src/lib/contextUsage.ts`).
+locally (no tokenizer, no `count_tokens` call): the context occupancy is the prompt of the turn's
+last model call as the engine reported it on the wire (fresh input + cache read + cache write),
+carried as `context_tokens` on the terminal `done` when the engine reported any, and persisted in
+`messages.context_tokens`. The
+row's `input_tokens + cache_read_tokens + cache_write_tokens` sum every tool iteration of the turn
+and overstate it. The frontend renders `context_tokens` of the last assistant row that has it
+against the model's context window (`app/services/context_window.py`,
+`frontend/src/lib/contextUsage.ts`); rows without it are skipped; no gauge until a row after the
+last boundary has it.
 
 Reclaiming context is **compaction** (`app/services/compaction.py`), not truncation:
 

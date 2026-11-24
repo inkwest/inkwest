@@ -102,6 +102,12 @@ class Message(Base):
         Integer,
         nullable=True,
     )
+    # Prompt size of the turn's LAST model call (fresh + cache read + cache write): the
+    # context occupancy. The columns above sum every call of the turn. NULL when unknown.
+    context_tokens: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     thinking_content: Mapped[str | None] = mapped_column(
         String,
         nullable=True,

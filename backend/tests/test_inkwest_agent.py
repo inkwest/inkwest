@@ -614,6 +614,101 @@ async def test_run_turn_client_error_carries_accumulated_usage():
     assert meta["cache_read_tokens"] == 0
 
 
+def _converse_tool_usage(tool_use_id: str, usage: dict) -> dict:
+    return {
+        "usage": usage,
+        "output": {
+            "message": {
+                "content": [
+                    {
+                        "toolUse": {
+                            "toolUseId": tool_use_id,
+                            "name": "kubectl_get",
+                            "input": {"resource": "pods"},
+                        }
+                    }
+                ]
+            }
+        },
+        "stopReason": "tool_use",
+    }
+
+
+def _call_usage(fresh: int, read: int, write: int) -> dict:
+    return {
+        "inputTokens": fresh,
+        "outputTokens": 40,
+        "cacheReadInputTokens": read,
+        "cacheWriteInputTokens": write,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_turn_context_tokens_is_last_call_prompt():
+    """The turn's counts sum every iteration's prompt; context_tokens is the last one's."""
+    client = _client(
+        [
+            _converse_tool_usage("tu-1", _call_usage(3, 0, 51_000)),
+            _converse_tool_usage("tu-2", _call_usage(5, 51_000, 1_200)),
+            _converse_cached("done", _call_usage(7, 52_200, 900)),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("pod/foo Running", False)),
+    ):
+        events = await _collect(_spec(), client)
+    assert events[-1].type == "done"
+    meta = events[-1].metadata
+    assert meta["context_tokens"] == 7 + 52_200 + 900
+    assert meta["input_tokens"] == 15
+    assert meta["cache_read_tokens"] == 103_200
+    assert meta["cache_write_tokens"] == 53_100
+
+
+@pytest.mark.parametrize("empty_usage", [{}, _call_usage(0, 0, 0)], ids=["absent", "zeros"])
+@pytest.mark.asyncio
+async def test_run_turn_empty_usage_call_keeps_the_last_real_reading(empty_usage: dict):
+    client = _client(
+        [
+            _converse_tool_usage("tu-1", _call_usage(3, 0, 51_000)),
+            _converse_cached("done", empty_usage),
+        ]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("pod/foo Running", False)),
+    ):
+        events = await _collect(_spec(), client)
+    assert events[-1].type == "done"
+    assert events[-1].metadata["context_tokens"] == 51_003
+
+
+@pytest.mark.asyncio
+async def test_run_turn_error_carries_last_completed_call_context():
+    err = ClientError({"Error": {"Message": "throttled"}}, "Converse")
+    client = MagicMock()
+    client.converse = MagicMock(
+        side_effect=[_converse_tool_usage("tu-1", _call_usage(3, 0, 51_000)), err]
+    )
+    with patch(
+        "app.services.tool_execution.execute_tool",
+        new=AsyncMock(return_value=("pod/foo Running", False)),
+    ):
+        events = await _collect(_spec(), client)
+    assert events[-1].type == "error"
+    assert events[-1].metadata["context_tokens"] == 51_003
+
+
+@pytest.mark.asyncio
+async def test_run_turn_error_before_any_call_reports_no_context():
+    client = MagicMock()
+    client.converse = MagicMock(side_effect=RuntimeError("boom"))
+    events = await _collect(_spec(), client)
+    assert events[-1].type == "error"
+    assert events[-1].metadata["context_tokens"] is None
+
+
 # --- Opportunistic prompt caching -------------------------------------------
 #
 # Rejection messages are VERBATIM live captures (2026-07-04/05 probes, recorded in the

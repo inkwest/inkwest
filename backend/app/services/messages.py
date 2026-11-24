@@ -152,6 +152,7 @@ async def save_message(
     output_tokens: int | None = None,
     cache_read_tokens: int | None = None,
     cache_write_tokens: int | None = None,
+    context_tokens: int | None = None,
     thinking_content: str | None = None,
     latency_ms: int | None = None,
     model: str | None = None,
@@ -176,6 +177,7 @@ async def save_message(
         output_tokens: Number of output tokens for this API call
         cache_read_tokens: Prompt-cache tokens read for this turn (input-side)
         cache_write_tokens: Prompt-cache tokens written for this turn (input-side)
+        context_tokens: Prompt size of the turn's last model call (context occupancy)
         thinking_content: AI reasoning/thinking content if extended thinking enabled
         latency_ms: API call latency in milliseconds
         model: Model that produced this turn (assistant messages) for cost attribution
@@ -210,6 +212,7 @@ async def save_message(
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        context_tokens=context_tokens,
         thinking_content=thinking_content,
         latency_ms=latency_ms,
         model=model,
@@ -594,6 +597,7 @@ async def stamp_message_usage(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    context_tokens: int | None = None,
 ) -> None:
     """Stamp a turn's token totals onto an already-saved assistant message.
 
@@ -610,6 +614,8 @@ async def stamp_message_usage(
     output_tokens = max(0, int(output_tokens))
     cache_read_tokens = max(0, int(cache_read_tokens))
     cache_write_tokens = max(0, int(cache_write_tokens))
+    if context_tokens is not None:
+        context_tokens = max(0, int(context_tokens))
 
     await db.execute(
         update(Message)
@@ -621,6 +627,7 @@ async def stamp_message_usage(
             token_count=output_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
+            context_tokens=context_tokens,
         )
     )
     await db.commit()

@@ -192,6 +192,9 @@ export interface Message {
   output_tokens?: number | null;
   cache_read_tokens?: number | null;
   cache_write_tokens?: number | null;
+  /** Prompt size of the turn's last model call (context occupancy); the counts above sum
+   *  every call of the turn. Null for rows predating it or from an older agent image. */
+  context_tokens?: number | null;
   status?: MessageStatus;
   error_message?: string;
   is_retryable?: boolean;

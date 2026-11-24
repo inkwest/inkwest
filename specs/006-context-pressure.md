@@ -25,11 +25,14 @@ reach, even though every message is still sitting in Postgres.
 
 Three parts, one release.
 
-1. **Measure.** The prompt size of a turn is already persisted per assistant row:
-   `input_tokens` (fresh) + `cache_read_tokens` + `cache_write_tokens` — all input-side, wire-reported
-   by all three engines. That sum over the last assistant row **is** the context occupancy, and it
-   self-corrects: when the CLI auto-compacts, the next turn's prompt is smaller and the gauge drops.
-   Divided by the model's context window it becomes a percentage the user can see.
+1. **Measure.** Each engine reports the prompt of the turn's **last** model call (fresh input +
+   cache read + cache write, all wire-reported) as `context_tokens` on its terminal `done`, and the
+   turn's assistant row persists it in `messages.context_tokens`. That value on the last assistant
+   row that has it **is** the context occupancy. The row's `input_tokens` + `cache_read_tokens` +
+   `cache_write_tokens` are not: they sum the prompt of every tool iteration of the turn, so a
+   5-iteration turn over a 51k prompt reads ~128% of a 200k window for ~26% real occupancy. The
+   reading self-corrects: when the CLI auto-compacts, the next turn's prompt is smaller and the gauge
+   drops. Divided by the model's context window it becomes a percentage the user can see.
 
 2. **Warn, then compact.** Past a warn threshold the header gauge turns amber and offers
    "Compact context". Past a trigger the next turn is preceded by an automatic compaction, announced
@@ -61,7 +64,7 @@ deleting one marker row.
   override; unknown ⇒ `null` (no gauge, no auto-compaction — never act on a guessed window).
 - `context_window` exposed on `AppConfig.available_models[]` (`/api/config`).
 - Header gauge (% of window, amber past warn, red past compact threshold); pure client-side
-  computation from the last assistant row + the resolved model. The "Compact context" action sits in
+  computation from the last assistant row's `context_tokens` + the resolved model. The "Compact context" action sits in
   the **composer toolbar**, not the header (see phase 2 for why).
 - WS `compact` message type (**owner only** — an editor can drive a turn but not rewrite what the
   session remembers; rejected while a turn is active, and by the WS route itself when nothing
@@ -184,8 +187,14 @@ deleting one marker row.
 
 ## Acceptance criteria
 
-- [x] Given an assistant row with `input_tokens=5000`, `cache_read_tokens=120000`,
-      `cache_write_tokens=3000` and a 200k-window model, then the gauge reads 64%.
+- [x] Given an assistant row with `context_tokens=128000` and a 200k-window model, then the gauge
+      reads 64%, whatever the row's cumulative `input_tokens` / `cache_*_tokens`.
+- [x] Given a turn of several model calls, then `context_tokens` is the last call's prompt on all
+      three engines (CLI: last top-level message, subagent messages excluded), while the cumulative
+      counts stay cumulative.
+- [x] Given assistant rows with no `context_tokens` (rows predating the column, an older agent
+      image), then they are skipped, never summed; no gauge until a row after the last boundary
+      has it.
 - [x] Given a model whose context window is unknown, then no gauge is rendered and auto-compaction
       never triggers for that session — but the manual action is still offered past an absolute
       prompt size (`COMPACT_OFFER_TOKENS`), so the escape hatch exists on an unsourced model.
@@ -266,11 +275,13 @@ deleting one marker row.
 ### Phase 1 — Measure and show
 - Work: `app/services/context_window.py` (static table keyed like `pricing.price_match_keys`, +
   registry `options.context_window` override, `None` when unknown); `context_window` on `ModelInfo`
-  in `/api/config`; `frontend/src/lib/contextUsage.ts` (pure: last assistant row + window → percent);
+  in `/api/config`; `frontend/src/lib/contextUsage.ts` (pure: last assistant row's `context_tokens` +
+  window → percent);
   gauge in `components/layout/Header.tsx` next to the existing token badge. The gauge's two
   **colour** thresholds are client-side constants in `contextUsage.ts` for this phase — the
   server-side ones only exist from phase 3, and they gate an action, not a colour.
-- **Data model impact**: none (registry `options` is already JSONB).
+- **Data model impact**: nullable `messages.context_tokens` (migration
+  `20261124000000_message_context_tokens.sql`); registry `options` is already JSONB.
 - **DoD**: `pytest tests/test_context_window.py tests/test_api_config.py -q` green, including an
   unknown-model case returning `None` and an `options` override winning;
   `npx vitest run src/lib/contextUsage src/components/layout` green with the 64% case above and the
@@ -303,10 +314,11 @@ deleting one marker row.
 
 ### Phase 3 — Auto-compaction on the trigger set
 - Work: pure `should_compact()` over percent / rounds-since-boundary / absolute token ceiling, with
-  the `min_percent` floor. Its `prompt_tokens` comes from the turn's **`usage_records` row** (the
-  authoritative accounting row, broker or engine), *not* the `messages` token stamp: the stamp is
-  display-only and its write failure is swallowed (`turn_usage.py`), which would silently stop
-  auto-compaction. The gauge keeps reading the stamp — a stale gauge is cosmetic. Rounds counted
+  the `min_percent` floor. Its `prompt_tokens` must be the turn's **last call's** prompt. The
+  `messages` stamp is display-only and its write failure is swallowed (`turn_usage.py`), which would
+  silently stop auto-compaction; the engine-side `usage_records` row sums every call of the turn, so
+  it cannot serve as is (open question below). The gauge keeps reading the stamp — a stale gauge is
+  cosmetic. Rounds counted
   from the last boundary row (one COUNT, no new column);
   pre-turn check in the WS `message` path (compaction runs first, then the user's turn) gated on
   `context_autocompact_enabled` and a known window; admin settings + System Info line; system row
@@ -325,13 +337,16 @@ its own diff.
 
 ## Data model impact (summary)
 
-- No migration. The boundary is a `messages` row (`role='system'`, structured `content`), the window
+- One migration: nullable `messages.context_tokens` (the last call's prompt). The boundary is a `messages` row (`role='system'`, structured `content`), the window
   override rides `model_registry.options` (JSONB), the thresholds ride `app_settings`.
 - The archive file lives in the conversation's existing `/workdir` — same confidentiality class as
   attachments and tool output already stored there. No new egress, no upload.
 
 ## Open questions
 
+- [ ] Phase 3's authoritative prompt size: the last broker `usage_records` row of the turn is per
+      call, but the engine-side row (broker off) is cumulative. Either carry `context_tokens` on
+      `usage_records` or accept the display stamp's failure mode.
 - [ ] Static context-window values must be sourced per model from vendor docs (neither Bedrock
       `ListFoundationModels` nor Anthropic `/v1/models` returns a context length). Any model we
       cannot source stays `None`.
@@ -341,8 +356,8 @@ its own diff.
 
 ## Decisions
 
-- **Occupancy is measured from the last turn's reported prompt size** (the UI reads the per-message
-  stamp, the auto-compaction decision reads the `usage_records` row — see phase 3), not counted locally — chosen
+- **Occupancy is measured from the last model call's reported prompt size** (the UI reads the
+  per-message `context_tokens` stamp; the auto-compaction source is open, see phase 3), not counted locally — chosen
   because it is already persisted for all three engines, needs no tokenizer, and self-corrects when
   an engine compacts behind our back. Consequence accepted: the gauge lags one turn and reads nothing
   before the first assistant reply.

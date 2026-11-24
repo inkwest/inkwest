@@ -420,6 +420,7 @@ async def orchestrate_chat_opencode(
             # the 1h portion is unknowable here — the fallback estimate prices all cache
             # writes at the 5m rate. Moot whenever opencode reports its authoritative
             # cache-aware cost_usd (the normal case, passed through below).
+            context_tokens=done_meta.get("context_tokens"),
             tool_calls=done_meta.get("tool_calls", 0),
             iterations=done_meta.get("iterations", 1),
             skip_budget_row=bool(broker_env),
@@ -738,7 +739,9 @@ async def orchestrate_chat_opencode(
                 # Persist whatever usage reached us before the kill (no-op when nothing
                 # terminal arrived) — AWS bills the completed calls.
                 await _persist_accumulated_usage()
-                yield done_event(stopped=True)
+                # The client stamps the live bubble from this usage, as the DB row has it.
+                stopped_meta = {k: v for k, v in done_meta.items() if k != "truncated"}
+                yield done_event(stopped_meta, stopped=True)
                 return
 
             await _flush()

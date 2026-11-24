@@ -660,6 +660,35 @@ async def test_stamp_message_usage_backfills_saved_row(db: AsyncSession) -> None
     assert msg.cache_write_tokens == 0
 
 
+async def test_context_tokens_persist_via_save_and_stamp(db: AsyncSession) -> None:
+    """The last call's prompt rides its own column, apart from the cumulative counts."""
+    sid = await _make_session(db)
+    saved = await save_message(
+        db, sid, "assistant", "cli turn", input_tokens=15, context_tokens=53_107
+    )
+    assert saved.context_tokens == 53_107
+
+    streamed = await save_message(db, sid, "assistant", "streamed early")
+    assert streamed.context_tokens is None
+    await stamp_message_usage(
+        db, streamed.id, input_tokens=15, output_tokens=90, context_tokens=53_107
+    )
+    await db.refresh(streamed)
+    assert streamed.context_tokens == 53_107
+    assert streamed.input_tokens == 15
+
+    older = await save_message(db, sid, "assistant", "older agent image")
+    await stamp_message_usage(db, older.id, input_tokens=15, output_tokens=90)
+    await db.refresh(older)
+    assert older.context_tokens is None  # unknown stays unknown, never derived
+
+    from app.models.schemas import MessageResponse, SharedMessage
+
+    assert MessageResponse.model_validate(saved).context_tokens == 53_107
+    # The anonymous share view exposes no token counts, this one included.
+    assert "context_tokens" not in SharedMessage.model_fields
+
+
 async def test_update_session_stats_no_commit_joins_caller_txn(db: AsyncSession) -> None:
     """commit=False leaves the increment uncommitted — turn_usage folds it into the
     budget-row transaction so the two land (or roll back) together."""

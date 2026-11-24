@@ -126,7 +126,7 @@ backend/app/
 | `tool_start` | server -> client | Tool execution starting |
 | `tool_result` | server -> client | Tool output |
 | `context_compacted` | server -> client | A compaction boundary was written (row id, timestamp, and the persisted row content) |
-| `done` | server -> client | Response complete (metadata includes `stopped: true` if cancelled) |
+| `done` | server -> client | Response complete (metadata carries the turn's cumulative token counts and `context_tokens`, the last model call's prompt for the context gauge, when the engine reported any (a stopped inkwest-agent turn and the no-terminal fallback carry only `stopped`); `stopped: true` if cancelled) |
 | `error` | server -> client | Error occurred |
 
 `message`, `retry` and `compact` share one gate (`start_gated_turn`): turn-rate limit → budget check → one-turn-per-session slot. Role gating (`session_access.turn_refusal` — viewers may not drive a turn, and only the owner may compact) happens earlier, in the receive loop. Compaction (`services/compaction.py`) runs a normal billed turn through the session's resolved engine, dumps the pre-boundary transcript to `/workdir/.inkwest/history-<n>.md`, and commits a `role='system'` boundary row; from there `get_session_messages` replays only what follows it, and the summary rides the system prompt. The UI still renders the whole history, with a divider at the boundary.

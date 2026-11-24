@@ -140,6 +140,9 @@ async def _run_loop(
     # usage.cacheDetails[{ttl, inputTokens}]. Not observed live yet (cachePoint exposes
     # no TTL knob; results report ttl:"5m").
     total_cache_write_1h_tokens = 0
+    # The LAST call's prompt (fresh + cache read + cache write): what occupies the model's
+    # context. The totals above sum every iteration's prompt and overstate it.
+    context_tokens: int | None = None
     # Opportunistic caching memos (per process = per turn — the worker is spawned per
     # turn). Two tiers of degradation, both triggered by captured pre-inference rejection
     # signatures: a PLACEMENT rejection (Nova: tools marker "extraneous") first drops only
@@ -153,7 +156,7 @@ async def _run_loop(
     iter_latency_ms = 0
 
     def _usage_meta() -> dict[str, Any]:
-        # Additive keys — an older backend ignores the cache fields (protocol-compatible).
+        # Additive keys: an older backend ignores the cache and context fields.
         return {
             "iterations": iteration,
             "input_tokens": total_input_tokens,
@@ -161,6 +164,7 @@ async def _run_loop(
             "cache_read_tokens": total_cache_read_tokens,
             "cache_write_tokens": total_cache_write_tokens,
             "cache_write_1h_tokens": total_cache_write_1h_tokens,
+            "context_tokens": context_tokens,
             "tool_calls": total_tool_calls,
             "latency_ms": iter_latency_ms,
         }
@@ -258,15 +262,21 @@ async def _run_loop(
             return
 
         usage = response.get("usage", {})
-        total_input_tokens += usage.get("inputTokens", 0)
-        total_output_tokens += usage.get("outputTokens", 0)
+        call_input = usage.get("inputTokens", 0) or 0
         # Both spellings observed live on the agent path (documented name + Count alias).
-        total_cache_read_tokens += (
+        call_cache_read = (
             usage.get("cacheReadInputTokens", usage.get("cacheReadInputTokenCount", 0)) or 0
         )
-        total_cache_write_tokens += (
+        call_cache_write = (
             usage.get("cacheWriteInputTokens", usage.get("cacheWriteInputTokenCount", 0)) or 0
         )
+        total_input_tokens += call_input
+        total_output_tokens += usage.get("outputTokens", 0)
+        total_cache_read_tokens += call_cache_read
+        total_cache_write_tokens += call_cache_write
+        # A call that reports no prompt must not wipe the last real reading.
+        if prompt := call_input + call_cache_read + call_cache_write:
+            context_tokens = prompt
         # ASSUMPTION (1h TTL unobserved live, same as llm_metering._from_converse_usage):
         # every cacheDetails entry is treated as write-side; a read-side 1h entry would be
         # over-priced into the 2x-write portion. Pricing clamps the 1h part to total writes.

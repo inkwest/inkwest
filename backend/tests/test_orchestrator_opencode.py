@@ -836,6 +836,41 @@ class TestOrchestrateOpencode:
         assert not any(e.type == "done" and e.metadata.get("truncated") for e in events)
 
     @pytest.mark.asyncio
+    async def test_cancel_stopped_done_carries_the_usage_the_row_gets(self):
+        import asyncio
+
+        cancel = asyncio.Event()
+
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"partial"}}\n'
+            yield (
+                b'{"type":"step_finish","part":{"reason":"tool-calls",'
+                b'"tokens":{"input":3,"output":57,"cache":{"write":7949,"read":0}}}}\n'
+            )
+            cancel.set()
+
+        es, _cap = self._patch(history=[], exec_factory=exec_factory)
+        stamp = AsyncMock()
+        with es, patch("app.services.turn_usage.stamp_message_usage", stamp):
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=mock_session(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                    cancel_event=cancel,
+                )
+            )
+        done = events[-1]
+        assert done.type == "done" and done.metadata["stopped"] is True
+        assert done.metadata["context_tokens"] == 7952
+        assert "truncated" not in done.metadata
+        assert stamp.await_args.kwargs["context_tokens"] == 7952
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("exc", [RuntimeError, TimeoutError])
     async def test_silent_crash_surfaces_error_burns_grant_and_tears_down(self, exc):
         # Nonzero exit / timeout with nothing terminal: error to the user, grant burned,
@@ -1655,6 +1690,47 @@ class TestOpencodeHardening:
         assert len(dones) == 1 and not dones[0].metadata.get("stopped")  # genuine done, not stopped
         assert "assistant" in saved_roles  # the completed answer was persisted
 
+    @pytest.mark.parametrize(
+        "terminal",
+        [
+            b'{"type":"step_finish","part":{"reason":"stop",'
+            b'"tokens":{"input":3,"output":2,"cache":{"write":7949,"read":0}}}}\n',
+            b'{"type":"step_finish","part":{"reason":"tool-calls",'
+            b'"tokens":{"input":3,"output":2,"cache":{"write":7949,"read":0}}}}\n'
+            b'{"type":"error","error":{"name":"APIError","data":{"message":"throttled"}}}\n',
+        ],
+        ids=["done", "error"],
+    )
+    @pytest.mark.asyncio
+    async def test_stop_after_terminal_reports_usage_once(self, terminal: bytes):
+        import asyncio
+
+        cancel = asyncio.Event()
+
+        async def exec_factory(session_id, user_message, **kwargs):
+            yield b'{"type":"text","part":{"text":"answer"}}\n'
+            for line in terminal.splitlines(keepends=True):
+                yield line
+            cancel.set()  # user hits Stop just after the terminal reached the client
+
+        es, _cap = TestOrchestrateOpencode()._patch(history=[], exec_factory=exec_factory)
+        with es:
+            events = await _collect(
+                oo.orchestrate_chat_opencode(
+                    db=mock_session(),
+                    session_id=SESSION_ID,
+                    cluster_name=None,
+                    kubeconfig_path=None,
+                    context_name=None,
+                    user_message="x",
+                    user_id=USER_ID,
+                    cancel_event=cancel,
+                )
+            )
+        terminals = [e for e in events if e.type in ("done", "error")]
+        assert len(terminals) == 1
+        assert terminals[0].metadata["context_tokens"] == 7952
+
 
 class TestBrokerAuthoritySwitch:
     """P2: broker-on skips ONLY the engine-side budget row; session stats stay engine-fed."""
@@ -1771,6 +1847,7 @@ class TestStampFirstAssistantRow:
             assert args[1] == first_row.id
             assert kwargs["input_tokens"] == 7  # FRESH input — cache not folded in
             assert kwargs["cache_read_tokens"] == 12608
+            assert kwargs["context_tokens"] == 7 + 12608  # the single step's prompt
             # session stats carry the splits too
             assert tu.update_session_stats.await_args.kwargs["input_tokens"] == 7
             assert tu.update_session_stats.await_args.kwargs["cache_read_tokens"] == 12608

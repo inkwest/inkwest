@@ -357,6 +357,8 @@ class MessageResponse(MessageBase):
     # Prompt-cache splits for the turn (per-bubble token line); NULL for older rows.
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
+    # Last model call's prompt size (context gauge); NULL for older rows / older agent images.
+    context_tokens: int | None = None
     thinking_content: str | None = None
     latency_ms: int | None = None
     status: str = "success"  # pending, success, error

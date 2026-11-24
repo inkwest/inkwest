@@ -1120,6 +1120,47 @@ class TestOrchestrateInkwestAgent:
         spies.record_usage.assert_not_awaited()
         spies.release.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        "terminal",
+        [
+            {"type": "done", "metadata": {"input_tokens": 8, "context_tokens": 51_003}},
+            {
+                "type": "error",
+                "content": "AI service error: throttled",
+                "is_error": True,
+                "metadata": {"input_tokens": 8, "context_tokens": 51_003},
+            },
+        ],
+        ids=["done", "error"],
+    )
+    @pytest.mark.asyncio
+    async def test_stop_after_terminal_reports_usage_once(self, terminal: dict):
+        """A Stop after the terminal reached the client must not add a second, usage-
+        carrying done (the live badges would count the turn twice)."""
+        patches, spies = _patch_broker()
+        spies.save_message.side_effect = [
+            SimpleNamespace(id=uuid.uuid4()),  # user turn
+            SimpleNamespace(id=uuid.uuid4()),  # assistant flush
+        ]
+        stamp = AsyncMock()
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+        lines = [json.dumps({"type": "text_delta", "content": "answer"}), json.dumps(terminal)]
+        for p in patches:
+            p.start()
+        try:
+            with patch("app.services.turn_usage.stamp_message_usage", stamp):
+                events = await _run_broker(spies, lines, cancel_event=cancel_event)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        terminals = [e for e in events if e.type in ("done", "error")]
+        assert len(terminals) == 1
+        assert terminals[0].type == terminal["type"]
+        assert not terminals[0].metadata.get("stopped")
+        assert terminals[0].metadata["context_tokens"] == 51_003
+        assert stamp.await_args.kwargs["context_tokens"] == 51_003
+
     @pytest.mark.asyncio
     async def test_cancel_persists_partial_with_dangling_tool_use(self):
         """Kill mid-tool: the partial assistant content IS persisted, tool_use and all.
@@ -1662,6 +1703,7 @@ async def test_turn_totals_stamped_on_first_assistant_row():
                     "output_tokens": 16,
                     "cache_read_tokens": 12608,
                     "cache_write_tokens": 0,
+                    "context_tokens": 6_400,
                 },
             }
         ),
@@ -1679,9 +1721,35 @@ async def test_turn_totals_stamped_on_first_assistant_row():
     assert args[1] == first_row.id  # FIRST assistant row, not the trailing flush's
     assert kwargs["input_tokens"] == 7
     assert kwargs["cache_read_tokens"] == 12608
+    assert kwargs["context_tokens"] == 6_400
     # session stats carry the cache splits too
     assert spies.update_stats.await_args.kwargs["cache_read_tokens"] == 12608
     assert spies.update_stats.await_args.kwargs["cache_write_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_done_without_context_tokens_stamps_none():
+    """An agent image older than the key sends no context_tokens: the row stays NULL."""
+    patches, spies = _patch_broker()
+    spies.save_message.side_effect = [
+        SimpleNamespace(id=uuid.uuid4()),  # user turn
+        SimpleNamespace(id=uuid.uuid4()),  # assistant flush
+    ]
+    stamp = AsyncMock()
+    lines = [
+        json.dumps({"type": "text_delta", "content": "hi"}),
+        json.dumps({"type": "done", "metadata": {"input_tokens": 5, "output_tokens": 3}}),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with patch("app.services.turn_usage.stamp_message_usage", stamp):
+            await _run_broker(spies, lines)
+    finally:
+        for p in reversed(patches):
+            p.stop()
+    stamp.assert_awaited_once()
+    assert stamp.await_args.kwargs["context_tokens"] is None
 
 
 @pytest.mark.asyncio

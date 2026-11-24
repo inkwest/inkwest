@@ -23,12 +23,14 @@ export interface ContextUsage {
 }
 
 /**
- * Prompt size of the last assistant turn that reported usage: fresh `input_tokens` +
- * `cache_read_tokens` + `cache_write_tokens` are all input-side, so their sum is the prompt
- * the engine actually sent. Null before any turn has reported usage.
+ * Prompt size of the last assistant turn that reported it: `context_tokens`, the prompt of
+ * the turn's LAST model call. Not the row's input + cache counts: those sum every tool
+ * iteration of the turn and overstate occupancy several times over. Null before any turn
+ * has reported it.
  *
- * Assistant rows with no usage (older rows, a turn that errored before its first API reply)
- * are skipped, so a failed retry doesn't blank a reading that was live a moment ago.
+ * Assistant rows without it (rows predating the field, an older agent image, a turn that
+ * errored before its first API reply) are skipped, so a failed retry doesn't blank a
+ * reading that was live a moment ago.
  */
 export function lastPromptTokens(messages: Message[]): number | null {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -38,8 +40,7 @@ export function lastPromptTokens(messages: Message[]): number | null {
     // and re-offer the button at a stale 96% the moment any row lands after the boundary.
     if (isCompactionBoundary(msg)) return null;
     if (msg.role !== 'assistant') continue;
-    const used =
-      (msg.input_tokens ?? 0) + (msg.cache_read_tokens ?? 0) + (msg.cache_write_tokens ?? 0);
+    const used = msg.context_tokens ?? 0;
     if (used > 0) return used;
   }
   return null;

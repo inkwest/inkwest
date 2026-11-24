@@ -166,6 +166,7 @@ export function useWebSocket(sessionId: string) {
             output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
             cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
             cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
+            context_tokens: (event.metadata?.context_tokens as number | undefined) ?? null,
           });
         } else if (wasStopped) {
           addMessage({
@@ -178,6 +179,8 @@ export function useWebSocket(sessionId: string) {
             output_tokens: (event.metadata?.output_tokens as number | undefined) ?? null,
             cache_read_tokens: (event.metadata?.cache_read_tokens as number | undefined) ?? null,
             cache_write_tokens: (event.metadata?.cache_write_tokens as number | undefined) ?? null,
+            // The backend saves no row for a contentless stop, so a reload has no reading.
+            context_tokens: null,
           });
         }
 

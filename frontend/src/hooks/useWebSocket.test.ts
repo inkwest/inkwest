@@ -355,6 +355,7 @@ describe('done-event token accounting', () => {
           output_tokens: 349,
           cache_read_tokens: 27082,
           cache_write_tokens: 3242,
+          context_tokens: 15_400,
         },
       }),
     );
@@ -367,6 +368,58 @@ describe('done-event token accounting', () => {
     expect(last.output_tokens).toBe(349);
     expect(last.cache_read_tokens).toBe(27082);
     expect(last.cache_write_tokens).toBe(3242);
+    // The gauge reads the last call's prompt, never the cumulative counts above.
+    expect(last.context_tokens).toBe(15_400);
+  });
+
+  it('stamps the context reading on a stopped partial turn, not on the empty placeholder', () => {
+    const cases = [
+      { blocks: [{ type: 'text' as const, content: 'partial' }], expected: 52_205 },
+      // No row is saved for a contentless stop: the live gauge must agree with a reload.
+      { blocks: [], expected: null },
+    ];
+    for (const { blocks, expected } of cases) {
+      const spy = vi.fn();
+      useSessionsStore.setState({ updateSessionTokens: spy });
+      useChatStore.setState({
+        messages: [],
+        streamingBlocks: blocks,
+        isStreaming: true,
+        queuedMessages: [],
+      });
+      renderHook(() => useWebSocket('session-1'));
+      const ws = MockWS.instances[MockWS.instances.length - 1];
+
+      act(() =>
+        ws.emit({ type: 'done', metadata: { stopped: true, input_tokens: 8, context_tokens: 52_205 } }),
+      );
+
+      const messages = useChatStore.getState().messages;
+      expect(messages[messages.length - 1].context_tokens).toBe(expected);
+      // The burned tokens still reach the session badge.
+      expect(spy).toHaveBeenCalledWith('session-1', 8, 0, undefined, undefined);
+    }
+  });
+
+  it('stamps no context reading when the done metadata lacks it (older agent image)', () => {
+    useChatStore.setState({
+      messages: [],
+      streamingBlocks: [{ type: 'text', content: 'answer' }],
+      isStreaming: true,
+      queuedMessages: [],
+    });
+    renderHook(() => useWebSocket('session-1'));
+    const ws = MockWS.instances[MockWS.instances.length - 1];
+
+    act(() =>
+      ws.emit({
+        type: 'done',
+        metadata: { input_tokens: 10, cache_read_tokens: 27082 },
+      }),
+    );
+
+    const messages = useChatStore.getState().messages;
+    expect(messages[messages.length - 1].context_tokens).toBeNull();
   });
 
   it('refreshes the session badge on a fully-cached turn (fresh in/out zero)', () => {

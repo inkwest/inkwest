@@ -74,6 +74,7 @@ async def persist_turn_usage(
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     cache_write_1h_tokens: int = 0,
+    context_tokens: int | None = None,
     tool_calls: int = 0,
     iterations: int = 1,
     skip_budget_row: bool = False,
@@ -155,6 +156,7 @@ async def persist_turn_usage(
                 output_tokens=output_tokens,
                 cache_read_tokens=cache_read_tokens,
                 cache_write_tokens=cache_write_tokens,
+                context_tokens=context_tokens,
             )
         except Exception as e:
             logger.warning(f"Failed to stamp message usage: {e}")

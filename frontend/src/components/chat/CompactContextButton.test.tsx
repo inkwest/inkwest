@@ -16,7 +16,7 @@ function assistantWith(tokens: number, id = 'm2'): Message {
     session_id: 's1',
     role: 'assistant',
     content: 'done',
-    input_tokens: tokens,
+    context_tokens: tokens,
     created_at: new Date().toISOString(),
   } as Message;
 }

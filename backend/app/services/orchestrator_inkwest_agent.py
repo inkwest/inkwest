@@ -341,6 +341,8 @@ async def orchestrate_chat_inkwest_agent(
             cache_read_tokens=done_meta.get("cache_read_tokens", 0),
             cache_write_tokens=done_meta.get("cache_write_tokens", 0),
             cache_write_1h_tokens=done_meta.get("cache_write_1h_tokens", 0),
+            # Absent from an agent image older than the key: the gauge then shows nothing.
+            context_tokens=done_meta.get("context_tokens"),
             tool_calls=done_meta.get("tool_calls", 0),
             iterations=done_meta.get("iterations", 1),
             skip_budget_row=bool(broker_env),
@@ -576,12 +578,15 @@ async def orchestrate_chat_inkwest_agent(
             # the history read path prunes unpaired tool blocks before replay
             # (get_session_messages -> prune_orphan_tool_calls), so the NEXT Converse turn is
             # unaffected.
-            if cancel_event and cancel_event.is_set():
+            # Gated on received_terminal like opencode: the client already has the turn's
+            # usage on that terminal, a second usage-carrying done would count it twice.
+            if cancel_event and cancel_event.is_set() and not received_terminal:
                 logger.info("inkwest-agent chat cancelled by user")
                 await _flush()
                 # Persist whatever usage reached us before the kill (no-op when the agent
                 # died before any terminal metadata) — AWS bills the completed calls.
                 await _persist_accumulated_usage()
+                # The agent reports usage only on its terminal event, and none arrived.
                 yield done_event(stopped=True)
                 return
 

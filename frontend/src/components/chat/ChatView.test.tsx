@@ -115,7 +115,7 @@ describe('ChatView composer toolbar', () => {
       session_id: 's1',
       role: 'assistant',
       content: 'a',
-      input_tokens: 190_000,
+      context_tokens: 190_000,
       created_at: '2026-01-01T00:00:01Z',
     },
   ];

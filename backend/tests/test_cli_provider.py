@@ -6,6 +6,7 @@ Tests the CLI client, output parsing, and orchestrator.
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -1247,3 +1248,153 @@ class TestParseCliCacheTokens:
         assert events[-1].metadata["input_tokens"] == 10
         assert events[-1].metadata["cache_read_tokens"] == 5000
         assert events[-1].metadata["cache_write_tokens"] == 100
+
+
+# --- context_tokens: the LAST top-level call's prompt, not the turn's sum ----------------
+#
+# Usage field names as in the class above. fixtures/claude_cli_stream_subagent.jsonl is a
+# real `claude -p --output-format stream-json --verbose` turn that spawns a subagent
+# (`parent_tool_use_id` set on its events), sanitized: system/rate-limit events dropped,
+# session/uuid/request ids replaced. The synthetic message is a real Claude Code transcript
+# entry (content trimmed) in the same envelope.
+
+CLI_FIXTURES = Path(__file__).parent / "fixtures"
+
+SYNTHETIC_ASSISTANT = {
+    "type": "assistant",
+    "message": {
+        "id": "34ed46ff-4af5-4985-95fa-bc09141f9350",
+        "container": None,
+        "model": "<synthetic>",
+        "role": "assistant",
+        "stop_details": None,
+        "stop_reason": "stop_sequence",
+        "stop_sequence": "",
+        "type": "message",
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+            "service_tier": None,
+            "cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 0},
+            "inference_geo": None,
+            "iterations": None,
+            "speed": None,
+        },
+        "context_management": None,
+        "content": [{"type": "text", "text": "No response requested."}],
+    },
+    "parent_tool_use_id": None,
+    "session_id": "fixture-session",
+}
+
+
+def _assistant(msg_id: str, fresh: int, read: int, write: int) -> str:
+    return json.dumps(
+        {
+            "type": "assistant",
+            "parent_tool_use_id": None,
+            "message": {
+                "id": msg_id,
+                "content": [{"type": "text", "text": "step"}],
+                "usage": {
+                    "input_tokens": fresh,
+                    "output_tokens": 30,
+                    "cache_read_input_tokens": read,
+                    "cache_creation_input_tokens": write,
+                },
+            },
+        }
+    )
+
+
+class TestParseCliContextTokens:
+    @pytest.mark.asyncio
+    async def test_multi_call_turn_context_is_last_call_while_result_stays_cumulative(self):
+        async def stream():
+            yield _assistant("msg_1", 3, 0, 51_000)
+            yield _assistant("msg_1", 3, 0, 51_000)  # per-block repeat of the same message
+            yield _assistant("msg_2", 5, 51_000, 1_200)
+            yield _assistant("msg_3", 7, 52_200, 900)
+            yield json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "x",
+                    "usage": {
+                        "input_tokens": 15,
+                        "output_tokens": 90,
+                        "cache_read_input_tokens": 103_200,
+                        "cache_creation_input_tokens": 53_100,
+                    },
+                }
+            )
+
+        done = [e async for e in parse_cli_response(stream())][-1]
+        assert done.type == "done"
+        assert done.metadata["context_tokens"] == 7 + 52_200 + 900
+        assert done.metadata["input_tokens"] == 15
+        assert done.metadata["cache_read_tokens"] == 103_200
+        assert done.metadata["cache_write_tokens"] == 53_100
+
+    @pytest.mark.asyncio
+    async def test_captured_subagent_turn_context_is_last_top_level_call(self):
+        lines = (CLI_FIXTURES / "claude_cli_stream_subagent.jsonl").read_text().splitlines()
+
+        async def stream():
+            for line in lines:
+                yield line
+
+        done = [e async for e in parse_cli_response(stream())][-1]
+        assert done.type == "done"
+        # Parent calls 2+24694+31884 and 2+56578+1049; the subagent call (2+0+49068) between
+        # them has its own window and a distinct message id.
+        assert done.metadata["context_tokens"] == 2 + 56_578 + 1_049
+
+    @pytest.mark.asyncio
+    async def test_captured_stream_stopped_inside_the_subagent_keeps_parent_reading(self):
+        lines = (CLI_FIXTURES / "claude_cli_stream_subagent.jsonl").read_text().splitlines()
+
+        async def stream():
+            for line in lines[:3]:  # parent call 1, subagent prompt, subagent call; then Stop
+                yield line
+
+        last = [e async for e in parse_cli_response(stream())][-1]
+        assert last.type == "usage_stats"
+        assert last.metadata["context_tokens"] == 2 + 24_694 + 31_884
+
+    @pytest.mark.parametrize("ends_with_result", [False, True])
+    @pytest.mark.asyncio
+    async def test_synthetic_message_keeps_the_real_reading(self, ends_with_result: bool):
+        async def stream():
+            yield _assistant("msg_1", 4, 20_000, 500)
+            yield json.dumps(SYNTHETIC_ASSISTANT)
+            if ends_with_result:
+                yield json.dumps({"type": "result", "subtype": "success", "result": "x"})
+
+        meta = [e async for e in parse_cli_response(stream())][-1].metadata
+        assert meta["context_tokens"] == 4 + 20_000 + 500
+
+    @pytest.mark.asyncio
+    async def test_cut_stream_carries_context_on_usage_stats(self):
+        async def stream():
+            yield _assistant("msg_1", 3, 0, 51_000)
+            yield _assistant("msg_2", 5, 51_000, 1_200)
+            raise RuntimeError("Claude CLI failed with exit code 1")
+
+        events = []
+        with pytest.raises(RuntimeError):
+            async for e in parse_cli_response(stream()):
+                events.append(e)
+        assert events[-1].type == "usage_stats"
+        assert events[-1].metadata["context_tokens"] == 5 + 51_000 + 1_200
+
+    @pytest.mark.asyncio
+    async def test_no_usage_reports_no_context(self):
+        async def stream():
+            yield json.dumps({"type": "result", "subtype": "success", "result": "x"})
+
+        done = [e async for e in parse_cli_response(stream())][-1]
+        assert done.metadata["context_tokens"] is None

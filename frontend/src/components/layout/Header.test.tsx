@@ -190,6 +190,7 @@ describe('Header', () => {
           input_tokens: 5000,
           cache_read_tokens: 120000,
           cache_write_tokens: 3000,
+          context_tokens: 128000,
           created_at: new Date().toISOString(),
         },
       ] as never,
@@ -199,7 +200,7 @@ describe('Header', () => {
   it('shows the context gauge when the model has a known window', () => {
     primeContextSession(200_000);
     renderHeader();
-    // 5000 fresh + 120000 cache-read + 3000 cache-write = 128000 of 200000 = 64%
+    // context_tokens 128000 of 200000 = 64%
     expect(screen.getByTitle(/128,000 of 200,000 tokens \(64%\)/i)).toHaveTextContent('64%');
   });
 
