@@ -43,14 +43,9 @@ ARCHIVE_DIR = ".inkwest"
 
 Trigger = Literal["manual", "auto"]
 
-# The summary is model-authored and lands in the system prompt of every later turn, so it
-# is capped: an unbounded one would eat the context it exists to reclaim, and a runaway
-# generation would be persisted forever.
+# The summary is replayed in the system prompt of every later turn.
 MAX_SUMMARY_CHARS = 8_000
-# The archive is written on the event loop's thread pool; a cap keeps one compaction from
-# turning a multi-hundred-MB conversation into a multi-hundred-MB file. Counted in
-# characters, not bytes — the budget bounds what we build in memory, and UTF-8 makes the
-# on-disk file at most a small multiple of it.
+# Counted in characters, not bytes: it bounds the string built in memory.
 MAX_ARCHIVE_CHARS = 4 * 1024 * 1024
 MAX_ARCHIVE_BLOCK_CHARS = 200_000
 
@@ -106,8 +101,7 @@ async def _last_boundary(db: AsyncSession, session_id: str | uuid.UUID) -> Messa
         )
         .order_by(Message.created_at.desc())
     )
-    # Not LIMIT 1: the predicate — not SQL — decides what counts (a summary-less row is not a
-    # boundary), and a session holds one such row per compaction, so the scan is bounded.
+    # Not LIMIT 1: a summary-less row matches the SQL but is not a boundary.
     for msg in result.scalars():
         if is_compaction_boundary(msg):
             return msg

@@ -3,7 +3,7 @@ Per-model context-window sizes — the denominator of the context-pressure gauge
 
 **Every value here is sourced, none inferred.** A model we cannot source resolves to
 ``None``, which disables the gauge for it rather than showing a percentage of a guessed
-capacity (spec 003: never act on a guessed window).
+capacity (spec 006: never act on a guessed window).
 
 Sources:
 - Anthropic (Claude): platform.claude.com/docs/en/about-claude/models/overview §Latest

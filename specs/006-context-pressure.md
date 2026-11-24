@@ -1,9 +1,9 @@
-# 003 — Context pressure: gauge, warning, compaction with a grep-able archive
+# 006 — Context pressure: gauge, warning, compaction with a grep-able archive
 
-**Status**: phases 1-2 implemented; phase 3 (auto-compaction) not started
-**Requested by**: @babs
+**Status**: in progress (phases 1-2 implemented, phase 3 not started)
+**Requested by**: Damien Degois
 **Date**: 2026-07-28
-**Depends on**: nothing (branched off `develop`; `001`/`002` live on another branch — renumber if they land first)
+**Depends on**: nothing
 
 ## Problem
 
@@ -86,7 +86,7 @@ deleting one marker row.
   mount and `os.replace`d relative to a directory fd opened `O_NOFOLLOW` per segment, because the
   sandbox can write to that volume: a planted symlink would otherwise redirect the dump anywhere the
   backend can write, and a name-based check would still lose the race against a mid-write swap.
-  Capped (~4 M characters per archive, 200k per content block, every block kind) so one runaway
+  Capped (~4 Mi characters per archive, ~200k per content block, every block kind) so one runaway
   tool output can't fill the volume; the boundary is written whether or not the dump succeeded.
 - Auto-compaction before a user turn past the trigger, with a visible notice naming which signal
   fired; admin settings `context_autocompact_enabled` (default true), `context_warn_percent`
@@ -266,7 +266,7 @@ its own diff.
       `ListFoundationModels` nor Anthropic `/v1/models` returns a context length). Any model we
       cannot source stays `None`.
 - [ ] Archive retention: the workdir is per-conversation and durable, so archives accumulate. Phase 2
-      ships per-file caps (4 MB, 200k chars per block) but **no** count cap — the existing workdir
+      ships per-file caps (~4 Mi characters, ~200k per block) but **no** count cap — the existing workdir
       lifecycle owns deletion. Revisit if a conversation ever fills its volume.
 
 ## Decisions
@@ -276,18 +276,18 @@ its own diff.
   because it is already persisted for all three engines, needs no tokenizer, and self-corrects when
   an engine compacts behind our back. Consequence accepted: the gauge lags one turn and reads nothing
   before the first assistant reply.
-- **Boundary in place, not a fork into a new session** — chosen by @babs: the conversation
+- **Boundary in place, not a fork into a new session** — chosen by Damien Degois: the conversation
   stays one thread in the sidebar and the UI keeps rendering the whole history. Cost: three
   orchestrators must consult the boundary, versus zero code for a fork.
 - **Recall via a grep-able archive file in `/workdir`, not a search tool** — chosen by
-  @babs ("make the conversation available for search"). All three engines already have file
+  Damien Degois ("make the conversation available for search"). All three engines already have file
   and shell tools over that mount, so this ships as one file write instead of an internal MCP server
   plus a tool policy default (which would have defaulted to `ask`, i.e. a permission prompt on every
   recall).
-- **Manual button *and* an automatic trigger with a visible warning** — chosen by @babs.
+- **Manual button *and* an automatic trigger with a visible warning** — chosen by Damien Degois.
   The automatic path never fires mid-turn and always leaves a transcript row saying it happened.
 - **A round counter and an absolute token ceiling sit beside the percent trigger** — asked for by
-  @babs on cost grounds. Percent of window is a *capacity* signal, not a *price* signal:
+  Damien Degois on cost grounds. Percent of window is a *capacity* signal, not a *price* signal:
   it lets a 1M-window model reach 900k tokens per turn before reacting, and every further turn pays
   that again. The three signals are three comparisons in one pure function, so the flexibility is
   ~free; the `min_percent` floor is the guard that stops the round counter from spending a

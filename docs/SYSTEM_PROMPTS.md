@@ -133,7 +133,8 @@ model can grep for the details the summary dropped.
 - The summary is **model-authored, hence untrusted**: it is fenced in
   `<compaction_summary untrusted="true">` and capped, so a tool result cannot
   smuggle instructions into system-prompt authority. Any occurrence of the tag
-  inside the summary is renamed (`prompts.fence`) — without that, a summary
+  inside the summary is renamed (`prompts.fence`), after NFKC normalization and
+  removal of every default-ignorable code point (zero-width, soft hyphen, fillers) — without that, a summary
   closing its own fence promotes the rest of itself to system authority.
 - It is byte-stable for the life of a boundary, so the agent loop's prompt cache
   does not churn between turns.

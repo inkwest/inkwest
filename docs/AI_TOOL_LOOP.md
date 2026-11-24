@@ -595,7 +595,7 @@ Reclaiming context is **compaction** (`app/services/compaction.py`), not truncat
 
 Nothing is deleted: Postgres keeps every row, the UI renders the whole thread with a divider,
 and the model recalls details by grepping the archive with the file tools it already has. See
-`specs/003-context-pressure.md`.
+`specs/006-context-pressure.md`.
 
 ## Security: Input Validation
 

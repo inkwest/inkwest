@@ -23,10 +23,7 @@ from app.services.pubsub import notify
 logger = logging.getLogger(__name__)
 
 
-# A compaction boundary is a session-event row (so it renders as an inline note and stays
-# out of the model transcript like every other event) whose subject/action mark where the
-# replayed transcript starts. Policy lives in app.services.compaction; the shape and the
-# predicate live here, with the other row shapes.
+# Subject/action of the session-event row that marks where the replayed transcript starts.
 COMPACTION_SUBJECT = "context"
 COMPACTION_ACTION = "compacted"
 
@@ -34,9 +31,7 @@ COMPACTION_ACTION = "compacted"
 def is_compaction_boundary(msg: Message) -> bool:
     """Whether a row is a compaction boundary that may cut the replayed transcript.
 
-    A boundary carrying no usable summary is NOT one: slicing at it would hand the model an
-    empty transcript with nothing put back — total amnesia, silently. The same predicate
-    gates both the slice and the summary injection so the two can never disagree.
+    A row with no usable summary is not one: cutting there would replay nothing, restore nothing.
     """
     content = msg.content
     if not (
@@ -52,11 +47,7 @@ def is_compaction_boundary(msg: Message) -> bool:
 
 
 def last_boundary_index(rows: list[Message]) -> int | None:
-    """Index of the last compaction boundary in a chronological row list, or None.
-
-    The one rule that decides what the model sees; kept in a single place so the slicer and
-    the compaction policy cannot drift apart.
-    """
+    """Index of the last compaction boundary in a chronological row list, or None."""
     return max((i for i, msg in enumerate(rows) if is_compaction_boundary(msg)), default=None)
 
 
