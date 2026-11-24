@@ -298,7 +298,7 @@ export function MessageBubble({ message, onRetry, highlighted, isLatest = true }
     }
   };
 
-  // Teams-specific rich variant (no <pre>, monospace via <code>, <br> line breaks).
+  // Teams-specific rich variant: attribute-free <pre><code> blocks, meant for Teams' code widget.
   const handleCopyTeams = async () => {
     setCopyMenuOpen(false);
     const meta = exportMeta();

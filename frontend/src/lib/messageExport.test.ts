@@ -24,6 +24,14 @@ describe('messageContentToMarkdown', () => {
     expect(md).toBe('First\n\nSecond');
   });
 
+  it('keeps a code-block indent at the start of a later block', () => {
+    const md = messageContentToMarkdown([
+      { type: 'text', text: 'para' },
+      { type: 'text', text: '\n    code' },
+    ]);
+    expect(md).toBe('para\n\n    code');
+  });
+
   it('yields an empty string for a session-event object', () => {
     expect(messageContentToMarkdown({ type: 'session_event', subject: 'aws', action: 'granted' })).toBe('');
   });
@@ -76,6 +84,19 @@ describe('buildExportMarkdown', () => {
     expect(out).toContain(`_Powered by Inkwest · ${formatFullTimestamp(meta.date)}_`);
   });
 
+  it('keeps the indent of a leading indented code block', () => {
+    const md = buildExportMarkdown('\n\n    ls -la\n', meta);
+    expect(md.startsWith('    ls -la\n\n---')).toBe(true);
+  });
+
+  it('drops a leading non-breaking space like trim() did', () => {
+    expect(buildExportMarkdown('\u00a0x', meta).startsWith('x\n\n---')).toBe(true);
+  });
+
+  it('drops leading CRLF blank lines like LF ones', () => {
+    expect(buildExportMarkdown('\r\n\r\n  hello\r\n', meta).startsWith('hello\n\n---')).toBe(true);
+  });
+
   it('trims the body before appending the footer', () => {
     const out = buildExportMarkdown('  spaced  \n', meta);
     expect(out.startsWith('spaced\n\n---')).toBe(true);
@@ -113,6 +134,17 @@ describe('buildExportHtml', () => {
     expect(html).toContain('const y = 2;');
   });
 
+  it('never styles a one-line block as inline code, and styles inline code across a soft break', async () => {
+    const html = await buildExportHtml('x\n\n    one line\n\na `foo\nbar` b', meta);
+    expect(html).toMatch(/<pre style="[^"]*">one line\n<\/pre>/);
+    expect(html).toMatch(/<code style="[^"]*monospace[^"]*">foo bar<\/code>/);
+  });
+
+  it('renders a body that opens with an indented code block as code', async () => {
+    const html = await buildExportHtml('    one line', meta);
+    expect(html).toMatch(/^<pre style="[^"]*">one line\n<\/pre>/);
+  });
+
   it('escapes HTML-significant characters in the signature (display name)', async () => {
     const html = await buildExportHtml('body', { ...meta, conversationName: '<script>x</script>' });
     expect(html).toContain('&lt;script&gt;');
@@ -129,16 +161,27 @@ describe('buildExportHtmlTeams', () => {
     messageId: 'msg-1',
   };
 
-  it('renders fenced code Teams-safe: no <pre>, monospace <code>, real <br> breaks', async () => {
+  it('renders fenced code as an attribute-free <pre><code> with its newlines', async () => {
     const html = await buildExportHtmlTeams('```js\nconst x = 1;\nconst y = 2;\n```', meta);
-    // No <pre> (Teams relocates it); monospace via <code> (survives style-stripping);
-    // line breaks via real <br> (raw "\n" is collapsed by Teams).
-    expect(html).not.toContain('<pre');
-    expect(html).toContain('<code');
-    expect(html).toContain('<br');
-    expect(html).toContain('const x = 1;');
-    expect(html).toContain('const y = 2;');
+    expect(html).toContain('<pre><code>const x = 1;\nconst y = 2;\n</code></pre>');
+    expect(html).not.toContain('<br');
     expect(html).toContain('Powered by Inkwest'); // signature still present
+  });
+
+  it('keeps each code block in place, around the text between them', async () => {
+    const html = await buildExportHtmlTeams('```bash\necho a\n```\n\ntext\n\n```yaml\nk: v\n```', meta);
+    expect(html).toMatch(/<pre><code>echo a\n<\/code><\/pre>\s*<p>text<\/p>\s*<pre><code>k: v\n<\/code><\/pre>/);
+  });
+
+  it('renders a body that opens with an indented code block as code', async () => {
+    const html = await buildExportHtmlTeams('    one line', meta);
+    expect(html.startsWith('<pre><code>one line\n</code></pre>')).toBe(true);
+  });
+
+  it('never styles a one-line block, and still styles inline code', async () => {
+    const html = await buildExportHtmlTeams('Run `ls` now.\n\n    single indented line\n', meta);
+    expect(html).toContain('<pre><code>single indented line\n</code></pre>');
+    expect(html).toMatch(/<code style="[^"]*monospace[^"]*">ls<\/code>/);
   });
 });
 

@@ -1,16 +1,8 @@
-import { createElement, type ReactNode } from 'react';
+import { createElement } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { MessageContent } from '@/types/api';
 import { formatFullTimestamp } from '@/lib/utils';
-
-// Split code text into nodes with real <br> between lines. Teams strips inline
-// `style` (so white-space:pre-wrap is lost) AND collapses raw "\n", so explicit
-// <br> elements are the only line breaks that survive a paste into Teams.
-function withLineBreaks(text: string): ReactNode[] {
-  const lines = text.replace(/\n$/, '').split('\n');
-  return lines.flatMap((line, i) => (i === 0 ? [line] : [createElement('br', { key: i }), line]));
-}
 
 const INLINE_CODE_STYLE = {
   fontFamily: 'Consolas,Menlo,monospace',
@@ -19,15 +11,26 @@ const INLINE_CODE_STYLE = {
   borderRadius: '3px',
 } as const;
 
-function isInlineCode(className: string | undefined, node: { position?: { start: { line: number }; end: { line: number } } } | undefined): boolean {
-  // Inline code = a single source line with no language class.
-  return node?.position?.start.line === node?.position?.end.line && !className;
+// Like trim(), except a leading 4-space or tab indent is kept: it opens a code block.
+function trimBody(text: string): string {
+  return text
+    .replace(/^\s*\n/, '')
+    .replace(/^ {0,3}[^\S\t\n ]*(?=\S)/, '')
+    .trimEnd();
+}
+
+type HastNode = { type: string; value?: string; children?: HastNode[] };
+
+function hastText(node: HastNode | undefined): string {
+  if (!node) return '';
+  return node.type === 'text' ? (node.value ?? '') : (node.children ?? []).map(hastText).join('');
 }
 
 // CLEAN renderer — the "real tools" version (Gmail, Docs, Outlook, Slack). Uses a
 // proper inline-styled <pre> so a code block is one cohesive, monospace box.
+// Both renderers build block code from the <pre>, so only inline code reaches `code`.
 const CLEAN_COMPONENTS: Components = {
-  pre: ({ children }) =>
+  pre: ({ node }) =>
     createElement(
       'pre',
       {
@@ -42,40 +45,17 @@ const CLEAN_COMPONENTS: Components = {
           margin: '8px 0',
         },
       },
-      children,
+      hastText(node),
     ),
-  code: ({ className, children, node }) =>
-    isInlineCode(className, node)
-      ? createElement('code', { style: INLINE_CODE_STYLE }, children)
-      : children, // block code: styling lives on the <pre> wrapper
+  code: ({ children }) => createElement('code', { style: INLINE_CODE_STYLE }, children),
   a: ({ href, children }) => createElement('a', { href, style: { color: '#0969da' } }, children),
 };
 
-// TEAMS renderer — Microsoft Teams' paste sanitizer (1) turns <pre> into its own
-// widget and relocates it to the end of the message, and (2) strips inline `style`
-// off block elements. So this variant emits NO <pre>, gets monospace from the
-// <code> ELEMENT (Teams styles it), and line breaks from real <br>. It looks
-// chunkier (one code pill per line) but stays in place and stays monospace.
+// Relies on Teams turning an attribute-free <pre><code> into its code widget (older Teams moved a
+// <pre> to the end of the message).
 const TEAMS_COMPONENTS: Components = {
-  pre: ({ children }) => createElement('div', { style: { margin: '8px 0' } }, children),
-  code: ({ className, children, node }) =>
-    isInlineCode(className, node)
-      ? createElement('code', { style: INLINE_CODE_STYLE }, children)
-      : createElement(
-          'code',
-          {
-            style: {
-              display: 'block',
-              whiteSpace: 'pre-wrap',
-              fontFamily: 'Consolas,Menlo,monospace',
-              background: '#f6f8fa',
-              border: '1px solid #e1e4e8',
-              borderRadius: '6px',
-              padding: '10px 12px',
-            },
-          },
-          withLineBreaks(String(children)),
-        ),
+  pre: ({ node }) => createElement('pre', {}, createElement('code', {}, hastText(node))),
+  code: ({ children }) => createElement('code', { style: INLINE_CODE_STYLE }, children),
   a: ({ href, children }) => createElement('a', { href, style: { color: '#0969da' } }, children),
 };
 
@@ -90,7 +70,7 @@ export function messageContentToMarkdown(content: MessageContent): string {
   if (Array.isArray(content)) {
     return content
       .filter((b) => b.type === 'text' && b.text)
-      .map((b) => b.text!.trim())
+      .map((b) => trimBody(b.text!))
       .join('\n\n');
   }
   return '';
@@ -157,7 +137,7 @@ export function buildExportMarkdown(body: string, meta: ExportFooterMeta): strin
   // Deep link: the ids become the link text so the IDs stay visible
   // when pasted into a plain editor, while the href carries the resolvable URL.
   const ids = `[${idsLine(meta)}](${messageDeepLink(meta)})`;
-  return `${body.trim()}\n\n---\n${attribution}\n\n${ids}\n`;
+  return `${trimBody(body)}\n\n---\n${attribution}\n\n${ids}\n`;
 }
 
 function signatureFooterHtml(meta: ExportFooterMeta): string {
@@ -176,7 +156,7 @@ async function renderHtml(body: string, meta: ExportFooterMeta, components: Comp
   // Loaded on first rich-copy only — keeps react-dom/server off the initial bundle.
   const { renderToStaticMarkup } = await import('react-dom/server');
   const bodyHtml = renderToStaticMarkup(
-    createElement(ReactMarkdown, { remarkPlugins: [remarkGfm], components }, body.trim()),
+    createElement(ReactMarkdown, { remarkPlugins: [remarkGfm], components }, trimBody(body)),
   );
   return `${bodyHtml}${signatureFooterHtml(meta)}`;
 }
@@ -190,11 +170,7 @@ export function buildExportHtml(body: string, meta: ExportFooterMeta): Promise<s
   return renderHtml(body, meta, CLEAN_COMPONENTS);
 }
 
-/**
- * Teams-specific rich payload: same content but rendered to survive Teams' paste
- * sanitizer (no <pre>, monospace via <code>, line breaks via <br>). Chunkier
- * (a code pill per line) but stays in place and stays monospace.
- */
+/** Teams-specific rich payload: styleless <pre><code> blocks, plus the signature footer. */
 export function buildExportHtmlTeams(body: string, meta: ExportFooterMeta): Promise<string> {
   return renderHtml(body, meta, TEAMS_COMPONENTS);
 }
