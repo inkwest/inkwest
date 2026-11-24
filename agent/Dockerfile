@@ -127,6 +127,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 RUN groupadd --gid 1000 sandbox && \
     useradd --uid 1000 --gid 1000 --home-dir /home/sandbox --create-home --shell /bin/bash sandbox
 
+# Redistribution of Claude Code is allowed only as published by Anthropic: never patch,
+# repackage or strip its auth methods (README "Claude Code terms").
 # Claude Code CLI — native installer (no Node.js), as the sandbox user (lands in
 # $HOME/.local/bin). HOME set explicitly: not every builder derives $HOME from the USER's
 # passwd entry the way BuildKit does (kaniko#507), and the installer needs it.

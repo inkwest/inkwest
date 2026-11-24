@@ -2,6 +2,8 @@
 
 The `claude-cli` provider runs Claude Code inside the backend container, using your Claude Max/Pro subscription instead of API keys. The container provides isolation — Claude CLI should **not** be run unattended on the host machine.
 
+Subscription login is for a single person's local use: Anthropic's terms forbid serving other users through Free/Pro/Max/Ultra credentials. A shared deployment must use an API key or Bedrock (see README "Claude Code terms").
+
 ## Security considerations
 
 - **Keep Claude CLI inside Docker.** The `--dangerously-skip-permissions` flag disables all confirmation prompts. Container isolation limits blast radius — running this on the host gives Claude unrestricted access to your filesystem, shell, and credentials.
